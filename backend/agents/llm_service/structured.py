@@ -50,10 +50,19 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 # Delimiters wrapping the reasoning-pass prose in the formatting prompt.
-# Callers' ``formatting_instructions`` / reasoning output should not contain
-# these markers; collision would make the prompt structure ambiguous.
+# Chosen as markdown-style section markers rather than bare tokens so they
+# are unlikely to appear in ordinary model prose; ``_ensure_prose_has_no_
+# analysis_delimiters`` still fails closed if they do.
 _ANALYSIS_START = "--- ANALYSIS ---"
 _ANALYSIS_END = "--- END ANALYSIS ---"
+
+# Fallback formatting-user-prompt preamble when ``complete_validated_via_reasoning``
+# is called without caller-supplied ``formatting_instructions``.
+_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS = (
+    "Convert the following analysis into a single JSON object matching "
+    "the required schema. Return JSON only — no markdown fences, no "
+    "prose outside the object."
+)
 
 
 def _ensure_prose_has_no_analysis_delimiters(prose: str) -> None:
@@ -70,6 +79,43 @@ def _ensure_prose_has_no_analysis_delimiters(prose: str) -> None:
         raise ValueError(
             "Reasoning output contains an analysis delimiter, "
             "cannot safely wrap it for the formatting call"
+        )
+
+
+def _wrap_with_analysis_delimiters(prose: str) -> str:
+    """Wrap reasoning prose in the shared analysis delimiters.
+
+    Preconditions:
+        - ``prose`` has already passed :func:`_ensure_prose_has_no_analysis_delimiters`.
+    Postconditions:
+        - Returns ``prose`` bracketed by ``_ANALYSIS_START`` / ``_ANALYSIS_END``.
+    """
+    return f"{_ANALYSIS_START}\n{prose}\n{_ANALYSIS_END}"
+
+
+def _require_non_empty(name: str, value: str) -> None:
+    """Raise ``ValueError`` when ``value`` is empty or whitespace-only.
+
+    Preconditions: ``name`` is the parameter name used in the error message.
+    Postconditions: returns normally iff ``value.strip()`` is non-empty.
+    """
+    if not (value and value.strip()):
+        raise ValueError(f"{name} must be non-empty")
+
+
+def _reject_think_kwarg(func_name: str, kwargs: dict[str, Any]) -> None:
+    """Raise ``TypeError`` if ``think`` appears in ``kwargs``.
+
+    Thinking is managed internally by the via-reasoning helpers; silently
+    popping it would hide caller mistakes. Reserved names that collide with
+    explicit parameters raise via Python's normal multiple-values path —
+    ``think`` is reserved the same way but has no dedicated parameter, so
+    it is rejected here explicitly.
+    """
+    if "think" in kwargs:
+        raise TypeError(
+            f"{func_name}() got an unexpected keyword argument 'think'; "
+            "thinking is managed internally"
         )
 
 
@@ -325,7 +371,10 @@ def complete_json_via_reasoning(
             prompt.
         formatting_system_prompt: Optional system prompt for the formatting
             call (default ``None`` — the formatting prompt is normally
-            self-contained via ``formatting_instructions``).
+            self-contained via ``formatting_instructions``). Forwarded
+            verbatim as ``system_prompt`` to ``client.complete_json``; a
+            non-``None`` value can therefore override provider-level JSON
+            formatting defaults that would otherwise apply.
         schema: Optional JSON Schema dict or Pydantic ``BaseModel`` subclass
             forwarded only to the formatting ``client.complete_json`` call
             for provider-enforced decoding. Never reaches the reasoning call.
@@ -333,24 +382,20 @@ def complete_json_via_reasoning(
             0.3 — some latitude for exploratory reasoning).
         temperature: Temperature for the formatting call (default 0.0 —
             pure transcription).
-        **kwargs: Forwarded to the formatting ``client.complete_json`` call
-            — EXCEPT ``think``, which is popped and managed internally: the
+        **kwargs: Forwarded to the formatting ``client.complete_json`` call.
+            ``think`` is reserved and raises ``TypeError`` if present — the
             reasoning call always uses ``think=True`` and the formatting call
-            always uses ``think=False``, regardless of any ``think`` passed in
-            ``**kwargs``. Reserved names: do not pass ``objective``,
-            ``system_prompt``, ``temperature``, or ``schema`` in ``**kwargs`` —
-            this function already forwards those explicitly to the formatting
-            ``client.complete_json`` call, so a same-named entry in
-            ``**kwargs`` raises ``TypeError: got multiple values for
+            always uses ``think=False``. Reserved names: do not pass
+            ``objective``, ``system_prompt``, ``temperature``, or ``schema`` in
+            ``**kwargs`` — this function already forwards those explicitly to
+            the formatting ``client.complete_json`` call, so a same-named
+            entry in ``**kwargs`` raises ``TypeError: got multiple values for
             keyword argument`` (use the dedicated parameters above instead).
     """
-    if not objective:
-        raise ValueError("objective must be non-empty")
-    if not reasoning_prompt:
-        raise ValueError("reasoning_prompt must be non-empty")
-    if not formatting_instructions:
-        raise ValueError("formatting_instructions must be non-empty")
-    kwargs.pop("think", None)
+    _require_non_empty("objective", objective)
+    _require_non_empty("reasoning_prompt", reasoning_prompt)
+    _require_non_empty("formatting_instructions", formatting_instructions)
+    _reject_think_kwarg("complete_json_via_reasoning", kwargs)
 
     prose = client.complete(
         reasoning_prompt,
@@ -360,7 +405,7 @@ def complete_json_via_reasoning(
         think=True,
     )
     _ensure_prose_has_no_analysis_delimiters(prose)
-    format_prompt = f"{formatting_instructions}\n\n{_ANALYSIS_START}\n{prose}\n{_ANALYSIS_END}"
+    format_prompt = f"{formatting_instructions}\n\n{_wrap_with_analysis_delimiters(prose)}"
     return client.complete_json(
         format_prompt,
         objective=f"{objective} (format)",
@@ -391,31 +436,37 @@ def complete_validated_via_reasoning(
     but the formatting call goes through :func:`complete_validated` (schema
     validation + self-correction retry) instead of a bare ``complete_json``.
 
-    The formatting user prompt defaults to a generic "transcribe into JSON
-    matching the schema" instruction. Pass ``formatting_instructions`` when
-    the caller has additional JSON-shape guidance (keys/types) for the user
-    prompt. Independently, ``formatting_system_prompt`` is forwarded as the
-    system prompt on every formatting attempt (first pass and corrective
-    retries), so schema guidance placed there is available on the first
-    attempt — callers such as the sales critics put the full JSON contract
-    there. The Pydantic ``schema`` argument itself only reaches the model via
-    :func:`complete_validated`'s corrective retry prompts (after a first-pass
-    parse/validation failure), not the first attempt's user prompt.
+    The formatting user prompt defaults to
+    :data:`_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS`. Pass
+    ``formatting_instructions`` when the caller has additional JSON-shape
+    guidance (keys/types) for the user prompt. Independently,
+    ``formatting_system_prompt`` is forwarded verbatim as the system prompt
+    on every formatting attempt (first pass and corrective retries), so
+    schema guidance placed there is available on the first attempt —
+    callers such as the sales critics put the full JSON contract there.
 
-    Preconditions: ``objective`` and ``reasoning_prompt`` are non-empty.
-    ``reasoning_prompt`` / ``reasoning_system_prompt`` must not end with
-    JSON-formatting instructions (same caller obligation as
+    Unlike :func:`complete_json_via_reasoning`, this helper does **not**
+    forward the Pydantic ``schema`` as a provider-enforced ``schema=``
+    argument to ``client.complete_json``. :func:`complete_validated` validates
+    the decoded dict in-process and only injects the JSON Schema text into
+    the *corrective retry* user prompts (after a first-pass parse/validation
+    failure). First-attempt schema guidance must therefore come from
+    ``formatting_instructions`` and/or ``formatting_system_prompt``.
+
+    Preconditions: ``objective`` and ``reasoning_prompt`` are non-empty
+    (whitespace-only rejected). ``reasoning_prompt`` /
+    ``reasoning_system_prompt`` must not end with JSON-formatting
+    instructions (same caller obligation as
     :func:`complete_json_via_reasoning`). Unlike that helper,
-    ``formatting_instructions`` is optional here — when omitted, the
-    hardcoded generic transcription instruction above is used alone.
+    ``formatting_instructions`` is optional here — when omitted,
+    :data:`_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS` is used alone.
     Postconditions/failure semantics: see :func:`complete_json_via_reasoning`;
     the formatting call additionally retries up to ``correction_attempts``
     times on a parse/validation failure, exactly as :func:`complete_validated`
     does today. ``**kwargs`` is forwarded to :func:`complete_validated` (and
-    therefore to the formatting ``client.complete_json`` call) EXCEPT
-    ``think``, which is popped and managed internally — the reasoning call
-    always uses ``think=True`` and the formatting call always uses
-    ``think=False``, regardless of any ``think`` passed in ``**kwargs``.
+    therefore to the formatting ``client.complete_json`` call). ``think`` is
+    reserved and raises ``TypeError`` if present — the reasoning call always
+    uses ``think=True`` and the formatting call always uses ``think=False``.
     Reserved names: do not pass ``objective``, ``system_prompt``,
     ``temperature``, ``correction_attempts``, or ``context`` in ``**kwargs`` —
     this function already forwards those explicitly to :func:`complete_validated`,
@@ -423,11 +474,11 @@ def complete_validated_via_reasoning(
     values for keyword argument`` (use the dedicated parameters above
     instead).
     """
-    if not objective:
-        raise ValueError("objective must be non-empty")
-    if not reasoning_prompt:
-        raise ValueError("reasoning_prompt must be non-empty")
-    kwargs.pop("think", None)
+    _require_non_empty("objective", objective)
+    _require_non_empty("reasoning_prompt", reasoning_prompt)
+    if formatting_instructions is not None:
+        _require_non_empty("formatting_instructions", formatting_instructions)
+    _reject_think_kwarg("complete_validated_via_reasoning", kwargs)
 
     prose = client.complete(
         reasoning_prompt,
@@ -439,10 +490,8 @@ def complete_validated_via_reasoning(
     _ensure_prose_has_no_analysis_delimiters(prose)
     instructions_block = f"{formatting_instructions}\n\n" if formatting_instructions else ""
     format_prompt = (
-        "Convert the following analysis into a single JSON object matching "
-        "the required schema. Return JSON only — no markdown fences, no "
-        f"prose outside the object.\n\n{instructions_block}"
-        f"{_ANALYSIS_START}\n{prose}\n{_ANALYSIS_END}"
+        f"{_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS}\n\n{instructions_block}"
+        f"{_wrap_with_analysis_delimiters(prose)}"
     )
     return complete_validated(
         client,

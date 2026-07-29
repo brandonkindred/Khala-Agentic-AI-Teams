@@ -225,13 +225,13 @@ class DeepthoughtAgent:
         """Ask the LLM whether we can answer directly or need sub-agents.
 
         Two-pass structured-output flow via :func:`complete_json_via_reasoning`:
-        a ``think=True`` reasoning pass (at the helper's default
-        ``reasoning_temperature``) that analyses the question in structured
-        prose against ``ANALYSIS_SYSTEM_PROMPT_REASONING``, followed by a
-        ``think=False`` formatting pass that transcribes that prose into the
-        ``QueryAnalysis`` JSON shape via ``ANALYSIS_FORMAT_INSTRUCTIONS``.
-        Either pass failing falls back to a forced direct answer at confidence
-        0.3 rather than raising.
+        a ``think=True`` reasoning pass (``reasoning_temperature=0.3``, matching
+        the previous single-call ``temperature=0.3``) that analyses the question
+        in structured prose against ``ANALYSIS_SYSTEM_PROMPT_REASONING``,
+        followed by a ``think=False`` formatting pass (``temperature=0.0``)
+        that transcribes that prose into the ``QueryAnalysis`` JSON shape via
+        ``ANALYSIS_FORMAT_INSTRUCTIONS``. Either pass failing falls back to a
+        forced direct answer at confidence 0.3 rather than raising.
 
         Preconditions:
             * ``self.llm`` implements the reasoning-capable client interface
@@ -276,6 +276,8 @@ class DeepthoughtAgent:
                 reasoning_system_prompt=reasoning_system,
                 formatting_instructions=ANALYSIS_FORMAT_INSTRUCTIONS,
                 objective="analyze specialist question",
+                reasoning_temperature=0.3,
+                temperature=0.0,
             )
             return self._parse_analysis(data)
         except Exception:

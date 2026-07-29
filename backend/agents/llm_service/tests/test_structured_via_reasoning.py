@@ -281,6 +281,75 @@ def test_json_via_reasoning_rejects_empty_reasoning_prompt() -> None:
     assert client.order == []
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"objective": "   ", "reasoning_prompt": "p", "formatting_instructions": "f"},
+        {"objective": "obj", "reasoning_prompt": "\n", "formatting_instructions": "f"},
+        {"objective": "obj", "reasoning_prompt": "p", "formatting_instructions": "  "},
+    ],
+)
+def test_json_via_reasoning_rejects_whitespace_only_inputs(kwargs: dict[str, str]) -> None:
+    """Whitespace-only objective/prompt/instructions violate the non-empty contract."""
+    client = _RecordingClient({"ok": True})
+
+    with pytest.raises(ValueError, match="must be non-empty"):
+        complete_json_via_reasoning(client, reasoning_system_prompt=None, **kwargs)
+
+    assert client.order == []
+
+
+def test_json_via_reasoning_rejects_think_kwarg() -> None:
+    """``think`` is reserved; passing it must raise rather than silently drop."""
+    client = _RecordingClient({"ok": True})
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'think'"):
+        complete_json_via_reasoning(
+            client,
+            reasoning_prompt="p",
+            reasoning_system_prompt=None,
+            formatting_instructions="f",
+            objective="obj",
+            think=True,
+        )
+
+    assert client.order == []
+
+
+def test_validated_via_reasoning_rejects_think_kwarg() -> None:
+    """``think`` is reserved on the validated helper as well."""
+    client = _RecordingClient({"status": "PASS", "score": 0.9})
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'think'"):
+        complete_validated_via_reasoning(
+            client,
+            schema=_Verdict,
+            reasoning_prompt="p",
+            reasoning_system_prompt=None,
+            objective="obj",
+            think=False,
+        )
+
+    assert client.order == []
+
+
+def test_validated_via_reasoning_uses_default_format_instructions_when_omitted() -> None:
+    """Omitting formatting_instructions uses the module-level default preamble."""
+    from llm_service.structured import _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS
+
+    client = _RecordingClient({"status": "PASS", "score": 0.9})
+
+    complete_validated_via_reasoning(
+        client,
+        schema=_Verdict,
+        reasoning_prompt="p",
+        reasoning_system_prompt=None,
+        objective="obj",
+    )
+
+    assert _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS in client.format_calls[0]["prompt"]
+
+
 def test_json_via_reasoning_rejects_prose_containing_analysis_delimiters() -> None:
     """Delimiter collision in reasoning output must fail closed before format."""
     from llm_service.structured import _ANALYSIS_END, _ANALYSIS_START

@@ -368,7 +368,8 @@ class TestOutreachCriticAgent:
         assert report.approved is False
         assert report.notes is not None and "parseable JSON" in report.notes
         assert len(llm.reasoning_calls) == 1
-        # The formatting pass retries on every invalid payload: 1 initial +
+        # ``llm.calls`` is formatting-only (see CannedLLMClient). The formatting
+        # pass retries on every invalid payload: 1 initial +
         # correction_attempts=2 corrective resends, all queued as invalid.
         assert len(llm.calls) == 3
 
@@ -465,7 +466,8 @@ class TestProposalCriticAgent:
         assert report.status == "FAIL"
         assert report.notes is not None and "parseable JSON" in report.notes
         assert len(llm.reasoning_calls) == 1
-        # The formatting pass retries on every invalid payload: 1 initial +
+        # ``llm.calls`` is formatting-only (see CannedLLMClient). The formatting
+        # pass retries on every invalid payload: 1 initial +
         # correction_attempts=2 corrective resends, all queued as invalid.
         assert len(llm.calls) == 3
 
@@ -513,6 +515,8 @@ class TestProposalCriticAgent:
         # _build_prompt output); the formatting call only sees its prose.
         assert "(no dossier supplied)" in llm.reasoning_calls[0]["prompt"]
         assert "(no qualification supplied)" in llm.reasoning_calls[0]["prompt"]
+        # ``llm.calls`` tracks ONLY formatting ``complete_json`` passes (see
+        # CannedLLMClient docstring); ``[0]`` is the first formatting prompt.
         # Formatting user prompt is transcribe-only — source placeholders must
         # not leak into it (CannedLLM.complete returns fixed prose, not the
         # reasoning prompt, so a leak here means the formatting path was fed

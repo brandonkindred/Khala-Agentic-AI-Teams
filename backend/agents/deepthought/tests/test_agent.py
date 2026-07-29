@@ -95,6 +95,10 @@ def test_direct_answer(root_spec, mock_llm):
     assert mock_llm.complete.call_args.kwargs.get("objective", "").startswith(
         "analyze specialist question"
     )
+    # Previous single-call temperature=0.3 is now split: reasoning keeps 0.3,
+    # formatting uses 0.0 for deterministic transcription.
+    assert mock_llm.complete.call_args.kwargs.get("temperature") == 0.3
+    assert mock_llm.complete_json.call_args.kwargs.get("temperature") == 0.0
 
 
 # ------------------------------------------------------------------

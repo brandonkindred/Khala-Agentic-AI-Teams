@@ -906,7 +906,7 @@ def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") ->
     failed for this specific reason; reissue the corrected JSON."
     """
     cause = exc.__cause__ or exc
-    payload = exc.payload if isinstance(exc.payload, str) else repr(exc.payload)
+    payload = exc.payload if isinstance(exc.payload, str) else json.dumps(exc.payload, indent=2, default=str)
     return _CORRECTION_PREAMBLE.format(
         field=exc.field,
         payload=payload,

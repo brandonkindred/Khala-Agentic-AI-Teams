@@ -342,9 +342,12 @@ class TestOutreachVariantValidator:
 
 
 class TestOutreachSequenceConfidenceGate:
+    """Gates outreach variants when dossier confidence is below threshold."""
+
     def test_drops_non_soft_opener_when_dossier_confidence_low(
         self, sample_prospect: Prospect
     ) -> None:
+        """Non-soft-opener variants are dropped when dossier confidence is low."""
         seq = OutreachSequence.model_validate(
             {
                 "prospect": sample_prospect.model_dump(),
@@ -441,7 +444,10 @@ def _prospect_payload(company: str, score: float = 0.8) -> Dict[str, Any]:
 
 
 class TestProspectorAgent:
+    """Prospector agent returns typed prospect lists from canned LLM output."""
+
     def test_prospect_returns_typed_list(self, sample_icp: IdealCustomerProfile) -> None:
+        """``prospect`` returns a list of ``Prospect`` instances."""
         client = CannedLLMClient(
             [{"prospects": [_prospect_payload("Acme"), _prospect_payload("Beta")]}]
         )
