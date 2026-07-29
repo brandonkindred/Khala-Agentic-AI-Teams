@@ -131,24 +131,22 @@ _SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
 _PARAGRAPH_SPLIT_RE = re.compile(r"\r?\n\s*\r?\n")
 
 # Protect common abbreviations / decimals before staccato sentence splitting.
-# Mid-sentence forms use a negative lookahead so a real sentence-ending period
-# after ``etc.`` / ``e.g.`` / ``i.e.`` is preserved when the next token starts
-# a new sentence (whitespace + uppercase) or the abbreviation ends the text.
-_ABBREV_PROTECT_MID: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\be\.g\.(?!\s+[A-Z]|\s*$)", re.IGNORECASE), "egPLACEHOLDER"),
-    (re.compile(r"\bi\.e\.(?!\s+[A-Z]|\s*$)", re.IGNORECASE), "iePLACEHOLDER"),
-    (re.compile(r"\betc\.(?!\s+[A-Z]|\s*$)", re.IGNORECASE), "etcPLACEHOLDER"),
+# Abbreviation matching is case-insensitive via ``(?i:...)``, but the sentence-
+# boundary lookahead keeps a case-sensitive ``[A-Z]`` so mid-sentence forms like
+# ``e.g. tracing`` stay protected while ``e.g. Tracing`` (new sentence) does not.
+# The same continuation rule applies to ``U.S.`` and titles: protect only when
+# the following token continues the sentence (not whitespace + uppercase, and
+# not end-of-text), so genuine sentence ends keep their terminal period.
+_ABBREV_PROTECT: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i:\be\.g\.)(?!\s+[A-Z]|\s*$)"), "egPLACEHOLDER"),
+    (re.compile(r"(?i:\bi\.e\.)(?!\s+[A-Z]|\s*$)"), "iePLACEHOLDER"),
+    (re.compile(r"(?i:\betc\.)(?!\s+[A-Z]|\s*$)"), "etcPLACEHOLDER"),
+    (re.compile(r"(?i:\bU\.S\.)(?!\s+[A-Z]|\s*$)"), "USPLACEHOLDER"),
+    (re.compile(r"(?i:\bDr\.)(?!\s+[A-Z]|\s*$)"), "DrPLACEHOLDER"),
+    (re.compile(r"(?i:\bMr\.)(?!\s+[A-Z]|\s*$)"), "MrPLACEHOLDER"),
+    (re.compile(r"(?i:\bMrs\.)(?!\s+[A-Z]|\s*$)"), "MrsPLACEHOLDER"),
+    (re.compile(r"(?i:\bMs\.)(?!\s+[A-Z]|\s*$)"), "MsPLACEHOLDER"),
     (re.compile(r"\d+\.\d+"), "NUMPLACEHOLDER"),
-)
-# Titles and multi-dot proper abbreviations are almost never sentence ends when
-# followed by a capitalized token (``Dr. Smith``, ``U.S. teams``), so always
-# protect their periods.
-_ABBREV_PROTECT_ALWAYS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bU\.S\.", re.IGNORECASE), "USPLACEHOLDER"),
-    (re.compile(r"\bDr\.", re.IGNORECASE), "DrPLACEHOLDER"),
-    (re.compile(r"\bMr\.", re.IGNORECASE), "MrPLACEHOLDER"),
-    (re.compile(r"\bMrs\.", re.IGNORECASE), "MrsPLACEHOLDER"),
-    (re.compile(r"\bMs\.", re.IGNORECASE), "MsPLACEHOLDER"),
 )
 
 # Precompiled banned-phrase patterns: leading word boundary; trailing boundary only
@@ -177,13 +175,11 @@ def _split_sentences_for_staccato(para: str) -> list[str]:
     Postconditions:
         - Returns a list of sentence strings (may be length 1 if no boundary found).
         - Mid-sentence abbreviation/decimal periods are not treated as sentence
-          boundaries; a real sentence-ending period after ``etc.`` / ``e.g.`` /
-          ``i.e.`` (next token capitalized, or end of text) is preserved.
+          boundaries; a real sentence-ending period after an abbreviation
+          (next token capitalized, or end of text) is preserved.
     """
     protected = para
-    for pattern, token in _ABBREV_PROTECT_ALWAYS:
-        protected = pattern.sub(token, protected)
-    for pattern, token in _ABBREV_PROTECT_MID:
+    for pattern, token in _ABBREV_PROTECT:
         protected = pattern.sub(token, protected)
     return re.split(r"(?<=[.!?])\s+", protected)
 

@@ -190,13 +190,28 @@ def test_writer_agent_deterministic_self_check_abbrev_not_staccato() -> None:
     from .conftest import make_writer_agent
 
     a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
-    # Long sentences with mid-sentence abbrevs; without protection these would
-    # split on the internal periods and falsely flag staccato prose.
+    # Long sentences with mid-sentence abbrevs (lowercase continuation). Without
+    # case-sensitive lookahead protection these would split on internal periods.
     draft = (
         "You should evaluate observability tools, e.g. tracers and profilers, "
         "before committing your team to a vendor. "
         "You can also prefer clearer wording, i.e. deeper probes over slogans. "
         "You will see U.S. teams succeed with careful measurement across releases.\n"
+    )
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Staccato" not in joined
+
+
+def test_writer_agent_deterministic_self_check_abbrev_lookahead_case_sensitive() -> None:
+    """``re.IGNORECASE`` must not make the ``[A-Z]`` sentence-boundary test ignore case."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    # If ``[A-Z]`` were case-insensitive, ``e.g. tracing`` would not be protected and
+    # the following short sentences would form a false staccato streak.
+    draft = (
+        "Please carefully review the available options, e.g. tracing platforms. Go now. Ship it.\n"
     )
     out = a._deterministic_self_check(draft)
     joined = "\n".join(out)
@@ -210,6 +225,17 @@ def test_writer_agent_deterministic_self_check_terminal_abbrev_preserves_boundar
     a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     # Three short sentences; the first ends with ``etc.`` — that period is real.
     draft = "Use standards, etc. Test carefully. Ship confidently.\n"
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Staccato" in joined
+
+
+def test_writer_agent_deterministic_self_check_terminal_us_preserves_boundary() -> None:
+    """Sentence-ending ``U.S.`` must keep its terminal period for staccato detection."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    draft = "We moved to the U.S. Act now. Go fast.\n"
     out = a._deterministic_self_check(draft)
     joined = "\n".join(out)
     assert "Staccato" in joined
