@@ -7,7 +7,10 @@ the job failed AND post a scrubbed one-line notice to the PR.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
+
+import pytest
 
 import software_engineering_team.api.coding_team_main as main
 from software_engineering_team.api.coding_team_main import ReviewPrRequest, _run_pr_review
@@ -30,7 +33,10 @@ def test_provider_abort_posts_pr_comment_and_fails_job(monkeypatch) -> None:
     monkeypatch.setattr(
         main,
         "_safe_comment",
-        lambda client, owner, repo, number, body: comments.append((owner, repo, number, body)),
+        lambda client, owner, repo, number, body: (
+            comments.append((owner, repo, number, body)),
+            True,
+        )[1],
     )
 
     request = ReviewPrRequest(owner="acme", repo="widgets", pr_number=7)
@@ -48,6 +54,35 @@ def test_provider_abort_posts_pr_comment_and_fails_job(monkeypatch) -> None:
     assert (owner, repo, number) == ("acme", "widgets", 7)
     assert "no engine provider" in body
     assert "ghp_secret" not in body
+
+
+def test_provider_abort_scrubs_token_from_notice_warning(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When posting the abort notice fails with a token-bearing exception,
+    the warning log must carry the scrubbed form, not the raw secret."""
+    secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+
+    monkeypatch.setattr(main, "get_engine_provider", lambda: None)
+    monkeypatch.setattr(main, "update_job", lambda *a, **k: None)
+    monkeypatch.setattr(main, "update_review", lambda *a, **k: None)
+
+    @contextmanager
+    def _boom_client(token: str):
+        raise RuntimeError(f"github unreachable: {secret_url}")
+        yield  # pragma: no cover - unreachable
+
+    monkeypatch.setattr(main, "GitHubClient", _boom_client)
+
+    request = ReviewPrRequest(owner="acme", repo="widgets", pr_number=7)
+    with caplog.at_level(logging.WARNING):
+        _run_pr_review("job-3", request, token="ghp_secret")
+
+    matches = [r for r in caplog.records if "failed to post abort notice" in r.getMessage()]
+    assert len(matches) == 1
+    msg = matches[0].getMessage()
+    assert "ghp_LEAKEDTOKEN" not in msg
+    assert "https://***@" in msg
 
 
 def test_provider_abort_survives_github_outage(monkeypatch) -> None:

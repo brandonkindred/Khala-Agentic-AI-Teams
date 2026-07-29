@@ -1,7 +1,7 @@
 """Structured-output helpers for LLM calls.
 
-This module provides both single-call and reasoning-then-formatting
-structured output paths:
+This module provides both single-call and reasoning-then-formatting structured
+output paths:
 
 - ``complete_validated``: single-shot JSON → Pydantic validation with one
   self-correction retry.
