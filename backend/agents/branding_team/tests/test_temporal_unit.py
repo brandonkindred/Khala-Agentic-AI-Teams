@@ -441,6 +441,47 @@ def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
     assert kwargs["result"]["degraded_phases"] == []
 
 
+def test_finalize_activity_raises_when_append_brand_version_returns_none(monkeypatch) -> None:
+    """If the brand vanished between resolve and append, finalize must fail."""
+    import shared.temporal
+    from branding_team.api import main as main_mod
+    from branding_team.temporal import activities
+
+    monkeypatch.setattr(shared.temporal, "load_checkpoint", lambda team, jid, phase: None)
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
+
+    phase_outputs = {
+        "strategic_core": {
+            "brand_purpose": "BP",
+            "mission_statement": "MS",
+            "vision_statement": "VS",
+            "positioning_statement": "POS",
+            "brand_promise": "PROM",
+            "core_values": [],
+        }
+    }
+
+    with (
+        patch(
+            "branding_team.shared.job_store.update_job_if_not_cancelled", return_value=True
+        ) as mock_update,
+        patch.object(main_mod.branding_store, "append_brand_version", return_value=None),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="Brand row disappeared while appending brand version",
+        ):
+            activities.finalize_branding_activity(
+                _phase_payload(target_phase="strategic_core"),
+                phase_outputs,
+                None,
+                None,
+            )
+
+    # finalize should not write a COMPLETED row when persistence failed.
+    mock_update.assert_not_called()
+
+
 def test_finalize_activity_propagates_degraded_phase_checkpoint(monkeypatch) -> None:
     """A phase whose activity checkpointed degraded=True must surface in the
     finalized TeamOutput.degraded_phases, matching the thread path's signal."""

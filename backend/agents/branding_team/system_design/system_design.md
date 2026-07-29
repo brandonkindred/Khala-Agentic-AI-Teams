@@ -40,10 +40,12 @@ backend/agents/branding_team/
 │   ├── worker.py            # start_branding_temporal_worker_thread
 │   └── start_workflow.py    # start_branding_workflow (sync -> async dispatch)
 └── tests/
+    ├── _fake_postgres.py
     ├── test_api.py
     ├── test_assistant.py
     ├── test_orchestrator.py
-    └── test_store.py
+    ├── test_store.py
+    └── test_store_real_postgres.py
 ```
 
 ## Domain model

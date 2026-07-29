@@ -226,7 +226,14 @@ class BrandingTeamOrchestrator:
         )
 
         if store and brand_id and resolved_client_id:
-            store.append_brand_version(resolved_client_id, brand_id, output)
+            appended = store.append_brand_version(resolved_client_id, brand_id, output)
+            if appended is None:
+                # Brand could have been deleted between resolve and finalize.
+                # Surface a failure instead of returning an output that wasn't persisted.
+                raise RuntimeError(
+                    "Brand row disappeared while appending brand version "
+                    f"(client_id={resolved_client_id}, brand_id={brand_id})"
+                )
 
         return output
 

@@ -29,7 +29,7 @@ from shared.postgres.testing import real_postgres_schema
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_postgres]
 
-_branding_schema = real_postgres_schema(BRANDING_SCHEMA, scope="function")
+_branding_schema = real_postgres_schema(BRANDING_SCHEMA, scope="function", autouse=True)
 
 
 def test_create_client_and_list() -> None:

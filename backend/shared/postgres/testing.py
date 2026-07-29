@@ -187,7 +187,7 @@ def _xdist_worker_id(request: pytest.FixtureRequest) -> str:
     return workerinput["workerid"]
 
 
-def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
+def real_postgres_schema(schema: TeamSchema, *, scope: str = "module", autouse: bool = True):
     """Build an autouse pytest fixture that provisions ``schema`` against live Postgres.
 
     Registers ``schema`` once per fixture instance (per ``scope``), truncates
@@ -205,10 +205,12 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     finishes isn't something this fixture factory can do without a caller
     also wiring up a ``conftest.py``-level hook.
 
-    The returned fixture is always ``autouse=True``: assigning
+    The returned fixture defaults to ``autouse=True``: assigning
     ``_my_schema = real_postgres_schema(SCHEMA)`` is enough for every test in
     the fixture's scope to get register/truncate; tests do not request it by
-    name. ``scope`` is passed straight through to ``pytest.fixture(scope=...)`` —
+    name. Pass ``autouse=False`` to build a non-autouse fixture when a caller
+    prefers explicit parameters. ``scope`` is passed straight through to
+    ``pytest.fixture(scope=...)`` —
     valid values are ``"session"``, ``"package"``, ``"module"`` (the default),
     ``"class"``, or ``"function"``; a wider scope amortizes the DDL/register
     cost across more tests at the price of more state shared between them.
@@ -235,7 +237,7 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
         yield from _real_postgres_schema_body(schema, worker_id=_xdist_worker_id(request))
 
     _fixture.__name__ = f"real_postgres_schema_{schema.team}"
-    return pytest.fixture(scope=scope, autouse=True)(_fixture)
+    return pytest.fixture(scope=scope, autouse=autouse)(_fixture)
 
 
 # Re-export the in-memory fake scaffold so callers can import from either

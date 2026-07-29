@@ -20,9 +20,11 @@ from branding_team import (
 from branding_team.models import (
     AudienceSegment,
     AudienceSegmentsOutput,
+    Brand,
     BrandCheckRequest,
     BrandDiscoveryAuditOutput,
     BrandHealthKPI,
+    BrandStatus,
     ChannelActivationOutput,
     ChannelGuideline,
     ColorEntry,
@@ -397,6 +399,41 @@ def test_run_with_store_appends_version(fake_pg) -> None:
     assert updated is not None
     assert updated.version == 1
     assert updated.latest_output is not None
+
+
+def test_run_with_store_append_brand_version_none_raises() -> None:
+    """A non-idempotent brand-version append must never be ignored.
+
+    When ``append_brand_version`` returns ``None`` (brand deleted between
+    resolve and append), the orchestrator must raise so the run can be
+    marked failed instead of reporting success without persistence.
+    """
+    mission = make_mission(
+        company_description="A strategic studio helping product teams ship cohesive digital experiences",
+        values=["clarity", "trust", "momentum"],
+    )
+    brand = Brand(
+        id="brand_deleted",
+        client_id="client_1",
+        name="Deleted Brand",
+        mission=mission,
+        status=BrandStatus.draft,
+    )
+
+    store = MagicMock()
+    store.get_brand.return_value = brand
+    store.append_brand_version.return_value = None
+
+    with _patch_graph_invoke(ALL_PHASES):
+        orchestrator = BrandingTeamOrchestrator()
+        with pytest.raises(RuntimeError, match="Brand row disappeared while appending brand version"):
+            orchestrator.run(
+                mission=mission,
+                human_review=HumanReview(approved=True),
+                store=store,
+                client_id=brand.client_id,
+                brand_id=brand.id,
+            )
 
 
 def test_run_phase_stops_at_strategic_core() -> None:

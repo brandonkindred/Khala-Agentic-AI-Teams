@@ -380,6 +380,13 @@ class BrandingStore(PostgresHelperMixin):
         Postconditions:
             Returns the updated Brand, or None when no such brand exists for
             the given client.
+
+            When ``mission`` is provided, the update invalidates any
+            previously generated output: it clears the brand's
+            ``latest_output`` and resets ``current_phase`` back to
+            ``BrandPhase.STRATEGIC_CORE.value`` so downstream consumers
+            recompute against the new mission instead of serving stale
+            positioning.
         """
         patch: dict = {"updated_at": _now_iso()}
         if mission is not None:

@@ -229,6 +229,9 @@ def finalize_branding_activity(
           best-effort dedup, not an exactly-once guarantee.
         - The COMPLETED write is idempotent and always applied unless the job was
           cancelled (cancel is terminal, not completed).
+        - If the underlying ``append_brand_version`` write returns ``None`` (the
+          brand row vanished between resolve and append), this activity raises to
+          force the workflow into its failure path and record a FAILED job row.
         - Raises ``branding_team.shared.job_store.JobNotFoundError`` if
           ``job_id`` does not exist — dispatched under a retry policy that
           treats that specific error as non-retryable.
@@ -311,7 +314,13 @@ def finalize_branding_activity(
     # job was cancelled).
     if not load_checkpoint(_CHECKPOINT_TEAM, job_id, _FINALIZED_CHECKPOINT):
         if client_id and brand_id:
-            branding_store.append_brand_version(client_id, brand_id, output)
+            appended = branding_store.append_brand_version(client_id, brand_id, output)
+            if appended is None:
+                # Brand could have been deleted between checkpoint read and write.
+                raise RuntimeError(
+                    "Brand row disappeared while appending brand version "
+                    f"(client_id={client_id}, brand_id={brand_id})"
+                )
         save_checkpoint(_CHECKPOINT_TEAM, job_id, _FINALIZED_CHECKPOINT, True)
 
     mark_completed(job_id, output.model_dump())
