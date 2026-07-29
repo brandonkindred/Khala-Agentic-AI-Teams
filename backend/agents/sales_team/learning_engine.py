@@ -6,7 +6,9 @@ automatically after every N deal outcomes are recorded. It:
 
 1. Loads all StageOutcome and DealOutcome records from the outcome store.
 2. Passes them to the shared ``llm_service`` with a specialized analysis prompt.
-3. Validates the response directly against :class:`LearningInsights`.
+3. Validates the response against :class:`_LearningInsightsBody`, then
+   assembles a :class:`LearningInsights` from it with persistence stamps
+   (``generated_at``, ``insights_version``).
 4. Persists the result to the outcome store so all agents can read it on the
    next pipeline run.
 """
@@ -22,7 +24,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from llm_service import LLMClient, complete_validated
+from llm_service import LLMClient, complete_validated_via_reasoning
 
 from .llm import get_sales_llm_client
 from .models import DealOutcome, LearningInsights, StageOutcome
@@ -59,7 +61,43 @@ class _LearningInsightsBody(BaseModel):
     actionable_recommendations: List[str] = Field(default_factory=list)
 
 
-_LEARNING_SYSTEM_PROMPT = """You are a Sales Analytics Expert who analyzes historical sales pipeline data
+# Formatting-pass (think=False) system prompt: the formatting call never sees
+# the source stage/deal records — only the reasoning pass's prose — so this
+# is a transcribe-only instruction, not the analytical-framework persona
+# below. Keeping the framework's example figures (e.g. "3× win rate") in a
+# system prompt the formatting call reads would invite it to echo those as if
+# they were conclusions about the actual dataset, rather than transcribing
+# only what the reasoning pass actually found.
+_LEARNING_SYSTEM_PROMPT = """You are a transcription assistant. You are given a structured prose \
+analysis of sales pipeline data produced by a separate reasoning pass. Convert that analysis into \
+a single JSON object — do not add, remove, or invent any insight not present in the prose.
+
+Return a JSON object with exactly these keys:
+{
+  "total_outcomes_analyzed": <int>,
+  "win_rate": <float 0-1>,
+  "stage_conversion_rates": {"stage_name": <float>, ...},
+  "top_performing_industries": [<string>, ...],
+  "top_icp_signals": [<string>, ...],
+  "best_outreach_angles": [<string>, ...],
+  "common_objections": [<string>, ...],
+  "best_close_techniques": [<string>, ...],
+  "winning_patterns": [<string>, ...],
+  "losing_patterns": [<string>, ...],
+  "avg_deal_size_won_usd": <float or null>,
+  "avg_sales_cycle_days": <float or null>,
+  "actionable_recommendations": [<string>, ...]
+}
+
+Every value must come from the provided analysis. If the analysis is silent on a field, use the
+schema's default (0, empty list/string, or null) rather than inventing a plausible-looking one.
+"""
+
+# Reasoning-only variant: same analytical framework, but ends with a prose
+# instruction instead of the JSON output contract. Used for the think=True
+# first pass of the two-call split — the formatting pass (think=False)
+# transcribes this prose into the _LearningInsightsBody schema.
+_LEARNING_SYSTEM_PROMPT_REASONING = """You are a Sales Analytics Expert who analyzes historical sales pipeline data
 to extract patterns that help sales teams improve their win rates and process efficiency.
 
 ## Your Analytical Framework
@@ -101,26 +139,13 @@ Identify velocity bottlenecks:
 - Which stage had the lowest conversion rate (biggest leak in the funnel)?
 - How does sales cycle length correlate with deal size?
 
-## Output Requirements
-Return a JSON object with exactly these keys:
-{
-  "total_outcomes_analyzed": <int>,
-  "win_rate": <float 0-1>,
-  "stage_conversion_rates": {"stage_name": <float>, ...},
-  "top_performing_industries": [<string>, ...],
-  "top_icp_signals": [<string>, ...],
-  "best_outreach_angles": [<string>, ...],
-  "common_objections": [<string>, ...],
-  "best_close_techniques": [<string>, ...],
-  "winning_patterns": [<string>, ...],
-  "losing_patterns": [<string>, ...],
-  "avg_deal_size_won_usd": <float or null>,
-  "avg_sales_cycle_days": <float or null>,
-  "actionable_recommendations": [<string>, ...]
-}
-
-Each string in arrays should be a specific, actionable insight — not generic advice.
-Recommendations must reference specific numbers from the data when available.
+Think through each dimension of the framework above against the data you were given, then
+answer in structured prose (not JSON) covering: total outcomes analyzed, win rate,
+stage-by-stage conversion rates, top performing industries, top ICP signals, best outreach
+angles, common objections, best close techniques, winning patterns, losing patterns, average
+deal size won (if inferable), average sales cycle length (if inferable), and actionable
+recommendations. Each insight should be specific and reference actual numbers from the data —
+not generic advice.
 """
 
 
@@ -154,7 +179,8 @@ class LearningEngine:
         If stage_outcomes / deal_outcomes are not provided, they are loaded
         from the outcome store automatically.
 
-        The expensive LLM call (``_generate_insights``) runs outside the lock.
+        The expensive LLM calls (``_generate_insights``'s reasoning + formatting
+        pass) run outside the lock.
         ``_REFRESH_LOCK`` serializes only the version read-increment-write so
         concurrent callers don't overwrite each other, without blocking the
         full network round-trip.
@@ -210,6 +236,22 @@ class LearningEngine:
         stage_outcomes: List[StageOutcome],
         deal_outcomes: List[DealOutcome],
     ) -> _LearningInsightsBody:
+        """Run the two-pass reasoning/formatting LLM analysis over the outcomes.
+
+        Preconditions:
+            - ``stage_outcomes`` and ``deal_outcomes`` are the loaded outcome
+              records to analyze; the caller has already handled the
+              empty-input case.
+        Postconditions:
+            - Returns a ``_LearningInsightsBody`` validated against the LLM's
+              JSON output, via a ``think=True`` reasoning prose pass
+              (``_LEARNING_SYSTEM_PROMPT_REASONING``) followed by a
+              ``think=False`` JSON-formatting/validation pass
+              (``_LEARNING_SYSTEM_PROMPT``).
+            - Raises if either pass fails (a reasoning-pass failure propagates
+              immediately; the formatting pass retries up to
+              ``correction_attempts`` times on a parse/validation failure).
+        """
         stage_data = [s.model_dump() for s in stage_outcomes]
         deal_data = [d.model_dump() for d in deal_outcomes]
         prompt = (
@@ -218,15 +260,16 @@ class LearningEngine:
             f"{json.dumps(stage_data, indent=2)}\n\n"
             f"DEAL OUTCOMES ({len(deal_outcomes)} records):\n"
             f"{json.dumps(deal_data, indent=2)}\n\n"
-            "Return a single JSON object with the insights schema defined in your system prompt. "
+            "Analyze the data above per your analytical framework. "
             "All insights must be grounded in the specific data above — no generic advice."
         )
-        return complete_validated(
+        return complete_validated_via_reasoning(
             self._llm,
-            prompt,
             schema=_LearningInsightsBody,
-            system_prompt=_LEARNING_SYSTEM_PROMPT,
-            temperature=0.0,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=_LEARNING_SYSTEM_PROMPT_REASONING,
+            formatting_system_prompt=_LEARNING_SYSTEM_PROMPT,
+            reasoning_temperature=0.0,
             correction_attempts=2,
             objective="extract sales learning insights",
         )

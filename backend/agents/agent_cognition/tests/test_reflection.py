@@ -60,7 +60,7 @@ class CannedLLM(LLMClient):
     def __init__(self, proposals: list[dict[str, Any]] | None = None) -> None:
         self._proposals = proposals if proposals is not None else []
         self.json_calls: list[dict[str, Any]] = []
-        self.text_calls: list[str] = []
+        self.text_calls: list[dict[str, Any]] = []
 
     def complete_json(
         self,
@@ -72,7 +72,14 @@ class CannedLLM(LLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        self.json_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        self.json_calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "temperature": temperature,
+            }
+        )
         # Returned verbatim (no per-item ``dict()`` copy) so a non-object item can
         # flow through to exercise reflection's drop-malformed-item path.
         return {"proposals": list(self._proposals)}
@@ -89,8 +96,17 @@ class CannedLLM(LLMClient):
         objective: str,
         **kwargs: object,
     ) -> str:
-        # Used only by compact_text when the input is over budget.
-        self.text_calls.append(prompt)
+        # Used by compact_text when the input is over budget, and by
+        # _propose's think=True reasoning pass before JSON formatting.
+        self.text_calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "objective": objective,
+                "temperature": temperature,
+            }
+        )
         return "COMPACTED"
 
 
@@ -271,7 +287,7 @@ def test_add_proposal_is_materialized_pending_derived_with_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     summaries = [_summary(sid="s1", version=2), _summary(sid="s2", version=1, scale=Scale.DAY)]
-    _canned, created = _wire(
+    canned, created = _wire(
         monkeypatch,
         proposals=[
             {"action": "add", "text": "run tests before merge", "rationale": "task-7 broke twice"}
@@ -279,7 +295,14 @@ def test_add_proposal_is_materialized_pending_derived_with_evidence(
         summaries=summaries,
     )
     report = reflection.reflect("a", _NOW)
-    assert report.proposed == 1 and report.llm_calls == 1
+    # The proposal call is now a reasoning pass (.complete) + a formatting
+    # pass (.complete_json), both counted by _CallCountingClient — verify the
+    # count actually reflects one of each, not two calls to the same method.
+    assert report.proposed == 1 and report.llm_calls == 2
+    assert len(canned.text_calls) == 1
+    assert len(canned.json_calls) == 1
+    assert canned.text_calls[0]["think"] is True
+    assert canned.json_calls[0]["think"] is False
     (proposal,) = created
     assert proposal.action == ProposalAction.ADD
     assert proposal.target_rule_id is None
@@ -306,6 +329,9 @@ def test_retire_known_target_builds_proposal_without_proposed_rule(
     )
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass
+    # (no compaction — the default input budget is not exceeded here).
+    assert report.llm_calls == 2
     (proposal,) = created
     assert proposal.action == ProposalAction.RETIRE
     assert proposal.target_rule_id == "r1"
@@ -333,6 +359,9 @@ def test_amend_requires_active_target_and_text(monkeypatch: pytest.MonkeyPatch) 
     )
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1 and report.dropped_invalid == 2
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass
+    # (a single reflect() call, regardless of how many proposals it yields).
+    assert report.llm_calls == 2
     (proposal,) = created
     assert proposal.action == ProposalAction.AMEND and proposal.target_rule_id == "r1"
     assert (
@@ -351,6 +380,8 @@ def test_amend_enforced_rule_inherits_mode_and_predicate(monkeypatch: pytest.Mon
     )
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass.
+    assert report.llm_calls == 2
     pr = created[0].proposed_rule
     # Mode/predicate/priority inherited → the enforced guardrail is preserved,
     # not silently downgraded to advisory or dropped for a missing predicate.
@@ -368,6 +399,8 @@ def test_amend_can_change_priority_without_being_noop(monkeypatch: pytest.Monkey
     report = reflection.reflect("a", _NOW)
     # A real priority change is not a no-op → reaches review.
     assert report.proposed == 1 and report.deduped == 0
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass.
+    assert report.llm_calls == 2
     assert created[0].proposed_rule["priority"] == 7
 
 
@@ -588,8 +621,14 @@ def test_llm_calls_counts_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     canned, created = _wire(monkeypatch, proposals=[{"action": "add", "text": "x"}])
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1 and len(created) == 1
-    # 1 compaction call (input over budget) + 1 proposal call.
-    assert report.llm_calls == 2 and canned.text_calls
+    # 1 compaction call (input over budget) + the proposal call's reasoning
+    # pass (.complete) + formatting pass (.complete_json).
+    # 3 total model calls: compact_text's one text (complete) call, plus the
+    # proposal's reasoning pass (complete, think=True) and formatting pass
+    # (complete_json, think=False) from complete_validated_via_reasoning.
+    assert report.llm_calls == 3
+    assert len(canned.text_calls) == 2
+    assert len(canned.json_calls) == 1
 
 
 def test_llm_calls_counts_complete_validated_correction_retries(
@@ -602,6 +641,7 @@ def test_llm_calls_counts_complete_validated_correction_retries(
     class FlakyCannedLLM(LLMClient):
         def __init__(self) -> None:
             self.json_calls: list[dict[str, Any]] = []
+            self.text_calls: list[dict[str, Any]] = []
             self.calls = 0
 
         def complete_json(
@@ -617,7 +657,7 @@ def test_llm_calls_counts_complete_validated_correction_retries(
         ) -> dict[str, Any]:
             self.calls += 1
             self.json_calls.append({"prompt": prompt, "objective": objective})
-            if self.calls == 1:
+            if len(self.json_calls) == 1:
                 # Trigger a schema validation error so ``complete_validated`` retries.
                 return {"proposals": "not-a-list"}
             return {"proposals": [{"action": "add", "text": "derived rule"}]}
@@ -634,7 +674,18 @@ def test_llm_calls_counts_complete_validated_correction_retries(
             objective: str,
             **kwargs: object,
         ) -> str:
-            raise AssertionError("compact_text should not call complete for large budgets")
+            # Reasoning pass from complete_validated_via_reasoning (think=True).
+            # Compaction is disabled via AGENT_COGNITION_REFLECTION_INPUT_CHARS,
+            # so this must only be the proposal reasoning call.
+            self.text_calls.append(
+                {
+                    "prompt": prompt,
+                    "objective": objective,
+                    "think": think,
+                }
+            )
+            assert think is True, "only the reasoning pass should call complete here"
+            return "REASONING PROSE"
 
     canned = FlakyCannedLLM()
     created: list[RuleProposal] = []
@@ -660,7 +711,10 @@ def test_llm_calls_counts_complete_validated_correction_retries(
 
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1
-    assert report.llm_calls == 2
+    # 1 reasoning complete() + 2 formatting complete_json() (initial miss + retry).
+    assert report.llm_calls == 3
+    assert len(canned.text_calls) == 1
+    assert len(canned.json_calls) == 2
     assert len(created) == 1 and created[0].proposed_rule is not None
 
 
@@ -809,11 +863,13 @@ def test_reflection_never_creates_or_activates_a_rule(monkeypatch: pytest.Monkey
 
 
 def test_reflect_requires_non_empty_agent_id() -> None:
+    """``reflect``'s precondition on a non-empty ``agent_id`` raises via assert."""
     with pytest.raises(AssertionError):
         reflection.reflect("", _NOW)
 
 
 def test_reflect_requires_tz_aware_now() -> None:
+    """``reflect``'s precondition on a tz-aware ``now`` raises via assert."""
     with pytest.raises(AssertionError):
         reflection.reflect("a", datetime(2026, 6, 1, 12, 0))  # naive
 
@@ -857,6 +913,10 @@ def test_dedupe_key_normalizes_text_mode_and_handles_retire() -> None:
 def test_restates_active_rule_matches_add_content_only() -> None:
     content = {("be kind", "advisory", None)}
     retire = reflection._build_proposal("a", ProposalAction.RETIRE, [], _NOW, target_rule_id="r1")
+    # proposed_rule["text"] is deliberately an int, not a str — it can never
+    # textually match a set of (str, str, str|None) content tuples, so this
+    # exercises the "non-str text" branch distinctly from the "wrong action"
+    # branch covered by `retire` above.
     bad_text = reflection._build_proposal(
         "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": 123}
     )
@@ -938,6 +998,7 @@ def test_reflect_persists_pending_proposal_and_leaves_rules_untouched(
     report = reflection.reflect("a", _NOW)
 
     assert report.proposed == 1
+    assert report.llm_calls == 2  # reasoning pass + formatting pass
     pending = store.list_proposals("a", status=ProposalStatus.PENDING)
     assert len(pending) == 1
     assert pending[0].action == ProposalAction.ADD
@@ -958,7 +1019,8 @@ def test_reflected_proposal_activates_only_after_approval(monkeypatch: pytest.Mo
         "get_client",
         lambda key: CannedLLM([{"action": "add", "text": "approved later"}]),
     )
-    reflection.reflect("a", _NOW)
+    report = reflection.reflect("a", _NOW)
+    assert report.llm_calls == 2  # reasoning pass + formatting pass
     (proposal,) = store.list_proposals("a", status=ProposalStatus.PENDING)
 
     # Before approval: no active rules at all.
@@ -980,5 +1042,6 @@ def test_reflect_supersedes_stale_pending_end_to_end(monkeypatch: pytest.MonkeyP
     report = reflection.reflect("a", _NOW)
 
     assert report.superseded == 1
+    assert report.llm_calls == 2  # reasoning pass + formatting pass
     assert store.get_proposal("a", stale.id).status == ProposalStatus.SUPERSEDED  # type: ignore[union-attr]
     assert store.list_proposals("a", status=ProposalStatus.PENDING) == []

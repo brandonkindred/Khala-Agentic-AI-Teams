@@ -129,6 +129,27 @@ def test_fatal_classification_raises_immediately(
     assert no_sleep == []  # never backed off
 
 
+def test_design_budget_exhausted_inside_callable_propagates_without_retry(
+    no_sleep: List[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A charge trip inside ``agent_callable`` must escape unmodified.
+
+    Unknown exceptions default to retriable; without a dedicated carve-out,
+    ``DesignBudgetExhausted`` would be retried and wrapped as
+    ``StrategyLabLLMError``, hiding the cycle-level stop from callers that
+    catch it distinctly (e.g. ``DesignReviewAgent.run``).
+    """
+    trip = DesignBudgetExhausted(limit=1, calls_made=1)
+    stub = _Stub(trip)
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(DesignBudgetExhausted) as ei:
+            invoke_agent(stub, "p", agent_key="k", phase="x", max_attempts=5)
+    assert ei.value is trip
+    assert stub.calls == 1
+    assert no_sleep == []
+    assert not any("strategy_lab LLM call failed" in r.message for r in caplog.records)
+
+
 def test_custom_classifier_is_used(no_sleep: List[float]) -> None:
     stub = _Stub(RuntimeError("weird"))
     with pytest.raises(StrategyLabLLMError) as ei:

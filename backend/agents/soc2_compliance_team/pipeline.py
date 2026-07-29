@@ -11,8 +11,10 @@ job-store or transport concerns. Two thin drivers share these functions:
   which wrap one function per ``@activity.defn`` and fan out across the workflow.
 
 Each step reuses the class-based agents in :mod:`soc2_compliance_team.agents`
-(one clean ``llm.complete_json`` call each) and resolves its LLM client from the
-central provider list via ``get_client("soc2")``.
+(each makes two sequential LLM calls via ``complete_json_via_reasoning`` — a
+prose reasoning pass with ``think=True`` followed by a JSON formatting pass
+with ``think=False`` — rather than one clean ``llm.complete_json`` call) and
+resolves its LLM client from the central provider list via ``get_client("soc2")``.
 
 Invariants:
     - Functions here never mutate their inputs and never touch the job store.
@@ -101,7 +103,9 @@ def audit_criterion(category: TSCCategory, context: RepoContext) -> TSCAuditResu
         - ``context`` is a ``RepoContext`` (typically from :func:`load_context`).
     Postconditions:
         - Returns a ``TSCAuditResult`` whose ``category`` equals ``category``.
-        - Performs exactly one LLM call (via the criterion's agent).
+        - Performs exactly two sequential LLM calls (via the criterion's
+          agent): a reasoning prose pass (``think=True``) followed by a JSON
+          formatting pass (``think=False``); see ``agents._run_tsc_agent``.
     """
     # Explicit raise (not ``assert``) so the precondition still holds under
     # ``python -O``, matching the module-level guard and ``audit_criterion_safe``.
@@ -199,7 +203,9 @@ def write_report(
     Postconditions:
         - Returns ``(compliance_report, next_steps_document)`` with exactly one
           element non-None: the compliance report when material findings exist,
-          otherwise the next-steps document. Performs exactly one LLM call.
+          otherwise the next-steps document. Performs exactly two sequential
+          LLM calls (a reasoning prose pass followed by a JSON formatting
+          pass); see ``ReportWriterAgent.run``.
     """
     return ReportWriterAgent().run(get_client(_AGENT_KEY), str(repo_path), tsc_results)
 

@@ -1,9 +1,10 @@
 """DesignAgent structured-output happy path and degrade behavior.
 
-``DesignAgent._invoke_and_parse`` requests provider-enforced
-schema-conformant decoding (``DESIGN_SPEC_SCHEMA``) via
-``LLMClient.complete_json(schema=...)`` when the active provider supports it
-(currently Ollama only), eliminating the ``build_json_correction_prompt``
+``DesignAgent._invoke_and_parse`` uses ``invoke_structured_with_schema``,
+which first runs a prose reasoning pass with ``think=True`` and then a
+schema-conformant formatting pass with ``think=False`` and
+``schema=DESIGN_SPEC_SCHEMA`` when the active provider supports structured
+output (currently Ollama only), eliminating the ``build_json_correction_prompt``
 happy-path resend for the design generate/revise loop. ``DesignAgent._self_review``
 gets the same treatment for ``CRITIQUE_SCHEMA``.
 
@@ -31,6 +32,7 @@ import pytest
 from investment_team.strategy_lab.agents import _agent_runner as agent_runner_mod
 from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import design as design_mod
+from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
 from investment_team.strategy_lab.agents._response_schemas import (
     CRITIQUE_SCHEMA,
     DESIGN_SPEC_SCHEMA,
@@ -108,6 +110,8 @@ class _ScriptedAgent:
     """Strands ``Agent`` replacement returning a scripted payload per call."""
 
     def __init__(self, payloads: List[str]) -> None:
+        if not payloads:
+            raise AssertionError("_ScriptedAgent requires a non-empty payloads list")
         self._payloads = payloads
         self.calls = 0
 
@@ -121,6 +125,8 @@ class _RecordingAgent:
     """Strands ``Agent`` replacement that records every prompt it receives."""
 
     def __init__(self, payloads: List[str]) -> None:
+        if not payloads:
+            raise AssertionError("_RecordingAgent requires a non-empty payloads list")
         self._payloads = payloads
         self.seen: List[str] = []
 
@@ -131,11 +137,19 @@ class _RecordingAgent:
 
 
 class _StubClient:
-    """Backing ``LLMClient`` stand-in that records every ``complete_json`` call."""
+    """Backing ``LLMClient`` stand-in that records every ``complete()``
+    (reasoning pass) and ``complete_json()`` (formatting pass) call."""
 
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        # invoke_structured_with_schema's think=True reasoning pass, run
+        # before the schema-conformant complete_json call below.
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
+        return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         self.calls.append({"prompt": prompt, **kwargs})
@@ -147,6 +161,9 @@ class _FailingClient:
 
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         raise self._exc
@@ -166,6 +183,13 @@ class _SchemaRoutedClient:
         self._design_result = design_result
         self._critique_result_or_exc = critique_result_or_exc
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        # invoke_structured_with_schema's think=True reasoning pass, run
+        # before the schema-conformant complete_json call below.
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
+        return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         self.calls.append({"prompt": prompt, **kwargs})
@@ -216,6 +240,7 @@ def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.Monk
     assert rationale == "scripted"
     assert parsed["asset_class"] == "stocks"
     assert len(stub_client.calls) == 1
+    assert len(stub_client.reasoning_calls) == 1
 
 
 def test_structured_success_logs_outcome_succeeded(
@@ -251,11 +276,24 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
 
     DesignAgent().run(prior_records=[])
 
+    assert len(stub_client.reasoning_calls) == 1
     assert len(stub_client.calls) == 1
+    reasoning_call = stub_client.reasoning_calls[0]
     call = stub_client.calls[0]
+
+    # Reasoning pass (think=True, reasoning_temperature): receives the
+    # original design-task prompt directly, not a correction re-prompt.
+    assert reasoning_call["think"] is True
+    assert reasoning_call["temperature"] == so_mod._DEFAULT_REASONING_TEMPERATURE
+    assert "Design ONE novel swing-style strategy" in reasoning_call["prompt"]
+    assert "could not be parsed as a single JSON object" not in reasoning_call["prompt"]
+
+    # Formatting pass (think=False, temperature=0.0): schema-conformant,
+    # original (non-reasoning) system prompt.
+    assert call["think"] is False
+    assert call["temperature"] == 0.0
     assert call["schema"] == DESIGN_SPEC_SCHEMA
     assert call["system_prompt"] == design_mod._get_design_system_prompt()
-    assert "Design ONE novel swing-style strategy" in call["prompt"]
     # The original task prompt was sent, not a correction re-prompt.
     assert "could not be parsed as a single JSON object" not in call["prompt"]
 
@@ -281,19 +319,22 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
         return _good_design_payload()
 
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({}))
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
     monkeypatch.setattr(so_mod, "run_structured_agent", _fake_run_structured_agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
-    DesignAgent().run(prior_records=[])
+    budget = LLMCallBudget(limit=5)
+    with use_budget(budget):
+        DesignAgent().run(prior_records=[])
 
     assert captured["agent_key"] == "strategy_design"
     assert captured["phase"] == "design_generate_structured"
-    # Both DesignAgent and RefinementAgent charge every real LLM call
-    # including retries — the structured pre-flight is a real call too.
-    assert captured["charge"] is True
+    # ``invoke_structured_with_schema`` always forwards charge=False to the
+    # envelope; per-provider-call charging happens inside its ``_call``.
+    assert captured["charge"] is False
+    # This spy skips ``_call``, so per-provider-call charges inside the
+    # closure never fire — the bound budget stays untouched.
+    assert budget.calls_made == 0
 
 
 def test_revise_also_uses_structured_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -352,6 +393,9 @@ def test_revise_also_uses_structured_path(monkeypatch: pytest.MonkeyPatch) -> No
     parsed, _ = DesignAgent().revise(prior_spec, critique)
 
     assert parsed["asset_class"] == "stocks"
+    # One structured invocation = one reasoning-pass (.complete) call plus
+    # one formatting-pass (.complete_json) call, recorded in separate lists.
+    assert len(stub_client.reasoning_calls) == 1
     assert len(stub_client.calls) == 1
 
 
@@ -387,6 +431,9 @@ def test_structured_success_dsl_invalid_falls_through_to_correction_retry(
     assert parsed["asset_class"] == "stocks"
     assert rationale == "scripted"
     # Exactly one structured attempt, then exactly one legacy correction retry.
+    # The one structured attempt is a reasoning-pass (.complete) call plus a
+    # formatting-pass (.complete_json) call, recorded in separate lists.
+    assert len(stub_client.reasoning_calls) == 1
     assert len(stub_client.calls) == 1
     assert len(legacy_agent.seen) == 1
     assert "rejected by the DSL validator" in legacy_agent.seen[0]
@@ -428,9 +475,7 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
         LLMSemanticExhaustionError("starved", schema_forced=True, attempts_used=1)
     )
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client))
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
     agent = _ScriptedAgent([json.dumps(_good_design_payload())])
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: agent)
@@ -478,9 +523,7 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
         )
     )
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client)
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
     with pytest.raises(design_mod.StrategyLabLLMError):
@@ -513,6 +556,9 @@ def test_self_review_uses_structured_path_when_available(
         parsed, _ = DesignAgent().run(prior_records=[])
 
     assert parsed["asset_class"] == "stocks"
+    # Two structured invocations (design-generate + self-review critique) =
+    # two reasoning-pass calls plus two formatting-pass calls.
+    assert len(client.reasoning_calls) == 2
     assert len(client.calls) == 2
     assert client.calls[0]["schema"] == DESIGN_SPEC_SCHEMA
     assert client.calls[1]["schema"] == CRITIQUE_SCHEMA
@@ -567,9 +613,7 @@ def test_self_review_non_schema_forced_failure_propagates_without_degrading(
     only thing that decides how it's handled, not this seam."""
     fatal_client = _FailingClient(LLMPermanentError("nope, fatal"))
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client)
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
     with pytest.raises(design_mod.StrategyLabLLMError):

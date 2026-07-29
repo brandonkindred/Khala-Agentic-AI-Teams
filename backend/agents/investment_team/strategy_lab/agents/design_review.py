@@ -31,7 +31,7 @@ from .._orchestrator_helpers import _has_short_period_stall
 from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
 from . import _structured_output as so
-from ._llm_budget import charge_active_budget
+from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
@@ -480,7 +480,8 @@ class DesignReviewAgent:
         cycle-level stop and is allowed to propagate (it is charged *before*
         the fail-closed ``try`` below).
         """
-        readiness_block, readiness_findings = _format_readiness(readiness_results or [])
+        readiness_list = readiness_results or []
+        readiness_block, readiness_findings = _format_readiness(readiness_list)
         prior_block = format_prior_critiques(prior_critiques)
 
         user_prompt = _REVIEW_USER_TEMPLATE.format(
@@ -488,7 +489,7 @@ class DesignReviewAgent:
             timeframe=spec.timeframe,
             target_symbols=list(spec.target_symbols),
             speculative=spec.speculative,
-            n_readiness=len(readiness_results or []),
+            n_readiness=len(readiness_list),
             readiness_block=readiness_block,
             n_prior_critiques=len(prior_critiques or []),
             prior_critiques_block=prior_block,
@@ -514,10 +515,16 @@ class DesignReviewAgent:
         # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
         # propagates to ``_run_design_loop`` instead of being converted into
         # a fail-closed critique that would let the loop continue past budget.
-        charge_active_budget()
+        # Structured path: ``invoke_structured_with_schema(charge=True)``
+        # charges once per provider call inside its retried closure
+        # (reasoning + formatting). Legacy path: charge once here for the
+        # single provider call.
+        structured_available = so.structured_output_available()
+        if not structured_available:
+            charge_active_budget()
 
         try:
-            if so.structured_output_available():
+            if structured_available:
                 try:
                     parsed = so.invoke_structured_with_schema(
                         "strategy_design_review",
@@ -525,9 +532,10 @@ class DesignReviewAgent:
                         user_prompt,
                         phase="design_review_structured",
                         schema=CRITIQUE_SCHEMA,
-                        charge=False,
+                        charge=True,
                         objective="strategy design review (structured)",
                         logger=logger,
+                        reasoning_system_prompt=so.build_reasoning_system_prompt(_SYSTEM_PROMPT),
                     )
                 except StrategyLabLLMError as exc:
                     cause = exc.cause
@@ -537,6 +545,11 @@ class DesignReviewAgent:
                         "structured design-review decode starved (schema_forced); "
                         "degrading to the legacy single-shot call."
                     )
+                    # The schema_forced degrade path makes an additional real
+                    # provider call after the structured attempt already charged
+                    # for whichever sub-calls ran — charge for the legacy
+                    # fallback here before invoking it.
+                    charge_active_budget()
                     parsed = _invoke_legacy()
                 else:
                     logger.info(
@@ -545,6 +558,11 @@ class DesignReviewAgent:
                     )
             else:
                 parsed = _invoke_legacy()
+        except DesignBudgetExhausted:
+            # Must propagate uncaught — same rationale as the pre-try charges
+            # above (a per-cycle budget trip is a cycle-level stop, not a
+            # reviewer/transport hiccup to fail closed on).
+            raise
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
             logger.warning("DesignReviewAgent failed to produce parseable JSON: %s", exc)
             return _fail_closed_critique(exc, readiness_findings)

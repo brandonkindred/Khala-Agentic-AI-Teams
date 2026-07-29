@@ -1,19 +1,24 @@
 """RefinementAgent structured-output happy path and degrade behavior.
 
-``RefinementAgent._invoke_and_parse`` requests provider-enforced
-schema-conformant decoding (``REFINEMENT_SCHEMA``) via
-``LLMClient.complete_json(schema=...)`` when the active provider supports it
-(currently Ollama only), eliminating the ``build_json_correction_prompt``
-happy-path resend for this call. These tests lock in: the structured call is
-used and skips the legacy ``strands.Agent`` + correction-prompt machinery on
-success; the real ``provider_supports_structured_output(resolve_provider())``
-wiring degrades to the legacy parse-retry loop for an unsupported provider
-(Bedrock); a ``schema_forced`` semantic-exhaustion starvation signal degrades
-to the legacy loop the same way; and any OTHER fatal failure from the
-structured attempt propagates without degrading (a deliberate scope
-boundary, not a hole). Mirrors the fixture/helper shapes in
-``test_strategy_lab_refinement_parse_retry.py``, which covers the legacy loop
-itself (with the structured seam forced off).
+``RefinementAgent._invoke_and_parse`` uses the two-pass
+``invoke_structured_with_schema`` helper when the active provider supports
+structured output (currently Ollama only): a reasoning ``LLMClient.complete()``
+pass with ``think=True`` and a prose-only system prompt (the caller's
+``_SYSTEM_PROMPT`` plus ``REASONING_MODE_SUFFIX``), followed by a formatting
+``LLMClient.complete_json(schema=REFINEMENT_SCHEMA)`` pass with
+``think=False``, eliminating the ``build_json_correction_prompt`` happy-path
+resend for this call. These tests lock in: both passes run on the structured
+happy path; the per-cycle ``LLMCallBudget`` is charged twice up front
+(``run_structured_agent`` receives ``charge=False``); the real
+``provider_supports_structured_output(resolve_provider())`` wiring degrades
+to the legacy ``strands.Agent`` + correction-prompt loop for an unsupported
+provider (Bedrock); a ``schema_forced`` semantic-exhaustion starvation
+signal — including one raised by the unconstrained reasoning pass and
+re-raised as ``schema_forced=True`` — degrades to the legacy loop the same
+way; and any OTHER fatal failure from the structured attempt propagates
+without degrading (a deliberate scope boundary, not a hole). Mirrors the
+fixture/helper shapes in ``test_strategy_lab_refinement_parse_retry.py``,
+which covers the legacy loop itself (with the structured seam forced off).
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents import _agent_runner
 from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import refinement as mod
+from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
 from llm_service.interface import LLMPermanentError, LLMSemanticExhaustionError
 
@@ -57,11 +63,19 @@ class _ScriptedAgent:
 
 
 class _StubClient:
-    """Backing ``LLMClient`` stand-in that records every ``complete_json`` call."""
+    """Backing ``LLMClient`` stand-in that records every ``complete()``
+    (reasoning pass) and ``complete_json()`` (formatting pass) call."""
 
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        # invoke_structured_with_schema's think=True reasoning pass, run
+        # before the schema-conformant complete_json call below.
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
+        return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         self.calls.append({"prompt": prompt, **kwargs})
@@ -73,6 +87,9 @@ class _FailingClient:
 
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         raise self._exc
@@ -135,9 +152,21 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     call = stub_client.calls[0]
     assert call["schema"] == mod.REFINEMENT_SCHEMA
     assert call["system_prompt"] == mod._SYSTEM_PROMPT
+    assert call["think"] is False
     assert "Fix the following trading strategy code" in call["prompt"]
     # The original task prompt was sent, not a correction re-prompt.
     assert "could not be parsed as a single JSON object" not in call["prompt"]
+
+    assert len(stub_client.reasoning_calls) == 1
+    reasoning_call = stub_client.reasoning_calls[0]
+    assert reasoning_call["think"] is True
+    assert reasoning_call["system_prompt"] == mod._SYSTEM_PROMPT + so_mod.REASONING_MODE_SUFFIX
+    # The reasoning-pass user prompt must re-assert prose-only LAST, after the
+    # task template's own "Return ONLY a JSON object"-style directive, so the
+    # more specific/later user-turn instruction doesn't win and make the
+    # reasoning pass emit JSON instead of prose (see
+    # ``_REASONING_USER_PROMPT_SUFFIX``'s docstring in ``_structured_output.py``).
+    assert reasoning_call["prompt"].endswith(so_mod._REASONING_USER_PROMPT_SUFFIX)
 
 
 def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,16 +193,20 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
     monkeypatch.setattr(so_mod, "run_structured_agent", _fake_run_structured_agent)
 
-    RefinementAgent().run(
-        spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
-    )
+    budget = LLMCallBudget(limit=5)
+    with use_budget(budget):
+        RefinementAgent().run(
+            spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+        )
 
     assert captured["agent_key"] == "strategy_refinement"
     assert captured["phase"] == "refinement_structured"
-    # RefinementAgent now charges the per-cycle LLM budget (#1569) — the
-    # orchestrator's ``_refine`` re-raises ``DesignBudgetExhausted`` instead
-    # of swallowing it, so charging here is safe.
-    assert captured["charge"] is True
+    # ``invoke_structured_with_schema`` always forwards charge=False to the
+    # envelope; per-provider-call charging happens inside its ``_call``.
+    assert captured["charge"] is False
+    # This spy skips ``_call``, so per-provider-call charges inside the
+    # closure never fire — the bound budget stays untouched.
+    assert budget.calls_made == 0
 
 
 # ---------------------------------------------------------------------------
@@ -232,9 +265,44 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
     assert "failure_phase=execution" in starvation_warnings[0].message
 
 
-# ---------------------------------------------------------------------------
-# No degrade: a non-schema_forced fatal failure propagates unchanged
-# ---------------------------------------------------------------------------
+def test_reasoning_pass_starvation_also_degrades_to_legacy_loop(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-schema_forced LLMSemanticExhaustionError from the *reasoning*
+    pass (complete()) is re-raised by invoke_structured_with_schema as a new
+    schema_forced=True receipt, so it degrades identically to a
+    formatting-pass starvation — and the formatting call (complete_json) is
+    never invoked, matching "a step-1 failure propagates immediately"."""
+
+    class _ReasoningStarvingClient:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            raise LLMSemanticExhaustionError(
+                "reasoning starved", schema_forced=False, attempts_used=1
+            )
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise AssertionError("formatting call must not run after a reasoning-pass failure")
+
+    starved_client = _ReasoningStarvingClient()
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client))
+    monkeypatch.setattr(
+        _agent_runner, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
+    )
+    agent = _ScriptedAgent([_GOOD])
+    monkeypatch.setattr(_agent_runner, "Agent", lambda **_k: agent)
+
+    logger_name = "investment_team.strategy_lab.agents.refinement"
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        updates, new_code = RefinementAgent().run(
+            spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+        )
+
+    assert new_code == "# fixed"
+    assert updates == {"changes_made": "tightened guard"}
+    assert agent.calls == 1
+    starvation_warnings = [r for r in caplog.records if "schema_forced" in r.message]
+    assert len(starvation_warnings) == 1
 
 
 def test_non_schema_forced_permanent_error_propagates_without_degrading(
@@ -280,6 +348,7 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
 def test_structured_output_available_true_for_ollama_real_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Ollama is a real provider wired up to advertise structured-output support."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     assert so_mod.structured_output_available() is True
 
@@ -287,6 +356,7 @@ def test_structured_output_available_true_for_ollama_real_provider(
 def test_structured_output_available_false_for_dummy_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The no-LLM dummy test/dev harness never advertises structured-output support."""
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     assert so_mod.structured_output_available() is False
 
@@ -294,6 +364,7 @@ def test_structured_output_available_false_for_dummy_provider(
 def test_structured_output_available_false_for_bedrock_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Bedrock lacks provider-enforced schema-conformant decoding support."""
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
     assert so_mod.structured_output_available() is False
 
@@ -326,22 +397,35 @@ def test_structured_success_logs_outcome_succeeded(
     assert "failure_phase=execution" in succeeded[0].message
 
 
-def test_structured_path_issues_fewer_calls_than_fallback(
+def test_structured_path_needs_no_correction_resend_unlike_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Measurable-reduction evidence for the parent structured-output work.
 
-    Replays the SAME simulated failure sequence — one response the strict
-    extractor rejects, then a valid one — down both paths and counts LLM
-    calls. On the structured path a schema-conformant decode cannot emit
-    unparseable JSON, so the first (and only) call succeeds and no
-    ``build_json_correction_prompt`` resend fires. On the degraded legacy
-    path the same sequence costs a second, full-context resend. Fewer calls
-    is a direct proxy for the token/latency win (mocked clients have no real
-    latency to measure), and the strict inequality is the acceptance
-    evidence.
+    The two paths are NOT given the same simulated failure sequence: the
+    structured path's stub client returns a valid, schema-conformant payload
+    on its one (formatting-pass) call, since schema-constrained decoding
+    cannot itself emit unparseable JSON; only the legacy fallback path is
+    scripted with a reject-then-valid sequence (``["not json at all", _GOOD]``)
+    to exercise its correction-resend. ``structured_format_calls`` below
+    counts only the formatting-pass
+    (``complete_json``) calls, not the reasoning pass — after the
+    reasoning+formatting split, the structured path's real total is two
+    provider calls (reasoning then formatting), matching the legacy path's
+    two (initial + one resend). The measurable win is therefore the absence
+    of a ``build_json_correction_prompt`` resend — the formatting call is
+    schema-constrained and cannot emit unparseable JSON, so it never needs
+    one — not a lower total provider-call count. The strict inequality below
+    compares formatting-pass calls only (1 structured vs. 2 legacy) as the
+    proxy for that resend elimination.
     """
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
+
+    # Capture the real function before either path monkeypatches
+    # ``mod.build_json_correction_prompt`` — capturing it later would pick up
+    # whichever stub the structured-path block below has already installed,
+    # not the real implementation the fallback path needs to exercise.
+    real_build = mod.build_json_correction_prompt
 
     # --- Structured path: one call, zero correction resends. ---
     structured_corrections = 0
@@ -353,21 +437,22 @@ def test_structured_path_issues_fewer_calls_than_fallback(
 
     structured_client = _StubClient({"strategy_code": "# fixed", "changes_made": "ok"})
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(structured_client))
+    monkeypatch.setattr(
+        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(structured_client)
+    )
     monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
     monkeypatch.setattr(mod, "build_json_correction_prompt", _count_structured_correction)
 
     RefinementAgent().run(
         spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
     )
-    structured_calls = len(structured_client.calls)
+    structured_format_calls = len(structured_client.calls)
 
-    assert structured_calls == 1
+    assert structured_format_calls == 1
     assert structured_corrections == 0
 
     # --- Legacy fallback path: same failure sequence, one resend. ---
     fallback_corrections = 0
-    real_build = mod.build_json_correction_prompt
 
     def _count_fallback_correction(*args: Any, **kwargs: Any) -> str:
         nonlocal fallback_corrections
@@ -388,5 +473,9 @@ def test_structured_path_issues_fewer_calls_than_fallback(
     assert fallback_calls == 2
     assert fallback_corrections == 1
 
-    # The structured path is strictly cheaper for the same failure sequence.
-    assert structured_calls < fallback_calls
+    # Formatting-pass-only calls are fewer (1 vs 2) because the structured
+    # path never needs a correction resend — NOT because its total real
+    # provider-call count is lower (it isn't: 2 either way, once the
+    # reasoning pass is counted on the structured side). See the docstring
+    # above for the accurate accounting.
+    assert structured_format_calls < fallback_calls

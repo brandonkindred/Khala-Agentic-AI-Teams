@@ -6,10 +6,10 @@ import logging
 import threading
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from job_service_client import start_stale_job_monitor
 from shared.app import create_team_app
@@ -17,7 +17,8 @@ from soc2_compliance_team import job_store
 from soc2_compliance_team.models import SOC2AuditResult
 from soc2_compliance_team.orchestrator import SOC2AuditOrchestrator
 
-logging.basicConfig(level=logging.INFO)
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -55,19 +56,37 @@ app = create_team_app(
     on_startup=_start_temporal_worker_backstop,
 )
 
-# The decomposed Temporal pipeline (temporal/workflows.py) can go up to an
-# hour between job-row touches while a criterion fan-out or report-writing
+# The decomposed Temporal pipeline (temporal/workflows.py) can go up to 90
+# minutes between job-row touches while a criterion fan-out or report-writing
 # activity is queued/running (AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT /
-# REPORT_SCHEDULE_TO_CLOSE_TIMEOUT) — Temporal's own per-activity timeouts are
-# the primary "is this stuck" detector on that path, feeding a genuine
-# failure into mark_failed_activity. This monitor is a backstop for what
-# Temporal can't self-heal (e.g. thread-mode, or the whole worker process
-# dying), so its threshold must stay comfortably above those ceilings —
-# otherwise it can mark a legitimate long-running Temporal audit
-# "failed (stale)" before it gets a chance to complete, and
-# _update_job_terminal's first-writer-wins guard would then treat that false
-# failure as authoritative and silently discard the real completion.
-_STALE_JOB_THRESHOLD_SECONDS = 90 * 60
+# REPORT_SCHEDULE_TO_CLOSE_TIMEOUT — increased from the original 1-hour
+# ceiling to 90 minutes because each activity now issues two sequential LLM
+# calls instead of one; the per-activity AUDIT_TIMEOUT / REPORT_TIMEOUT
+# doubled from 30 to 60 minutes for the same reason) — Temporal's own
+# per-activity timeouts are the primary "is this stuck"
+# detector on that path, feeding a genuine failure into mark_failed_activity.
+#
+# In thread mode, _run_audit_job touches the job twice before
+# SOC2AuditOrchestrator.run() is invoked (status=running plus the
+# "Loading repository" stage, then a "Running TSC audits" stage update)
+# and not again until it returns, so the uninterrupted window is the
+# combined criteria + report ceiling
+# (_CRITERIA_TIMEOUT_SECONDS + _REPORT_TIMEOUT_SECONDS, each doubled from 30
+# to 60 minutes for the same two-call reason — 120 minutes combined) plus
+# repository-loading and thread-scheduling overhead before that.
+#
+# This monitor is a backstop for what neither path can self-heal (thread-mode
+# has no per-stage timeout of its own; Temporal mode covers the whole worker
+# process dying), so its threshold must stay comfortably above BOTH ceilings
+# above — otherwise it can mark a legitimate long-running audit "failed
+# (stale)" before it gets a chance to complete, and _update_job_terminal's
+# first-writer-wins guard would then treat that false failure as
+# authoritative and silently discard the real completion. Keep the same ~30
+# minute margin above the thread-mode ceiling that this threshold held
+# pre-doubling: 90 min total minus the 60 min pre-doubling combined ceiling
+# = a 30 min margin; 120 min new combined ceiling + that same 30 min margin
+# = 150 min.
+_STALE_JOB_THRESHOLD_SECONDS = 150 * 60
 
 _stale_monitor_stop = start_stale_job_monitor(
     job_store._job_manager,
@@ -96,9 +115,8 @@ def _is_temporal_enabled() -> bool:
 class RunAuditRequest(BaseModel):
     """Request body for starting an audit."""
 
-    repo_path: str = Field(
+    repo_path: Annotated[str, StringConstraints(max_length=4096)] = Field(
         ...,
-        max_length=4096,
         description="Local filesystem path to the code repository to audit.",
     )
 
@@ -131,7 +149,20 @@ class AuditStatusResponse(BaseModel):
 
 
 def mark_all_running_jobs_failed(reason: str) -> None:
-    """Mark all pending or running SOC2 audit jobs as failed (e.g. on server shutdown)."""
+    """Mark all pending or running SOC2 audit jobs as failed.
+
+    Intended for use during server shutdown so in-flight thread-mode
+    audits are not left stuck in ``running`` across a restart.
+
+    Preconditions:
+        - ``reason`` is a non-empty string explaining why jobs are being
+          marked failed.
+    Postconditions:
+        - All jobs currently ``pending`` or ``running`` in the job store are
+          transitioned to ``failed`` with the provided ``reason``.
+        - Any exception raised by the job store is logged and suppressed;
+          this function never propagates an error to its caller.
+    """
     try:
         job_store._job_manager.mark_all_active_jobs_failed(reason)
     except Exception as e:
@@ -190,15 +221,18 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
     Postconditions:
         - Creates a job row (``status="pending"``) and returns its ``job_id``
           for polling via ``GET /soc2-audit/status/{job_id}``. Dispatches the
-          audit to Temporal when enabled, else to a background thread.
+          audit to Temporal when enabled, else to a daemon background thread
+          (best-effort, thread mode only: the thread is abandoned without
+          waiting for it if the process exits, so a job can be left
+          ``running`` in the job store across a restart).
         - Raises ``HTTPException(400)`` if ``repo_path`` isn't a directory.
-        - Raises ``HTTPException(503)`` if Temporal dispatch fails; the job is
-          marked ``failed`` on a best-effort basis (via
-          :func:`soc2_compliance_team.job_store._update_job_terminal`, so this
-          write can't silently clobber a terminal status the workflow already
-          wrote, and a workflow that actually started despite the dispatch
-          error can't later clobber this ``failed`` write back to
-          ``completed``) rather than left orphaned in ``pending``.
+        - Raises ``HTTPException(503)`` if Temporal dispatch fails. The job is
+          marked ``failed`` on a best-effort basis via
+          :func:`soc2_compliance_team.job_store._update_job_terminal`. This
+          write cannot silently clobber a terminal status already written by
+          the workflow, and a workflow that started despite the dispatch
+          error cannot later overwrite this failed status back to completed,
+          preventing the job from being left orphaned in ``pending``.
     """
     repo_path = Path(request.repo_path).expanduser().resolve()
     if not repo_path.is_dir():
@@ -258,7 +292,18 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
     description="Returns current status and, when completed, the full SOC2 audit result.",
 )
 def get_audit_status(job_id: str) -> AuditStatusResponse:
-    """Get the status and result of an audit job."""
+    """Get the status and result of an audit job.
+
+    Preconditions:
+        - ``job_id`` is a job id previously returned by ``POST /soc2-audit/run``.
+    Postconditions:
+        - Returns the job's current ``status`` (``pending``/``running``/
+          ``completed``/``failed``), ``current_stage``, and ``error`` as last
+          persisted in the job store. ``result`` is populated (parsed as
+          :class:`SOC2AuditResult`) only once the job has produced one; it is
+          ``None`` for a job still pending or running.
+        - Raises ``HTTPException(404)`` if no job with ``job_id`` exists.
+    """
     job = job_store._job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -280,5 +325,9 @@ def get_audit_status(job_id: str) -> AuditStatusResponse:
 
 @app.get("/health")
 def health() -> dict:
-    """Health check endpoint."""
+    """Return a simple health check response.
+
+    Postconditions:
+        - Always returns ``{"status": "ok"}`` with HTTP 200.
+    """
     return {"status": "ok"}

@@ -41,11 +41,54 @@ class CannedLLMClient(LLMClient):
     Mirrors the test helper in ``test_sales_team.py``. Re-defined locally to
     keep this file self-contained — both critic tests and orchestrator-level
     retry tests share this exact pattern.
+
+    The critics make two calls per review, and this double records them in
+    two SEPARATE lists — they are not aliases:
+
+    * ``calls`` — the think=False ``complete_json`` formatting calls. These
+      consume the programmed ``responses`` queue, so assertions about the
+      *verdict* (and about the JSON-shape system prompt) belong here.
+    * ``reasoning_calls`` — the think=True ``complete`` reasoning calls. These
+      never touch the queue. The critic's built prompt (dossier, rubric,
+      sequence/proposal payload) is sent here, so assertions about *prompt
+      content* belong here, not in ``calls``.
     """
 
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool | str | None = None,
+    ) -> str:
+        # The critics' think=True reasoning pass (complete_json_via_reasoning /
+        # complete_validated_via_reasoning) calls this before the real verdict
+        # call. Override the LLMClient base's default (which would otherwise
+        # route through complete_json and silently consume a queued response)
+        # with a harmless placeholder that doesn't touch the response queue —
+        # ``self.calls`` and ``self._responses`` continue to track only the
+        # verdict-producing complete_json calls these tests assert on. Recorded
+        # separately in ``self.reasoning_calls`` for tests that need to inspect
+        # the reasoning-pass prompt itself.
+        self.reasoning_calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "temperature": temperature,
+                "objective": objective,
+            }
+        )
+        return "Reasoning: proceeding as configured by the test fixture."
 
     def complete_json(
         self,
@@ -55,10 +98,17 @@ class CannedLLMClient(LLMClient):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: bool = False,
+        objective: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         self.calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "temperature": temperature}
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "temperature": temperature,
+                "think": think,
+                "objective": objective,
+            }
         )
         if not self._responses:
             raise AssertionError(
@@ -204,12 +254,15 @@ def _fail_outreach_report(rule_id: str, description: str = "violation") -> Dict[
 
 
 class TestOutreachCriticAgent:
+    """Regression tests for OutreachCriticAgent's two-call review flow."""
+
     def test_pass_report_marks_approved(
         self,
         sample_sequence: OutreachSequence,
         sample_dossier: ProspectDossier,
         sample_icp: IdealCustomerProfile,
     ) -> None:
+        """A passing sequence yields an approved report and prose-only reasoning prompts."""
         llm = CannedLLMClient([_pass_outreach_report()])
         critic = OutreachCriticAgent(llm_client=llm)
 
@@ -218,7 +271,21 @@ class TestOutreachCriticAgent:
         assert report.status == "PASS"
         assert report.approved is True
         assert report.violations == []
-        assert llm.calls and "Outreach Reviewer" in (llm.calls[0]["system_prompt"] or "")
+        assert llm.reasoning_calls and "Outreach Reviewer" in (
+            llm.reasoning_calls[0]["system_prompt"] or ""
+        )
+        # Locks in the two-pass contract: the reasoning pass runs with
+        # think=True, the formatting pass with think=False.
+        assert llm.reasoning_calls[0]["think"] is True
+        assert llm.calls and llm.calls[0]["think"] is False
+        # Reasoning user + system prompts must stay free of JSON-only
+        # directives — those belong on the formatting pass only.
+        reasoning_prompt = llm.reasoning_calls[0]["prompt"] or ""
+        reasoning_system = llm.reasoning_calls[0]["system_prompt"] or ""
+        for text in (reasoning_prompt, reasoning_system):
+            assert "Return JSON only" not in text
+            assert "No markdown fences" not in text
+            assert "Return ONLY a JSON object" not in text
 
     def test_fail_with_fabricated_citation(
         self,
@@ -276,8 +343,12 @@ class TestOutreachCriticAgent:
 
         report = critic.review(sample_sequence, sample_dossier, sample_icp)
 
-        # Critic enforces approved == (status == 'PASS' AND no must_fix).
+        # Critic enforces approved == (status == 'PASS' AND no must_fix) AND
+        # reconciles status itself — a must_fix violation forces FAIL, not
+        # just approved=False (a status="PASS"/approved=False report would
+        # itself violate the documented invariant).
         assert report.approved is False
+        assert report.status == "FAIL"
 
     def test_parse_failure_falls_back_to_fail(
         self,
@@ -296,6 +367,11 @@ class TestOutreachCriticAgent:
         assert report.status == "FAIL"
         assert report.approved is False
         assert report.notes is not None and "parseable JSON" in report.notes
+        assert len(llm.reasoning_calls) == 1
+        # ``llm.calls`` is formatting-only (see CannedLLMClient). The formatting
+        # pass retries on every invalid payload: 1 initial +
+        # correction_attempts=2 corrective resends, all queued as invalid.
+        assert len(llm.calls) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -325,12 +401,15 @@ def _fail_proposal_report(rule_id: str) -> Dict[str, Any]:
 
 
 class TestProposalCriticAgent:
+    """Regression tests for ProposalCriticAgent's two-call review flow."""
+
     def test_pass_report_marks_approved(
         self,
         sample_proposal: SalesProposal,
         sample_dossier: ProspectDossier,
         sample_qualification: QualificationScore,
     ) -> None:
+        """A passing proposal yields an approved report and prose-only reasoning prompts."""
         llm = CannedLLMClient([_pass_proposal_report()])
         critic = ProposalCriticAgent(llm_client=llm)
 
@@ -338,7 +417,16 @@ class TestProposalCriticAgent:
 
         assert report.status == "PASS"
         assert report.approved is True
-        assert "Proposal Reviewer" in (llm.calls[0]["system_prompt"] or "")
+        reasoning_system = llm.reasoning_calls[0]["system_prompt"] or ""
+        assert "Proposal Reviewer" in reasoning_system
+        # Regression guard: the reasoning pass must stay prose-only — a JSON
+        # directive here would outrank its "answer in structured prose"
+        # instruction and collapse the two-call split back to one.
+        reasoning_prompt = llm.reasoning_calls[0]["prompt"] or ""
+        for text in (reasoning_prompt, reasoning_system):
+            assert "Return JSON only" not in text
+            assert "No markdown fences" not in text
+            assert "Return ONLY a JSON object" not in text
 
     def test_fail_with_broken_roi_math(
         self,
@@ -377,16 +465,67 @@ class TestProposalCriticAgent:
 
         assert report.status == "FAIL"
         assert report.notes is not None and "parseable JSON" in report.notes
+        assert len(llm.reasoning_calls) == 1
+        # ``llm.calls`` is formatting-only (see CannedLLMClient). The formatting
+        # pass retries on every invalid payload: 1 initial +
+        # correction_attempts=2 corrective resends, all queued as invalid.
+        assert len(llm.calls) == 3
+
+    def test_invariant_forces_status_fail_on_must_fix(
+        self,
+        sample_proposal: SalesProposal,
+        sample_dossier: ProspectDossier,
+        sample_qualification: QualificationScore,
+    ) -> None:
+        # Model lies: claims PASS+approved while listing a must_fix violation.
+        bogus = {
+            "status": "PASS",
+            "approved": True,
+            "violations": [
+                {
+                    "rule_id": "proposal.roi.arithmetic",
+                    "severity": "must_fix",
+                    "section": "roi_model",
+                    "description": "payback_months doesn't reconcile",
+                    "suggested_fix": "recompute payback_months",
+                }
+            ],
+            "rubric_version": "v1",
+        }
+        llm = CannedLLMClient([bogus])
+        critic = ProposalCriticAgent(llm_client=llm)
+
+        report = critic.review(sample_proposal, sample_dossier, sample_qualification)
+
+        # Critic reconciles BOTH status and approved from the violations —
+        # not just approved (a status="PASS"/approved=False report would
+        # itself violate the documented invariant on ProposalCriticReport).
+        assert report.status == "FAIL"
+        assert report.approved is False
 
     def test_handles_missing_dossier_and_qualification(
         self, sample_proposal: SalesProposal
     ) -> None:
+        """Missing dossier/qualification render as placeholders on the reasoning pass only."""
         llm = CannedLLMClient([_pass_proposal_report()])
         critic = ProposalCriticAgent(llm_client=llm)
         report = critic.review(sample_proposal, None, None)
         assert report.approved is True
-        assert "(no dossier supplied)" in llm.calls[0]["prompt"]
-        assert "(no qualification supplied)" in llm.calls[0]["prompt"]
+        # The dossier-fallback text is in the reasoning-pass prompt (the raw
+        # _build_prompt output); the formatting call only sees its prose.
+        assert "(no dossier supplied)" in llm.reasoning_calls[0]["prompt"]
+        assert "(no qualification supplied)" in llm.reasoning_calls[0]["prompt"]
+        # ``llm.calls`` tracks ONLY formatting ``complete_json`` passes (see
+        # CannedLLMClient docstring); ``[0]`` is the first formatting prompt.
+        # Formatting user prompt is transcribe-only — source placeholders must
+        # not leak into it (CannedLLM.complete returns fixed prose, not the
+        # reasoning prompt, so a leak here means the formatting path was fed
+        # the dossier/qualification material directly).
+        formatting_prompt = llm.calls[0]["prompt"] or ""
+        assert "(no dossier supplied)" not in formatting_prompt
+        assert "(no qualification supplied)" not in formatting_prompt
+        assert "--- DOSSIER ---" not in formatting_prompt
+        assert "--- QUALIFICATION ---" not in formatting_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -395,11 +534,15 @@ class TestProposalCriticAgent:
 
 
 class TestFormatCriticFeedback:
+    """Unit tests for format_critic_feedback severity ordering and rendering."""
+
     def test_empty_violations_returns_notes_or_default(self) -> None:
+        """Empty violation list falls back to notes text or a default rejection line."""
         assert format_critic_feedback([], notes=None).startswith("Critic rejected")
         assert format_critic_feedback([], notes="parse failure") == "parse failure"
 
     def test_sorts_must_fix_first(self) -> None:
+        """must_fix violations are listed before should_fix and consider."""
         violations = [
             CriticViolation(
                 rule_id="rule.consider",
@@ -427,6 +570,7 @@ class TestFormatCriticFeedback:
         assert idx_must < idx_should < idx_consider
 
     def test_includes_evidence_quote_and_section(self) -> None:
+        """Rendered feedback includes section path, evidence quote, and suggested fix."""
         violations = [
             CriticViolation(
                 rule_id="outreach.day1.subject_length",
@@ -538,9 +682,11 @@ class TestOrchestratorCriticRefinement:
             sample_icp,
         )
 
-        # Two outreach emits + one critic call = one bounded refinement.
+        # Two outreach emits + one critic review (reasoning + formatting pass) =
+        # one bounded refinement.
         assert len(outreach_llm.calls) == 2
         assert len(critic_llm.calls) == 1
+        assert len(critic_llm.reasoning_calls) == 1
         assert sequence.variants
         # Refined emit's prompt carries the critic feedback we returned.
         assert "Reviewer feedback to address" in outreach_llm.calls[1]["prompt"]
@@ -567,9 +713,11 @@ class TestOrchestratorCriticRefinement:
             sample_icp,
         )
 
-        # No refinement attempt — only the initial emit + the single critic call.
+        # No refinement attempt — only the initial emit + one critic review
+        # (reasoning + formatting pass).
         assert len(outreach_llm.calls) == 1
         assert len(critic_llm.calls) == 1
+        assert len(critic_llm.reasoning_calls) == 1
 
     def test_outreach_skips_critic_when_icp_missing(
         self, sample_prospect: Prospect, sample_dossier: ProspectDossier
@@ -591,6 +739,7 @@ class TestOrchestratorCriticRefinement:
 
         assert len(outreach_llm.calls) == 1
         assert len(critic_llm.calls) == 0
+        assert len(critic_llm.reasoning_calls) == 0
 
     def test_proposal_refines_once_when_critic_revises(
         self,
@@ -624,6 +773,7 @@ class TestOrchestratorCriticRefinement:
 
         assert len(proposal_llm.calls) == 2
         assert len(critic_llm.calls) == 1
+        assert len(critic_llm.reasoning_calls) == 1
         assert proposal.executive_summary
         assert "Reviewer feedback to address" in proposal_llm.calls[1]["prompt"]
         assert "proposal.next_steps.concrete" in proposal_llm.calls[1]["prompt"]

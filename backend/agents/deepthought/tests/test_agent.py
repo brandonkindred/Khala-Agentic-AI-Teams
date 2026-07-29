@@ -12,6 +12,28 @@ from deepthought.models import AgentEvent, AgentSpec
 from deepthought.result_cache import ResultCache
 
 
+def _complete_side_effect(*deliberation_and_synthesis_values):
+    """Route ``mock_llm.complete`` calls by objective.
+
+    ``_analyse`` now issues a think=True reasoning-pass ``.complete()`` call
+    before its ``.complete_json()`` formatting call; that reasoning call is
+    the only one resolved by objective — it gets a generic placeholder (its
+    content doesn't matter to these tests) so it doesn't consume slots meant
+    for deliberation/synthesis. All other calls are consumed positionally, in
+    order, from ``deliberation_and_synthesis_values``; this assumes no
+    interleaving non-reasoning ``.complete()`` calls from concurrently
+    scheduled child-agent threads.
+    """
+    it = iter(deliberation_and_synthesis_values)
+
+    def _side_effect(*args, **kwargs):
+        if kwargs.get("objective", "").startswith("analyze specialist question"):
+            return "Reasoning: proceeding as configured by the test fixture."
+        return next(it)
+
+    return _side_effect
+
+
 @pytest.fixture()
 def root_spec():
     return AgentSpec(
@@ -68,6 +90,15 @@ def test_direct_answer(root_spec, mock_llm):
     assert result.answer == "42"
     assert result.child_results == []
     mock_llm.complete_json.assert_called_once()
+    # The reasoning pass that now precedes formatting also ran.
+    mock_llm.complete.assert_called_once()
+    assert mock_llm.complete.call_args.kwargs.get("objective", "").startswith(
+        "analyze specialist question"
+    )
+    # Previous single-call temperature=0.3 is now split: reasoning keeps 0.3,
+    # formatting uses 0.0 for deterministic transcription.
+    assert mock_llm.complete.call_args.kwargs.get("temperature") == 0.3
+    assert mock_llm.complete_json.call_args.kwargs.get("temperature") == 0.0
 
 
 # ------------------------------------------------------------------
@@ -90,6 +121,9 @@ def test_structural_confidence_direct(root_spec, mock_llm):
 
     # 0.4 + 0.6 * min(0.9, 0.95) = 0.4 + 0.54 = 0.94
     assert result.confidence == 0.94
+    # Both the reasoning pass and the formatting pass ran exactly once.
+    assert mock_llm.complete.call_count == 1
+    assert mock_llm.complete_json.call_count == 1
 
 
 # ------------------------------------------------------------------
@@ -121,7 +155,10 @@ def test_depth_limit_forces_direct(mock_llm):
             }
         ],
     }
-    mock_llm.complete.return_value = "Forced direct answer"
+    # The reasoning pass (routed by objective) gets a placeholder distinct
+    # from the actual forced-direct-answer call, so the two can't be
+    # conflated by sharing one return value.
+    mock_llm.complete.side_effect = _complete_side_effect("Forced direct answer")
 
     agent = _make_agent(spec, mock_llm)
     result = agent.execute(max_depth=5)
@@ -129,6 +166,8 @@ def test_depth_limit_forces_direct(mock_llm):
     assert not result.was_decomposed
     assert result.answer == "Forced direct answer"
     assert result.child_results == []
+    assert mock_llm.complete.call_count == 2
+    assert mock_llm.complete_json.call_count == 1
 
 
 # ------------------------------------------------------------------
@@ -177,12 +216,12 @@ def test_decomposition_with_deliberation(root_spec, mock_llm):
             "skill_requirements": [],
         },
     ]
-    # First complete call = deliberation, second = synthesis
-    mock_llm.complete.side_effect = [
+    # First non-reasoning complete call = deliberation, second = synthesis
+    mock_llm.complete.side_effect = _complete_side_effect(
         '{"contradictions": [], "gaps": [], "agreements": ["Both say 42"], '
         '"quality_flags": [], "synthesis_guidance": "Straightforward agreement"}',
         "Synthesised: both say 42",
-    ]
+    )
 
     spawned = []
 
@@ -198,6 +237,17 @@ def test_decomposition_with_deliberation(root_spec, mock_llm):
     assert result.answer == "Synthesised: both say 42"
     assert result.deliberation_notes is not None
     assert len(spawned) == 2
+    # Two-pass analysis on root + both children: three formatting calls and
+    # three reasoning completes (objective-tagged), plus deliberation and
+    # synthesis completes.
+    assert mock_llm.complete_json.call_count == 3
+    reasoning_calls = [
+        c
+        for c in mock_llm.complete.call_args_list
+        if str(c.kwargs.get("objective", "")).startswith("analyze specialist question")
+    ]
+    assert len(reasoning_calls) == 3
+    assert mock_llm.complete.call_count == 5  # 3 reasoning + deliberation + synthesis
 
 
 # ------------------------------------------------------------------
@@ -236,6 +286,7 @@ def test_knowledge_base_deduplication(mock_llm, knowledge_base):
     assert result.reused_from_cache
     assert result.answer == "The meaning is 42"
     # LLM should not have been called
+    mock_llm.complete.assert_not_called()
     mock_llm.complete_json.assert_not_called()
 
 
@@ -274,6 +325,7 @@ def test_result_cache_hit(mock_llm):
     assert result.reused_from_cache
     assert result.answer == "cached answer"
     assert result.agent_id == "new-1"  # ID should be updated
+    mock_llm.complete.assert_not_called()
     mock_llm.complete_json.assert_not_called()
 
 
@@ -338,10 +390,7 @@ def test_original_query_threaded_to_children(root_spec, mock_llm):
             "skill_requirements": [],
         },
     ]
-    mock_llm.complete.side_effect = [
-        "deliberation",
-        "synthesis",
-    ]
+    mock_llm.complete.side_effect = _complete_side_effect("deliberation", "synthesis")
 
     spawned_agents = []
 
@@ -357,11 +406,21 @@ def test_original_query_threaded_to_children(root_spec, mock_llm):
     )
     agent.execute(max_depth=10)
 
-    # Verify the original_query appears in the analysis system prompt
-    # by checking the LLM calls
-    first_call_kwargs = mock_llm.complete_json.call_args_list[0]
-    system_prompt = first_call_kwargs.kwargs.get("system_prompt", "")
+    # Verify the original_query appears in the analysis reasoning-pass system
+    # prompt (the root's analyse call runs synchronously before any children
+    # are spawned, so it's the first .complete() call recorded).
+    first_complete_call = mock_llm.complete.call_args_list[0]
+    system_prompt = first_complete_call.kwargs.get("system_prompt", "")
     assert original_msg in system_prompt
+
+    # Every formatting call (root analysis and child analysis both make one)
+    # sees only its own reasoning pass's prose, never the raw original_query
+    # text.
+    for format_call in mock_llm.complete_json.call_args_list:
+        format_input = (format_call.kwargs.get("system_prompt") or "") + str(
+            format_call.args[0] if format_call.args else ""
+        )
+        assert original_msg not in format_input
 
 
 # ------------------------------------------------------------------
@@ -375,6 +434,9 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
         {"role": "user", "content": "Tell me about Mars"},
         {"role": "assistant", "content": "Mars is the 4th planet."},
     ]
+    mock_llm.complete.return_value = (
+        "The user previously asked about Mars; answering the follow-up directly."
+    )
     mock_llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,
@@ -386,10 +448,27 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
     agent = _make_agent(root_spec, mock_llm, conversation_history=history)
     agent.execute(max_depth=10)
 
-    # The user prompt should contain the conversation history
-    first_call_args = mock_llm.complete_json.call_args_list[0]
-    user_prompt = first_call_args.args[0] if first_call_args.args else ""
+    # The user prompt should contain the conversation history. It's now the
+    # reasoning-pass .complete() call that carries the user-facing prompt;
+    # the .complete_json() formatting call only sees the reasoning prose.
+    first_complete_call = mock_llm.complete.call_args_list[0]
+    user_prompt = first_complete_call.args[0] if first_complete_call.args else ""
     assert "Mars" in user_prompt
+
+    # The formatting call sees only the reasoning pass's prose, never the
+    # raw conversation history — check for the raw history's structure
+    # (role labels, the verbatim assistant reply), not the topic word
+    # "Mars", since the reasoning prose legitimately mentions the topic too.
+    format_call = mock_llm.complete_json.call_args
+    format_input = (format_call.kwargs.get("system_prompt") or "") + str(
+        format_call.args[0] if format_call.args else ""
+    )
+    assert "Mars is the 4th planet." not in format_input
+    assert "User: Tell me about Mars" not in format_input
+    assert "Assistant: Mars is the 4th planet." not in format_input
+    # Positive check: the reasoning pass's prose (not the raw history) is
+    # what actually reaches the formatting call.
+    assert mock_llm.complete.return_value in format_input
 
 
 # ------------------------------------------------------------------
@@ -464,7 +543,10 @@ def test_max_children_capped(root_spec, mock_llm):
         )
 
     mock_llm.complete_json.side_effect = analysis_responses
-    mock_llm.complete.side_effect = ["deliberation notes", "Synthesised"]
+    # "deliberation notes" is the reasoning-pass placeholder consumed by the
+    # single deliberation .complete() call; "Synthesised" is consumed by the
+    # single non-reasoning synthesis .complete() call after decomposition.
+    mock_llm.complete.side_effect = _complete_side_effect("deliberation notes", "Synthesised")
 
     spawned = []
 
@@ -476,8 +558,9 @@ def test_max_children_capped(root_spec, mock_llm):
     result = agent.execute(max_depth=10)
 
     assert result.was_decomposed
-    assert len(result.child_results) <= MAX_CHILDREN_PER_AGENT
-    assert len(spawned) <= MAX_CHILDREN_PER_AGENT
+    assert len(result.child_results) == MAX_CHILDREN_PER_AGENT
+    assert len(spawned) == MAX_CHILDREN_PER_AGENT
+    assert result.answer == "Synthesised"
 
 
 # ------------------------------------------------------------------
@@ -485,16 +568,33 @@ def test_max_children_capped(root_spec, mock_llm):
 # ------------------------------------------------------------------
 
 
-def test_analysis_llm_error_fallback(root_spec, mock_llm):
-    """If the analysis LLM call raises, agent falls back to a direct answer."""
-    mock_llm.complete_json.side_effect = RuntimeError("LLM unavailable")
-    mock_llm.complete.return_value = "Fallback answer"
+@pytest.mark.parametrize("failing_call", ["reasoning", "formatting"])
+def test_analysis_llm_error_fallback(root_spec, mock_llm, failing_call):
+    """If either analysis LLM call raises, agent falls back to a direct answer."""
+    if failing_call == "reasoning":
+        mock_llm.complete.side_effect = RuntimeError("LLM unavailable")
+    else:
+        mock_llm.complete_json.side_effect = RuntimeError("LLM unavailable")
+        # Distinct values for the analysis reasoning call vs. the
+        # _force_direct_answer fallback's own .complete() call, so the
+        # assertion below can only pass if the fallback call actually ran —
+        # a shared .return_value would let echoed reasoning prose masquerade
+        # as the fallback answer.
+        mock_llm.complete.side_effect = ["Reasoning prose (not the answer)", "Fallback answer"]
 
     agent = _make_agent(root_spec, mock_llm)
     result = agent.execute(max_depth=10)
 
     assert not result.was_decomposed
-    assert result.answer == "Fallback answer"
+    if failing_call == "formatting":
+        # The formatting call fails, but the reasoning call's answer is
+        # still recoverable via _force_direct_answer's own .complete() call.
+        assert result.answer == "Fallback answer"
+    else:
+        # Both the analysis reasoning call and the force-direct fallback's
+        # own .complete() call fail, so the agent falls back to its final,
+        # LLM-free placeholder.
+        assert result.answer == f"Unable to provide analysis for: {root_spec.focus_question}"
 
 
 # ------------------------------------------------------------------
@@ -504,6 +604,9 @@ def test_analysis_llm_error_fallback(root_spec, mock_llm):
 
 def test_findings_stored_in_knowledge_base(root_spec, mock_llm, knowledge_base):
     """After answering, the agent stores its finding in the knowledge base."""
+    mock_llm.complete.return_value = (
+        "The user asked a direct question that can be answered from general knowledge."
+    )
     mock_llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,
