@@ -965,7 +965,10 @@ class TestReviewEndpoint:
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        review = review_app["github"]["client"].reviews[0]
+        gh = review_app["github"]["client"]
+        assert len(gh.reviews) == 1
+        review = gh.reviews[0]
+        assert len(review["comments"]) == 1
         assert "ghp_SECRETTOKEN" not in review["body"]
         assert "https://***@" in review["body"]
         assert "ghp_SECRETTOKEN" not in review["comments"][0]["body"]
@@ -988,6 +991,8 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
+        assert len(gh.review_comments) == 1
+        assert len(gh.comments) == 1
         assert "ghp_SECRETTOKEN" not in gh.review_comments[0]["body"]
         assert "https://***@" in gh.review_comments[0]["body"]
         assert "ghp_SECRETTOKEN" not in gh.comments[0][1]
