@@ -8,14 +8,36 @@ Canonical helper decision
 ``run_structured_persona`` (``shared/persona_agent_base.py``) remains the
 pattern for the four agents already using it (``security_agent``,
 ``qa_agent``, ``accessibility_agent``, ``integration_team``). Switching
-devops onto ``run_structured_persona`` was considered and deferred: that
-helper centralizes dataclass construction via Strands
-``structured_output_model`` and requires a ``fallback_factory`` per agent,
-and several devops outputs carry nested models
-(``DevOpsCompletionPackage``, ``IaCExecutionError``, ``ReviewFinding``)
-that would need verification before a switch. The devops standardization
-effort only asks to standardize on one helper, not to migrate away from
-``complete_json_with_continuation``.
+devops onto ``run_structured_persona`` was considered and deferred for
+these reasons:
+
+1. That helper centralizes dataclass construction via Strands
+   ``structured_output_model`` and requires a ``fallback_factory`` per
+   agent.
+2. Several devops outputs carry nested models
+   (``DevOpsCompletionPackage``, ``IaCExecutionError``, ``ReviewFinding``)
+   that would need verification against Strands'
+   ``structured_output_model`` before a switch.
+3. The devops standardization effort only asks to standardize on one
+   helper, not to migrate away from ``complete_json_with_continuation``.
+
+Resolution status (post pipeline-framework migration)
+-----------------------------------------------------
+The devops per-task pipeline later moved onto ``BaseTeamLead`` / shared
+phase functions. That control-flow migration did not change how
+single-shot JSON agents call the LLM, so each original reason above
+still applies as an intentional limitation:
+
+1. Still applies — ``run_structured_persona`` still requires a
+   ``fallback_factory`` and ``structured_output_model``; devops agents
+   still build outputs in ``build_output`` from a parsed dict instead.
+2. Still applies — ``DevOpsCompletionPackage``, ``IaCExecutionError``,
+   and ``ReviewFinding`` remain nested models in devops outputs; they
+   have not been verified against Strands' ``structured_output_model``.
+3. Still applies — devops single-shot agents (including subclasses of
+   ``DevOpsSingleShotAgent``) continue to call
+   ``complete_json_with_continuation``; no helper migration was in
+   scope for the pipeline work.
 
 Monkeypatchability
 ------------------
