@@ -1730,12 +1730,16 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
 
     # Start order is fixed by the workflow; sleep lengths enforce a different
     # completion order.
-    schedule_order = ["filter", "architecture", "side_effect"]
+    expected_completion_order = ["architecture", "side_effect", "filter"]
     sleep_s = {
-        "filter": 0.10,
         "architecture": 0.02,
         "side_effect": 0.05,
+        "filter": 0.10,
     }
+
+    barrier = threading.Barrier(3, timeout=5)
+    barrier_enabled = threading.Event()
+    barrier_enabled.set()
 
     completion_order: list[str] = []
     lock = threading.Lock()
@@ -1745,16 +1749,22 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
             completion_order.append(name)
 
     def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        if barrier_enabled.is_set():
+            barrier.wait()
         time.sleep(sleep_s["filter"])
         _record_completion("filter")
         return [filter_issue]
 
     def _architecture(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        if barrier_enabled.is_set():
+            barrier.wait()
         time.sleep(sleep_s["architecture"])
         _record_completion("architecture")
         return [architecture_issue]
 
     def _side_effect(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        if barrier_enabled.is_set():
+            barrier.wait()
         time.sleep(sleep_s["side_effect"])
         _record_completion("side_effect")
         return [side_effect_issue]
@@ -1787,16 +1797,15 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
 
     # Confirm forced out-of-order completion; without this assertion the test
     # could pass even if the merge regressed.
-    workflow_schedule_order = [
-        "filter",
-        "architecture",
-        "side_effect",
-    ]
-    assert workflow_schedule_order == schedule_order
-    assert completion_order != schedule_order, (
-        "expected completion order to differ from workflow scheduling order; "
-        f"got {completion_order}"
+    assert completion_order == expected_completion_order, (
+        "expected deterministic out-of-order completion based on per-pass "
+        f"sleeps; got {completion_order}"
     )
+
+    # Disable the start-barrier for the sequential pipeline below; otherwise
+    # it would deadlock because the sequential pipeline calls the tail passes
+    # one at a time.
+    barrier_enabled.clear()
 
     # Validate the merged verdict is equivalent to the sequential activity
     # pipeline (which applies the same tail-pass merge ordering explicitly).
