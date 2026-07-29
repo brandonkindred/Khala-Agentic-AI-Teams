@@ -293,6 +293,22 @@ def test_review_uses_review_model_attr_for_no_model_guard(monkeypatch):
     assert "1 issue(s) found." in out.summary
 
 
+def test_review_skips_when_review_model_attr_is_missing():
+    """When ``review_model_attr`` points to an attribute the instance doesn't
+    have (e.g. ``_model_json`` when ``uses_json_model`` is false), the guard
+    treats it as no-model and skips rather than raising ``AttributeError``."""
+
+    class _JsonAttrAgent(_DemoAgent):
+        review_model_attr = "_model_json"
+
+    agent = _JsonAttrAgent.__new__(_JsonAttrAgent)
+    agent._model = object()
+    agent.llm = None
+    # _model_json deliberately NOT set
+    out = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert "skipped (no LLM)" in out.summary
+
+
 def test_review_code_with_braces_reaches_llm_uncorrupted(monkeypatch):
     """Literal braces in file contents must reach the LLM uncorrupted on the
     one-shot review path (placeholder substitution must not escape or

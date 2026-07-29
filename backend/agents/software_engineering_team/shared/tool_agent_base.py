@@ -177,7 +177,9 @@ class SingleIssueProblemSolveMixin:
         ``self._parse_single_issue``, ``self.default_severity``,
         ``self.default_recommendation``, ``self.issue_source``, ``self.name``,
         ``self.empty_label`` — i.e. exactly what :class:`BaseReviewToolAgent`
-        supplies.
+        supplies.  Subclasses must override :attr:`problem_solve_sources` (a
+        tuple of source strings) to select which review issues this agent will
+        fix; the default empty tuple means no issues are selected.
     """
 
     problem_solve_sources: Tuple[str, ...] = ()
@@ -438,7 +440,9 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         Postconditions: returns a :class:`ToolAgentPhaseOutput`; when ``repo_path``
         is unset/missing the issue list is empty and the summary says "skipped".
         :attr:`build_runner` is called uncaught — any exception it raises is a
-        defect and propagates to the caller.
+        defect and propagates to the caller.  ``build_runner`` implementations
+        are responsible for setting each returned ``ReviewIssue.source`` to the
+        appropriate value (typically the owning agent's :attr:`issue_source`).
         """
         from pathlib import Path
 
@@ -522,8 +526,10 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             any) all carry :attr:`issue_source`. Only the default one-shot LLM
             path (neither :attr:`build_runner` nor :attr:`review_via_engine`
             set) degrades a missing model, empty code, or LLM failure to a
-            skipped/failed summary with no issues rather than raising. When
-            :attr:`build_runner` or :attr:`review_via_engine` is set, an
+            skipped/failed summary with no issues rather than raising; however,
+            a misconfigured subclass on the default path (no ``review_prompt``,
+            ``review_via_engine``, or ``build_runner``) raises ``ValueError``.
+            When :attr:`build_runner` or :attr:`review_via_engine` is set, an
             unexpected exception from the runner/engine is a defect and
             propagates uncaught; see :meth:`_build_review` and
             :meth:`_engine_review`.
