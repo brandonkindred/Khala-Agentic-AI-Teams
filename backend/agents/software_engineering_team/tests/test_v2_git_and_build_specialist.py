@@ -127,7 +127,11 @@ def _be_review_issue(**kwargs):
 
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    # Explicit initial branch so a global init.defaultBranch=development does not
+    # make the later ``checkout -b development`` fail (branch already exists).
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True
+    )
     subprocess.run(
         ["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True, check=True
     )
