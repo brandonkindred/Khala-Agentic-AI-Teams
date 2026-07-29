@@ -21,12 +21,19 @@ from software_engineering_team.shared.git_utils import (
 from software_engineering_team.shared.repo_writer import write_agent_output
 from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
+from . import debug_patch, tool_dispatch
 from .change_review_agent import ChangeReviewAgent
 from .cicd_pipeline_agent import CICDPipelineAgent
+from .debug_patch import (  # noqa: F401 (re-exported for test_devops_debug_patch.py)
+    MAX_INFRA_FIX_ITERATIONS,
+    _DebugPatchState,
+)
 from .deployment_strategy_agent import DeploymentStrategyAgent
 from .devsecops_review_agent import DevSecOpsReviewAgent
 from .doc_runbook_agent import DocumentationRunbookAgent
 from .iac_agent import InfrastructureAsCodeAgent
+from .infra_debug_agent import InfraDebugAgent
+from .infra_patch_agent import InfraPatchAgent
 from .models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult, SubtaskContract
 from .phases import (
     criterion_traces_from_phase4,  # noqa: F401 (public re-export; test_devops_team.py imports it here)
@@ -34,6 +41,19 @@ from .phases import (
     run_phase2_design_fanout,
     run_phase4_quality_gate,
     run_phase5_deliver_merge,
+)
+from .task_clarifier import DevOpsTaskClarifierAgent
+from .test_validation_agent import DevOpsTestValidationAgent
+from .tool_agents import (
+    CDKExecutionToolAgent,
+    CICDLintPipelineValidationToolAgent,
+    DeploymentDryRunPlanToolAgent,
+    DockerComposeExecutionToolAgent,
+    HelmExecutionToolAgent,
+    IaCValidationToolAgent,
+    PolicyAsCodeToolAgent,
+    RepoNavigatorToolAgent,
+    TerraformExecutionToolAgent,
 )
 
 # Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
@@ -145,30 +165,8 @@ ENV_POLICY = {
         "policy_strictness": "high",
     },
 }
-from . import tool_dispatch  # noqa: E402
-from .infra_debug_agent import InfraDebugAgent  # noqa: E402
-from .infra_patch_agent import InfraPatchAgent  # noqa: E402
-from .task_clarifier import DevOpsTaskClarifierAgent  # noqa: E402
-from .test_validation_agent import DevOpsTestValidationAgent  # noqa: E402
-from .tool_agents import (  # noqa: E402
-    CDKExecutionToolAgent,
-    CICDLintPipelineValidationToolAgent,
-    DeploymentDryRunPlanToolAgent,
-    DockerComposeExecutionToolAgent,
-    HelmExecutionToolAgent,
-    IaCValidationToolAgent,
-    PolicyAsCodeToolAgent,
-    RepoNavigatorToolAgent,
-    TerraformExecutionToolAgent,
-)
 
 logger = logging.getLogger(__name__)
-
-from . import debug_patch  # noqa: E402
-from .debug_patch import (  # noqa: E402,F401 (re-exported for test_devops_debug_patch.py)
-    MAX_INFRA_FIX_ITERATIONS,
-    _DebugPatchState,
-)
 
 
 class DevOpsTeamLeadAgent(BaseTeamLead):
