@@ -80,6 +80,7 @@ _MANIFEST_LIMIT = 300
 # rest of an oversized task field, so an unbounded field has no fallback path
 # at all if it blows the prompt past context.
 _CONTEXT_FIELD_CHARS = 4_000
+_CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 
 # Column-0 token prefixes that should NOT be counted as construct start lines
 # by the heuristic fallback used for non-Python files.
@@ -834,6 +835,9 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
             if content is None:
                 return f"Error: {path!r} is not a readable path."
             display_path = resolved if resolved != index.EXISTING_CODEBASE_PATH else path
+            # Helpers ``_strip_numbered_prefixes``, ``_find_python_function_at_line``,
+            # and ``_find_heuristic_function_at_line`` all take 1-based line numbers
+            # (matching this tool's public contract) — no 0-based conversion.
             # Strip ``N: `` line-number prefixes that the PR-review path injects via
             # ``render_annotated_hunks``; remap to the physical line index so the
             # helper functions operate on plain code, then restore original numbers
@@ -971,6 +975,9 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
         - Returns the lines for finding ``i``: an ``--- Finding index i ---``
           anchor the verdict contract refers back to, a severity/category/
           location line, the description, and the suggestion when present.
+        - ``description`` and ``suggestion`` are whitespace-normalized
+          (``' '.join(text.split())``) so multi-line or oddly spaced text
+          collapses to a single prompt line.
     """
     location = issue.file_path or "(file unknown)"
     if issue.line is not None:
@@ -990,12 +997,12 @@ def _cap_context_field(text: str) -> str:
 
     Preconditions: ``text`` is a non-None string (may be empty).
     Postconditions: returns ``text`` unchanged when within the cap; otherwise
-        a prefix of length ``_CONTEXT_FIELD_CHARS`` plus a truncation marker.
-        Never raises.
+        a prefix of length ``_CONTEXT_FIELD_CHARS`` plus
+        ``_CONTEXT_FIELD_TRUNCATION_MARKER``. Never raises.
     """
     if len(text) <= _CONTEXT_FIELD_CHARS:
         return text
-    return text[:_CONTEXT_FIELD_CHARS] + "\n... (truncated)"
+    return text[:_CONTEXT_FIELD_CHARS] + _CONTEXT_FIELD_TRUNCATION_MARKER
 
 
 def _build_group_prompt(
@@ -1013,12 +1020,20 @@ def _build_group_prompt(
     tools. The wording is a stable anchor for the verdict contract: it names
     the file, indexes each finding, and asks for a ``verdicts`` array.
 
+    Preconditions:
+        - ``file_path`` is a canonical key previously returned by
+          ``index.resolve_path`` (the production filter only groups resolved
+          paths). Unreadable keys still degrade to a placeholder rather than
+          raising.
+
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order) and inlines the cited file's full body.
+          matching ``issues`` order) and inlines the cited file's full body
+          when readable, otherwise a ``(file content unavailable)`` placeholder.
           The task description and each acceptance criterion are capped at
           ``_CONTEXT_FIELD_CHARS`` so an oversized task field cannot dominate
           the prompt.
+        - Never raises.
     """
     parts: List[str] = []
     task = input_data.task_description.strip()
@@ -1038,7 +1053,9 @@ def _build_group_prompt(
         parts.append(f"... and {len(manifest) - _MANIFEST_LIMIT} more (call list_files()).")
     parts.append("")
 
-    body = index.read_file(file_path)
+    body = index.read_file_or_none(file_path)
+    if body is None:
+        body = "(file content unavailable)"
     fence = _code_fence_for(body)
     parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
     parts.append(fence)

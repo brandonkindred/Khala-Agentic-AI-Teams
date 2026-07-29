@@ -377,6 +377,16 @@ def test_find_function_at_line_python_top_level() -> None:
     assert "beta" not in result
 
 
+def test_find_function_at_line_line_one_is_one_based() -> None:
+    """``line_number=1`` resolves the construct starting on the first line (1-based contract)."""
+    code = "def alpha():\n    return 1\n"
+    idx = CodebaseIndex(files={"app/main.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("app/main.py", 1)
+    assert "alpha" in result
+    assert not result.startswith("Error:")
+
+
 def test_find_function_at_line_python_nested() -> None:
     """Tool returns the innermost (nested) function, not the outer one."""
     code = (
@@ -559,11 +569,16 @@ def test_strip_numbered_prefixes_empty_content() -> None:
 
 
 def test_find_function_at_line_rejects_nonpositive_line() -> None:
-    """Tool returns an error string for non-positive line numbers instead of guessing."""
+    """Tool returns an error string for invalid line numbers instead of guessing or raising."""
     idx = CodebaseIndex(files={"app/main.py": "def f():\n    return 1\n"})
     _, _, _, find_fn = _build_tools(idx)
-    assert "positive" in find_fn("app/main.py", 0).lower()
-    assert "positive" in find_fn("app/main.py", -3).lower()
+    for bad in (0, -1, -3, True, False, "5"):
+        msg = find_fn("app/main.py", bad)  # type: ignore[arg-type]
+        assert msg.startswith("Error:"), bad
+        assert "positive" in msg.lower(), bad
+    missing = find_fn("does/not/exist.py", 1)
+    assert missing.startswith("Error:")
+    assert "not a readable path" in missing
 
 
 def test_strip_numbered_prefixes_rejects_bad_preconditions() -> None:
@@ -757,7 +772,10 @@ def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
 
 def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
     """Task description and acceptance criteria are capped at ``_CONTEXT_FIELD_CHARS``."""
-    from code_review_agent.false_positive_filter import _CONTEXT_FIELD_CHARS
+    from code_review_agent.false_positive_filter import (
+        _CONTEXT_FIELD_CHARS,
+        _CONTEXT_FIELD_TRUNCATION_MARKER,
+    )
 
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     huge = "T" * (_CONTEXT_FIELD_CHARS + 50)
@@ -770,9 +788,18 @@ def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
     prompt = _build_group_prompt(idx, "app/main.py", [_issue()], inp)
     assert "T" * _CONTEXT_FIELD_CHARS in prompt
     assert "T" * (_CONTEXT_FIELD_CHARS + 1) not in prompt
-    assert "... (truncated)" in prompt
+    assert _CONTEXT_FIELD_TRUNCATION_MARKER.strip() in prompt
     assert "A" * _CONTEXT_FIELD_CHARS in prompt
     assert "short ok" in prompt
+
+
+def test_group_prompt_unreadable_file_uses_placeholder() -> None:
+    """``_build_group_prompt`` never raises when the cited path is unreadable."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    prompt = _build_group_prompt(idx, "missing.py", [_issue()], _input())
+    assert "(file content unavailable)" in prompt
+    assert "Finding index 0" in prompt
+    assert "verdicts" in prompt.lower()
 
 
 def test_group_prompt_caps_manifest_and_notes_overflow() -> None:
