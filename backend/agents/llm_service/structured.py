@@ -1,18 +1,11 @@
 """Structured-output helpers for LLM calls.
 
-This module provides both single-call and reasoning-then-formatting structured
-output paths:
+This module currently exports one helper:
 
 - ``complete_validated``: single-shot JSON → Pydantic validation with one
   self-correction retry.
-- ``complete_json_via_reasoning``: two-pass split (prose reasoning via
-  ``complete`` with ``think=True``; then JSON transcription via
-  ``complete_json`` with ``think=False``).
-- ``complete_validated_via_reasoning``: two-pass split (prose reasoning via
-  ``complete``; then schema-validated JSON transcription via
-  ``complete_validated`` with corrective retries).
 
-Contract (applies to ``complete_validated`` and the formatting pass helpers):
+Contract (applies to ``complete_validated``):
 
 - Does **not** call ``llm_service.util.extract_json_from_response``.
   Provider clients handle JSON parsing internally and raise
@@ -217,7 +210,8 @@ def complete_validated(
         last_parse_error.correction_attempts_used = attempts_used
         raise last_parse_error
 
-    assert last_validation_error is not None  # one of the two paths must be set
+    if last_validation_error is None:
+        raise RuntimeError("complete_validated reached terminal state with no recorded error")
     try:
         preview = json.dumps(last_validation_data, default=str)
     except (TypeError, ValueError):
