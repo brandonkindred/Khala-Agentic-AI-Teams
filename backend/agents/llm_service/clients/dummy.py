@@ -116,6 +116,25 @@ _STRIP_SUFFIXES: frozenset[str] = frozenset(
 )
 
 
+def _placeholder_slug(hint: str, separator: str, max_length: int) -> str:
+    """Build a unique fallback slug when filtering leaves no usable words.
+
+    Preconditions:
+        - ``hint`` / ``separator`` are strings; ``separator`` is non-empty.
+        - ``max_length`` is a positive integer.
+
+    Postconditions:
+        - Returns a non-empty identifier of at most ``max_length`` characters
+          whose digest portion is derived from ``hint``, so distinct hints
+          produce distinct placeholders.
+    """
+    digest = hashlib.md5(hint.encode()).hexdigest()[:8]
+    result = f"item{separator}{digest}"
+    if len(result) > max_length:
+        result = result[:max_length].rstrip(separator)
+    return result or f"item{separator}0"
+
+
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
     """Derive a short, identifier-friendly name from a free-form hint.
 
@@ -123,14 +142,17 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
     remaining words with ``separator`` and truncates to ``max_length``.
 
     Preconditions:
-        - ``hint`` is a string (may be empty; empty / all-stripped yields a placeholder).
+        - ``hint`` is a string (may be empty; empty / all-stripped yields a
+          hint-derived placeholder).
         - ``separator`` is a non-empty string safe for identifiers.
         - ``max_length`` is a positive integer.
 
     Postconditions:
         - Returns a non-empty string of at most ``max_length`` characters.
-        - The result contains only lowercase alphanumerics and ``separator``
-          (or the placeholder ``item{separator}1`` when no usable words remain).
+        - The result contains only lowercase alphanumerics and ``separator``.
+        - When filtering leaves no usable words, the placeholder is derived
+          from a digest of ``hint`` so distinct all-stripped hints do not
+          collapse onto one path.
     """
     assert isinstance(hint, str)
     assert isinstance(separator, str) and separator
@@ -144,12 +166,12 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
         if w not in _STRIP_VERBS and w not in _STRIP_FILLERS and w not in _STRIP_SUFFIXES
     ]
     if not filtered:
-        # Do not reintroduce verbs/fillers/suffixes; guarantee a usable identifier.
-        return f"item{separator}1"
+        # Do not reintroduce verbs/fillers/suffixes; stay unique per hint.
+        return _placeholder_slug(hint, separator, max_length)
     result = separator.join(filtered[:3])
     if len(result) > max_length:
         result = result[:max_length].rstrip(separator)
-    return result or f"item{separator}1"
+    return result or _placeholder_slug(hint, separator, max_length)
 
 
 def _last_user_text(messages: list) -> str:

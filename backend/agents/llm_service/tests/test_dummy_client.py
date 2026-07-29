@@ -1,6 +1,7 @@
 """Tests for DummyLLMClient: complete_json returns dict; get_max_context_tokens; complete returns str."""
 
 import json
+import re
 
 import pytest
 from pydantic import BaseModel
@@ -109,9 +110,17 @@ def test_extract_name_from_hint_keeps_usable_words() -> None:
     assert _extract_name_from_hint("Build PaymentWebhook", separator="_") == "payment_webhook"
 
 
-def test_extract_name_from_hint_all_stripped_returns_placeholder() -> None:
-    assert _extract_name_from_hint("the component") == "item-1"
-    assert _extract_name_from_hint("create service module", separator="_") == "item_1"
+def test_extract_name_from_hint_all_stripped_returns_unique_placeholder() -> None:
+    a = _extract_name_from_hint("the component")
+    b = _extract_name_from_hint("create service module", separator="_")
+    c = _extract_name_from_hint("configure service module", separator="_")
+    assert a.startswith("item-")
+    assert b.startswith("item_")
+    assert c.startswith("item_")
+    assert a != _extract_name_from_hint("a component")
+    assert b != c  # distinct all-stripped hints must not collide on one path
+    assert re.fullmatch(r"item-[0-9a-f]+", a)
+    assert re.fullmatch(r"item_[0-9a-f]+", b)
 
 
 def test_strip_filter_constants_are_frozensets() -> None:
