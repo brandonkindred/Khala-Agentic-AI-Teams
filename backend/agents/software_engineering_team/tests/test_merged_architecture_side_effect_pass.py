@@ -215,6 +215,18 @@ def test_runs_without_architecture_document() -> None:
 def test_discards_disabled_half_when_only_one_flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
     monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "true")
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    built: Dict[str, Any] = {}
+    real_build = pass_mod.build_merged_architecture_side_effect_prompt
+
+    def _spy(*, arch_on: bool, side_on: bool) -> str:
+        built["arch_on"] = arch_on
+        built["side_on"] = side_on
+        built["prompt"] = real_build(arch_on=arch_on, side_on=side_on)
+        return built["prompt"]
+
+    monkeypatch.setattr(pass_mod, "build_merged_architecture_side_effect_prompt", _spy)
 
     class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
@@ -246,6 +258,14 @@ def test_discards_disabled_half_when_only_one_flag_on(monkeypatch: pytest.Monkey
     assert arch == []
     assert len(side) == 1
     assert side[0].category == "documentation"
+    assert built == {
+        "arch_on": False,
+        "side_on": True,
+        "prompt": built["prompt"],
+    }
+    assert "Part 1: Architecture" not in built["prompt"]
+    assert "Part 2: Side-Effect" in built["prompt"]
+    assert "Do NOT perform architecture-consistency" in built["prompt"]
 
 
 def test_skips_side_effect_half_when_pre_numbered() -> None:
@@ -305,16 +325,11 @@ def test_large_architecture_document_shrinks_code_inline_budget(
     captured: Dict[str, Any] = {}
     original_build = pass_mod._build_prompt
 
-    def _spy(index, architecture_body, max_inline_chars, *, max_architecture_chars):
+    def _spy(index, architecture_body, max_inline_chars, **kwargs):
         captured["max_inline_chars"] = max_inline_chars
-        captured["max_architecture_chars"] = max_architecture_chars
+        captured["max_architecture_chars"] = kwargs["max_architecture_chars"]
         captured["architecture_body_len"] = len(architecture_body)
-        return original_build(
-            index,
-            architecture_body,
-            max_inline_chars,
-            max_architecture_chars=max_architecture_chars,
-        )
+        return original_build(index, architecture_body, max_inline_chars, **kwargs)
 
     monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
 
@@ -339,6 +354,51 @@ def test_large_architecture_document_shrinks_code_inline_budget(
     assert captured["max_architecture_chars"] < 100_000
     assert captured["max_inline_chars"] < map_budget
     assert captured["max_inline_chars"] == 0
+
+
+def test_skips_call_when_context_cannot_fit_fixed_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undersized context that cannot hold the system prompt + response
+    reserve must skip the LLM call rather than inventing inline capacity."""
+    calls = {"n": 0}
+
+    class _TinyCtx(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 2_048
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            calls["n"] += 1
+            raise AssertionError("merged pass should not call the LLM")
+
+    arch, side = find_architecture_and_side_effect_issues(_TinyCtx(), _input())
+    assert arch == []
+    assert side == []
+    assert calls["n"] == 0
+
+
+def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            # Tight enough that after the merged system prompt + dual-array
+            # response reserve, the path list must be truncated (content room
+            # collapses to ~0 on this context).
+            return 8_192
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {f"pkg/module_{i:04d}.py": f"def f{i}():\n    return {i}\n" for i in range(400)}
+    find_architecture_and_side_effect_issues(_Client(), _input(files=files))
+    assert prompts
+    manifest_section = prompts[0].split("**Full content of the changed files:**", 1)[0]
+    assert "more changed path(s) not listed" in manifest_section
+    assert manifest_section.count("pkg/module_") < 400
 
 
 def test_raises_tight_output_cap_for_dual_finding_arrays(

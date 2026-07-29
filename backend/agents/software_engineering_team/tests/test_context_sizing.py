@@ -143,28 +143,75 @@ def test_merged_pass_budgets_prefer_full_arch_and_shrink_code() -> None:
     unchanged while still inlining the full document."""
     llm = _StubLLM(40_000)
     map_budget = compute_code_review_map_chunk_chars(llm)
-    max_arch, max_code = compute_code_review_merged_pass_budgets(
+    budgets = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=40_000,
         system_prompt_chars=14_000,
     )
-    assert max_arch == 40_000
-    assert max_code < map_budget
-    assert max_code <= CODE_REVIEW_ABS_CHUNK_CHARS
+    assert budgets is not None
+    assert budgets.max_architecture_chars == 40_000
+    assert budgets.max_inline_code_chars < map_budget
+    assert budgets.max_inline_code_chars <= CODE_REVIEW_ABS_CHUNK_CHARS
+    assert budgets.reserved_response_tokens == CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
 
 
 def test_merged_pass_budgets_cap_architecture_when_it_cannot_fit() -> None:
     """On a small-context model, an oversized architecture document is capped
     so the merged call stays inside the window; code inlining yields to it."""
     llm = _StubLLM(16_384)
-    max_arch, max_code = compute_code_review_merged_pass_budgets(
+    budgets = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=100_000,
         system_prompt_chars=14_000,
     )
-    assert max_arch < 100_000
-    assert max_arch > 0
-    assert max_code == 0
+    assert budgets is not None
+    assert budgets.max_architecture_chars < 100_000
+    assert budgets.max_architecture_chars > 0
+    assert budgets.max_inline_code_chars == 0
+
+
+def test_merged_pass_budgets_return_none_when_fixed_reserves_exceed_context() -> None:
+    """When system prompt + scaffolding leave no usable response room, skip
+    rather than inventing a positive inline allowance."""
+    llm = _StubLLM(8_192)
+    # ~14K-char system prompt alone is already ~4K tokens; with the dual-array
+    # response floor the old clamp still forced 512 content tokens.
+    budgets = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=14_000,
+    )
+    # 8192 context: prompt (~4K+tok) + response can still fit with shrunk
+    # response and 0 content — that is OK. Force an impossible prompt:
+    impossible = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=50_000,
+    )
+    assert impossible is None
+    assert budgets is not None
+    assert budgets.max_architecture_chars == 0
+    assert budgets.max_inline_code_chars == 0
+    assert budgets.reserved_response_tokens < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
+    assert budgets.reserved_response_tokens >= 1024
+
+
+def test_merged_pass_budgets_bound_manifest_within_content_room() -> None:
+    llm = _StubLLM(40_000)
+    budgets = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=1_000,
+        system_prompt_chars=5_000,
+        manifest_chars=200_000,
+    )
+    assert budgets is not None
+    assert budgets.max_manifest_chars < 200_000
+    assert (
+        budgets.max_manifest_chars + budgets.max_architecture_chars + budgets.max_inline_code_chars
+    ) <= int(
+        (40_000 - int((5_000 + 1_500) / CHARS_PER_TOKEN) - budgets.reserved_response_tokens)
+        * CHARS_PER_TOKEN
+    ) + 1  # float rounding
 
 
 def test_merged_pass_response_reserve_is_dual_array_floor() -> None:

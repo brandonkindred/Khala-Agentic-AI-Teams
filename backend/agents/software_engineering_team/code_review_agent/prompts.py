@@ -213,6 +213,49 @@ MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT = (
 )
 
 
+def build_merged_architecture_side_effect_prompt(*, arch_on: bool, side_on: bool) -> str:
+    """Build the merged-pass system prompt for the halves that are actually enabled.
+
+    Preconditions:
+        - At least one of ``arch_on`` / ``side_on`` is True.
+
+    Postconditions:
+        - When both halves are on, returns ``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``.
+        - When only one half is on, omits the disabled half's instruction body and
+          explicitly requires its dual-key array to be ``[]``, so the model does
+          not spend tool iterations or output capacity on a discarded check.
+        - Always uses the dual-key output format so the merged pass parser stays
+          unchanged.
+    """
+    if not arch_on and not side_on:
+        raise ValueError("build_merged_architecture_side_effect_prompt requires arch_on or side_on")
+    if arch_on and side_on:
+        return MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT
+
+    parts: list[str] = []
+    if arch_on:
+        parts.append(
+            "You are running ONLY the architecture-consistency / cross-codebase-redundancy "
+            "check on top of an already-completed per-file code review. Do NOT perform "
+            "side-effect / blast-radius analysis — return "
+            '"side_effect_findings": [] unchanged.'
+        )
+        parts.append("\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n")
+        parts.append(_ARCHITECTURE_CONSISTENCY_BODY)
+    else:
+        parts.append(
+            "You are running ONLY the side-effect / blast-radius check on top of an "
+            "already-completed per-file code review. Do NOT perform architecture-consistency "
+            "or cross-codebase-redundancy analysis — return "
+            '"architecture_findings": [] unchanged.'
+        )
+        parts.append("\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n")
+        parts.append(_SIDE_EFFECT_IMPACT_BODY)
+    parts.append(_MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT)
+    parts.append(JSON_OUTPUT_INSTRUCTION)
+    return "".join(parts)
+
+
 REVIEW_SYNTHESIS_PROMPT = (
     """You consolidate the findings of an automated per-file code review into one coherent report.
 

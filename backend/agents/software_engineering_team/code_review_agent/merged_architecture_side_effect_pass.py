@@ -2,8 +2,8 @@
 
 Runs both additive whole-submission checks that the in-process coordinator
 previously scheduled as two independent Agent calls, in a single pass with
-``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``. Findings are split back into
-the two lists downstream merge/gate logic already expects.
+a half-aware ``build_merged_architecture_side_effect_prompt``. Findings are
+split back into the two lists downstream merge/gate logic already expects.
 
 Invariants:
 
@@ -15,9 +15,9 @@ Invariants:
     - **``CODE_REVIEW`` profile only.** Same restriction as each standalone
       pass.
     - **Context-aware budgeting.** Changed-file inlining (and, when needed,
-      architecture text) is sized for the combined system prompt, full
-      architecture document, and dual finding-array response — not the
-      map-call code allowance alone.
+      architecture text / the path manifest) is sized for the combined
+      system prompt and dual finding-array response — not the map-call code
+      allowance alone. Disabled halves are omitted from the prompt.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from llm_service import LLMClient, LLMClientModel
 from llm_service.config import resolve_max_tokens
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import (
+    CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
     CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     compute_code_review_merged_pass_budgets,
 )
@@ -41,11 +42,11 @@ from software_engineering_team.shared.models import SystemArchitecture
 from . import architecture_consistency_pass as arch_pass
 from . import side_effect_impact_pass as side_pass
 from .architecture_context import render_architecture_context
-from .false_positive_filter import CodebaseIndex, code_fence_for
+from .false_positive_filter import CodebaseIndex, _build_tools, code_fence_for
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .profiles import ReviewProfile
-from .prompts import MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT
+from .prompts import build_merged_architecture_side_effect_prompt
 from .repo_reader import RepoReader
 
 logger = logging.getLogger(__name__)
@@ -125,29 +126,50 @@ def _run_pass(
     Postconditions:
         - Same contract as the public entry, minus the env/profile early
           returns the caller already handled.
+        - Skips the LLM call (returns ``([], [])``) when the model context
+          cannot hold the fixed prompt plus a usable response reserve.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
     if not index.files:
         return [], []
 
-    model = _with_merged_pass_output_budget(resolve_code_review_model(llm))
-    arch_body = _architecture_document_text(input_data.architecture)
-    max_arch_chars, max_inline_chars = compute_code_review_merged_pass_budgets(
+    system_prompt = build_merged_architecture_side_effect_prompt(arch_on=arch_on, side_on=side_on)
+    arch_body = _architecture_document_text(input_data.architecture) if arch_on else ""
+    changed_paths = list(index.files.keys())
+    manifest_chars = _manifest_chars(changed_paths)
+    budgets = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=len(arch_body),
-        system_prompt_chars=len(MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT),
+        system_prompt_chars=len(system_prompt),
+        manifest_chars=manifest_chars,
+        base_scaffolding_chars=CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
+    )
+    if budgets is None:
+        logger.warning(
+            "MergedArchitectureSideEffectPass: model context too small for fixed "
+            "prompt + response reserve; skipping merged call"
+        )
+        return [], []
+
+    model = _with_merged_pass_output_budget(
+        resolve_code_review_model(llm),
+        response_tokens=budgets.reserved_response_tokens,
     )
     prompt = _build_prompt(
         index,
         arch_body,
-        max_inline_chars,
-        max_architecture_chars=max_arch_chars,
+        budgets.max_inline_code_chars,
+        max_architecture_chars=budgets.max_architecture_chars,
+        max_manifest_chars=budgets.max_manifest_chars,
+        arch_on=arch_on,
+        side_on=side_on,
     )
+    tools = side_pass.build_side_effect_tools(index) if side_on else _build_tools(index)
     agent = Agent(
         model=model,
-        system_prompt=MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT,
-        tools=side_pass.build_side_effect_tools(index),
+        system_prompt=system_prompt,
+        tools=tools,
     )
     raw = str(agent(prompt)).strip()
     data = json.loads(raw)
@@ -186,21 +208,36 @@ def _run_pass(
     return architecture_findings, side_effect_findings
 
 
+def _manifest_chars(paths: List[str]) -> int:
+    """Char count of the changed-file path list as emitted in the user prompt.
+
+    Postconditions: returns ``>= 0``; one newline per path plus the section header.
+    """
+    header = f"**Changed files in this submission ({len(paths)}):**\n"
+    return len(header) + sum(len(p) + 1 for p in paths)
+
+
 def _with_merged_pass_output_budget(
     model: "Union[LLMClient, _StrandsModel]",
+    *,
+    response_tokens: int,
 ) -> "Union[LLMClient, _StrandsModel]":
-    """Raise a tight output cap so both finding arrays can fit.
+    """Align the model's output cap with the merged call's response reserve.
 
     Preconditions:
         - ``model`` is the result of :func:`resolve_code_review_model`.
+        - ``response_tokens`` is the reserve from
+          :func:`compute_code_review_merged_pass_budgets` (``>= 1024``).
 
     Postconditions:
-        - When ``model`` is an ``LLMClientModel`` and the effective
-          ``LLM_MAX_TOKENS`` / pinned ``max_tokens`` is set but below
-          ``CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS``, returns a clone with
-          that dual-array floor. Otherwise returns ``model`` unchanged
-          (injected test models and unset / already-generous caps keep the
-          provider default).
+        - When ``model`` is an ``LLMClientModel``:
+          - If ``LLM_MAX_TOKENS`` / pinned ``max_tokens`` is set below
+            ``response_tokens``, clones with ``max_tokens=response_tokens``.
+          - If the reserve was shrunk below the dual-array floor for a small
+            context (and no tighter pin is set), clones with that shrunk value
+            so the completion request cannot exceed the input budget's reserve.
+          - Otherwise returns ``model`` unchanged.
+        - Injected non-``LLMClientModel`` test models are returned unchanged.
         - Never mutates ``model``.
     """
     if not isinstance(model, LLMClientModel):
@@ -209,8 +246,10 @@ def _with_merged_pass_output_budget(
     pinned = model.get_config().get("max_tokens")
     pinned_int = pinned if isinstance(pinned, int) and pinned > 0 else 0
     effective = configured if configured > 0 else pinned_int
-    if 0 < effective < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS:
-        return model.clone(max_tokens=CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS)
+    if 0 < effective < response_tokens:
+        return model.clone(max_tokens=response_tokens)
+    if effective == 0 and response_tokens < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS:
+        return model.clone(max_tokens=response_tokens)
     return model
 
 
@@ -279,51 +318,56 @@ def _build_prompt(
     max_inline_chars: int,
     *,
     max_architecture_chars: int,
+    max_manifest_chars: int,
+    arch_on: bool,
+    side_on: bool,
 ) -> str:
     """Render the single user prompt for the merged pass.
 
     Preconditions:
-        - ``architecture_body`` is the flattened document text (may be empty).
-        - ``max_architecture_chars`` / ``max_inline_chars`` are ``>= 0`` budgets
-          from :func:`compute_code_review_merged_pass_budgets`.
+        - ``architecture_body`` is the flattened document text (empty when the
+          architecture half is off or no document was provided).
+        - Budget ints are ``>= 0`` from :func:`compute_code_review_merged_pass_budgets`.
+        - At least one of ``arch_on`` / ``side_on`` is True.
 
     Postconditions:
-        - Inlines architecture document/context when present (truncated to
-          ``max_architecture_chars`` when the budget requires it); otherwise
-          states that no formal architecture document was provided.
-        - Inlines changed files up to ``max_inline_chars``; overflow files are
-          named as tool-reachable.
+        - Omits the architecture section when ``arch_on`` is False.
+        - Truncates the changed-file path manifest to ``max_manifest_chars`` with
+          a tool-reachable overflow note when needed.
+        - Inlines changed-file bodies up to ``max_inline_chars``, deducting
+          per-file heading/fence wrappers from that allowance.
         - Ends with a return instruction containing both response keys so
-          DummyLLMClient tests can anchor on the merged call.
+          DummyLLMClient tests can anchor on the merged call; disabled halves
+          are told to stay empty.
     """
     parts: List[str] = []
 
-    if architecture_body:
-        body = architecture_body[:max_architecture_chars]
-        doc_fence = code_fence_for(body)
-        parts.append("**Architecture document:**")
-        parts.append(doc_fence)
-        parts.append(body)
-        parts.append(doc_fence)
-        if len(body) < len(architecture_body):
+    if arch_on:
+        if architecture_body:
+            body = architecture_body[:max_architecture_chars]
+            doc_fence = code_fence_for(body)
+            parts.append("**Architecture document:**")
+            parts.append(doc_fence)
+            parts.append(body)
+            parts.append(doc_fence)
+            if len(body) < len(architecture_body):
+                parts.append(
+                    f"(Only the first {len(body)} characters of the architecture document "
+                    "are shown above — the remainder was omitted to fit the model context.)"
+                )
+        else:
+            parts.append("**Architecture document:**")
             parts.append(
-                f"(Only the first {len(body)} characters of the architecture document "
-                "are shown above — the remainder was omitted to fit the model context.)"
+                "No formal architecture document was provided for this review. "
+                "For Part 1, derive architecture expectations from the repository's "
+                "established structure and patterns via list_files()/read_file(); "
+                "do not invent a phantom document."
             )
-    else:
-        parts.append("**Architecture document:**")
-        parts.append(
-            "No formal architecture document was provided for this review. "
-            "For Part 1, derive architecture expectations from the repository's "
-            "established structure and patterns via list_files()/read_file(); "
-            "do not invent a phantom document."
-        )
-    parts.append("")
+        parts.append("")
 
     changed_files = list(index.files.items())
-    manifest = [path for path, _ in changed_files]
-    parts.append(f"**Changed files in this submission ({len(manifest)}):**")
-    parts.extend(manifest)
+    paths = [path for path, _ in changed_files]
+    parts.extend(_render_manifest(paths, max_manifest_chars))
     parts.append("")
 
     parts.append("**Full content of the changed files:**")
@@ -333,18 +377,30 @@ def _build_prompt(
         if remaining <= 0:
             omitted = len(changed_files) - i
             break
-        body = content[:remaining]
+        heading = f"### {path} ###"
+        # Fence length is content-dependent; reserve a small worst-case fence so
+        # heading + fences never push the block past ``remaining``.
+        fence_reserve = 8
+        overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
+        if remaining <= overhead:
+            omitted = len(changed_files) - i
+            break
+        body = content[: remaining - overhead]
         body_fence = code_fence_for(body)
-        parts.append(f"### {path} ###")
-        parts.append(body_fence)
-        parts.append(body)
-        parts.append(body_fence)
+        block_lines = [heading, body_fence, body, body_fence]
         if len(body) < len(content):
-            parts.append(
+            block_lines.append(
                 f"(Only the first {len(body)} characters of `{path}` are shown above; call "
                 "read_file to see the rest.)"
             )
-        remaining -= len(body)
+        block = "\n".join(block_lines)
+        if len(block) > remaining:
+            # Rare: actual fence longer than reserve — drop this file rather than
+            # overflow the budget.
+            omitted = len(changed_files) - i
+            break
+        parts.extend(block_lines)
+        remaining -= len(block) + 1  # +1 for the join newline before the next block
     if omitted:
         parts.append(
             f"... and {omitted} more changed file(s) not shown above; use read_file(path) or "
@@ -352,14 +408,65 @@ def _build_prompt(
         )
     parts.append("")
 
-    parts.append(
-        "Use list_files()/read_file()/search_codebase()/search_repository()/"
-        "find_function_at_line() as each part's instructions require. Address "
-        "Part 1 and Part 2 independently."
-    )
+    if arch_on and side_on:
+        parts.append(
+            "Use list_files()/read_file()/search_codebase()/search_repository()/"
+            "find_function_at_line() as each part's instructions require. Address "
+            "Part 1 and Part 2 independently."
+        )
+    elif arch_on:
+        parts.append(
+            "Use list_files()/read_file()/search_codebase()/find_function_at_line() as "
+            "Part 1 requires. Do not run side-effect analysis."
+        )
+    else:
+        parts.append(
+            "Use list_files()/read_file()/search_codebase()/search_repository()/"
+            "find_function_at_line() as Part 2 requires. Do not run architecture analysis."
+        )
     parts.append(
         'Return a single JSON object with "architecture_findings"/"side_effect_findings" '
         "keys as instructed. Return "
         '{"architecture_findings": [], "side_effect_findings": []} if neither part finds anything.'
     )
     return "\n".join(parts)
+
+
+def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
+    """Render the changed-file path list, truncated to ``max_manifest_chars``.
+
+    Postconditions:
+        - Always includes the section header.
+        - When the full list exceeds the budget, includes as many paths as fit
+          and a tool-reachable overflow note for the rest.
+    """
+    header = f"**Changed files in this submission ({len(paths)}):**"
+    lines: List[str] = [header]
+    used = len(header) + 1
+    shown = 0
+    for path in paths:
+        line_cost = len(path) + 1
+        overflow_note = (
+            f"... and {len(paths) - shown} more changed path(s) not listed; "
+            "use list_files()/read_file() to reach them."
+        )
+        # Leave room for an overflow note if this isn't the last path.
+        need_note_room = shown + 1 < len(paths)
+        room_for_note = len(overflow_note) + 1 if need_note_room else 0
+        if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
+            lines.append(
+                f"... and {len(paths) - shown} more changed path(s) not listed; "
+                "use list_files()/read_file() to reach them."
+            )
+            break
+        if used + line_cost > max_manifest_chars and shown == 0:
+            # Budget too tight for even one path: header + overflow only.
+            lines.append(
+                f"... and {len(paths)} more changed path(s) not listed; "
+                "use list_files()/read_file() to reach them."
+            )
+            break
+        lines.append(path)
+        used += line_cost
+        shown += 1
+    return lines

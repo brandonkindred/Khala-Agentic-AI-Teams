@@ -871,19 +871,20 @@ An architecture document on `CodeReviewInput.architecture` is optional:
 when present (document, overview, components, and/or decisions), it is inlined
 in full when context allows; when absent, the pass still runs and the model must
 derive expectations from established repository structure and patterns. The
-in-process merged call budgets changed-file inlining against the combined
-system prompt, architecture body, and a dual-array response reserve
-(`CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS` / 8192) — and caps the architecture
-text only when it cannot fit — rather than reusing the map-call code allowance
-alone. It can only ADD findings, in two categories: `architecture` (the change
-contradicts a stated or established boundary/pattern/decision in a way that
-would break integration) and `refactor` (the change duplicates a capability that
-already exists elsewhere in the repository, tool-verified before it is flagged —
-never guessed from naming alone). It never removes or alters any finding the map
-phase or the false-positive filter already produced. Any setup or LLM failure
-is fail-safe: it is logged and yields no additional findings, so a broken pass
-never blocks or changes the rest of the review. Set to `false`/`0`/`no` to
-disable the pass (any other value, or unset, leaves it enabled).
+in-process merged call budgets the changed-file path manifest, architecture
+body, and code inlining against the (half-filtered) system prompt and a
+dual-array response reserve that shrinks on small contexts — and skips the call
+entirely when even an empty payload cannot fit. Disabled halves are omitted from
+the system/user prompt (not merely discarded after the fact). It can only ADD
+findings, in two categories: `architecture` (the change contradicts a stated or
+established boundary/pattern/decision in a way that would break integration) and
+`refactor` (the change duplicates a capability that already exists elsewhere in
+the repository, tool-verified before it is flagged — never guessed from naming
+alone). It never removes or alters any finding the map phase or the
+false-positive filter already produced. Any setup or LLM failure is fail-safe:
+it is logged and yields no additional findings, so a broken pass never blocks or
+changes the rest of the review. Set to `false`/`0`/`no` to disable the pass
+(any other value, or unset, leaves it enabled).
 
 ### CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS
 Default-on toggle for the side-effect / blast-radius pass. This toggle enables

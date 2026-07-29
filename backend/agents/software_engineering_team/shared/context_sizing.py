@@ -10,6 +10,8 @@ chunk + prompt + response stays within the model context window.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from llm_service import LLMClient
 
 # Re-exported from the shared typed env-config helper so the int-knob parser
@@ -138,6 +140,22 @@ def compute_code_review_map_chunk_chars(llm: LLMClient) -> int:
 # (2 × the map-phase ``reserved_response_tokens=4096``). Also used as the
 # floor when raising a tight ``LLM_MAX_TOKENS`` for that call's output budget.
 CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS = 8192
+# Minimum completion room before the merged call is skipped entirely: below
+# this, even an empty payload cannot usefully return JSON findings.
+_CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS = 1024
+# Fixed user-prompt headers / tool+return instructions excluding the variable
+# changed-file path manifest (that size is passed in by the caller).
+CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS = 1_500
+
+
+@dataclass(frozen=True)
+class MergedPassBudgets:
+    """Character/token budgets for one merged architecture + side-effect call."""
+
+    max_architecture_chars: int
+    max_inline_code_chars: int
+    max_manifest_chars: int
+    reserved_response_tokens: int
 
 
 def compute_code_review_merged_pass_budgets(
@@ -145,52 +163,72 @@ def compute_code_review_merged_pass_budgets(
     *,
     architecture_chars: int,
     system_prompt_chars: int,
-) -> tuple[int, int]:
-    """Return ``(max_architecture_chars, max_inline_code_chars)`` for the merged pass.
+    manifest_chars: int = 0,
+    base_scaffolding_chars: int = CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
+) -> MergedPassBudgets | None:
+    """Budget architecture, changed-file manifest, and code for the merged pass.
 
     The in-process coordinator's merged architecture + side-effect call inlines
     the architecture document *and* a combined system prompt that is larger than
     either standalone pass. Reusing the map-call code allowance alone can therefore
     overflow smaller-context models. This helper:
 
-    1. Reserves the merged system prompt, fixed user-prompt scaffolding, and a
-       dual-array response budget (``CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS``).
-    2. Prefers keeping the full architecture document; leftover capacity goes to
-       changed-file inlining (capped by ``CODE_REVIEW_MAP_CHUNK_CHARS``).
-    3. Caps the architecture text only when it cannot fit after those reserves
-       (overflow changed files remain tool-reachable either way).
+    1. Reserves the (possibly half-filtered) system prompt and fixed scaffolding.
+    2. Takes up to ``CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS`` for the completion,
+       shrinking that reserve when the context cannot hold the full dual-array
+       floor — never inventing a positive content allowance once reserves already
+       exceed the window.
+    3. Splits leftover capacity across the changed-file manifest (truncated with
+       tool-reachable overflow), then the architecture body, then code inlining
+       (capped by ``CODE_REVIEW_MAP_CHUNK_CHARS``).
 
     Preconditions:
         - ``llm.get_max_context_tokens()`` returns a positive context size.
-        - ``architecture_chars`` / ``system_prompt_chars`` are non-negative
-          char counts for the bodies that will be placed in the merged call.
+        - Char-count arguments are non-negative sizes for the bodies that will
+          be placed in the merged call.
 
     Postconditions:
-        - Returns two ints ``>= 0``. ``max_inline_code_chars`` never exceeds the
-          map-chunk absolute cap. Never raises.
+        - Returns ``None`` when even an empty payload cannot leave a usable
+          response reserve (caller should skip the LLM call).
+        - Otherwise returns a :class:`MergedPassBudgets` with all fields ``>= 0``.
+          ``max_inline_code_chars`` never exceeds the map-chunk absolute cap.
+        - Never raises.
     """
     ctx = llm.get_max_context_tokens()
-    # Headers, file manifest, tool/return instructions in the merged user prompt
-    # beyond the architecture body itself.
-    scaffolding_chars = 2_000
-    reserved_fixed_tokens = (
-        int((max(0, system_prompt_chars) + scaffolding_chars) / CHARS_PER_TOKEN)
-        + CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
+    fixed_prompt_tokens = int(
+        (max(0, system_prompt_chars) + max(0, base_scaffolding_chars)) / CHARS_PER_TOKEN
     )
-    available_tokens = max(512, ctx - reserved_fixed_tokens)
-    available_chars = int(available_tokens * CHARS_PER_TOKEN)
+    if fixed_prompt_tokens >= ctx:
+        return None
+
+    room_after_prompt = ctx - fixed_prompt_tokens
+    if room_after_prompt < _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS:
+        return None
+
+    reserved_response = min(CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS, room_after_prompt)
+    content_tokens = room_after_prompt - reserved_response  # may be 0
+    content_chars = int(content_tokens * CHARS_PER_TOKEN)
+
+    manifest_wanted = max(0, manifest_chars)
+    max_manifest = min(manifest_wanted, content_chars)
+    after_manifest = content_chars - max_manifest
 
     arch_wanted = max(0, architecture_chars)
-    if arch_wanted <= available_chars:
+    if arch_wanted <= after_manifest:
         max_arch = arch_wanted
-        code_room = available_chars - arch_wanted
+        code_room = after_manifest - arch_wanted
     else:
-        max_arch = available_chars
+        max_arch = after_manifest
         code_room = 0
 
     code_cap = parse_env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
     max_code = 0 if code_room <= 0 else min(code_room, code_cap)
-    return max_arch, max_code
+    return MergedPassBudgets(
+        max_architecture_chars=max_arch,
+        max_inline_code_chars=max_code,
+        max_manifest_chars=max_manifest,
+        reserved_response_tokens=reserved_response,
+    )
 
 
 def compute_spec_chunk_chars(llm: LLMClient) -> int:
