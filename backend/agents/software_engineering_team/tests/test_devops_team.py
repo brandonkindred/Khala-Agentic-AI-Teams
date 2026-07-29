@@ -2054,6 +2054,7 @@ class TestMainOrchestratorRegistration:
     def test_build_fix_specialist_registered(self) -> None:
         """Verify the main orchestrator registers BuildFixSpecialistAgent."""
         from orchestrator import _get_agents
+
         from software_engineering_team.build_fix_specialist import BuildFixSpecialistAgent
 
         agents = _get_agents()
@@ -2316,4 +2317,3 @@ class TestDevOpsAgentsRecoverFencedJson:
         _patch_fenced_response(monkeypatch, payload)
         agent, inp = build()
         check(agent.run(inp))
-
