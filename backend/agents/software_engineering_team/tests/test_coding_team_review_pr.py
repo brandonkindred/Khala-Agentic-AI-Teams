@@ -1219,7 +1219,11 @@ class TestReviewEndpoint:
         # attached traceback still shows the raw exception (inherent to
         # ``logger.exception``/``exc_info`` and out of scope for this fix — the bug
         # is about the message text passed through, not Python's traceback capture).
-        [record] = [r for r in caplog.records if r.getMessage().startswith("PR review hook failed")]
+        matches = [
+            r for r in caplog.records if r.getMessage().startswith("PR review hook failed")
+        ]
+        assert len(matches) == 1
+        record = matches[0]
         assert "ghp_LEAKEDTOKEN" not in record.getMessage()
         assert "ghp_LEAKEDTOKEN" not in (job.get("error") or "")
 
