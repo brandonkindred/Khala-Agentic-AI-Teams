@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from deepthought.models import DecompositionStrategy, DeepthoughtRequest
 from deepthought.orchestrator import DeepthoughtOrchestrator
 from deepthought.result_cache import ResultCache
+from llm_service.interface import LLMClient
 
 
 def _make_orchestrator(mock_llm, budget=50, cache=None):
@@ -15,11 +16,54 @@ def _make_orchestrator(mock_llm, budget=50, cache=None):
     )
 
 
+def _reasoning_stub(*args, **kwargs):
+    """Generic placeholder for _analyse's think=True reasoning-pass .complete() call.
+
+    Content doesn't matter to these tests — only the downstream .complete_json()
+    formatting call (mocked separately) determines the analysis outcome.
+    """
+    return "Reasoning: proceeding as configured by the test fixture."
+
+
+def _complete_side_effect(*classification_values):
+    """Route ``mock_llm.complete`` calls by objective.
+
+    ``_analyse`` issues a think=True reasoning-pass ``.complete()`` call
+    (objective "analyze specialist question (reasoning)") independent of
+    strategy classification (objective "classify question strategy") —
+    resolve by objective, not call position, so both can be exercised (or
+    the reasoning pass alone, when classification is skipped) without
+    tripping over each other.
+
+    Exhaustion raises ``AssertionError`` rather than ``StopIteration``:
+    ``StopIteration`` subclasses ``Exception`` and would be swallowed by
+    production ``except Exception`` fallbacks, masking a test that
+    programmed too few classification responses.
+    """
+    values = list(classification_values)
+    idx = [0]
+
+    def _side_effect(*args, **kwargs):
+        if kwargs.get("objective", "").startswith("analyze specialist question"):
+            return _reasoning_stub(*args, **kwargs)
+        if idx[0] >= len(values):
+            raise AssertionError(
+                f"_complete_side_effect exhausted after {len(values)} "
+                f"classification response(s); unexpected complete() call "
+                f"with objective={kwargs.get('objective')!r}"
+            )
+        val = values[idx[0]]
+        idx[0] += 1
+        return val
+
+    return _side_effect
+
+
 def test_simple_direct_answer():
     """Orchestrator handles a simple question that needs no decomposition."""
     llm = MagicMock()
     # Strategy classification call
-    llm.complete.side_effect = ['{"strategy": "none", "reasoning": "simple"}']
+    llm.complete.side_effect = _complete_side_effect('{"strategy": "none", "reasoning": "simple"}')
     llm.complete_json.return_value = {
         "summary": "Simple question",
         "can_answer_directly": True,
@@ -42,8 +86,8 @@ def test_simple_direct_answer():
     assert len(resp.events) >= 1
 
 
-def test_one_level_decomposition_with_deliberation():
-    """Orchestrator decomposes, deliberates, and synthesises."""
+def test_one_level_decomposition_skips_deliberation_for_single_child():
+    """Orchestrator decomposes and synthesises, skipping deliberation (1 child < 2 threshold)."""
     llm = MagicMock()
     llm.complete_json.side_effect = [
         # Root analysis
@@ -70,12 +114,13 @@ def test_one_level_decomposition_with_deliberation():
             "skill_requirements": [],
         },
     ]
-    # strategy classification, then deliberation, then synthesis
-    llm.complete.side_effect = [
+    # strategy classification, then synthesis — deliberation is skipped with a
+    # single child (< 2), so it never calls .complete(). Reasoning-pass
+    # .complete() calls (root + child analyse) are routed separately by objective.
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "by_discipline", "reasoning": "factual"}',
-        "Deliberation: no contradictions, all good",
         "Synthesised: A says yes",
-    ]
+    )
 
     orch = _make_orchestrator(llm)
     req = DeepthoughtRequest(message="Complex question")
@@ -84,7 +129,8 @@ def test_one_level_decomposition_with_deliberation():
     assert resp.total_agents_spawned == 2
     assert resp.max_depth_reached == 1
     assert resp.agent_tree.was_decomposed
-    assert resp.agent_tree.deliberation_notes is not None
+    assert resp.agent_tree.deliberation_notes == ""
+    assert resp.answer.startswith("Synthesised: A says yes")
     assert "Specialists consulted" in resp.answer
 
 
@@ -129,11 +175,11 @@ def test_agent_budget_limits_spawning():
             "skill_requirements": [],
         },
     ]
-    llm.complete.side_effect = [
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "auto", "reasoning": "general"}',
         "deliberation",
         "Synthesised with budget limits",
-    ]
+    )
 
     orch = _make_orchestrator(llm, budget=2)
     req = DeepthoughtRequest(message="Big question")
@@ -192,13 +238,18 @@ def test_max_depth_tracking():
             "skill_requirements": [],
         },
     ]
-    llm.complete.side_effect = [
+    # Only 3 non-reasoning .complete() calls actually happen: strategy
+    # classification, then one synthesis call per level (depth 1, then depth
+    # 0) — deliberation is skipped at both depths since each node has a
+    # single child (below the >=2-children threshold), so it never draws
+    # from this queue. Supplying values for the skipped deliberation calls
+    # would go unconsumed and silently shift the labels on the values that
+    # ARE consumed onto the wrong calls.
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "auto", "reasoning": "complex"}',
-        "deliberation depth 1",  # depth-1 deliberation (skipped, <2 children)
         "Mid synthesis",  # depth 1 synthesis
-        "deliberation depth 0",
         "Root synthesis",  # depth 0 synthesis
-    ]
+    )
 
     orch = _make_orchestrator(llm)
     req = DeepthoughtRequest(message="Deep question", max_depth=10)
@@ -218,8 +269,16 @@ def test_explicit_strategy_skips_classification():
         "confidence": 0.9,
         "skill_requirements": [],
     }
-    # complete should NOT be called for classification
-    llm.complete.side_effect = RuntimeError("Should not be called for classification")
+
+    # complete should NOT be called for classification (it's still legitimately
+    # called for _analyse's think=True reasoning pass, which _complete_side_effect
+    # handles separately).
+    def _no_classification_calls(*args, **kwargs):
+        if not kwargs.get("objective", "").startswith("analyze specialist question"):
+            raise RuntimeError("Should not be called for classification")
+        return _reasoning_stub(*args, **kwargs)
+
+    llm.complete.side_effect = _no_classification_calls
 
     orch = _make_orchestrator(llm)
     req = DeepthoughtRequest(
@@ -234,7 +293,11 @@ def test_explicit_strategy_skips_classification():
 def test_conversation_history_passed_through():
     """Conversation history from the request reaches the agent."""
     llm = MagicMock()
-    llm.complete.return_value = '{"strategy": "none", "reasoning": "simple"}'
+    # Route by objective so the strategy-classification call and _analyse's
+    # think=True reasoning-pass call don't share a return value (the latter
+    # expects prose, not the classification JSON string) — same conflation
+    # this helper exists to avoid elsewhere in this file.
+    llm.complete.side_effect = _complete_side_effect('{"strategy": "none", "reasoning": "simple"}')
     llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,
@@ -253,16 +316,25 @@ def test_conversation_history_passed_through():
     )
     orch.process_message(req)
 
-    # The analysis prompt should contain conversation history
-    call_args = llm.complete_json.call_args_list[0]
-    user_prompt = call_args.args[0]
+    # The analysis prompt should contain conversation history. It's now the
+    # reasoning-pass .complete() call that carries the user-facing prompt.
+    analyse_calls = [
+        c
+        for c in llm.complete.call_args_list
+        if c.kwargs.get("objective", "").startswith("analyze specialist question")
+    ]
+    assert analyse_calls, "expected at least one reasoning-pass call"
+    user_prompt = analyse_calls[0].args[0]
     assert "Mars" in user_prompt
 
 
 def test_knowledge_entries_in_response():
     """Response includes knowledge base entries from all agents."""
     llm = MagicMock()
-    llm.complete.return_value = '{"strategy": "none", "reasoning": "simple"}'
+    # Route by objective so the strategy-classification call and _analyse's
+    # think=True reasoning-pass call don't share a return value (the latter
+    # expects prose, not the classification JSON string).
+    llm.complete.side_effect = _complete_side_effect('{"strategy": "none", "reasoning": "simple"}')
     llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,
@@ -304,15 +376,17 @@ def test_specialists_footer_format():
             "skill_requirements": [],
         },
     ]
-    llm.complete.side_effect = [
+    # Single child → deliberation is skipped (< 2 children), so only
+    # classification and synthesis call .complete() non-reasoning.
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "by_discipline", "reasoning": "physics"}',
-        "deliberation",
         "Force equals mass times acceleration.",
-    ]
+    )
 
     orch = _make_orchestrator(llm)
     resp = orch.process_message(DeepthoughtRequest(message="Explain force"))
 
+    assert resp.answer.startswith("Force equals mass times acceleration.")
     assert "Specialists consulted" in resp.answer
     assert "physics_expert" in resp.answer
 
@@ -375,6 +449,7 @@ def test_default_llm_exposes_complete_and_complete_json(monkeypatch):
     """
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     orch = DeepthoughtOrchestrator()
+    assert isinstance(orch._llm, LLMClient)
     assert callable(orch._llm.complete)
     assert callable(orch._llm.complete_json)
     # The dummy client must actually answer, not raise.

@@ -5,10 +5,14 @@ fabricated emails, missing CTAs, bloated subject lines, leftover template
 tokens, ICP misalignment. The orchestrator wraps the critic in a one-shot
 refinement loop: emit -> critic -> on revise, re-emit with violations.
 
-The critic uses :func:`llm_service.complete_validated` so the same role-keyed
-client and self-correction guard the rest of the sales pod relies on apply
-here too. Tests inject a ``CannedLLMClient`` via ``llm_client=...`` so this
-file stays Strands-free and runs in CI without a network.
+The critic uses :func:`llm_service.complete_validated_via_reasoning` — a
+think=True prose reasoning pass over the rubric, then a think=False pass that
+transcribes it into :class:`OutreachCriticReport` through
+``complete_validated`` — so the same role-keyed client and self-correction
+guard the rest of the sales pod relies on apply here too. Tests inject a
+``CannedLLMClient`` via ``llm_client=...`` so this file stays Strands-free and
+runs in CI without a network; such doubles must implement ``complete()`` too,
+or the reasoning pass silently consumes a canned formatting response.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from llm_service import LLMClient, complete_validated
+from llm_service import LLMClient, complete_validated_via_reasoning
 
 from ..llm import get_sales_llm_client
 from ..models import (
@@ -33,15 +37,10 @@ from ..prompts._dossier_render import render_dossier_json_for_prompt
 logger = logging.getLogger(__name__)
 
 
-_OUTREACH_CRITIC_SYSTEM_PROMPT = """\
-You are an independent Sales Outreach Reviewer. You did NOT write the sequence \
-under review; your job is to score it against the rubric below and the \
-authoritative dossier + ICP supplied by the user.
-
-REJECT the sequence (status=FAIL) if ANY must_fix violation is present. For \
-every violation, emit a CriticViolation with a concrete suggested_fix the \
-agent can apply on retry.
-
+# Shared verbatim rubric — used by both the JSON-output prompt and its
+# reasoning-only variant below. Extracted once so the two prompts can never
+# drift apart on rule wording; only their surrounding framing differs.
+_OUTREACH_RUBRIC = """\
 RUBRIC (use these rule_id slugs verbatim):
 
  1. outreach.citation.fabricated — every non-`fallback` variant whose \
@@ -70,7 +69,21 @@ RUBRIC (use these rule_id slugs verbatim):
  6. outreach.personalization.icp_alignment — at least one variant must tie \
     the product to a concrete ICP `pain_point`. Generic value-prop \
     restatement does not qualify.
+"""
 
+_OUTREACH_CRITIC_SYSTEM_PROMPT = (
+    """\
+You are an independent Sales Outreach Reviewer. You did NOT write the sequence \
+under review; your job is to score it against the rubric below and the \
+authoritative dossier + ICP supplied by the user.
+
+REJECT the sequence (status=FAIL) if ANY must_fix violation is present. For \
+every violation, emit a CriticViolation with a concrete suggested_fix the \
+agent can apply on retry.
+
+"""
+    + _OUTREACH_RUBRIC
+    + """
 OUTPUT contract:
  - Output a SINGLE JSON object matching this schema:
    {
@@ -95,6 +108,34 @@ OUTPUT contract:
    equal (status == "PASS").
  - Return JSON only. No markdown fences. No prose outside the object.
 """
+)
+
+# Reasoning-only variant: same role/rubric, but ends with a prose instruction
+# instead of the JSON output contract. Used for the think=True first pass of
+# the two-call split — the formatting pass (think=False) transcribes this
+# prose into the OutreachCriticReport schema.
+_OUTREACH_CRITIC_SYSTEM_PROMPT_REASONING = (
+    """\
+You are an independent Sales Outreach Reviewer. You did NOT write the sequence \
+under review; your job is to score it against the rubric below and the \
+authoritative dossier + ICP supplied by the user.
+
+REJECT the sequence (status=FAIL) if ANY must_fix violation is present. For \
+every violation, identify a concrete suggested_fix the agent can apply on retry.
+
+"""
+    + _OUTREACH_RUBRIC
+    + """
+Think this through rule by rule, then answer in structured prose (not JSON):
+ - Your overall status (PASS only when no must_fix violations exist) and approved verdict.
+ - For each violation found: the rubric rule_id, severity (must_fix/should_fix/consider), the
+   section it's in (e.g. 'variants[0].day1' or 'overall'), a short quoted evidence excerpt
+   (under ~120 chars), what is wrong and why, and a concrete suggested fix.
+ - Whether you'd override the personalization grade (high/medium/low/fallback), and why, if
+   applicable.
+ - Any other short notes.
+"""
+)
 
 
 @dataclass
@@ -116,18 +157,21 @@ class OutreachCriticAgent:
     ) -> OutreachCriticReport:
         """Evaluate ``sequence`` and return a :class:`OutreachCriticReport`.
 
-        On any LLM exception (parse failure after corrective retries, network
-        error, schema rejection) the critic returns a fail-closed FAIL report
-        so the orchestrator's one-shot refinement budget gets used.
+        On any exception raised while producing the report — an LLM failure
+        (parse failure after corrective retries, network error, schema
+        rejection) or anything else the call raises — the critic returns a
+        fail-closed FAIL report so the orchestrator's one-shot refinement
+        budget gets used.
         """
         prompt = self._build_prompt(sequence, dossier, icp)
         try:
-            report = complete_validated(
+            report = complete_validated_via_reasoning(
                 self._llm,
-                prompt,
                 schema=OutreachCriticReport,
-                system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT,
-                temperature=0.0,
+                reasoning_prompt=prompt,
+                reasoning_system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT_REASONING,
+                formatting_system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT,
+                reasoning_temperature=0.0,
                 correction_attempts=2,
                 objective="critique outreach sequence",
             )
@@ -135,10 +179,14 @@ class OutreachCriticAgent:
             logger.warning("sales.outreach_critic.failed reason=%s", exc)
             return _fallback_outreach_report(str(exc))
 
-        # Enforce the invariant: approved iff status == PASS with no must_fix items.
-        approved = report.status == "PASS" and report.must_fix_count() == 0
-        if approved != report.approved:
-            report = report.model_copy(update={"approved": approved})
+        # Enforce the invariant: approved iff status == PASS with no must_fix
+        # items. A must_fix violation always forces FAIL, overriding whatever
+        # status the LLM returned — reconciling only `approved` could leave
+        # status="PASS" with approved=False, an inconsistent report.
+        status = "FAIL" if report.must_fix_count() > 0 else report.status
+        approved = status == "PASS"
+        if status != report.status or approved != report.approved:
+            report = report.model_copy(update={"status": status, "approved": approved})
         return report
 
     @staticmethod
@@ -161,8 +209,7 @@ class OutreachCriticAgent:
             "--- OUTREACH SEQUENCE (JSON) ---\n"
             f"{sequence_json}\n\n"
             "--- TASK ---\n"
-            "Evaluate the outreach sequence against the rubric in your system "
-            "prompt. Return a single OutreachCriticReport JSON object only."
+            "Evaluate the outreach sequence against the rubric in your system prompt."
         )
 
 

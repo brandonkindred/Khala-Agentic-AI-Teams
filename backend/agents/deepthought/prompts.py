@@ -25,7 +25,13 @@ Respond: {{"strategy": "<category>", "reasoning": "<one sentence>"}}\
 # Analysis prompt — decides whether to answer directly or decompose
 # ---------------------------------------------------------------------------
 
-ANALYSIS_SYSTEM_PROMPT = """\
+# Analysis prompts come as a pair for the two-call split: this one drives the
+# think=True reasoning pass (prose, no JSON schema), and
+# ANALYSIS_FORMAT_INSTRUCTIONS drives the think=False pass that transcribes
+# that prose into JSON. The role/context/decomposition rules live here only —
+# the formatting pass never re-derives them, so there is a single source of
+# truth for them.
+ANALYSIS_SYSTEM_PROMPT_REASONING = """\
 You are a Deepthought analysis engine. Your role: "{role_description}"
 
 You are at recursion depth {depth} of a maximum {max_depth}.
@@ -55,24 +61,13 @@ do NOT create a duplicate sub-agent for it. Reference the existing finding inste
 ## Prior findings from other agents
 {knowledge_summary}
 
-Respond with ONLY a JSON object (no markdown fencing) matching this schema:
-{{
-  "summary": "<concise restatement of the question>",
-  "can_answer_directly": true/false,
-  "direct_answer": "<your THOROUGH answer if can_answer_directly is true, else null>",
-  "confidence": <0.0-1.0>,
-  "skill_requirements": [
-    {{
-      "name": "<short_snake_case_identifier>",
-      "description": "<what this specialist knows/does>",
-      "focus_question": "<specific question for this specialist>",
-      "reasoning": "<why this specialist is needed>"
-    }}
-  ]
-}}
-
-If can_answer_directly is true, skill_requirements must be an empty list.
-If can_answer_directly is false, direct_answer must be null and confidence should be 0.0.\
+Think this through carefully, then answer in clearly labeled structured prose (not JSON)
+covering:
+- Summary: a concise restatement of the question.
+- Decision: whether you can answer directly, and why.
+- Direct answer: if answering directly, your THOROUGH answer, and your confidence (0.0-1.0).
+- Sub-agents: if decomposing, list 1-5 specialists, each with a short name, what it knows/does,
+  its specific focus question, and why it's needed.\
 """
 
 ANALYSIS_USER_PROMPT = """\
@@ -84,6 +79,31 @@ ANALYSIS_USER_PROMPT = """\
 
 ## Question
 {question}\
+"""
+
+# JSON-formatting instructions for the think=False second pass of the
+# two-call split: transcribes ANALYSIS_SYSTEM_PROMPT_REASONING's prose
+# output into the QueryAnalysis JSON shape.
+ANALYSIS_FORMAT_INSTRUCTIONS = """\
+Respond with ONLY a JSON object (no markdown fencing) matching this schema:
+{
+  "summary": "<concise restatement of the question>",
+  "can_answer_directly": true/false,
+  "direct_answer": "<the THOROUGH answer if can_answer_directly is true, else null>",
+  "confidence": <0.0-1.0>,
+  "skill_requirements": [
+    {
+      "name": "<short_snake_case_identifier>",
+      "description": "<what this specialist knows/does>",
+      "focus_question": "<specific question for this specialist>",
+      "reasoning": "<why this specialist is needed>"
+    }
+  ]
+}
+
+If can_answer_directly is true, skill_requirements must be an empty list.
+If can_answer_directly is false, direct_answer must be null and confidence should be 0.0.
+Transcribe the analysis below faithfully — do not add or invent information beyond it.\
 """
 
 # ---------------------------------------------------------------------------

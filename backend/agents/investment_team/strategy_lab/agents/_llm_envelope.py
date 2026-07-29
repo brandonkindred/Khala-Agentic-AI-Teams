@@ -43,6 +43,7 @@ with the agents that consume this module.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import random
 import threading
@@ -65,7 +66,7 @@ from llm_service.interface import (
 from shared.env_config import env_float, env_int
 
 from ..exceptions import StrategyLabLLMError
-from ._llm_budget import charge_active_budget
+from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 
 _module_logger = logging.getLogger(__name__)
 
@@ -336,8 +337,14 @@ def _call_with_timeout(fn: Callable[[], Any], timeout_s: float) -> Any:
     raised; raises :class:`_EnvelopeTimeout` if ``fn`` did not finish within
     ``timeout_s`` (the worker thread is left running as a daemon — bounded by
     the transport-level timeout configured in the model factory).
+
+    The worker runs under a copy of the caller's ``contextvars`` context so
+    bindings such as the design-phase LLM budget (``charge_active_budget``)
+    remain visible inside ``fn`` — without this, charges made from a
+    two-pass ``_call`` closure would silently no-op on the worker thread.
     """
     box: dict[str, Any] = {}
+    ctx = contextvars.copy_context()
 
     def _runner() -> None:
         try:
@@ -345,7 +352,9 @@ def _call_with_timeout(fn: Callable[[], Any], timeout_s: float) -> Any:
         except BaseException as exc:  # noqa: BLE001 — propagate to caller thread
             box["error"] = exc
 
-    thread = threading.Thread(target=_runner, daemon=True, name="strategy-lab-llm")
+    thread = threading.Thread(
+        target=ctx.run, args=(_runner,), daemon=True, name="strategy-lab-llm"
+    )
     thread.start()
     thread.join(timeout_s)
     if thread.is_alive():
@@ -379,18 +388,29 @@ def invoke_agent(
     Preconditions:
       * ``agent_callable`` is the constructed ``strands.Agent`` (called as
         ``agent_callable(prompt)``); the caller is responsible for budget
-        charging (``charge_active_budget``) BEFORE calling this — transport
-        retries here intentionally do not re-charge.
+        charging (``charge_active_budget``) either BEFORE calling this or
+        inside ``agent_callable`` itself when that callable owns multiple
+        provider calls per attempt (see
+        ``_structured_output.invoke_structured_with_schema``, which charges
+        inside its retried closure so transport retries re-charge).
+        This envelope does not charge on its own.
       * ``agent_key`` / ``phase`` are non-empty diagnostic labels.
 
     Postconditions:
       * Returns ``str(result)`` on the first successful attempt.
+      * Re-raises :class:`~._llm_budget.DesignBudgetExhausted` immediately,
+        unmodified — a per-cycle design-budget trip is a cycle-level stop, not
+        a transport fault. Callables that charge inside the attempt (e.g.
+        ``invoke_structured_with_schema``'s two-pass ``_call``) must still
+        surface this to callers that catch it distinctly from
+        :class:`StrategyLabLLMError` / fail-closed paths.
       * Raises :class:`StrategyLabLLMError` (an ``LLMTemporaryError`` subclass,
         so existing broad ``except`` clauses keep their fail-closed contract)
         when attempts are exhausted, the total budget is spent, or the
         exception classifies as fatal.
       * Emits one structured ``logger.exception`` per failed attempt and one
-        summary ``logger.error`` on terminal failure.
+        summary ``logger.error`` on terminal failure. Budget trips skip that
+        logging — they are not LLM-call failures.
       * A retriable 429 rate limit backs off on the dedicated rate-limit schedule
         (first retry ~30s, ``STRATEGY_LAB_LLM_RATE_LIMIT_*`` /
         ``LLM_RATE_LIMIT_*``); transient faults keep the fast backoff. A
@@ -415,6 +435,10 @@ def invoke_agent(
         try:
             result = _call_with_timeout(lambda: agent_callable(prompt), effective_ts)
             return str(result)
+        except DesignBudgetExhausted:
+            # Cycle-level stop from a charge inside agent_callable — do not
+            # classify, retry, log as an LLM failure, or wrap.
+            raise
         except Exception as exc:  # noqa: BLE001 — classify + log every failure
             latency_ms = int((time.monotonic() - t0) * 1000)
             last_exc = exc

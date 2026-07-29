@@ -65,6 +65,18 @@ LLM_ACTIVITY_OPTS = MappingProxyType(
     }
 )
 
+# analyse_activity runs `_analyse`, which performs two sequential LLM calls
+# (a think=True reasoning pass, then a think=False JSON-formatting pass) via
+# `complete_json_via_reasoning` — double the single-call ceiling above so two
+# individually healthy calls can't trip the activity timeout and force a full
+# (expensive) two-call retry.
+ANALYSE_ACTIVITY_OPTS = MappingProxyType(
+    {
+        "start_to_close_timeout": timedelta(minutes=20),
+        "retry_policy": _LLM_RETRY_POLICY,
+    }
+)
+
 # Job-store writes are quick; short timeout with a bounded retry.
 JOB_ACTIVITY_OPTS = MappingProxyType(
     {

@@ -1,7 +1,14 @@
 """Tests for branding store (clients and brands).
 
-These tests mock ``shared.postgres.get_conn`` with a tiny dict-backed
-fake — see ``_fake_postgres.py``.
+Runs against live Postgres via ``shared.postgres.testing.real_postgres_schema``
+with ``scope="function"`` (truncate before and after each test when not under
+pytest-xdist). Skips when ``POSTGRES_HOST`` is unset. The ``real_postgres``
+marker opts this module out of the suite-wide dict-backed fake installed by
+``conftest.py``.
+
+These tests assert global table counts and are intended for the branding CI
+job / plain pytest (no ``-n``). Under xdist, truncate is skipped by the
+shared fixture — use unique row identifiers instead of this module.
 """
 
 from __future__ import annotations
@@ -15,17 +22,17 @@ from branding_team.models import (
     TeamOutput,
     WorkflowStatus,
 )
+from branding_team.postgres import SCHEMA as BRANDING_SCHEMA
 from branding_team.store import AttachConversationResult, BrandingStore
-from branding_team.tests._fake_postgres import install_fake_postgres
 from branding_team.tests.conftest import make_mission
+from shared.postgres.testing import real_postgres_schema
+
+pytestmark = [pytest.mark.integration, pytest.mark.real_postgres]
+
+_branding_schema = real_postgres_schema(BRANDING_SCHEMA, scope="function", autouse=True)
 
 
-@pytest.fixture
-def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
-    return install_fake_postgres(monkeypatch)
-
-
-def test_create_client_and_list(fake_pg: dict) -> None:
+def test_create_client_and_list() -> None:
     store = BrandingStore()
     client = store.create_client("Acme Corp")
     assert client.id.startswith("client_")
@@ -36,7 +43,7 @@ def test_create_client_and_list(fake_pg: dict) -> None:
     assert store.get_client(client.id) == client
 
 
-def test_create_brand_and_list(fake_pg: dict) -> None:
+def test_create_brand_and_list() -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
     mission = make_mission(
@@ -57,9 +64,7 @@ def test_create_brand_and_list(fake_pg: dict) -> None:
     assert store.get_brand(client.id, brand.id) == brand
 
 
-def test_create_brand_records_profile_association(
-    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_create_brand_records_profile_association(monkeypatch: pytest.MonkeyPatch) -> None:
     """create_brand links the new brand to the default user profile (best-effort)."""
     import branding_team.store as store_mod
     from user_profile import ArtifactType
@@ -79,7 +84,7 @@ def test_create_brand_records_profile_association(
     assert calls == [((ArtifactType.BRAND, "branding", brand.id), {"label": brand.name})]
 
 
-def test_get_brand_wrong_client_returns_none(fake_pg: dict) -> None:
+def test_get_brand_wrong_client_returns_none() -> None:
     store = BrandingStore()
     c1 = store.create_client("C1")
     c2 = store.create_client("C2")
@@ -93,7 +98,7 @@ def test_get_brand_wrong_client_returns_none(fake_pg: dict) -> None:
     assert store.get_brand(c2.id, brand.id) is None
 
 
-def test_update_brand(fake_pg: dict) -> None:
+def test_update_brand() -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
     mission = make_mission(
@@ -112,7 +117,7 @@ def test_update_brand(fake_pg: dict) -> None:
     assert updated.status == BrandStatus.active
 
 
-def test_append_brand_version(fake_pg: dict) -> None:
+def test_append_brand_version() -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
     mission = make_mission(
@@ -138,7 +143,7 @@ def test_append_brand_version(fake_pg: dict) -> None:
     assert updated.current_phase == BrandPhase.COMPLETE
 
 
-def test_append_brand_version_persists_current_phase(fake_pg: dict) -> None:
+def test_append_brand_version_persists_current_phase() -> None:
     """Verify that current_phase on the brand record is updated from the output."""
     store = BrandingStore()
     client = store.create_client("PhaseTest")
@@ -171,7 +176,7 @@ def test_append_brand_version_persists_current_phase(fake_pg: dict) -> None:
     assert reloaded2.current_phase == BrandPhase.COMPLETE
 
 
-def test_create_brand_for_nonexistent_client_returns_none(fake_pg: dict) -> None:
+def test_create_brand_for_nonexistent_client_returns_none() -> None:
     store = BrandingStore()
     mission = make_mission(
         company_name="XY",
@@ -182,9 +187,7 @@ def test_create_brand_for_nonexistent_client_returns_none(fake_pg: dict) -> None
     assert brand is None
 
 
-def test_delete_brand_removes_brand_and_association(
-    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_delete_brand_removes_brand_and_association(monkeypatch: pytest.MonkeyPatch) -> None:
     import branding_team.store as store_mod
     from user_profile import ArtifactType
 
@@ -207,13 +210,13 @@ def test_delete_brand_removes_brand_and_association(
     assert calls == [((ArtifactType.BRAND, brand.id), {})]
 
 
-def test_delete_brand_unknown_id_is_noop(fake_pg: dict) -> None:
+def test_delete_brand_unknown_id_is_noop() -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
     assert store.delete_brand(client.id, "brand_does_not_exist") is False
 
 
-def test_delete_brand_wrong_client_is_noop(fake_pg: dict) -> None:
+def test_delete_brand_wrong_client_is_noop() -> None:
     """delete_brand is scoped to client_id — another client can't delete it."""
     store = BrandingStore()
     owner = store.create_client("Owner")
@@ -230,7 +233,7 @@ def test_delete_brand_wrong_client_is_noop(fake_pg: dict) -> None:
     assert store.get_brand(owner.id, brand.id) is not None
 
 
-def test_brand_exists(fake_pg: dict) -> None:
+def test_brand_exists() -> None:
     """brand_exists is True for an existing brand and False for an unknown id."""
     store = BrandingStore()
     client = store.create_client("Acme")
@@ -247,7 +250,7 @@ def test_brand_exists(fake_pg: dict) -> None:
     assert store.brand_exists("brand_does_not_exist") is False
 
 
-def test_get_brand_by_id_resolves_client(fake_pg: dict) -> None:
+def test_get_brand_by_id_resolves_client() -> None:
     """get_brand_by_id returns the owning client id + brand, or None if absent."""
     store = BrandingStore()
     client = store.create_client("Acme")
@@ -268,7 +271,7 @@ def test_get_brand_by_id_resolves_client(fake_pg: dict) -> None:
     assert store.get_brand_by_id("brand_missing") is None
 
 
-def test_get_brand_names_returns_only_requested(fake_pg: dict) -> None:
+def test_get_brand_names_returns_only_requested() -> None:
     """get_brand_names maps only the requested existing ids; empty input is a no-op."""
     store = BrandingStore()
     client = store.create_client("Acme")
@@ -301,7 +304,7 @@ def test_get_brand_names_returns_only_requested(fake_pg: dict) -> None:
     assert store.get_brand_names([""]) == {}
 
 
-def test_list_clients_pagination(fake_pg: dict) -> None:
+def test_list_clients_pagination() -> None:
     """list_clients limit/offset returns non-overlapping pages within the set."""
     store = BrandingStore()
     created = [store.create_client(f"Client {i}") for i in range(5)]
@@ -316,7 +319,7 @@ def test_list_clients_pagination(fake_pg: dict) -> None:
     assert ids <= {c.id for c in created}
 
 
-def test_pagination_rejects_invalid_args(fake_pg: dict) -> None:
+def test_pagination_rejects_invalid_args() -> None:
     """Both list methods reject non-positive limits and negative offsets."""
     store = BrandingStore()
     for bad in (dict(limit=0), dict(limit=-1), dict(offset=-1)):
@@ -326,7 +329,7 @@ def test_pagination_rejects_invalid_args(fake_pg: dict) -> None:
             store.list_brands_for_client("client_x", **bad)
 
 
-def test_list_brands_for_client_pagination(fake_pg: dict) -> None:
+def test_list_brands_for_client_pagination() -> None:
     """list_brands_for_client honors limit/offset for a client's brands."""
     store = BrandingStore()
     client = store.create_client("Acme")
@@ -347,7 +350,7 @@ def test_list_brands_for_client_pagination(fake_pg: dict) -> None:
     assert len(page) == 1
 
 
-def test_attach_conversation_success(fake_pg: dict) -> None:
+def test_attach_conversation_success() -> None:
     """attach_conversation atomically links an unattached conversation and the
     brand's conversation_id, updating both rows in one call."""
     store = BrandingStore()
@@ -380,7 +383,7 @@ def test_attach_conversation_success(fake_pg: dict) -> None:
     assert state.mission.company_name == "Acme Rebrand"
 
 
-def test_attach_conversation_unknown_conversation(fake_pg: dict) -> None:
+def test_attach_conversation_unknown_conversation() -> None:
     """attach_conversation reports CONVERSATION_NOT_FOUND without touching the brand."""
     store = BrandingStore()
     client = store.create_client("Acme")
@@ -395,7 +398,7 @@ def test_attach_conversation_unknown_conversation(fake_pg: dict) -> None:
     assert store.get_brand(client.id, brand.id).conversation_id is None
 
 
-def test_attach_conversation_already_attached(fake_pg: dict) -> None:
+def test_attach_conversation_already_attached() -> None:
     """attach_conversation reports ALREADY_ATTACHED and leaves both rows unchanged
     when the conversation is already linked to a different brand."""
     store = BrandingStore()
@@ -415,7 +418,7 @@ def test_attach_conversation_already_attached(fake_pg: dict) -> None:
     assert store.get_brand(client.id, target_brand.id).conversation_id is None
 
 
-def test_attach_conversation_reattaching_same_brand_is_ok(fake_pg: dict) -> None:
+def test_attach_conversation_reattaching_same_brand_is_ok() -> None:
     """Re-attaching a conversation to the brand it's already on is allowed
     (not a conflict) and refreshes the mission."""
     store = BrandingStore()
@@ -433,14 +436,10 @@ def test_attach_conversation_reattaching_same_brand_is_ok(fake_pg: dict) -> None
     assert updated_brand.conversation_id == cid
 
 
-def test_attach_conversation_unknown_brand(fake_pg: dict) -> None:
+def test_attach_conversation_unknown_brand() -> None:
     """attach_conversation reports BRAND_NOT_FOUND when the brand row doesn't
-    exist for the given client.
-
-    The rollback guarantee (the conversation write undoing when the brand
-    patch misses) is a real-transaction property the dict-backed fake can't
-    model — it's covered against a live Postgres in
-    ``test_store_real_postgres.py::test_attach_conversation_real_postgres``.
+    exist for the given client, and rolls back the conversation write so the
+    conversation is not left pointing at a missing brand id.
     """
     store = BrandingStore()
     conv_store = BrandingConversationStore()
@@ -452,3 +451,4 @@ def test_attach_conversation_unknown_brand(fake_pg: dict) -> None:
     )
     assert result is AttachConversationResult.BRAND_NOT_FOUND
     assert updated_brand is None
+    assert conv_store.get_conversation_brand_id(cid) is None
