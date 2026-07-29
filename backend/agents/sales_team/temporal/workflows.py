@@ -72,7 +72,15 @@ IO_RETRY = RetryPolicy(
 _IO_TIMEOUT = timedelta(minutes=2)
 _FINALIZE_TIMEOUT = timedelta(minutes=5)
 _PROSPECTING_TIMEOUT = timedelta(minutes=45)
-_PER_PROSPECT_TIMEOUT = timedelta(minutes=30)
+# Per-prospect stages that run a critic (outreach / proposal) now issue two
+# sequential LLM calls per critique — a think=True reasoning pass then a
+# think=False formatting pass, via complete_validated_via_reasoning — and the
+# outreach critic runs inside a refinement loop, so a stage can make several
+# such pairs. Doubled from the original single-call 30-minute budget so two
+# individually healthy calls can't trip the ceiling; on timeout the
+# ``gather(return_exceptions=True)`` fan-out silently drops that prospect, so
+# a too-tight budget costs work rather than surfacing an error.
+_PER_PROSPECT_TIMEOUT = timedelta(minutes=60)
 _HEARTBEAT_TIMEOUT = timedelta(seconds=_act.HEARTBEAT_TIMEOUT_S)
 
 

@@ -72,18 +72,50 @@ from sales_team.orchestrator import (
 
 
 class CannedLLMClient(LLMClient):
-    """LLMClient that returns pre-programmed dicts from a list, in order.
+    """LLMClient test double for the two-pass reasoning pattern.
 
-    Each call to ``complete_json`` pops the next response off the queue and
-    returns it as a dict. Tests program expected responses in setup, then
-    assert on agent output. This gives richer control than the shared
-    ``DummyLLMClient`` whose pattern-match fallbacks don't understand sales
-    prompts.
+    ``complete()`` (the think=True reasoning pass) returns a harmless
+    placeholder string and records the call in ``reasoning_calls`` — it
+    never touches the programmed response queue. ``complete_json()`` (the
+    think=False formatting pass) pops the next response off the queue,
+    returns it as a dict, and records the call in ``calls``. Tests program
+    expected ``complete_json`` responses in setup, then assert on agent
+    output. This gives richer control than the shared ``DummyLLMClient``
+    whose pattern-match fallbacks don't understand sales prompts.
     """
 
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+    ) -> str:
+        # Some callers now run a think=True reasoning pass (complete_json_via_reasoning /
+        # complete_validated_via_reasoning) before the real complete_json call. Override
+        # the LLMClient base's default (which would otherwise route through complete_json
+        # and consume a queued response) with a harmless placeholder — ``self.calls`` /
+        # ``self._responses`` keep tracking only the complete_json calls these tests assert on.
+        # ``reasoning_calls`` records this pass separately for tests that verify it ran.
+        self.reasoning_calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "temperature": temperature,
+                "objective": objective,
+            }
+        )
+        return "Reasoning: proceeding as configured by the test fixture."
 
     def complete_json(
         self,
@@ -93,10 +125,17 @@ class CannedLLMClient(LLMClient):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: bool = False,
+        objective: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         self.calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "temperature": temperature}
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "temperature": temperature,
+                "think": think,
+                "objective": objective,
+            }
         )
         if not self._responses:
             raise AssertionError(
@@ -303,9 +342,12 @@ class TestOutreachVariantValidator:
 
 
 class TestOutreachSequenceConfidenceGate:
+    """Gates outreach variants when dossier confidence is below threshold."""
+
     def test_drops_non_soft_opener_when_dossier_confidence_low(
         self, sample_prospect: Prospect
     ) -> None:
+        """Non-soft-opener variants are dropped when dossier confidence is low."""
         seq = OutreachSequence.model_validate(
             {
                 "prospect": sample_prospect.model_dump(),
@@ -402,7 +444,10 @@ def _prospect_payload(company: str, score: float = 0.8) -> Dict[str, Any]:
 
 
 class TestProspectorAgent:
+    """Prospector agent returns typed prospect lists from canned LLM output."""
+
     def test_prospect_returns_typed_list(self, sample_icp: IdealCustomerProfile) -> None:
+        """``prospect`` returns a list of ``Prospect`` instances."""
         client = CannedLLMClient(
             [{"prospects": [_prospect_payload("Acme"), _prospect_payload("Beta")]}]
         )
@@ -412,7 +457,9 @@ class TestProspectorAgent:
         assert [p.company_name for p in result.prospects] == ["Acme", "Beta"]
         assert "Sales Development Representative" in client.calls[0]["system_prompt"]
 
-    def test_prospect_companies_uses_same_schema(self, sample_icp: IdealCustomerProfile) -> None:
+    def test_prospect_companies_returns_typed_prospect_list(
+        self, sample_icp: IdealCustomerProfile
+    ) -> None:
         client = CannedLLMClient([{"prospects": [_prospect_payload("GlobalCo")]}])
         agent = ProspectorAgent(llm_client=client)
         result = agent.prospect_companies(sample_icp.model_dump_json(), "ProductX", "vp", 3, "ctx")
@@ -793,6 +840,7 @@ class TestLearningEngine:
         assert result.total_outcomes_analyzed == 0
         assert saved["insights"] is result
         assert client.calls == []
+        assert client.reasoning_calls == []
 
     def test_refresh_builds_insights_from_llm_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
         saved: Dict[str, Any] = {}
@@ -829,6 +877,22 @@ class TestLearningEngine:
         assert insights.winning_patterns == ["multi-threaded"]
         assert insights.insights_version == 1
         assert insights.generated_at
+
+        # Two-pass split: a think=True reasoning call ran before the single
+        # programmed think=False formatting call, and the formatting call's
+        # prompt carries the reasoning pass's prose forward (not the raw
+        # stage/deal records, which only the reasoning call receives).
+        assert len(client.reasoning_calls) == 1
+        assert client.reasoning_calls[0]["think"] is True
+        assert client.reasoning_calls[0]["temperature"] == 0.0
+        assert "Acme" in client.reasoning_calls[0]["prompt"]
+        assert len(client.calls) == 1
+        assert client.calls[0]["temperature"] == 0.0
+        assert client.calls[0]["think"] is False
+        assert (
+            "Reasoning: proceeding as configured by the test fixture" in client.calls[0]["prompt"]
+        )
+        assert "Acme" not in client.calls[0]["prompt"]
 
 
 # ---------------------------------------------------------------------------

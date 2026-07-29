@@ -996,6 +996,45 @@ def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
 
 def test_lifespan_runs_cleanly(monkeypatch) -> None:
     """Entering + exiting the TestClient context runs the lifespan hook end-to-end."""
+    monkeypatch.setattr(api_main, "_start_temporal_worker_backstop", lambda: None)
     with TestClient(api_main.app) as c:
         r = c.get("/health")
         assert r.status_code == 200
+
+
+def test_startup_backstop_starts_temporal_worker(monkeypatch) -> None:
+    """Standalone uvicorn runs need a lifespan backstop so TEMPORAL_ADDRESS-set
+    processes still start the worker after import stopped auto-booting."""
+    from agent_provisioning_team.temporal import worker as worker_mod
+
+    started: list[bool] = []
+    monkeypatch.setattr(
+        worker_mod,
+        "start_agent_provisioning_temporal_worker_thread",
+        lambda: started.append(True),
+    )
+
+    api_main._start_temporal_worker_backstop()
+    assert started == [True]
+
+
+def test_startup_backstop_swallows_worker_failure(monkeypatch) -> None:
+    """A worker-start failure in the backstop must not abort app boot."""
+    from agent_provisioning_team.temporal import worker as worker_mod
+
+    def _boom() -> bool:
+        raise RuntimeError("temporal down")
+
+    monkeypatch.setattr(worker_mod, "start_agent_provisioning_temporal_worker_thread", _boom)
+    api_main._start_temporal_worker_backstop()
+
+
+def test_lifespan_invokes_temporal_worker_backstop(monkeypatch) -> None:
+    """Entering the TestClient context must call the Temporal worker backstop."""
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        api_main, "_start_temporal_worker_backstop", lambda: calls.append(True)
+    )
+    with TestClient(api_main.app):
+        pass
+    assert calls == [True]

@@ -299,16 +299,24 @@ def test_ask_falls_back_to_thread_when_temporal_disabled():
 
 
 class _FakeLLM:
-    """Offline LLM stub: canned JSON for analysis, canned text for the rest."""
+    """Offline LLM stub: canned text for the reasoning pass (``complete``)
+    and canned JSON for the formatting pass (``complete_json``).
+    """
 
     def __init__(self, *, json_return: dict | None = None, text_return: str = "TXT") -> None:
         self._json = json_return or {}
         self._text = text_return
+        self.complete_calls = 0
+        self.complete_json_calls = 0
+        self.last_format_prompt = ""
 
-    def complete_json(self, *_a, **_k) -> dict:
+    def complete_json(self, prompt="", *_a, **_k) -> dict:
+        self.complete_json_calls += 1
+        self.last_format_prompt = prompt
         return self._json
 
     def complete(self, *_a, **_k) -> str:
+        self.complete_calls += 1
         return self._text
 
 
@@ -399,6 +407,12 @@ def test_analyse_activity_direct_answer():
 
     assert out["can_answer_directly"] is True
     assert out["direct_answer"] == "the answer"
+    # Two-call split: exactly one reasoning pass (.complete) feeding exactly
+    # one formatting pass (.complete_json), and the reasoning output (TXT,
+    # this fake's canned text_return) reaches the formatting prompt.
+    assert fake.complete_calls == 1
+    assert fake.complete_json_calls == 1
+    assert "TXT" in fake.last_format_prompt
 
 
 def test_analyse_activity_injects_knowledge_summary():
@@ -409,10 +423,20 @@ def test_analyse_activity_injects_knowledge_summary():
     captured: dict = {}
 
     class _CapturingLLM(_FakeLLM):
-        def complete_json(self, user, *a, **k):
+        # The knowledge_summary now reaches the analysis reasoning-pass
+        # system prompt (the .complete() call), not the formatting call's.
+        def complete(self, user, *a, **k):
+            self.complete_calls += 1
             captured["system"] = k.get("system_prompt", "")
+            return "TXT"
+
+        def complete_json(self, prompt="", *a, **k):
+            self.complete_json_calls += 1
+            captured["format_system"] = k.get("system_prompt", "") or ""
+            captured["format_prompt"] = prompt
             return {"can_answer_directly": True, "direct_answer": "ok", "confidence": 0.5}
 
+    fake = _CapturingLLM()
     payload = AnalysePayload(
         spec=_spec(),
         original_query="q",
@@ -421,16 +445,23 @@ def test_analyse_activity_injects_knowledge_summary():
         max_depth=3,
     ).model_dump(mode="json")
 
-    with patch.object(activities, "_build_llm", return_value=_CapturingLLM()):
+    with patch.object(activities, "_build_llm", return_value=fake):
         out = _run_activity(activities.analyse_activity, payload)
 
     assert out["can_answer_directly"] is True
+    assert fake.complete_calls == 1
+    assert fake.complete_json_calls == 1
     # The workflow-rendered summary reaches the prompt verbatim — no per-node KB
     # is shipped to the activity.
     assert "an earlier finding worth reusing" in captured["system"]
+    # ...and never leaks into the formatting call, which only sees the
+    # reasoning pass's prose.
+    assert "an earlier finding worth reusing" not in captured["format_system"]
+    assert "an earlier finding worth reusing" not in captured["format_prompt"]
 
 
 def test_analyse_activity_decomposition():
+    """Decomposition strategy yields skill_requirements and uses the two-call split."""
     from deepthought.temporal import activities
     from deepthought.temporal.phase_models import AnalysePayload
 
@@ -451,9 +482,13 @@ def test_analyse_activity_decomposition():
 
     assert out["can_answer_directly"] is False
     assert len(out["skill_requirements"]) == 1
+    assert fake.complete_calls == 1
+    assert fake.complete_json_calls == 1
+    assert "TXT" in fake.last_format_prompt
 
 
 def test_force_direct_answer_activity_returns_text():
+    """force_direct_answer_activity returns the LLM's forced-answer text."""
     from deepthought.temporal import activities
     from deepthought.temporal.phase_models import ForceDirectAnswerPayload
 
@@ -465,6 +500,7 @@ def test_force_direct_answer_activity_returns_text():
 
 
 def test_deliberate_activity_returns_notes():
+    """deliberate_activity returns the LLM deliberation notes string."""
     from deepthought.temporal import activities
     from deepthought.temporal.phase_models import ChildSummary, DeliberatePayload
 
@@ -482,6 +518,7 @@ def test_deliberate_activity_returns_notes():
 
 
 def test_synthesise_activity_returns_answer():
+    """synthesise_activity returns the LLM's synthesised answer string."""
     from deepthought.temporal import activities
     from deepthought.temporal.phase_models import ChildSummary, SynthesisePayload
 

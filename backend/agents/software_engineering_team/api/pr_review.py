@@ -487,7 +487,8 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           the PR did not touch, per its own line/file — see
           :func:`_partition_review_issues`) is NOT commented and is serialized
           into ``review_summary["pending_issue_proposals"]`` for a human to
-          optionally file as a GitHub issue; however, if
+          optionally file as a GitHub issue, and it drives neither the review
+          event nor the "no issues" reaction; however, if
           :func:`_partition_review_issues` proves the finding lies on a line
           the PR actually ADDED, the pre_existing tag is overridden back to a
           PR finding and the finding is commented like any other. Every other finding IS

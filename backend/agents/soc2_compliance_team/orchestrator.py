@@ -26,9 +26,12 @@ T = TypeVar("T")
 # call, so these mirror the equivalent Temporal-mode ceilings
 # (temporal/workflows.py's AUDIT_TIMEOUT / REPORT_TIMEOUT) rather than the
 # tighter 180s the deleted Strands graph used, which risked false timeouts on
-# legitimately long (e.g. thinking-mode) LLM calls.
-_CRITERIA_TIMEOUT_SECONDS = 30 * 60
-_REPORT_TIMEOUT_SECONDS = 30 * 60
+# legitimately long (e.g. thinking-mode) LLM calls. Both criteria audits and
+# report synthesis now issue two sequential LLM calls (reasoning + formatting
+# via complete_json_via_reasoning), doubled from 30m to 60m to match
+# AUDIT_TIMEOUT / REPORT_TIMEOUT.
+_CRITERIA_TIMEOUT_SECONDS = 60 * 60
+_REPORT_TIMEOUT_SECONDS = 60 * 60
 
 
 def _run_with_timeout(fn: Callable[[], T], timeout_seconds: float, timeout_message: str) -> T:
@@ -42,6 +45,7 @@ def _run_with_timeout(fn: Callable[[], T], timeout_seconds: float, timeout_messa
           bounds the CALLER's wait (unblocking the request), not the
           in-flight LLM call itself (which is separately bounded by
           ``llm_service``'s own per-request timeout).
+        - Propagates any exception raised by ``fn()`` unchanged.
     """
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="soc2-pipeline-step")
     future = pool.submit(fn)

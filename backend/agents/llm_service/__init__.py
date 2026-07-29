@@ -45,8 +45,19 @@ from .interface import (
     LLMUnreachableAfterRetriesError,
 )
 from .pricing import estimate_cost_usd
+
+# ``strands_provider`` imports ``strands.models.model`` at module scope, so this
+# import is EAGER: getting ``get_strands_model`` / this cache-clear helper from
+# ``llm_service`` triggers the real ``strands`` package import immediately, not
+# lazily. Only ``LLMClientModel`` and ``run_json_via_strands`` (below, from the
+# separate ``strands_adapter`` module) are actually deferred via PEP 562
+# ``__getattr__``.
 from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
-from .structured import complete_validated
+from .structured import (
+    complete_json_via_reasoning,
+    complete_validated,
+    complete_validated_via_reasoning,
+)
 from .telemetry import (
     get_recent_calls,
     get_usage_summary,
@@ -65,16 +76,20 @@ from .util import (
 # teams in this monorepo ship with a narrower requirements file that does NOT
 # include strands, and importing the adapter module eagerly would force every
 # team to install it just to use ``llm_service``. Resolve ``LLMClientModel``
-# and ``get_strands_model`` lazily via PEP 562 ``__getattr__`` so they only
+# and ``run_json_via_strands`` lazily via PEP 562 ``__getattr__`` so they only
 # trigger the strands import when a consumer actually asks for them.
+# NOTE: this lazy seam does NOT cover ``get_strands_model`` — that name is
+# imported eagerly above from ``.strands_provider``, which itself imports
+# ``strands`` at module scope. This module therefore already forces a real
+# ``strands`` import on import, regardless of what a consumer asks for; the
+# lazy seam below only avoids a *second*, redundant such import.
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .strands_adapter import (  # noqa: F401
         LLMClientModel,
-        get_strands_model,
         run_json_via_strands,
     )
 
-_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "get_strands_model", "run_json_via_strands"}
+_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "run_json_via_strands"}
 
 
 def __getattr__(name: str) -> Any:
@@ -103,6 +118,8 @@ __all__ = [
     "bind_request_id",
     "complete_json_with_tool_loop",
     "complete_validated",
+    "complete_json_via_reasoning",
+    "complete_validated_via_reasoning",
     "call_llm_with_retries",
     "call_llm_with_retries_async",
     "compact_text",
