@@ -262,15 +262,35 @@ def test_search_repository_skips_a_single_unreadable_file() -> None:
     assert truncated is True
 
 
+class _PartlyUnreadableReader:
+    """Lists every path but returns None for a configured unreadable subset."""
+
+    def __init__(self, files: Dict[str, str], unreadable: set[str]):
+        self._files = files
+        self._unreadable = unreadable
+
+    def list_files(self):
+        return list(self._files)
+
+    def read_file(self, path: str):
+        if path in self._unreadable:
+            return None
+        return self._files.get((path or "").strip())
+
+
 def test_search_repository_skips_files_the_reader_cannot_read() -> None:
     """A path the reader lists but returns None for (fail-safe RepoReader
     contract) is skipped rather than crashing the scan, but -- same as the
     raising case -- must mark the scan truncated since that file's content
     was never actually inspected (e.g. a shared GitHubRepoReader fetch budget
     already exhausted by an earlier pass would surface exactly this way)."""
-    index = CodebaseIndex(files={}, repo_reader=_FakeReader({"present.py": "needle here"}))
-    # "missing.py" is not in the reader's map, so read_file returns None for it.
-    index.repo_reader._files["missing.py"] = None
+    index = CodebaseIndex(
+        files={},
+        repo_reader=_PartlyUnreadableReader(
+            {"present.py": "needle here", "missing.py": ""},
+            unreadable={"missing.py"},
+        ),
+    )
     matches, truncated = _search_repository(index, "needle")
     assert matches == [("present.py", 1, "needle here")]
     assert truncated is True

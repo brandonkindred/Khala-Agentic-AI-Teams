@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from strands import Agent
 
@@ -170,8 +170,8 @@ def _run_pass(
 def _issues_from_half(
     raw_list: object,
     *,
-    parse,
-    validate,
+    parse: Callable[[object], List[CodeReviewIssue]],
+    validate: Callable[..., List[CodeReviewIssue]],
     index: CodebaseIndex,
     pre_numbered: bool,
 ) -> List[CodeReviewIssue]:
@@ -184,14 +184,25 @@ def _issues_from_half(
     Postconditions:
         - Returns ``[]`` when ``raw_list`` is missing or not a list (that half
           produced nothing usable) without raising.
+        - Returns ``[]`` for *this half only* when ``parse`` / ``validate`` raise
+          (a malformed half must not discard findings from the other half).
         - Otherwise returns the parse+validate result for that half alone.
     """
     if not isinstance(raw_list, list):
         return []
-    findings = parse({"findings": raw_list})
-    if findings:
-        findings = validate(index, findings, pre_numbered=pre_numbered)
-    return findings
+    try:
+        findings = parse({"findings": raw_list})
+        if findings:
+            findings = validate(index, findings, pre_numbered=pre_numbered)
+        return findings
+    except Exception as exc:  # noqa: BLE001 - per-half fail-safe
+        logger.warning(
+            "MergedArchitectureSideEffectPass: half failed (%s: %s); "
+            "returning no findings for this half",
+            type(exc).__name__,
+            exc,
+        )
+        return []
 
 
 def _build_prompt(

@@ -2794,8 +2794,8 @@ def test_coordinator_runs_with_submission_cache_disabled(monkeypatch) -> None:
 def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
     """The submission is parsed into a ``CodebaseIndex`` exactly once per
     ``run_coordinator`` call, and the same instance is forwarded to both the
-    false-positive filter and the architecture-consistency pass (rather than
-    each independently rebuilding it from the same input)."""
+    false-positive filter and the merged architecture/side-effect pass (rather
+    than each independently rebuilding it from the same input)."""
     import code_review_agent.coordinator as coord
     from code_review_agent.false_positive_filter import CodebaseIndex
 
@@ -2974,14 +2974,24 @@ class _NonDummyLLMClient(LLMClient, Model):
         return self._inner.get_max_context_tokens()
 
 
+def _noop_filter(llm, input_data, issues, repo_reader=None, index=None):
+    """Shared stub: return findings unchanged (false-positive filter no-op)."""
+    return list(issues)
+
+
+def _noop_merged(llm, input_data, repo_reader=None, index=None):
+    """Shared stub: merged architecture/side-effect pass finds nothing."""
+    return [], []
+
+
 def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None:
-    """With a non-``DummyLLMClient`` ``llm``, the three tail passes run at once:
-    each stub records its arrival then blocks on a 3-party barrier, so the call
-    only completes if all three are in flight together -- a fallback to
-    sequential execution would deadlock the first stub and the test would fail
-    on the barrier timeout. The recorded arrivals additionally prove, without
-    relying on that implicit timeout/exception behavior, that all three stubs
-    actually ran."""
+    """With a non-``DummyLLMClient`` ``llm``, the two tail passes (false-positive
+    filter and merged architecture/side-effect pass) run concurrently: each stub
+    records its arrival then blocks on a 2-party barrier, so the call only
+    completes if both are in flight together -- a fallback to sequential
+    execution would deadlock the first stub and the test would fail on the
+    barrier timeout. The recorded arrivals additionally prove, without relying
+    on that implicit timeout/exception behavior, that both stubs actually ran."""
     import code_review_agent.coordinator as coord
 
     arrivals: list[str] = []
@@ -3013,8 +3023,8 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
         )
     finally:
         # Leaves no party waiting on the barrier even if run_coordinator raises
-        # before all three stubs reach it, so a failure here can't wedge a
-        # later test sharing the same worker process.
+        # before both stubs reach it, so a failure here can't wedge a later
+        # test sharing the same worker process.
         barrier.abort()
 
     assert isinstance(result, CodeReviewOutput)
@@ -3072,9 +3082,9 @@ def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch
 def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypatch) -> None:
     """The concurrent branch (non-``DummyLLMClient`` ``llm``) and the sequential
     branch (``DummyLLMClient``) must produce a byte-identical merged
-    ``CodeReviewOutput`` for the same input -- the tail passes are independent
-    and additive, so fanning them out must not change the result, only the
-    wall-clock order in which they run."""
+    ``CodeReviewOutput`` for the same input -- the two tail passes are
+    independent and additive, so fanning them out must not change the result,
+    only the wall-clock order in which they run."""
     import code_review_agent.coordinator as coord
     from code_review_agent.models import CodeReviewIssue
 
@@ -3091,13 +3101,10 @@ def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypa
         description="bar() no longer raises ValueError; app/caller.py still catches it.",
     )
 
-    def _filter(llm, input_data, issues, repo_reader=None, index=None):
-        return list(issues)
-
     def _merged(llm, input_data, repo_reader=None, index=None):
         return [arch_issue], [side_effect_issue]
 
-    monkeypatch.setattr(coord, "filter_false_positives", _filter)
+    monkeypatch.setattr(coord, "filter_false_positives", _noop_filter)
     monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
 
     script = [

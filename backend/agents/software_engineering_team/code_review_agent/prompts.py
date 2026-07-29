@@ -75,9 +75,10 @@ Include exactly one verdict per finding index. Do not omit any, and do not add i
 # since it must describe the combined two-key schema instead of either
 # pass's standalone one-key schema. See models.py's
 # MergedArchitectureSideEffectResponse for the corresponding merged schema
-# design; neither is wired into architecture_consistency_pass.py,
-# side_effect_impact_pass.py, coordinator.py, or temporal/workflows.py yet --
-# that wiring is tracked separately.
+# design. The merged prompt is wired into coordinator.py via
+# merged_architecture_side_effect_pass (which splits findings back into the
+# architecture and side-effect lists). The standalone pass modules and
+# temporal/workflows.py remain on the separate Temporal path.
 # ---------------------------------------------------------------------------
 
 _ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running a whole-codebase check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could not check whether the change fits the established system architecture, or whether it duplicates a capability that already exists elsewhere in the repository. That is your one job here.

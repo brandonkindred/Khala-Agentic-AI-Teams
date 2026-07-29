@@ -19,7 +19,7 @@
 - Do not modify Temporal activities/workflows in this plan.
 - Do not delete `architecture_consistency_pass.py` or `side_effect_impact_pass.py`.
 - Prefer reusing existing `_parse_findings` / `_validate_findings` / `_build_side_effect_tools` over forking logic.
-- Run tests via the repo `backend/.venv/bin/python -m pytest` from the worktree `backend/` directory.
+- Run tests from the worktree `backend/` directory via `.venv/bin/python -m pytest` (or from the repo root via `backend/.venv/bin/python -m pytest`).
 - Never mention issue numbers in commit messages.
 
 ## File map
@@ -71,12 +71,11 @@ def test_architecture_body_allows_review_without_formal_document():
 
 ```bash
 cd backend
-../../backend/.venv/bin/python -m pytest \
+.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_merged_review_prompt.py::test_architecture_body_allows_review_without_formal_document -v
 ```
 
-Use the absolute venv path if needed:
-`backend/.venv/bin/python`
+From the repo root (without `cd backend`), use `backend/.venv/bin/python` instead.
 
 Expected: FAIL (phrase absent from current body).
 

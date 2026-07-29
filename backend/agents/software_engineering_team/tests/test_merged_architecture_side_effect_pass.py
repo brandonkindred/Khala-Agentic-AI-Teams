@@ -139,6 +139,48 @@ def test_missing_half_key_does_not_discard_the_other_half() -> None:
     assert side == []
 
 
+def test_half_parse_failure_does_not_discard_the_other_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising validate/parse on one half must not wipe valid findings from the other."""
+    import code_review_agent.side_effect_impact_pass as side_pass
+
+    class _Partial(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "crosses a service boundary",
+                            "suggestion": "keep the call in the application layer",
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "breaks a caller",
+                            "suggestion": "update the caller",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    def _boom(*_a, **_k):
+        raise ValueError("malformed side-effect half")
+
+    monkeypatch.setattr(side_pass, "validate_findings", _boom)
+    arch, side = find_architecture_and_side_effect_issues(_Partial(), _input())
+    assert len(arch) == 1
+    assert arch[0].category == "architecture"
+    assert side == []
+
+
 def test_fails_safe_on_non_object_reply() -> None:
     class _Gibberish(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
