@@ -81,7 +81,9 @@ def _code_review_verify_model_pin() -> str:
     provider-list entry).
 
     Preconditions: ``AGENT_DEFAULT_MODELS`` contains ``code_review_verify``.
-    Postconditions: returns a non-empty model id string. Never raises.
+    Postconditions: returns a non-empty model id string when the precondition
+        holds. Raises ``KeyError`` if ``code_review_verify`` is absent from
+        ``AGENT_DEFAULT_MODELS`` (precondition violation).
     """
     per_agent = (os.environ.get(f"{ENV_LLM_MODEL}_{_VERIFY_AGENT_KEY}") or "").strip()
     if per_agent:

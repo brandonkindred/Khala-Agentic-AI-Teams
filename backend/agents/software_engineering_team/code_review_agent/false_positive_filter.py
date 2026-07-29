@@ -596,8 +596,9 @@ def _find_heuristic_function_at_line(
         - ``path`` is a non-empty string used only for display.
 
     Postconditions:
-        - Returns the best-guess start line and advises using ``read_file`` for
-          the precise construct name.
+        - Returns a descriptive message naming the best-guess construct start
+          line (not the raw integer) and advising ``read_file`` for the precise
+          construct name.
         - Returns a "no construct found" message (never raises) when no
           column-0 declaration precedes ``line_number``.
     """
