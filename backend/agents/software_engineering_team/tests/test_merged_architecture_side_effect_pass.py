@@ -111,11 +111,38 @@ def test_fails_safe_on_llm_error() -> None:
     assert side == []
 
 
-def test_fails_safe_on_unparsable_or_missing_key() -> None:
+def test_missing_half_key_does_not_discard_the_other_half() -> None:
+    """A missing/malformed sibling key must not wipe valid findings from the
+    other half — halves are validated independently."""
+
+    class _Partial(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "bypasses the repository layer",
+                            "suggestion": "use the repository",
+                        }
+                    ]
+                    # side_effect_findings deliberately omitted
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_Partial(), _input())
+    assert len(arch) == 1
+    assert arch[0].category == "architecture"
+    assert side == []
+
+
+def test_fails_safe_on_non_object_reply() -> None:
     class _Gibberish(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
-                return {"architecture_findings": []}  # missing side_effect_findings
+                return "not even a dict-shaped reply"  # type: ignore[return-value]
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     arch, side = find_architecture_and_side_effect_issues(_Gibberish(), _input())
@@ -176,3 +203,49 @@ def test_discards_disabled_half_when_only_one_flag_on(monkeypatch: pytest.Monkey
     assert arch == []
     assert len(side) == 1
     assert side[0].category == "documentation"
+
+
+def test_skips_side_effect_half_when_pre_numbered() -> None:
+    """Pre-numbered hunk mode keeps architecture findings but must not emit
+    side-effect findings (same guard as the standalone side-effect pass)."""
+    prompts: list = []
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "refactor",
+                            "file_path": "app/main.py",
+                            "description": "duplicates an existing helper",
+                            "suggestion": "reuse the helper",
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "should be discarded in pre_numbered mode",
+                            "suggestion": "n/a",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
+            task_description="wire up bar",
+            pre_numbered=True,
+        ),
+    )
+    assert len(prompts) == 1
+    assert len(arch) == 1
+    assert arch[0].category == "refactor"
+    assert side == []

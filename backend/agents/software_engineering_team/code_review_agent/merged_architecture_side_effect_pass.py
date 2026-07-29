@@ -35,11 +35,7 @@ from . import side_effect_impact_pass as side_pass
 from .architecture_context import render_architecture_context
 from .false_positive_filter import CodebaseIndex, _code_fence_for
 from .model_resolution import resolve_code_review_model
-from .models import (
-    CodeReviewInput,
-    CodeReviewIssue,
-    MergedArchitectureSideEffectResponse,
-)
+from .models import CodeReviewInput, CodeReviewIssue
 from .profiles import ReviewProfile
 from .prompts import MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT
 from .repo_reader import RepoReader
@@ -64,16 +60,22 @@ def find_architecture_and_side_effect_issues(
           ``repo_reader``.
 
     Postconditions:
-        - Returns ``([], [])`` with no LLM call when both env flags are off,
-          profile is not ``CODE_REVIEW``, or there are no readable files.
+        - Returns ``([], [])`` with no LLM call when both halves are disabled
+          (env flags off, or side-effect disabled by ``pre_numbered`` with
+          architecture also off), profile is not ``CODE_REVIEW``, or there are
+          no readable files.
         - Otherwise returns two lists of NEW ``CodeReviewIssue``s
           (architecture/refactor and side-effects/documentation respectively),
           each validated like the corresponding standalone pass; never raises.
-        - When only one env flag is on, still makes the merged call but returns
-          ``[]`` for the disabled half.
+        - When only one half is enabled, still makes the merged call but returns
+          ``[]`` for the disabled half. ``pre_numbered`` forces the side-effect
+          half off (same guard as the standalone side-effect pass).
     """
     arch_on = env_flag_enabled(_ARCH_ENV)
-    side_on = env_flag_enabled(_SIDE_ENV)
+    # Mirror ``find_side_effect_impact_issues``: pre-numbered hunk mode only has
+    # partial file excerpts, so caller-impact analysis must not run (architecture
+    # half may still proceed).
+    side_on = env_flag_enabled(_SIDE_ENV) and not input_data.pre_numbered
     if not arch_on and not side_on:
         return [], []
     if input_data.profile != ReviewProfile.CODE_REVIEW:
@@ -131,26 +133,32 @@ def _run_pass(
     )
     raw = str(agent(prompt)).strip()
     data = json.loads(raw)
-    parsed = MergedArchitectureSideEffectResponse.model_validate(data)
-
+    # Validate each half independently. A malformed / missing key on one side
+    # must not discard valid findings from the other (the Agent+tools path
+    # cannot use ``complete_validated``'s corrective retry the way chunk review
+    # does, so per-half salvage matches the standalone passes' ``_parse_findings``
+    # posture instead of all-or-nothing ``MergedArchitectureSideEffectResponse``
+    # validation).
     architecture_findings: List[CodeReviewIssue] = []
     side_effect_findings: List[CodeReviewIssue] = []
+    if not isinstance(data, dict):
+        raise TypeError(f"merged pass expected a JSON object, got {type(data).__name__}")
     if arch_on:
-        architecture_findings = arch_pass._parse_findings(
-            {"findings": [f.model_dump() for f in parsed.architecture_findings]}
+        architecture_findings = _issues_from_half(
+            data.get("architecture_findings"),
+            parse=arch_pass._parse_findings,
+            validate=arch_pass._validate_findings,
+            index=index,
+            pre_numbered=input_data.pre_numbered,
         )
-        if architecture_findings:
-            architecture_findings = arch_pass._validate_findings(
-                index, architecture_findings, pre_numbered=input_data.pre_numbered
-            )
     if side_on:
-        side_effect_findings = side_pass._parse_findings(
-            {"findings": [f.model_dump() for f in parsed.side_effect_findings]}
+        side_effect_findings = _issues_from_half(
+            data.get("side_effect_findings"),
+            parse=side_pass._parse_findings,
+            validate=side_pass._validate_findings,
+            index=index,
+            pre_numbered=input_data.pre_numbered,
         )
-        if side_effect_findings:
-            side_effect_findings = side_pass._validate_findings(
-                index, side_effect_findings, pre_numbered=input_data.pre_numbered
-            )
     if architecture_findings or side_effect_findings:
         logger.info(
             "MergedArchitectureSideEffectPass: found %s architecture and %s side-effect finding(s)",
@@ -158,6 +166,33 @@ def _run_pass(
             len(side_effect_findings),
         )
     return architecture_findings, side_effect_findings
+
+
+def _issues_from_half(
+    raw_list: object,
+    *,
+    parse,
+    validate,
+    index: CodebaseIndex,
+    pre_numbered: bool,
+) -> List[CodeReviewIssue]:
+    """Coerce one merged-response array into validated ``CodeReviewIssue``s.
+
+    Preconditions:
+        - ``parse`` / ``validate`` are the corresponding standalone pass helpers
+          (``_parse_findings`` / ``_validate_findings``).
+
+    Postconditions:
+        - Returns ``[]`` when ``raw_list`` is missing or not a list (that half
+          produced nothing usable) without raising.
+        - Otherwise returns the parse+validate result for that half alone.
+    """
+    if not isinstance(raw_list, list):
+        return []
+    findings = parse({"findings": raw_list})
+    if findings:
+        findings = validate(index, findings, pre_numbered=pre_numbered)
+    return findings
 
 
 def _build_prompt(

@@ -36,6 +36,9 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     )
     from .chunk_reviewer import ChunkReviewAgent  # noqa: F401
     from .false_positive_filter import CodebaseIndex, filter_false_positives  # noqa: F401
+    from .merged_architecture_side_effect_pass import (  # noqa: F401
+        find_architecture_and_side_effect_issues,
+    )
     from .models import (  # noqa: F401
         ChunkReviewInput,
         ChunkReviewOutput,
@@ -46,9 +49,6 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .profiles import ReviewProfile, build_review_system_prompt  # noqa: F401
     from .side_effect_impact_pass import (  # noqa: F401
         find_side_effect_impact_issues,
-    )
-    from .merged_architecture_side_effect_pass import (  # noqa: F401
-        find_architecture_and_side_effect_issues,
     )
 
 _LAZY_EXPORTS = {
