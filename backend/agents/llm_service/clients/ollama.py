@@ -546,7 +546,7 @@ class OllamaLLMClient(LLMClient):
         model: str = "llama3.1",
         *,
         base_url: str = "https://ollama.com",
-        timeout: float = 1800.0,
+        timeout: float = 3600.0,
         on_reasoning: Optional[Callable[[str], None]] = None,
         rate_limit_max_retries: Optional[int] = None,
         api_key: str = "",
