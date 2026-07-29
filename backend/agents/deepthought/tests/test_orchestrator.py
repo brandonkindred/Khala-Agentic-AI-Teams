@@ -34,13 +34,27 @@ def _complete_side_effect(*classification_values):
     resolve by objective, not call position, so both can be exercised (or
     the reasoning pass alone, when classification is skipped) without
     tripping over each other.
+
+    Exhaustion raises ``AssertionError`` rather than ``StopIteration``:
+    ``StopIteration`` subclasses ``Exception`` and would be swallowed by
+    production ``except Exception`` fallbacks, masking a test that
+    programmed too few classification responses.
     """
-    it = iter(classification_values)
+    values = list(classification_values)
+    idx = [0]
 
     def _side_effect(*args, **kwargs):
         if kwargs.get("objective", "").startswith("analyze specialist question"):
             return _reasoning_stub(*args, **kwargs)
-        return next(it)
+        if idx[0] >= len(values):
+            raise AssertionError(
+                f"_complete_side_effect exhausted after {len(values)} "
+                f"classification response(s); unexpected complete() call "
+                f"with objective={kwargs.get('objective')!r}"
+            )
+        val = values[idx[0]]
+        idx[0] += 1
+        return val
 
     return _side_effect
 

@@ -66,9 +66,11 @@ app = create_team_app(
 # per-activity timeouts are the primary "is this stuck"
 # detector on that path, feeding a genuine failure into mark_failed_activity.
 #
-# In thread mode, _run_audit_job touches the job once before
-# SOC2AuditOrchestrator.run() and not again until it returns, so the
-# uninterrupted window is the combined criteria + report ceiling
+# In thread mode, _run_audit_job touches the job twice before
+# SOC2AuditOrchestrator.run() is invoked (status=running plus the
+# "Loading repository" stage, then a "Running TSC audits" stage update)
+# and not again until it returns, so the uninterrupted window is the
+# combined criteria + report ceiling
 # (_CRITERIA_TIMEOUT_SECONDS + _REPORT_TIMEOUT_SECONDS, each doubled from 30
 # to 60 minutes for the same two-call reason — 120 minutes combined) plus
 # repository-loading and thread-scheduling overhead before that.

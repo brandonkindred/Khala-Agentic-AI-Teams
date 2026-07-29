@@ -110,6 +110,8 @@ class _ScriptedAgent:
     """Strands ``Agent`` replacement returning a scripted payload per call."""
 
     def __init__(self, payloads: List[str]) -> None:
+        if not payloads:
+            raise AssertionError("_ScriptedAgent requires a non-empty payloads list")
         self._payloads = payloads
         self.calls = 0
 
@@ -123,6 +125,8 @@ class _RecordingAgent:
     """Strands ``Agent`` replacement that records every prompt it receives."""
 
     def __init__(self, payloads: List[str]) -> None:
+        if not payloads:
+            raise AssertionError("_RecordingAgent requires a non-empty payloads list")
         self._payloads = payloads
         self.seen: List[str] = []
 

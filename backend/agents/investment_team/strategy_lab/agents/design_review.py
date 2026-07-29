@@ -480,7 +480,8 @@ class DesignReviewAgent:
         cycle-level stop and is allowed to propagate (it is charged *before*
         the fail-closed ``try`` below).
         """
-        readiness_block, readiness_findings = _format_readiness(readiness_results or [])
+        readiness_list = readiness_results or []
+        readiness_block, readiness_findings = _format_readiness(readiness_list)
         prior_block = format_prior_critiques(prior_critiques)
 
         user_prompt = _REVIEW_USER_TEMPLATE.format(
@@ -488,7 +489,7 @@ class DesignReviewAgent:
             timeframe=spec.timeframe,
             target_symbols=list(spec.target_symbols),
             speculative=spec.speculative,
-            n_readiness=len(readiness_results or []),
+            n_readiness=len(readiness_list),
             readiness_block=readiness_block,
             n_prior_critiques=len(prior_critiques or []),
             prior_critiques_block=prior_block,
