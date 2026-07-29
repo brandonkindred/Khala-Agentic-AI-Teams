@@ -44,14 +44,6 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from llm_service.interface import LLMError
-from software_engineering_team.code_review_agent.profiles import ReviewProfile
-from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
-from software_engineering_team.shared.v2_models import (
-    ReviewIssue,
-    ToolAgentOutput,
-    ToolAgentPhaseOutput,
-)
 from strands.types.exceptions import (
     ConcurrencyException,
     ContextWindowOverflowException,
@@ -59,6 +51,15 @@ from strands.types.exceptions import (
     MaxTokensReachedException,
     ModelThrottledException,
     ProviderTokenCountError,
+)
+
+from llm_service.interface import LLMError
+from software_engineering_team.code_review_agent.profiles import ReviewProfile
+from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
+from software_engineering_team.shared.v2_models import (
+    ReviewIssue,
+    ToolAgentOutput,
+    ToolAgentPhaseOutput,
 )
 
 # Strands provider/runtime failures that are not subclasses of ``LLMError`` but
