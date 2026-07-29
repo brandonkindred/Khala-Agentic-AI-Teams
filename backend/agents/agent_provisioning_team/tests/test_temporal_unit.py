@@ -70,11 +70,10 @@ def test_sandbox_task_queue_env_override(monkeypatch) -> None:
 
 
 def test_workflows_activities_exclude_sandbox_items() -> None:
-    """P1 regression: WORKFLOWS/ACTIVITIES (served by Pattern A's auto-boot,
-    which also fires inside the standalone agent-provisioning-service team
-    container) must never include sandbox workflows/activities — those run
-    only on SANDBOX_TASK_QUEUE via a worker booted solely inside the unified
-    API process."""
+    """P1 regression: WORKFLOWS/ACTIVITIES (served by the main provisioning
+    worker that team_service boots) must never include sandbox
+    workflows/activities — those run only on SANDBOX_TASK_QUEUE via a worker
+    booted solely inside the unified API process."""
     from agent_provisioning_team import temporal as temporal_pkg
 
     workflow_names = {w.__name__ for w in temporal_pkg.WORKFLOWS}
