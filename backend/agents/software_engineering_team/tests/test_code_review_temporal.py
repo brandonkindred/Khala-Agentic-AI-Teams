@@ -23,8 +23,9 @@ Covers the five things testable without a live (deployed) Temporal server:
 
 from __future__ import annotations
 
+import contextlib
 import os
-from typing import Any, Dict
+from typing import Any, Dict, NoReturn
 
 import pytest
 from code_review_agent import CodeReviewAgent
@@ -1273,45 +1274,31 @@ class _LegacySequentialCodeReviewWorkflow:
         }
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_workflow_executes_and_replays_without_non_determinism() -> None:
-    """Execute ``CodeReviewWorkflow`` end-to-end and replay its recorded history.
+@contextlib.asynccontextmanager
+async def _workflow_environment_worker(activities=None):
+    """Shared ``WorkflowEnvironment`` + ``Worker`` startup/teardown for the
+    ``CodeReviewWorkflow`` integration tests below. Yields the started ``env``
+    with a ``CodeReviewWorkflow`` worker already listening on ``TASK_QUEUE``,
+    against the ``dummy`` LLM harness this suite runs under.
 
-    This is the baseline the issue asks for: a ``WorkflowEnvironment``-driven
-    execute + replay round-trip against today's sequential (pre-parallelization)
-    workflow, so a later change to the tail passes (architecture-consistency,
-    side-effect-impact) has a real replay-determinism guard instead of only the
-    activity-level orchestration replica ``_run_activity_pipeline`` exercises
-    above. Unlike that helper, this drives the actual ``CodeReviewWorkflow.run``
-    coroutine through a real Temporal worker and sandbox, so it is the one test
-    that would catch a ``workflow.patched`` ordering regression.
-
-    Uses the REAL activities (not hand-written fakes) against the ``dummy`` LLM
-    harness this suite already runs under (``tests/conftest.py`` sets
-    ``LLM_PROVIDER=dummy``), so prepare -> map -> verify -> gate -> narrative
-    executes for real, just fast and deterministically.
+    ``activities`` defaults to the real, production ``ACTIVITIES`` list; pass
+    a substitute list (e.g. swapping one activity for a stand-in that raises
+    directly, bypassing that activity's own fail-safe try/except) to exercise
+    a tail-pass failure mode the real activities never produce on their own.
 
     ``WorkflowEnvironment.start_time_skipping()`` downloads (and thereafter
     caches) a small ephemeral test-server binary from ``temporal.download`` on
     first use in an environment -- unlike an activity/worker connecting to a
     deployed Temporal server, this needs one-time outbound network access, so
-    the test skips (rather than fails) when that download is unreachable (e.g.
-    a network-restricted sandbox), while still running for real wherever that
+    this skips (rather than fails) when that download is unreachable (e.g. a
+    network-restricted sandbox), while still running for real wherever that
     egress is allowed (a normal dev machine or CI runner).
-
-    Marked ``integration`` (run with ``-m integration``): standing up the
-    embedded test server is heavier than this file's other pure-Python tests,
-    matching this suite's existing convention for that marker.
     """
     import concurrent.futures
 
     from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
     from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Replayer, Worker
-
-    review_input = _input()
-    workflow_id = "code-review-workflow-replay-test"
+    from temporalio.worker import Worker
 
     try:
         test_env = await WorkflowEnvironment.start_time_skipping()
@@ -1324,18 +1311,46 @@ async def test_workflow_executes_and_replays_without_non_determinism() -> None:
                 env.client,
                 task_queue=TASK_QUEUE,
                 workflows=[CodeReviewWorkflow],
-                activities=ACTIVITIES,
+                activities=activities if activities is not None else ACTIVITIES,
                 activity_executor=activity_executor,
             )
             async with worker:
-                result = await env.client.execute_workflow(
-                    CodeReviewWorkflow.run,
-                    review_input.model_dump(mode="json"),
-                    id=workflow_id,
-                    task_queue=TASK_QUEUE,
-                )
+                yield env
 
-            history = await env.client.get_workflow_handle(workflow_id).fetch_history()
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_executes_and_replays_without_non_determinism() -> None:
+    """Execute ``CodeReviewWorkflow`` end-to-end and replay its recorded history.
+
+    This is the baseline the issue asks for: a ``WorkflowEnvironment``-driven
+    execute + replay round-trip against the current ``CodeReviewWorkflow``,
+    including its concurrent tail-pass activities (false-positive verify,
+    architecture consistency, side-effect impact), so a regression in that
+    concurrent gather / ``workflow.patched`` ordering has a real
+    replay-determinism guard instead of only the activity-level orchestration
+    replica ``_run_activity_pipeline`` exercises above. Unlike that helper,
+    this drives the actual ``CodeReviewWorkflow.run`` coroutine through a real
+    Temporal worker and sandbox.
+
+    Marked ``integration`` (run with ``-m integration``): standing up the
+    embedded test server is heavier than this file's other pure-Python tests,
+    matching this suite's existing convention for that marker.
+    """
+    from code_review_agent.temporal import TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.worker import Replayer
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-replay-test"
+
+    async with _workflow_environment_worker() as env:
+        result = await env.client.execute_workflow(
+            CodeReviewWorkflow.run,
+            review_input.model_dump(mode="json"),
+            id=workflow_id,
+            task_queue=TASK_QUEUE,
+        )
+        history = await env.client.get_workflow_handle(workflow_id).fetch_history()
 
     # Sanity check: the durable path produced the same verdict shape the
     # activity-level pipeline test above asserts against `run_coordinator`.
@@ -1346,6 +1361,203 @@ async def test_workflow_executes_and_replays_without_non_determinism() -> None:
     # history against the same workflow code must not raise a non-determinism
     # error.
     await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)
+
+
+# ---------------------------------------------------------------------------
+# 7. Concurrent tail-pass error-handling semantics (asyncio.gather)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gather_return_exceptions_reproduces_sequential_error_precedence() -> None:
+    """The exact idiom ``CodeReviewWorkflow.run`` uses for its concurrent map
+    fan-out and concurrent tail passes -- ``asyncio.gather(*calls,
+    return_exceptions=True)`` followed by a fixed-order scan that surfaces the
+    first exception found -- must always surface the earliest-listed failure
+    (matching sequential execution's list-order precedence) regardless of which
+    awaitable actually finishes first in real time, and must let every
+    awaitable run to completion instead of abandoning the others.
+
+    Ordering is driven by ``asyncio.gather``'s list-order scheduling and an
+    ``asyncio.Event``: ``_verify`` is scheduled first but immediately
+    suspends on ``architecture_done.wait()``; ``_architecture`` then runs
+    to completion and sets ``architecture_done``; ``_side_effect`` runs to
+    completion next; finally ``_verify`` resumes and finishes last. This
+    guarantees ``verify`` is listed first but completes last, so surfacing
+    ``verify_exc`` proves list-order precedence rather than
+    completion-order precedence.
+    """
+    import asyncio
+
+    completed: list[str] = []
+    architecture_done = asyncio.Event()
+    verify_exc = RuntimeError("verify failed")
+    side_effect_exc = RuntimeError("side_effect failed")
+
+    async def _verify() -> None:
+        await architecture_done.wait()
+        completed.append("verify")
+        raise verify_exc
+
+    async def _architecture() -> str:
+        completed.append("architecture")
+        architecture_done.set()
+        return "architecture"
+
+    async def _side_effect() -> None:
+        completed.append("side_effect")
+        raise side_effect_exc
+
+    calls = [_verify(), _architecture(), _side_effect()]
+    results = await asyncio.gather(*calls, return_exceptions=True)
+
+    # Every awaitable ran to completion -- nothing was abandoned once the
+    # first exception in the list resolved.
+    assert set(completed) == {"verify", "architecture", "side_effect"}
+
+    raised: BaseException | None = None
+    for result in results:
+        if isinstance(result, BaseException):
+            raised = result
+            break
+    assert raised is verify_exc
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_fails_on_verify_failure_without_leaking_sibling_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forces the verify pass to fail by monkeypatching the false-positive
+    filter to raise (the architecture/side-effect passes are wrapped
+    real-function calls that record their own completion), then asserts the
+    whole workflow fails with that failure as its cause -- the same
+    total-failure outcome sequential execution produces (verify was always
+    the pass whose failure aborts everything) -- AND that the architecture
+    and side-effect passes still ran to completion rather than being
+    abandoned once verify raised."""
+    from code_review_agent import (
+        architecture_consistency_pass,
+        false_positive_filter,
+        side_effect_impact_pass,
+    )
+    from code_review_agent.temporal import TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.client import WorkflowFailureError
+
+    completed: set[str] = set()
+    real_architecture = architecture_consistency_pass.find_architecture_and_redundancy_issues
+    real_side_effect = side_effect_impact_pass.find_side_effect_impact_issues
+
+    def _boom(*args: Any, **kwargs: Any) -> NoReturn:
+        raise RuntimeError("verify boom")
+
+    def _tracked_architecture(*args: Any, **kwargs: Any) -> Any:
+        result = real_architecture(*args, **kwargs)
+        completed.add("architecture")
+        return result
+
+    def _tracked_side_effect(*args: Any, **kwargs: Any) -> Any:
+        result = real_side_effect(*args, **kwargs)
+        completed.add("side_effect")
+        return result
+
+    monkeypatch.setattr(false_positive_filter, "filter_false_positives", _boom)
+    monkeypatch.setattr(
+        architecture_consistency_pass, "find_architecture_and_redundancy_issues", _tracked_architecture
+    )
+    monkeypatch.setattr(side_effect_impact_pass, "find_side_effect_impact_issues", _tracked_side_effect)
+
+    review_input = _input()
+
+    async with _workflow_environment_worker() as env:
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await env.client.execute_workflow(
+                CodeReviewWorkflow.run,
+                review_input.model_dump(mode="json"),
+                id="code-review-workflow-verify-failure-test",
+                task_queue=TASK_QUEUE,
+            )
+
+    cause = exc_info.value.cause
+    assert cause is not None
+    assert "verify boom" in str(cause)
+    assert completed == {"architecture", "side_effect"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When verify succeeds but a *later*-listed tail pass fails, the
+    workflow must fail with that pass's own exception as its cause -- never
+    a ``TypeError`` from mistakenly treating the exception object itself as
+    a findings list to spread -- and side-effect (listed after architecture)
+    must still run to completion rather than being abandoned.
+
+    The real architecture activity is internally fail-safe and never raises
+    (see ``find_architecture_and_redundancy_activity``'s docstring), so this
+    substitutes a stand-in activity registered under the same activity name
+    that raises directly, to exercise the branch a real activity can't
+    reach on its own.
+    """
+    from code_review_agent import side_effect_impact_pass
+    from code_review_agent.temporal import (
+        ACTIVITIES,
+        TASK_QUEUE,
+        CodeReviewWorkflow,
+        filter_false_positives_activity,
+        finalize_review_activity,
+        find_side_effect_impact_activity,
+        prepare_review_activity,
+        review_chunk_activity,
+        synthesize_findings_activity,
+    )
+    from temporalio import activity as activity_module
+    from temporalio.client import WorkflowFailureError
+
+    completed: set[str] = set()
+    real_side_effect = side_effect_impact_pass.find_side_effect_impact_issues
+
+    def _tracked_side_effect(*args: Any, **kwargs: Any) -> Any:
+        result = real_side_effect(*args, **kwargs)
+        completed.add("side_effect")
+        return result
+
+    monkeypatch.setattr(side_effect_impact_pass, "find_side_effect_impact_issues", _tracked_side_effect)
+
+    @activity_module.defn(name="code_review_architecture_consistency")
+    def _raising_architecture_activity(review_input: Dict[str, Any]) -> Any:
+        raise RuntimeError("architecture boom")
+
+    stand_in_activities = [
+        prepare_review_activity,
+        review_chunk_activity,
+        filter_false_positives_activity,
+        _raising_architecture_activity,
+        find_side_effect_impact_activity,
+        finalize_review_activity,
+        synthesize_findings_activity,
+    ]
+    assert len(stand_in_activities) == len(ACTIVITIES)
+
+    review_input = _input()
+
+    async with _workflow_environment_worker(activities=stand_in_activities) as env:
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await env.client.execute_workflow(
+                CodeReviewWorkflow.run,
+                review_input.model_dump(mode="json"),
+                id="code-review-workflow-architecture-failure-test",
+                task_queue=TASK_QUEUE,
+            )
+
+    cause = exc_info.value.cause
+    assert cause is not None
+    assert "architecture boom" in str(cause)
+    assert "TypeError" not in str(cause)
+    assert completed == {"side_effect"}
+    assert "architecture" not in completed
 
 
 @pytest.mark.integration
