@@ -164,28 +164,13 @@ def invoke_structured_with_schema(
     ``system_prompt`` / ``user_prompt`` / ``phase`` / ``objective`` /
     ``reasoning_system_prompt`` are non-empty strings; ``schema`` is a
     non-empty mapping.
-    Postconditions: returns the parsed JSON dict on success. Whatever
-    propagates out of ``_call`` — the exception either pass raised directly,
-    or (see below) the new receipt substituted for a reasoning-pass
-    starvation — is wrapped by :func:`run_structured_agent`'s envelope as
-    :class:`~..exceptions.StrategyLabLLMError`, whose ``.cause`` is exactly
-    that propagated exception. For most exceptions, and for a
-    formatting-pass :class:`~llm_service.interface.LLMSemanticExhaustionError`
-    (already ``schema_forced=True`` natively — the formatting call is
-    schema-constrained, so a starvation there is never re-wrapped),
-    ``StrategyLabLLMError.cause`` IS that original exception. For a
-    reasoning-pass ``LLMSemanticExhaustionError`` specifically — the
-    reasoning call is unconstrained, so the client raises it with
-    ``schema_forced=False`` — ``_call`` catches it and raises a **new**
-    receipt with ``schema_forced=True`` in its place (see the comment at its
-    catch site), so ``StrategyLabLLMError.cause`` is that new receipt, and
-    the original starvation exception is one level deeper, at
-    ``StrategyLabLLMError.cause.cause``. Either way, callers' degrade gate —
-    ``isinstance(exc.cause, LLMSemanticExhaustionError) and exc.cause.schema_forced``
-    — sees ``schema_forced=True`` for both pass's starvations, by
-    construction. ``ValueError`` (also wrapped in ``StrategyLabLLMError``)
-    when :func:`extract_json_object` cannot recover a balanced JSON object
-    from the response.
+
+    Postconditions: returns the parsed JSON dict on success. Raises
+    :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
+    transport retries or hits a fatal LLM error.
+
+    ``ValueError`` from :func:`extract_json_object` propagates as a raw
+    ``ValueError`` (it is not wrapped in :class:`~..exceptions.StrategyLabLLMError`).
     """
     if not structured_output_available():
         raise ValueError(
