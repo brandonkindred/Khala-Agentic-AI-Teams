@@ -2986,6 +2986,42 @@ def test_filter_duplicate_questions_matches_doubled_consonant_and_ied_past_tense
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_preserves_lexical_doubled_consonants() -> None:
+    """install/fill/address keep their lexical doubles after -ed stripping.
+
+    Inflectional doubling (planned→plan) still undoubles; lexical doubles must
+    not become instal/fil/adres or base-form questions fall below 90% match.
+    """
+    questions = [
+        OpenQuestion(id="q1", question_text="Where do we install packages?")
+    ]
+    qa_history = (
+        "Q: Where were packages installed after the form was filled?\n"
+        "A: Packages were installed once addressed findings were fixed."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_progressive_ing_forms() -> None:
+    """monitoring→monitor, running→run, making→make so base verbs match -ing history."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which services monitor application errors?")
+    ]
+    qa_history = (
+        "Q: Which services are monitoring application errors while making alerts?\n"
+        "A: The worker services are monitoring errors while the notifier is running."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_matches_es_and_ies_plurals() -> None:
     """processes→process and policies→policy so singular questions match plural history."""
     questions = [

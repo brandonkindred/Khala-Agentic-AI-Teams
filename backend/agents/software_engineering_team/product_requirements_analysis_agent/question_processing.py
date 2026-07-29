@@ -86,15 +86,34 @@ def filter_duplicate_questions(
 
         Preconditions: ``w`` is a cleaned token (lowercase).
         Postconditions: returns ``(stem, silent_e_candidate)``. Never raises.
-            ``silent_e_candidate`` is True only when stripping ``ed`` may have
-            dropped a silent ``e`` (``stored`` -> ``stor``); it is False for
-            ``ied`` (``carried`` -> ``carry``), undoubled consonants
-            (``planned`` -> ``plan``), and five-letter ``*ed`` forms that already
-            retain the ``e`` (``moved`` -> ``move``).
+            ``silent_e_candidate`` is True only when stripping ``ed``/``ing`` may
+            have dropped a silent ``e`` (``stored`` -> ``stor``, ``making`` ->
+            ``mak``); it is False for ``ied`` (``carried`` -> ``carry``),
+            inflectional consonant doubling (``planned`` -> ``plan``), lexical
+            doubles that must be preserved (``installed`` -> ``install``), and
+            five-letter ``*ed`` forms that already retain the ``e``
+            (``moved`` -> ``move``).
             Plurals: ``ies`` -> ``y``, ``-es`` after s/x/z/ch/sh, else trailing ``s``.
         """
         w = w.strip()
         vowels = set("aeiou")
+
+        def _undouble_inflectional(base: str) -> str:
+            """Undouble only when -ed/-ing spelling doubled a final consonant.
+
+            Porter-style: undouble trailing CC when C is not l/s/z, so lexical
+            doubles in install/fill/address stay intact while plan+n → planned
+            and run+n → running still collapse.
+            """
+            if (
+                len(base) >= 2
+                and base[-1] == base[-2]
+                and base[-1] not in vowels
+                and base[-1] not in "lsz"
+            ):
+                return base[:-1]
+            return base
+
         if len(w) <= 4:
             return w, False
 
@@ -111,17 +130,20 @@ def filter_duplicate_questions(
             ):
                 return w[:-1], False
             if len(w) > 5:
-                base = w[:-2]
+                base = _undouble_inflectional(w[:-2])
                 if len(base) >= 4:
-                    # plan + n + ed → planned → plann → plan (complete after undouble).
-                    if (
-                        len(base) >= 2
-                        and base[-1] == base[-2]
-                        and base[-1] not in vowels
-                    ):
-                        return base[:-1], False
-                    # stored → stor, created → creat (may need silent e at match time).
-                    return base, True
+                    # stored → stor, created → creat (may need silent e).
+                    # planned → plan (undoubled); installed → install (kept).
+                    silent_e = len(base) >= 2 and base[-1] not in vowels and base == w[:-2]
+                    return base, silent_e
+
+        if w.endswith("ing") and len(w) > 5:
+            # carrying → carry (exact after stripping ing).
+            base = _undouble_inflectional(w[:-3])
+            if len(base) >= 3:
+                # monitoring → monitor; running → run; making → mak (silent e).
+                silent_e = len(base) >= 2 and base[-1] not in vowels and base == w[:-3]
+                return base, silent_e
 
         # Plurals: policies→policy, processes→process, tokens→token.
         if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
@@ -148,9 +170,9 @@ def filter_duplicate_questions(
         Preconditions: ``stem`` is a non-empty stemmed token; ``qa_stems`` /
             ``qa_silent_e_stubs`` are sets of stemmed tokens from qa history.
         Postconditions: exact membership always matches. Silent-``e`` pairs
-            (``stor``/``store``) match only when a past-tense strip produced a
-            silent-``e`` stub — unrelated pairs like ``plan``/``plane`` do not.
-            Never raises.
+            (``stor``/``store``, ``mak``/``make``) match only when an ``ed``/
+            ``ing`` strip produced a silent-``e`` stub — unrelated pairs like
+            ``plan``/``plane`` do not. Never raises.
         """
         if stem in qa_stems:
             return True
