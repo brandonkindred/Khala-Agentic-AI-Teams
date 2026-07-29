@@ -86,14 +86,17 @@ def filter_duplicate_questions(
 
         Preconditions: ``w`` is a cleaned token (lowercase).
         Postconditions: returns ``(stem, silent_e_candidate)``. Never raises.
-            ``silent_e_candidate`` is True only when stripping ``ed``/``ing`` may
-            have dropped a silent ``e`` (``stored`` -> ``stor``, ``making`` ->
-            ``mak``); it is False for ``ied`` (``carried`` -> ``carry``),
-            inflectional consonant doubling (``planned`` -> ``plan``), lexical
-            doubles that must be preserved (``installed`` -> ``install``), and
-            five-letter ``*ed`` forms that already retain the ``e``
-            (``moved`` -> ``move``).
-            Plurals: ``ies`` -> ``y``, ``-es`` after s/x/z/ch/sh, else trailing ``s``.
+            ``silent_e_candidate`` is True only when stripping ``ed``/``ing``/``es``
+            may have dropped a silent ``e`` (``stored`` -> ``stor``, ``making`` ->
+            ``mak``, ``houses`` -> ``hous``); it is False for ``ied``
+            (``carried`` -> ``carry``), inflectional consonant doubling
+            (``planned`` -> ``plan``, ``controlled`` -> ``control``), and lexical
+            doubles that must be preserved (``installed`` -> ``install``,
+            ``filled`` -> ``fill``). Always strip ``ed`` (not just ``d``) so
+            regular CVC pasts like ``fixed`` -> ``fix`` while silent-e pasts
+            like ``moved``/``freed`` still match via the silent-e flag.
+            Plurals: ``ies`` -> ``y``, ``-es`` after s/x/z/ch/sh (including
+            single-``s`` bases like ``statuses``), else trailing ``s``.
         """
         w = w.strip()
         vowels = set("aeiou")
@@ -101,18 +104,24 @@ def filter_duplicate_questions(
         def _undouble_inflectional(base: str) -> str:
             """Undouble only when -ed/-ing spelling doubled a final consonant.
 
-            Porter-style: undouble trailing CC when C is not l/s/z, so lexical
-            doubles in install/fill/address stay intact while plan+n → planned
-            and run+n → running still collapse.
+            Undouble trailing CC when the base is long enough that the double
+            is inflectional (``planned``/``running``), not lexical (``added``).
+            Never undouble ``s``/``z``. Undouble ``l`` only after ``e``/``o``
+            (``controlled``/``compelled``) so lexical ``ll`` in ``install``/
+            ``fill`` stays intact.
             """
-            if (
-                len(base) >= 2
-                and base[-1] == base[-2]
-                and base[-1] not in vowels
-                and base[-1] not in "lsz"
-            ):
-                return base[:-1]
-            return base
+            if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
+                return base
+            doubled = base[-1]
+            if doubled in "sz":
+                return base
+            if doubled == "l":
+                # Inflectional -l doubling is common after e/o (control, compel);
+                # a/i/u typically mark lexical ll (install, fill, pull).
+                if len(base) >= 3 and base[-3] in "eo":
+                    return base[:-1]
+                return base
+            return base[:-1]
 
         if len(w) <= 4:
             return w, False
@@ -121,20 +130,16 @@ def filter_duplicate_questions(
             # carry + ed written as carried → carry (no silent-e stub).
             if w.endswith("ied") and len(w) > 4:
                 return w[:-3] + "y", False
-            # move/save/name + d → moved/saved/named (len 5, CVCed); e retained.
-            if (
-                len(w) == 5
-                and w[0] not in vowels
-                and w[1] in vowels
-                and w[2] not in vowels
-            ):
-                return w[:-1], False
-            if len(w) > 5:
+            # Strip full "ed" for all longer forms so fixed→fix (not fixe) while
+            # moved/freed/glued become mov/fre/glu and match via silent-e.
+            if len(w) >= 5:
                 base = _undouble_inflectional(w[:-2])
-                if len(base) >= 4:
-                    # stored → stor, created → creat (may need silent e).
-                    # planned → plan (undoubled); installed → install (kept).
-                    silent_e = len(base) >= 2 and base[-1] not in vowels and base == w[:-2]
+                if len(base) >= 3:
+                    # stored → stor, created → creat, moved → mov, freed → fre
+                    # (may need silent e). planned → plan; controlled → control;
+                    # installed → install. Flag whenever -ed stripping did not
+                    # undouble, including vowel-final stubs (fre/glu).
+                    silent_e = base == w[:-2]
                     return base, silent_e
 
         if w.endswith("ing") and len(w) > 5:
@@ -142,14 +147,17 @@ def filter_duplicate_questions(
             base = _undouble_inflectional(w[:-3])
             if len(base) >= 3:
                 # monitoring → monitor; running → run; making → mak (silent e).
-                silent_e = len(base) >= 2 and base[-1] not in vowels and base == w[:-3]
+                silent_e = base == w[:-3]
                 return base, silent_e
 
-        # Plurals: policies→policy, processes→process, tokens→token.
+        # Plurals: policies→policy, processes→process, statuses→status, tokens→token.
         if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
             return w[:-3] + "y", False
         if w.endswith(("sses", "xes", "zes", "ches", "shes")) and len(w) > 4:
             return w[:-2], False
+        # Single-s bases take -es (statuses→status); also houses→hous (silent e).
+        if w.endswith("ses") and len(w) > 4:
+            return w[:-2], True
         if (
             w.endswith("s")
             and len(w) > 4
@@ -170,9 +178,9 @@ def filter_duplicate_questions(
         Preconditions: ``stem`` is a non-empty stemmed token; ``qa_stems`` /
             ``qa_silent_e_stubs`` are sets of stemmed tokens from qa history.
         Postconditions: exact membership always matches. Silent-``e`` pairs
-            (``stor``/``store``, ``mak``/``make``) match only when an ``ed``/
-            ``ing`` strip produced a silent-``e`` stub — unrelated pairs like
-            ``plan``/``plane`` do not. Never raises.
+            (``stor``/``store``, ``mak``/``make``, ``hous``/``house``) match only
+            when an ``ed``/``ing``/``es`` strip produced a silent-``e`` stub —
+            unrelated pairs like ``plan``/``plane`` do not. Never raises.
         """
         if stem in qa_stems:
             return True

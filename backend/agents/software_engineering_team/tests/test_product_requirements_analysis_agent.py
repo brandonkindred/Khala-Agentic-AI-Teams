@@ -2958,11 +2958,50 @@ def test_filter_duplicate_questions_matches_past_tense_silent_e() -> None:
 
 
 def test_filter_duplicate_questions_matches_five_letter_silent_e_past_tense() -> None:
-    """Five-letter past forms like moved/saved keep their silent-e base (move/save)."""
+    """Five-letter silent-e past forms like moved/saved match base move/save via silent-e."""
     questions = [
         OpenQuestion(id="q1", question_text="Where should we move data files?")
     ]
     qa_history = "Q: Where should data files be moved?\nA: Files were moved to cold storage."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_regular_cvc_past_tense() -> None:
+    """Regular +ed pasts like fixed→fix must not be treated as silent-e fixe.
+
+    ``fix`` itself is too short to be a key token, so the question uses
+    ``fixing`` (stemmed to ``fix``) against history ``fixed``.
+    """
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which defects get fixing after release?",
+        )
+    ]
+    qa_history = (
+        "Q: Which defects were fixed after release?\n"
+        "A: Defects were fixed in the hotfix branch after release."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_non_cvc_silent_e_past_tense() -> None:
+    """Non-CVC five-letter silent-e pasts like freed/glued still match free/glue."""
+    questions = [
+        OpenQuestion(id="q1", question_text="When should we free and glue resources?")
+    ]
+    qa_history = (
+        "Q: When should resources be freed and glued?\n"
+        "A: Resources were freed after artifacts were glued into the bundle."
+    )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
 
@@ -3006,6 +3045,22 @@ def test_filter_duplicate_questions_preserves_lexical_doubled_consonants() -> No
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_matches_inflectional_doubled_l() -> None:
+    """controlled→control and compelled→compel while install/fill stay lexical."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which service controls retries?")
+    ]
+    qa_history = (
+        "Q: Which service controlled retries when callers were compelled to wait?\n"
+        "A: The gateway controlled retries after callers were compelled to back off."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_matches_progressive_ing_forms() -> None:
     """monitoring→monitor, running→run, making→make so base verbs match -ing history."""
     questions = [
@@ -3030,6 +3085,25 @@ def test_filter_duplicate_questions_matches_es_and_ies_plurals() -> None:
     qa_history = (
         "Q: Which processes and policies should we use?\n"
         "A: Follow the documented processes and security policies."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_single_s_es_plurals() -> None:
+    """statuses→status (single-s + es) so singular questions match plural history."""
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which deployment status should APIs expose?",
+        )
+    ]
+    qa_history = (
+        "Q: Which deployment statuses should APIs expose?\n"
+        "A: Expose the documented deployment statuses from the health endpoint."
     )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
