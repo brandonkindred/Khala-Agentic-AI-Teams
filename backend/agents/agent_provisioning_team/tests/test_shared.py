@@ -1245,10 +1245,10 @@ def test_sanitize_prompt_var_strips_emoji() -> None:
     from agent_provisioning_team.shared.llm_client import sanitize_prompt_var
 
     s = sanitize_prompt_var("hi \U0001f600 there")
-    # Emoji is not in the allowlist; gets replaced by _ (which is on the
-    # allowlist, so two underscores are produced for the multi-byte char).
-    assert "_" in s
-    assert "hi" in s and "there" in s
+    # Emoji is disallowed and must be removed, not replaced with underscores.
+    assert "\U0001f600" not in s
+    assert "_" not in s
+    assert s == "hi  there"
 
 
 def test_sanitize_prompt_var_handles_none() -> None:
