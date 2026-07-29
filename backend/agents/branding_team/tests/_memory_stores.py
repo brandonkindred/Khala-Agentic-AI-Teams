@@ -416,6 +416,17 @@ class MemoryConversationStore:
         return conv.brand_id
 
 
+def _session_copy(session: BrandingSession) -> BrandingSession:
+    """Return a detached ``BrandingSession`` (JSON round-trip), matching Postgres ``get``.
+
+    Preconditions:
+        ``session`` is a valid ``BrandingSession``.
+    Postconditions:
+        Returns a new model instance; mutating the result does not change ``session``.
+    """
+    return BrandingSession.model_validate(session.model_dump(mode="json"))
+
+
 class MemorySessionStore:
     """In-memory ``BrandingSessionStore`` for interactive review routes."""
 
@@ -428,15 +439,20 @@ class MemorySessionStore:
         questions = _build_open_questions(mission)
         session_id = str(uuid4())
         session = BrandingSession(mission=mission, questions=questions, latest_output=latest_output)
-        self._bundle.sessions[session_id] = session
+        # Persist a detached copy so the returned object is not the stored row
+        # (same isolation real Postgres JSON get/create provide).
+        self._bundle.sessions[session_id] = _session_copy(session)
         return session_id, session
 
     def get(self, session_id: str) -> Optional[BrandingSession]:
-        return self._bundle.sessions.get(session_id)
+        stored = self._bundle.sessions.get(session_id)
+        if stored is None:
+            return None
+        return _session_copy(stored)
 
     def save(self, session_id: str, session: BrandingSession) -> None:
         if session_id in self._bundle.sessions:
-            self._bundle.sessions[session_id] = session
+            self._bundle.sessions[session_id] = _session_copy(session)
 
 
 def install_memory_stores(monkeypatch: pytest.MonkeyPatch) -> MemoryStoreBundle:
