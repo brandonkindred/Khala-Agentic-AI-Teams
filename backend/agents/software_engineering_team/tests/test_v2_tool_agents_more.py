@@ -121,6 +121,8 @@ def _patch_strands(monkeypatch, mod, response="", raise_exc=None):
 
 
 class TestBackendDocumentation:
+    """Backend DocumentationToolAgent: document_microtask, review, and problem_solve."""
+
     def _agent(self):
         from software_engineering_team.backend_code_v2_team.tool_agents.documentation import (
             agent as mod,
@@ -132,32 +134,43 @@ class TestBackendDocumentation:
         return a, mod
 
     def test_execute_returns_stub(self):
+        """execute() returns the Documentation execute stub summary."""
         a, _ = self._agent()
         out = a.execute(_be_tool_input())
         assert "Documentation execute" in out.summary
 
     def test_run_delegates_to_execute(self):
+        """run() delegates to execute()."""
         a, _ = self._agent()
         out = a.run(_be_tool_input())
         assert "Documentation execute" in out.summary
 
     def test_plan_returns_recommendations(self):
+        """plan() returns the exact backend documentation recommendations."""
         a, _ = self._agent()
         out = a.plan(_be_phase_input())
-        assert out.recommendations
+        assert out.recommendations == [
+            "Include README updates for new features.",
+            "Document API changes and new endpoints.",
+            "Add docstrings for all public functions, classes, and methods.",
+            "Update CONTRIBUTORS.md if applicable.",
+        ]
         assert "Documentation planning" in out.summary
 
     def test_deliver_returns_stub(self):
+        """deliver() returns the Documentation deliver stub summary."""
         a, _ = self._agent()
         out = a.deliver(_be_phase_input())
         assert "Documentation deliver" in out.summary
 
     def test_document_microtask_no_model(self):
+        """document_microtask() skips when no LLM is configured."""
         a, _ = self._agent()
         out = a.document_microtask(_be_microtask(), {"a.py": "code"}, "task")
         assert "no LLM" in out.summary
 
     def test_document_microtask_no_code(self, monkeypatch):
+        """document_microtask() skips when there is no code to document."""
         a, mod = self._agent()
         a._model = object()  # not None
         _patch_strands(monkeypatch, mod, response="## FILE x.py ##\nupdated\n## SUMMARY ##\nok\n## END SUMMARY ##\n")
@@ -165,6 +178,7 @@ class TestBackendDocumentation:
         assert "no code" in out.summary
 
     def test_document_microtask_llm_exception(self, monkeypatch):
+        """document_microtask() reports LLM error when the strands call raises."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod, raise_exc=RuntimeError("boom"))
@@ -172,6 +186,7 @@ class TestBackendDocumentation:
         assert "LLM error" in out.summary
 
     def test_document_microtask_success(self, monkeypatch):
+        """document_microtask() returns parsed files on a successful LLM response."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(
@@ -184,11 +199,13 @@ class TestBackendDocumentation:
         assert "1 file(s)" in out.summary
 
     def test_review_no_model(self):
+        """review() skips when no LLM is configured."""
         a, _ = self._agent()
         out = a.review(_be_phase_input(current_files={"a.py": "code"}))
         assert "skipped" in out.summary
 
     def test_review_no_code(self, monkeypatch):
+        """review() skips when current_files is empty."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod)
@@ -196,6 +213,7 @@ class TestBackendDocumentation:
         assert "no code" in out.summary
 
     def test_review_llm_exception(self, monkeypatch):
+        """review() reports LLM error when the strands call raises."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod, raise_exc=RuntimeError("boom"))
@@ -203,6 +221,7 @@ class TestBackendDocumentation:
         assert "LLM error" in out.summary
 
     def test_review_finds_issues(self, monkeypatch):
+        """review() parses exactly one documentation issue from the LLM response."""
         a, mod = self._agent()
         a._model = object()
         resp = (
@@ -219,11 +238,13 @@ class TestBackendDocumentation:
         assert out.issues[0].severity == "low"
 
     def test_problem_solve_no_model(self):
+        """problem_solve() skips when no LLM is configured."""
         a, _ = self._agent()
         out = a.problem_solve(_be_phase_input())
         assert "skipped" in out.summary
 
     def test_problem_solve_no_doc_issues(self, monkeypatch):
+        """problem_solve() no-ops when review_issues have no documentation sources."""
         a, mod = self._agent()
         a._model = object()
         out = a.problem_solve(
@@ -232,6 +253,7 @@ class TestBackendDocumentation:
         assert "No documentation issues" in out.summary
 
     def test_problem_solve_fixes_issues(self, monkeypatch):
+        """problem_solve() merges LLM file fixes for matching documentation issues."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(
@@ -252,7 +274,7 @@ class TestBackendDocumentation:
         assert "fixed 2 of 2" in out.summary
 
     def test_problem_solve_java_uses_java_conventions(self, monkeypatch):
-        """The language=java path uses JAVA_CONVENTIONS."""
+        """The language=java path injects JAVA_CONVENTIONS into the problem_solve prompt."""
         a, mod = self._agent()
         a._model = object()
         stub = _patch_strands(
@@ -260,17 +282,20 @@ class TestBackendDocumentation:
             mod,
             response="## FILE a.java ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n",
         )
-        a.problem_solve(
+        out = a.problem_solve(
             _be_phase_input(
                 language="java",
                 current_files={"a.java": "old"},
                 review_issues=[_be_review_issue(source="documentation", file_path="a.java")],
             )
         )
-        # Just verify the LLM was called (Java prompt formatting succeeded)
-        assert stub.calls
+        assert len(stub.calls) == 1
+        assert "Java conventions" in stub.calls[0]
+        assert out.files["a.java"] == "fixed"
+        assert "fixed 1 of 1" in out.summary
 
     def test_problem_solve_llm_exception_skips_that_issue(self, monkeypatch):
+        """problem_solve() counts an LLM failure as unfixed for that issue."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod, raise_exc=RuntimeError("boom"))
@@ -372,6 +397,8 @@ def test_be_relevant_code_bounds_multifile_context():
 
 
 class TestBackendSecurity:
+    """Backend SecurityToolAgent: review-only; no problem_solve self-fix."""
+
     def _agent(self):
         from software_engineering_team.backend_code_v2_team.tool_agents.security import (
             agent as mod,
@@ -383,41 +410,51 @@ class TestBackendSecurity:
         return a, mod
 
     def test_execute_returns_stub(self):
+        """execute() returns the Security execute stub summary."""
         a, _ = self._agent()
         out = a.execute(_be_tool_input())
         assert "Security execute" in out.summary
 
     def test_run_delegates(self):
+        """run() delegates to execute()."""
         a, _ = self._agent()
         out = a.run(_be_tool_input())
         assert "Security execute" in out.summary
 
     def test_plan(self):
+        """plan() returns the exact backend security recommendation."""
         a, _ = self._agent()
         out = a.plan(_be_phase_input())
-        assert out.recommendations
+        assert out.recommendations == [
+            "Consider injection prevention, auth checks, and secure defaults."
+        ]
 
     def test_deliver(self):
+        """deliver() returns the Security deliver stub summary."""
         a, _ = self._agent()
         assert "Security deliver" in a.deliver(_be_phase_input()).summary
 
     def test_review_no_model(self):
+        """review() skips when no LLM is configured."""
         a, _ = self._agent()
         assert "skipped" in a.review(_be_phase_input(current_files={"a.py": "x"})).summary
 
     def test_review_no_code(self, monkeypatch):
+        """review() skips when current_files is empty."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod)
         assert "no code" in a.review(_be_phase_input(current_files={})).summary
 
     def test_review_llm_exception(self, monkeypatch):
+        """review() reports LLM error when the strands call raises."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod, raise_exc=RuntimeError("err"))
         assert "LLM error" in a.review(_be_phase_input(current_files={"a.py": "x"})).summary
 
     def test_review_finds_issues(self, monkeypatch):
+        """review() parses exactly one security issue from the LLM response."""
         a, mod = self._agent()
         a._model = object()
         resp = (
@@ -445,6 +482,8 @@ class TestBackendSecurity:
 
 
 class TestBackendTestingQA:
+    """Backend TestingQAToolAgent: review-only; no problem_solve self-fix."""
+
     def _agent(self):
         from software_engineering_team.backend_code_v2_team.tool_agents.testing_qa import (
             agent as mod,
@@ -456,38 +495,45 @@ class TestBackendTestingQA:
         return a, mod
 
     def test_execute_returns_stub(self):
+        """execute() returns the Testing/QA execute stub summary."""
         a, _ = self._agent()
         out = a.execute(_be_tool_input())
         assert "Testing/QA execute" in out.summary
 
     def test_plan(self):
+        """plan() returns the exact Testing/QA recommendation."""
         a, _ = self._agent()
         out = a.plan(_be_phase_input())
-        assert out.recommendations
+        assert out.recommendations == ["Include unit and integration tests in the plan."]
 
     def test_deliver(self):
+        """deliver() returns the Testing/QA deliver stub summary."""
         a, _ = self._agent()
         out = a.deliver(_be_phase_input())
-        assert "deliver" in out.summary.lower()
+        assert "Testing/QA deliver" in out.summary
 
     def test_review_no_model(self):
+        """review() skips when no LLM is configured."""
         a, _ = self._agent()
         out = a.review(_be_phase_input(current_files={"a.py": "x"}))
         assert "skipped" in out.summary
 
     def test_review_no_code(self, monkeypatch):
+        """review() skips when current_files is empty."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod)
         assert "no code" in a.review(_be_phase_input(current_files={})).summary
 
     def test_review_llm_exception(self, monkeypatch):
+        """review() reports LLM error when the strands call raises."""
         a, mod = self._agent()
         a._model = object()
         _patch_strands(monkeypatch, mod, raise_exc=RuntimeError("err"))
-        assert "error" in a.review(_be_phase_input(current_files={"a.py": "x"})).summary.lower()
+        assert "LLM error" in a.review(_be_phase_input(current_files={"a.py": "x"})).summary
 
     def test_review_finds_issues(self, monkeypatch):
+        """review() parses exactly one QA issue with the expected fields."""
         a, mod = self._agent()
         a._model = object()
         resp = (
@@ -499,7 +545,11 @@ class TestBackendTestingQA:
         )
         _patch_strands(monkeypatch, mod, response=resp)
         out = a.review(_be_phase_input(current_files={"a.py": "x"}))
-        assert len(out.issues) >= 1
+        assert len(out.issues) == 1
+        assert out.issues[0].source == "qa"
+        assert out.issues[0].severity == "high"
+        assert out.issues[0].description == "missing test"
+        assert out.issues[0].file_path == "a.py"
 
     def test_no_problem_solve_capability(self):
         """QA is review-only: fixing its findings is the coding agent's job."""
@@ -514,6 +564,8 @@ class TestBackendTestingQA:
 
 
 class TestFrontendDocumentation:
+    """Frontend DocumentationToolAgent: TypeScript-specific plan, review, and problem_solve."""
+
     def _agent(self):
         from software_engineering_team.frontend_code_v2_team.tool_agents.documentation import (
             agent as mod,
@@ -525,12 +577,19 @@ class TestFrontendDocumentation:
         return a, mod
 
     def test_plan_returns_typescript_specific(self):
+        """plan() returns the exact frontend documentation recommendations."""
         a, _ = self._agent()
         out = a.plan(_fe_phase_input())
-        joined = " ".join(out.recommendations)
-        assert "Storybook" in joined or "JSDoc" in joined or "TSDoc" in joined or "component" in joined.lower()
+        assert out.recommendations == [
+            "Include README updates for new features and components.",
+            "Document component props and usage examples.",
+            "Add JSDoc/TSDoc comments for all public functions and components.",
+            "Update Storybook stories for new UI components.",
+            "Update CONTRIBUTORS.md if applicable.",
+        ]
 
     def test_extract_doc_files_includes_stories(self):
+        """_extract_doc_files includes Storybook/stories and excludes component source."""
         from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
             _extract_doc_files,
         )
@@ -549,6 +608,7 @@ class TestFrontendDocumentation:
         assert "Button.tsx" not in out
 
     def test_review_finds_issues(self, monkeypatch):
+        """review() parses exactly one documentation issue from the LLM response."""
         a, mod = self._agent()
         a._model = object()
         resp = (
@@ -561,8 +621,12 @@ class TestFrontendDocumentation:
         _patch_strands(monkeypatch, mod, response=resp)
         out = a.review(_fe_phase_input(current_files={"a.ts": "code"}))
         assert len(out.issues) == 1
+        assert out.issues[0].source == "documentation"
+        assert out.issues[0].severity == "medium"
+        assert out.issues[0].description == "missing docs"
 
     def test_problem_solve_uses_typescript_conventions(self, monkeypatch):
+        """problem_solve() injects TypeScript conventions and applies the LLM file fix."""
         a, mod = self._agent()
         a._model = object()
         stub = _patch_strands(
@@ -570,14 +634,15 @@ class TestFrontendDocumentation:
             mod,
             response="## FILE a.ts ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n",
         )
-        a.problem_solve(
+        out = a.problem_solve(
             _fe_phase_input(
                 current_files={"a.ts": "old"},
                 review_issues=[_fe_review_issue(source="documentation", file_path="a.ts")],
             )
         )
-        assert stub.calls
+        assert len(stub.calls) == 1
         assert "TypeScript conventions" in stub.calls[0]
+        assert out.files.get("a.ts") == "fixed"
 
 
 # ---------------------------------------------------------------------------
@@ -586,6 +651,8 @@ class TestFrontendDocumentation:
 
 
 class TestFrontendSecurity:
+    """Frontend SecurityToolAgent: review-only; no problem_solve self-fix."""
+
     def _agent(self):
         from software_engineering_team.frontend_code_v2_team.tool_agents.security import (
             agent as mod,
@@ -597,6 +664,7 @@ class TestFrontendSecurity:
         return a, mod
 
     def test_execute_returns_stub(self):
+        """execute() returns the Security execute stub summary."""
         from software_engineering_team.frontend_code_v2_team.models import ToolAgentInput
 
         a, _ = self._agent()
@@ -611,10 +679,12 @@ class TestFrontendSecurity:
         assert "Security execute" in out.summary
 
     def test_review_no_model(self):
+        """review() skips when no LLM is configured."""
         a, _ = self._agent()
         assert "skipped" in a.review(_fe_phase_input(current_files={"a.ts": "x"})).summary
 
     def test_review_finds_issues(self, monkeypatch):
+        """review() parses exactly one security issue from the LLM response."""
         a, mod = self._agent()
         a._model = object()
         resp = (
@@ -627,6 +697,9 @@ class TestFrontendSecurity:
         _patch_strands(monkeypatch, mod, response=resp)
         out = a.review(_fe_phase_input(current_files={"a.tsx": "code"}))
         assert len(out.issues) == 1
+        assert out.issues[0].source == "security"
+        assert out.issues[0].severity == "high"
+        assert out.issues[0].description == "XSS risk"
 
     def test_no_problem_solve_capability(self):
         """Security is review-only: fixing its findings is the coding agent's job."""

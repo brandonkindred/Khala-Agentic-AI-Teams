@@ -41,17 +41,21 @@ Temporal is unavailable — there is no in-process fallback.
 
 Workflows/activities live in `temporal/`. Provisioning/deprovision are
 registered in the `WORKFLOWS` / `ACTIVITIES` lists in `temporal/__init__.py`,
-served by the single Pattern A worker (task queue `agent-provisioning`) that
-auto-boots on import. **Sandbox workflows/activities are the exception**: they
-are exported separately as `SANDBOX_WORKFLOWS` / `SANDBOX_ACTIVITIES` and are
-*not* part of `WORKFLOWS`/`ACTIVITIES` — they run on a dedicated
-`SANDBOX_TASK_QUEUE`, served only by a worker started explicitly from
-`unified_api/main.py`'s own lifespan (never by Pattern A's auto-boot, which
-also runs inside the standalone `agent-provisioning-service` team container).
-This keeps the sandbox `Lifecycle` singleton's process-local state from being
-mutated by an activity dispatched into the wrong process — see
-`temporal/constants.py`'s `SANDBOX_TASK_QUEUE` docstring and
-`sandbox/README.md`'s "Durable execution" section for the full rationale.
+served by the worker started explicitly via
+`start_agent_provisioning_temporal_worker_thread` (task queue
+`agent-provisioning`) from the `agent-provisioning-service` team_service
+entrypoint (`TEAM_TEMPORAL_WORKER_MODULE` / `TEAM_TEMPORAL_WORKER_FUNC`), with
+the API lifespan as a standalone-dev backstop (`uvicorn ...:app`).
+Importing the package does not start a worker.
+**Sandbox workflows/activities are the exception**: they are exported
+separately as `SANDBOX_WORKFLOWS` / `SANDBOX_ACTIVITIES` and are *not* part of
+`WORKFLOWS`/`ACTIVITIES` — they run on a dedicated `SANDBOX_TASK_QUEUE`, served
+only by a worker started explicitly from `unified_api/main.py`'s own lifespan
+(never by the team-service main-queue worker). This keeps the sandbox
+`Lifecycle` singleton's process-local state from being mutated by an activity
+dispatched into the wrong process — see `temporal/constants.py`'s
+`SANDBOX_TASK_QUEUE` docstring and `sandbox/README.md`'s "Durable execution"
+section for the full rationale.
 
 ### Coverage — every team operation → its workflow/activity
 
