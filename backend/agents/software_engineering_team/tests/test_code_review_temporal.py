@@ -1691,14 +1691,14 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
 
     The workflow uses ``asyncio.gather`` (deterministic fan-in order), so
     out-of-order completion should not affect the merged verdict. This test
-    forces out-of-order completion via per-pass sleeps and asserts that the
-    merged tail-pass issue descriptions match the sequential activity pipeline
+    forces a completion order that differs from schedule order via explicit
+    event handoffs (not wall-clock sleeps) and asserts that the merged
+    tail-pass issue descriptions match the sequential activity pipeline
     (``_run_activity_pipeline``).
     """
 
     import concurrent.futures
     import threading
-    import time
 
     import code_review_agent.architecture_consistency_pass as acp
     import code_review_agent.false_positive_filter as fpf
@@ -1730,18 +1730,19 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
         description="tail-pass side-effect (oOO)",
     )
 
-    # Start order is fixed by the workflow; sleep lengths enforce a different
-    # completion order.
+    # Force completion order architecture → side_effect → filter (different
+    # from the workflow's schedule order filter → architecture → side_effect)
+    # via explicit event handoffs. A start barrier puts all three in flight
+    # first; then each later pass waits for the previous one's completion
+    # event before finishing. No wall-clock sleeps — CI preemption cannot
+    # reorder these handoffs.
     expected_completion_order = ["architecture", "side_effect", "filter"]
-    sleep_s = {
-        "architecture": 0.02,
-        "side_effect": 0.05,
-        "filter": 0.10,
-    }
 
     barrier = threading.Barrier(3, timeout=5)
-    barrier_enabled = threading.Event()
-    barrier_enabled.set()
+    coordinate = threading.Event()
+    coordinate.set()
+    architecture_done = threading.Event()
+    side_effect_done = threading.Event()
 
     completion_order: list[str] = []
     lock = threading.Lock()
@@ -1751,24 +1752,29 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
             completion_order.append(name)
 
     def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
-        if barrier_enabled.is_set():
+        if coordinate.is_set():
             barrier.wait()
-        time.sleep(sleep_s["filter"])
+            # Wait until architecture and side_effect have both finished so
+            # filter is last — independent of thread scheduling.
+            if not side_effect_done.wait(timeout=5):
+                raise AssertionError("side_effect did not signal before filter timeout")
         _record_completion("filter")
         return [filter_issue]
 
     def _architecture(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
-        if barrier_enabled.is_set():
+        if coordinate.is_set():
             barrier.wait()
-        time.sleep(sleep_s["architecture"])
         _record_completion("architecture")
+        architecture_done.set()
         return [architecture_issue]
 
     def _side_effect(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
-        if barrier_enabled.is_set():
+        if coordinate.is_set():
             barrier.wait()
-        time.sleep(sleep_s["side_effect"])
+            if not architecture_done.wait(timeout=5):
+                raise AssertionError("architecture did not signal before side_effect timeout")
         _record_completion("side_effect")
+        side_effect_done.set()
         return [side_effect_issue]
 
     monkeypatch.setattr(fpf, "filter_false_positives", _filter)
@@ -1780,34 +1786,39 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
     except RuntimeError as exc:
         pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
 
-    async with test_env as env:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
-            worker = Worker(
-                env.client,
-                task_queue=TASK_QUEUE,
-                workflows=[CodeReviewWorkflow],
-                activities=ACTIVITIES,
-                activity_executor=activity_executor,
-            )
-            async with worker:
-                workflow_out = await env.client.execute_workflow(
-                    CodeReviewWorkflow.run,
-                    review_input.model_dump(mode="json"),
-                    id=workflow_id,
+    try:
+        async with test_env as env:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+                worker = Worker(
+                    env.client,
                     task_queue=TASK_QUEUE,
+                    workflows=[CodeReviewWorkflow],
+                    activities=ACTIVITIES,
+                    activity_executor=activity_executor,
                 )
+                async with worker:
+                    workflow_out = await env.client.execute_workflow(
+                        CodeReviewWorkflow.run,
+                        review_input.model_dump(mode="json"),
+                        id=workflow_id,
+                        task_queue=TASK_QUEUE,
+                    )
+    finally:
+        # Abort so a mid-test failure cannot leave a party parked on the
+        # barrier and wedge a later test in the same worker process.
+        barrier.abort()
 
     # Confirm forced out-of-order completion; without this assertion the test
     # could pass even if the merge regressed.
     assert completion_order == expected_completion_order, (
-        "expected deterministic out-of-order completion based on per-pass "
-        f"sleeps; got {completion_order}"
+        "expected deterministic out-of-order completion via event handoffs; "
+        f"got {completion_order}"
     )
 
-    # Disable the start-barrier for the sequential pipeline below; otherwise
-    # it would deadlock because the sequential pipeline calls the tail passes
+    # Disable barrier + handoff waits for the sequential pipeline below;
+    # otherwise it would deadlock because that path calls the tail passes
     # one at a time.
-    barrier_enabled.clear()
+    coordinate.clear()
 
     # Validate the merged verdict is equivalent to the sequential activity
     # pipeline (which applies the same tail-pass merge ordering explicitly).
