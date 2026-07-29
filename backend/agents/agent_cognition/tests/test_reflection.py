@@ -641,6 +641,7 @@ def test_llm_calls_counts_complete_validated_correction_retries(
     class FlakyCannedLLM(LLMClient):
         def __init__(self) -> None:
             self.json_calls: list[dict[str, Any]] = []
+            self.text_calls: list[dict[str, Any]] = []
             self.calls = 0
 
         def complete_json(
@@ -656,7 +657,7 @@ def test_llm_calls_counts_complete_validated_correction_retries(
         ) -> dict[str, Any]:
             self.calls += 1
             self.json_calls.append({"prompt": prompt, "objective": objective})
-            if self.calls == 1:
+            if len(self.json_calls) == 1:
                 # Trigger a schema validation error so ``complete_validated`` retries.
                 return {"proposals": "not-a-list"}
             return {"proposals": [{"action": "add", "text": "derived rule"}]}
@@ -673,7 +674,18 @@ def test_llm_calls_counts_complete_validated_correction_retries(
             objective: str,
             **kwargs: object,
         ) -> str:
-            raise AssertionError("compact_text should not call complete for large budgets")
+            # Reasoning pass from complete_validated_via_reasoning (think=True).
+            # Compaction is disabled via AGENT_COGNITION_REFLECTION_INPUT_CHARS,
+            # so this must only be the proposal reasoning call.
+            self.text_calls.append(
+                {
+                    "prompt": prompt,
+                    "objective": objective,
+                    "think": think,
+                }
+            )
+            assert think is True, "only the reasoning pass should call complete here"
+            return "REASONING PROSE"
 
     canned = FlakyCannedLLM()
     created: list[RuleProposal] = []
@@ -699,7 +711,10 @@ def test_llm_calls_counts_complete_validated_correction_retries(
 
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1
-    assert report.llm_calls == 2
+    # 1 reasoning complete() + 2 formatting complete_json() (initial miss + retry).
+    assert report.llm_calls == 3
+    assert len(canned.text_calls) == 1
+    assert len(canned.json_calls) == 2
     assert len(created) == 1 and created[0].proposed_rule is not None
 
 
