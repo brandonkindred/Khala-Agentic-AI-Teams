@@ -35,7 +35,7 @@ backend/agents/branding_team/
 ├── temporal/
 │   ├── __init__.py          # WORKFLOWS/ACTIVITIES exports + Pattern A auto-boot
 │   ├── constants.py         # TASK_QUEUE, WORKFLOW_ID_PREFIX
-│   ├── activities.py        # run_branding_pipeline_activity
+│   ├── activities.py        # Decomposed Temporal activities (begin/phase/integrations/finalize/fail/cancel)
 │   ├── workflows.py         # BrandingWorkflow
 │   ├── worker.py            # start_branding_temporal_worker_thread
 │   └── start_workflow.py    # start_branding_workflow (sync -> async dispatch)
@@ -99,18 +99,14 @@ classDiagram
         +mission_summary : str
         +current_phase : BrandPhase
         +phase_gates : List~PhaseGate~
+        +degraded_phases : List~BrandPhase~
         +strategic_core : Optional~StrategicCoreOutput~
         +narrative_messaging : Optional~NarrativeMessagingOutput~
         +visual_identity : Optional~VisualIdentityOutput~
         +channel_activation : Optional~ChannelActivationOutput~
         +governance : Optional~GovernanceOutput~
-        +codification : BrandCodification
-        +mood_boards : List~MoodBoardConcept~
-        +writing_guidelines : WritingGuidelines
-        +brand_guidelines : List~str~
-        +design_system : DesignSystemDefinition
-        +wiki_backlog : List~WikiEntry~
         +brand_checks : List~BrandCheckResult~
+        +human_feedback : Optional~str~
         +competitive_snapshot : Optional~CompetitiveSnapshot~
         +design_asset_result : Optional~DesignAssetRequestResult~
         +brand_book : Optional~BrandBook~
@@ -304,9 +300,12 @@ is not set.
 
 ## LLM integration
 
-Only the `BrandingAssistantAgent` touches the shared LLM client. Everything
-else in the pipeline (phase agents, compliance agent, specialist agents) is
-deterministic Python code — they do not call LLMs today.
+The conversational `BrandingAssistantAgent` and all five pipeline phase
+agents are LLM-backed. Phase agents are `strands.Agent` instances built by
+`graphs/shared.py:build_agent()`, which wires each one to the centralized
+LLM service via `get_strands_model()`. Only `BrandComplianceAgent` is
+deterministic post-processing (regex-based brand checks) and does not call
+an LLM.
 
 **Initialization** (`assistant/agent.py:129-135`) happens lazily:
 
@@ -408,9 +407,8 @@ changing the orchestrator or API.
 
 When `TEMPORAL_ADDRESS` is not set, `BrandingTeamOrchestrator` is a
 plain Python class called synchronously from the FastAPI handlers
-(`api/main.py:65`). Every phase agent runs in the request thread.
-Most runs complete in seconds because the phase agents are deterministic
-template expansion, not LLM calls.
+(`api/main.py:65`). Every phase agent runs in the request thread and is
+LLM-backed via Strands; wall-clock time depends on the configured provider.
 
 ### Temporal mode (optional)
 
@@ -418,16 +416,24 @@ When `TEMPORAL_ADDRESS` is set, the async branding-run dispatch path
 (`_submit_brand_run` in `api/main.py`) routes through Temporal instead of
 the in-process thread pool. The `temporal/` package defines:
 
-- `run_branding_pipeline_activity(payload: dict)` — a Temporal activity that
-  rehydrates the job's `BrandingMission` / `HumanReview` / brand checks from a
-  JSON-safe payload and delegates to the existing `_run_branding_background`
-  job function, so the Temporal path and the thread path run the identical
-  pipeline body and share the same job-store bookkeeping.
-- `BrandingWorkflow` — a single-activity Temporal workflow (id
-  `branding-{job_id}`) whose `run()` forwards the payload to the activity with
-  a 2-hour `start_to_close_timeout` and no app-level retries.
-- `start_branding_workflow(job_id, payload)` — the sync -> async bridge the API
-  handler calls to start the workflow (fire-and-forget; the client polls
+- Decomposed activities in `activities.py` that the durable
+  `BrandingWorkflow` drives one at a time so a worker restart re-runs only
+  the unfinished unit:
+  - `begin_branding_job_activity` — mark the job RUNNING (returns false if
+    already cancelled)
+  - `run_branding_phase_activity` — run one pipeline phase via
+    `orchestrator.run_single_phase`, with checkpointing
+  - `run_market_research_activity` / `run_design_assets_activity` — optional
+    sibling-team integrations
+  - `finalize_branding_activity` — compliance + assemble `TeamOutput` +
+    persist brand version + mark COMPLETED
+  - `mark_branding_failed_activity` — record a FAILED job row
+  - `check_branding_cancelled_activity` — cooperative between-phase cancel
+- `BrandingWorkflow` — the durable workflow (id `branding-{job_id}`) that
+  sequences those activities with per-activity timeouts and cooperative
+  cancel checks between phases.
+- `start_branding_workflow(job_id, payload)` — the sync → async bridge the
+  API handler calls to start the workflow (fire-and-forget; the client polls
   `GET /branding/status/{job_id}`).
 
 The worker boots two idempotent ways (Pattern A): on import when

@@ -51,7 +51,9 @@ def _merge_brand(cur: FakeCursor, params: tuple, *, returning: bool) -> None:
     """Apply ``jsonb ||`` shallow merge for ``branding_brands``.
 
     Preconditions:
-        ``params`` is ``(patch, brand_id, client_id)``.
+        ``cur.db`` contains a ``'brands'`` key mapping brand IDs to row dicts;
+        ``params`` is ``(patch, brand_id, client_id)``; ``returning`` is a
+        boolean flag controlling ``fetchone`` output behavior.
     Postconditions:
         On ownership match, merges ``patch`` into the brand's data and sets
         ``rowcount`` to 1; if ``returning`` is True, ``fetchone`` yields the

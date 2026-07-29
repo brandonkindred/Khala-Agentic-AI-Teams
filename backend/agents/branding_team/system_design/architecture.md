@@ -40,10 +40,12 @@ briefed vs. exploratory vs. chat-first) can all reach a consistent
 - **Consolidated output shape.** Specialist agents
   (`VoicePrinciplesDrafter`, the `MoodBoardConceptualist` swarm,
   `converge_decider`, `design_system_codifier`, `brand_rules_codifier`,
-  `asset_wiki_planner`) contribute to every pipeline execution so the fields on
-  `TeamOutput` (`codification`, `mood_boards`, `brand_guidelines`,
-  `design_system`, `wiki_backlog`, etc.) stay populated for all
-  consumers. See `orchestrator.py:141-145` and `orchestrator.py:196-203`.
+  `asset_wiki_planner`) contribute nested fields on the phase outputs —
+  e.g. `writing_guidelines` on `NarrativeMessagingOutput`;
+  `mood_board_candidates` / `creative_refinement` / `design_system` on
+  `VisualIdentityOutput`; `brand_guidelines` / `wiki_backlog` on
+  `GovernanceOutput` — which `TeamOutput` surfaces via its phase-output
+  fields. There is no top-level `BrandCodification` type.
 - **Composable external work via thin adapters.** Market research and
   design asset generation are delegated to sibling teams through HTTP
   adapters (`adapters/market_research.py`, `adapters/design_assets.py`).
@@ -184,14 +186,15 @@ what they're approving (`models.py:370-375`).
 
 ### 2. Why specialist agents are retained in the pipeline
 
-The `TeamOutput` model carries the specialist fields
-(`codification`, `mood_boards`, `creative_refinement`, `writing_guidelines`,
-`brand_guidelines`, `design_system`, `wiki_backlog`) and existing consumers
+The phase-output models carry the specialist fields
+(`writing_guidelines` on narrative; `mood_board_candidates` /
+`creative_refinement` / `design_system` on visual identity;
+`brand_guidelines` / `wiki_backlog` on governance) and existing consumers
 (including `_build_brand_book`, the design adapter, and the session API)
-read them. Removing them would break those consumers. The specialist agents
-are therefore invoked unconditionally on every run
-(`orchestrator.py:196-203`) so every `TeamOutput` remains
-structurally identical regardless of which phases actually ran.
+read them through `TeamOutput`'s nested phase outputs. Removing them would
+break those consumers. The specialist agents are therefore invoked as part
+of the phase graphs on every run so every `TeamOutput` remains structurally
+complete for the phases that executed.
 
 ### 3. Why three API styles coexist
 

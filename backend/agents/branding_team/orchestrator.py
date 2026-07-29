@@ -1,8 +1,14 @@
 """Orchestrator for the 5-phase branding strategy team.
 
-Thin wrapper that builds the top-level Strands SDK graph, invokes it with the
-serialised ``BrandingMission``, runs brand-compliance checks separately, and
-assembles the final ``TeamOutput``.
+``BrandingTeamOrchestrator`` resolves the mission from ``BrandingStore`` when
+a client/brand pair is supplied, builds the top-level Strands SDK graph,
+invokes it with the serialised ``BrandingMission``, optionally gathers sibling
+integrations (market research + design assets) concurrently, runs brand-
+compliance checks separately, assembles the final ``TeamOutput``, and appends
+a brand version when a store is attached. If that append returns ``None``
+(brand row deleted between resolve and finalize), ``run`` raises
+``RuntimeError`` so callers can mark the run failed instead of reporting
+success without persistence.
 
 Phase gate logic:
   Phase 1 → 2: Strategy is validated with stakeholders
@@ -509,7 +515,9 @@ class BrandingTeamOrchestrator:
         )
 
     @staticmethod
-    def _extract_phase_output(result, node_id: str, model_class) -> "tuple[BaseModel, bool]":
+    def _extract_phase_output(
+        result: Any, node_id: str, model_class: type[BaseModel]
+    ) -> tuple[BaseModel, bool]:
         """Best-effort extraction of a phase output from graph results.
 
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
@@ -545,8 +553,9 @@ class BrandingTeamOrchestrator:
               was called for.
         """
         try:
-            if hasattr(result, "result") and hasattr(result.result, "get"):
-                node_result = result.result.get(node_id)
+            result_obj = getattr(result, "result", None)
+            if result_obj is not None and hasattr(result_obj, "get"):
+                node_result = result_obj.get(node_id)
                 if node_result and hasattr(node_result, "result"):
                     merged = _merge_phase1_fragments(node_result, model_class)
                     if merged is not None:
@@ -611,8 +620,16 @@ def _merge_structured_output(
     ``structured`` is often a strict subset of ``model_class`` — e.g. the
     positioning synthesizer only emits ``positioning_statement``/``brand_promise``
     out of the full ``StrategicCoreOutput`` schema — which validates fine since
-    every field on the phase output models has a default. Returns None on a
-    genuine schema mismatch, same failure contract as ``_parse_model_from_text``.
+    every field on the phase output models has a default.
+
+    Preconditions:
+        ``structured`` is a ``pydantic.BaseModel`` instance; ``model_class`` is
+        the phase output model type to validate against.
+    Postconditions:
+        Returns a validated ``model_class`` instance when fields match (including
+        subset payloads that fill missing fields from defaults); returns
+        ``None`` on a genuine schema mismatch — same failure contract as
+        ``_parse_model_from_text``.
     """
     try:
         return model_class.model_validate(structured.model_dump())
@@ -638,7 +655,7 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
-def _merge_phase1_fragments(node_result, model_class: type[BaseModel]) -> Optional[BaseModel]:
+def _merge_phase1_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
     """Merge every Phase 1 fan-out node's ``structured_output`` into one phase output.
 
     Phase 1 wraps six agents (five parallel specialists + a synthesizer) as a

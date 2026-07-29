@@ -34,21 +34,37 @@ router = APIRouter()
 
 @router.post("/run", response_model=TeamOutput)
 def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
+    """Run the branding pipeline synchronously and return its ``TeamOutput``.
+
+    Preconditions:
+        ``payload`` is a validated ``RunBrandingTeamRequest``.
+    Postconditions:
+        Returns the assembled ``TeamOutput`` on success.
+        When persistence fails because the brand row disappeared mid-run
+        (``orchestrator.run`` raises ``RuntimeError``), maps that to HTTP 409
+        instead of an unhandled 500 — matching the background path's failed-job
+        handling rather than reporting success without a persisted version.
+    """
     from branding_team.api import main as _main
 
     mission = _mission_from_payload(payload)
     human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
     store = _main.branding_store if (payload.client_id and payload.brand_id) else None
     target_phase = _parse_target_phase(payload.target_phase)
-    return _main.orchestrator.run(
-        mission=mission,
-        human_review=human_review,
-        brand_checks=payload.brand_checks,
-        store=store,
-        client_id=payload.client_id,
-        brand_id=payload.brand_id,
-        target_phase=target_phase,
-    )
+    try:
+        return _main.orchestrator.run(
+            mission=mission,
+            human_review=human_review,
+            brand_checks=payload.brand_checks,
+            store=store,
+            client_id=payload.client_id,
+            brand_id=payload.brand_id,
+            target_phase=target_phase,
+        )
+    except RuntimeError as exc:
+        # Brand deleted between resolve and append_brand_version — controlled
+        # conflict response rather than an unhandled 500.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/sessions", response_model=BrandingSessionResponse)
