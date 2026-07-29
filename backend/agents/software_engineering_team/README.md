@@ -206,7 +206,7 @@ This starts the team's HTTP API on `http://127.0.0.1:8000`; see [API](#api) belo
 | `LLM_PROVIDER` | `dummy` or `ollama` | `dummy` |
 | `LLM_MODEL` | Model name for Ollama | `qwen3.5:397b-cloud` |
 | `LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
-| `LLM_TIMEOUT` | Timeout in seconds | `1800` |
+| `LLM_TIMEOUT` | Timeout in seconds | `3600` |
 | `LLM_MAX_RETRIES` | Max retries for 429/5xx errors | `4` |
 | `LLM_BACKOFF_BASE` | Base seconds for exponential backoff | `2` |
 | `LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
