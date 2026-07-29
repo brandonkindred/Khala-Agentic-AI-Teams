@@ -25,6 +25,7 @@ from .llm_io import call_llm_text
 from .models import AnsweredQuestion, OpenQuestion, SpecCleanupResult
 from .prompts import (
     PRD_PROMPT,
+    SPEC_CLARIFICATION_PROMPT,
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
     SPEC_CONSISTENCY_CLARIFICATION_PROMPT,
@@ -38,9 +39,11 @@ logger = logging.getLogger(__name__)
 def format_answered_questions(answered_questions: List[AnsweredQuestion]) -> str:
     """Format answered questions for the LLM prompt.
 
-    Preconditions: ``answered_questions`` is a list of :class:`AnsweredQuestion`.
+    Preconditions: ``answered_questions`` is a list of :class:`AnsweredQuestion`;
+        when an item has ``was_auto_answered`` true, ``confidence`` must be a float
+        usable with the ``:.0%`` format specifier.
     Postconditions: returns a plain-text ``Q:``/``A:`` block; empty string for an
-        empty list; never raises.
+        empty list.
     """
     lines = []
     for aq in answered_questions:
@@ -65,10 +68,11 @@ def _merge_spec_cleanup_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
     Returns:
         Merged dict with combined validation issues and cleaned spec
 
-    Preconditions: ``results`` is a list of dicts.
+    Preconditions: ``results`` is an iterable of dicts (generators are materialized).
     Postconditions: ``is_valid`` is ``False`` if any chunk was invalid; validation
-        issues concatenated; cleaned specs joined with blank lines.
+        issues concatenated as strings; cleaned specs joined with blank lines.
     """
+    results = list(results)
     merged: Dict[str, Any] = {
         "is_valid": True,
         "validation_issues": [],
@@ -81,7 +85,7 @@ def _merge_spec_cleanup_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
         if not _coerce_bool(r.get("is_valid", True)):
             merged["is_valid"] = False
         if isinstance(r.get("validation_issues"), list):
-            merged["validation_issues"].extend(r["validation_issues"])
+            merged["validation_issues"].extend(str(item) for item in r["validation_issues"])
         if r.get("cleaned_spec"):
             cleaned_parts.append(str(r["cleaned_spec"]))
 
@@ -103,7 +107,13 @@ def _write_spec_artifact(repo_path: Path, filename: str, spec_text: str) -> Path
         ``filename`` and ``updated_spec.md`` with ``spec_text``; returns the
         versioned file's path for the caller to log/reference.
     """
-    if not filename or Path(filename).name != filename or filename in (".", ".."):
+    if (
+        not filename
+        or Path(filename).name != filename
+        or "/" in filename
+        or "\\" in filename
+        or filename in (".", "..")
+    ):
         raise ValueError(f"filename must be a bare filename, got {filename!r}")
     plan_dir = repo_path / "plan" / "product_analysis"
     plan_dir.mkdir(parents=True, exist_ok=True)
@@ -366,8 +376,6 @@ def update_spec_from_duplicates(
         extracted or the LLM fails; otherwise writes the versioned + latest spec
         files and returns the clarified text.
     """
-    from .prompts import SPEC_CLARIFICATION_PROMPT
-
     # Extract answers from qa_history for each duplicate
     extracted_answers: List[AnsweredQuestion] = []
     for q in duplicate_questions:
@@ -519,11 +527,25 @@ def parse_spec_cleanup_response(
             summary="Spec cleanup completed (no structured output)",
         )
 
+    raw_cleaned = raw.get("cleaned_spec", fallback_spec)
+    cleaned_spec = (
+        raw_cleaned if isinstance(raw_cleaned, str) and raw_cleaned.strip() else fallback_spec
+    )
+    raw_summary = raw.get("summary", "Spec cleanup complete")
+    summary = (
+        raw_summary
+        if isinstance(raw_summary, str) and raw_summary.strip()
+        else "Spec cleanup complete"
+    )
+    validation_issues = (
+        [str(item) for item in raw["validation_issues"]]
+        if isinstance(raw.get("validation_issues"), list)
+        else []
+    )
+
     return SpecCleanupResult(
         is_valid=_coerce_bool(raw.get("is_valid", True)),
-        validation_issues=list(raw.get("validation_issues", []))
-        if isinstance(raw.get("validation_issues"), list)
-        else [],
-        cleaned_spec=str(raw.get("cleaned_spec", fallback_spec)),
-        summary=str(raw.get("summary", "Spec cleanup complete")),
+        validation_issues=validation_issues,
+        cleaned_spec=cleaned_spec,
+        summary=summary,
     )
