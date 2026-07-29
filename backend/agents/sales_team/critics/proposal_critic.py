@@ -6,7 +6,9 @@ broken ROI math, line-item totals that don't reconcile, claims with no
 backing case study, and pro-forma "next steps" that aren't really steps.
 
 Same shape as :class:`OutreachCriticAgent` — uses
-:func:`llm_service.complete_validated`, fail-closed FAIL on any LLM exception.
+:func:`llm_service.complete_validated_via_reasoning` (a think=True prose
+reasoning pass, then a think=False ``complete_validated`` transcription),
+fail-closed FAIL on any LLM exception.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from llm_service import LLMClient, complete_validated
+from llm_service import LLMClient, complete_validated_via_reasoning
 
 from ..llm import get_sales_llm_client
 from ..models import (
@@ -30,15 +32,12 @@ from ..prompts._dossier_render import render_dossier_json_for_prompt
 logger = logging.getLogger(__name__)
 
 
-_PROPOSAL_CRITIC_SYSTEM_PROMPT = """\
+_PROPOSAL_CRITIC_ROLE_INTRO = """\
 You are an independent Sales Proposal Reviewer. You did NOT write the \
 proposal under review; your job is to score it against the rubric below \
-using the supplied dossier and qualification score as authoritative context.
+using the supplied dossier and qualification score as authoritative context."""
 
-REJECT the proposal (status=FAIL) if ANY must_fix violation is present. For \
-every violation, emit a CriticViolation with a concrete suggested_fix the \
-agent can apply on retry.
-
+_PROPOSAL_CRITIC_RUBRIC = """\
 RUBRIC (use these rule_id slugs verbatim):
 
  1. proposal.roi.arithmetic — the supplied roi_model numbers must internally \
@@ -66,7 +65,19 @@ RUBRIC (use these rule_id slugs verbatim):
  5. proposal.next_steps.concrete — the next_steps list must contain at \
     least one entry that includes either a date / timeframe ("within 7 \
     days", "by 2026-05-15") or an explicit owner ("Buyer:", "Vendor:"). \
-    "We will follow up soon" alone FAILs.
+    "We will follow up soon" alone FAILs."""
+
+_PROPOSAL_CRITIC_SYSTEM_PROMPT = (
+    _PROPOSAL_CRITIC_ROLE_INTRO
+    + """
+
+REJECT the proposal (status=FAIL) if ANY must_fix violation is present. For \
+every violation, emit a CriticViolation with a concrete suggested_fix the \
+agent can apply on retry.
+
+"""
+    + _PROPOSAL_CRITIC_RUBRIC
+    + """
 
 OUTPUT contract:
  - Output a SINGLE JSON object matching this schema:
@@ -91,6 +102,32 @@ OUTPUT contract:
    equal (status == "PASS").
  - Return JSON only. No markdown fences. No prose outside the object.
 """
+)
+
+# Reasoning-only variant: same role/rubric, but ends with a prose instruction
+# instead of the JSON output contract. Used for the think=True first pass of
+# the two-call split — the formatting pass (think=False) transcribes this
+# prose into the ProposalCriticReport schema.
+_PROPOSAL_CRITIC_SYSTEM_PROMPT_REASONING = (
+    _PROPOSAL_CRITIC_ROLE_INTRO
+    + """
+
+REJECT the proposal (status=FAIL) if ANY must_fix violation is present. For \
+every violation, identify a concrete suggested_fix the agent can apply on retry.
+
+"""
+    + _PROPOSAL_CRITIC_RUBRIC
+    + """
+
+Think this through rule by rule — compute the ROI arithmetic yourself before flagging or
+clearing rule 1 — then answer in structured prose (not JSON):
+ - Your overall status (PASS only when no must_fix violations exist) and approved verdict.
+ - For each violation found: the rubric rule_id, severity (must_fix/should_fix/consider), the
+   section it's in (e.g. 'roi_model' or 'next_steps' or 'overall'), a short quoted evidence
+   excerpt (under ~120 chars), what is wrong and why, and a concrete suggested fix.
+ - Any other short notes.
+"""
+)
 
 
 @dataclass
@@ -110,15 +147,38 @@ class ProposalCriticAgent:
         dossier: Optional[ProspectDossier],
         qualification: Optional[QualificationScore],
     ) -> ProposalCriticReport:
-        """Evaluate ``proposal`` and return a :class:`ProposalCriticReport`."""
+        """Evaluate ``proposal`` and return a :class:`ProposalCriticReport`.
+
+        Runs a two-pass reasoning-then-formatting LLM call via
+        :func:`complete_validated_via_reasoning` — a ``think=True`` prose
+        critique followed by a ``think=False`` schema-validated formatting
+        pass (with up to 2 self-correction attempts on a parse/validation
+        miss) — rather than a single JSON call.
+
+        Preconditions:
+            * ``proposal`` is a fully-populated :class:`SalesProposal`.
+            * ``dossier`` / ``qualification`` may each be ``None``.
+        Postconditions:
+            * Always returns a :class:`ProposalCriticReport` — never raises.
+              On any LLM/validation failure (including exhausting the
+              correction attempts), logs a single WARNING and returns
+              :func:`_fallback_proposal_report`'s forced-FAIL report instead.
+            * On success, enforces the invariant documented on
+              :attr:`ProposalCriticReport.status`: ``status == "PASS"`` iff
+              no must-fix violation exists. A must-fix violation always
+              forces ``status="FAIL"`` and ``approved=False``, overriding
+              whatever the model returned, so the two fields can never
+              disagree with that rule in the returned report.
+        """
         prompt = self._build_prompt(proposal, dossier, qualification)
         try:
-            report = complete_validated(
+            report = complete_validated_via_reasoning(
                 self._llm,
-                prompt,
                 schema=ProposalCriticReport,
-                system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT,
-                temperature=0.0,
+                reasoning_prompt=prompt,
+                reasoning_system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT_REASONING,
+                formatting_system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT,
+                reasoning_temperature=0.0,
                 correction_attempts=2,
                 objective="critique sales proposal",
             )
@@ -126,9 +186,16 @@ class ProposalCriticAgent:
             logger.warning("sales.proposal_critic.failed reason=%s", exc)
             return _fallback_proposal_report(str(exc))
 
-        approved = report.status == "PASS" and report.must_fix_count() == 0
-        if approved != report.approved:
-            report = report.model_copy(update={"approved": approved})
+        # Enforce the invariant documented on ProposalCriticReport.status:
+        # "status is PASS only when no must_fix violations exist. approved
+        # must equal (status == 'PASS')." A must_fix violation always forces
+        # FAIL, overriding whatever status the LLM returned — reconciling
+        # only `approved` (as a prior version of this code did) could leave
+        # status="PASS" with approved=False, which breaks that invariant.
+        status = "FAIL" if report.must_fix_count() > 0 else report.status
+        approved = status == "PASS"
+        if status != report.status or approved != report.approved:
+            report = report.model_copy(update={"status": status, "approved": approved})
         return report
 
     @staticmethod
@@ -137,6 +204,17 @@ class ProposalCriticAgent:
         dossier: Optional[ProspectDossier],
         qualification: Optional[QualificationScore],
     ) -> str:
+        """Render the shared user prompt for both the reasoning and formatting passes.
+
+        Preconditions:
+            * ``proposal`` is a fully-populated :class:`SalesProposal`.
+        Postconditions:
+            * Returns a prompt embedding ``proposal``, ``dossier`` (via
+              :func:`render_dossier_json_for_prompt`), and ``qualification`` as
+              JSON in full, untruncated. ``dossier``/``qualification`` of
+              ``None`` render as an explicit placeholder string rather than being
+              omitted, so the model never mistakes "not supplied" for "empty".
+        """
         proposal_json = json.dumps(proposal.model_dump(mode="json"), indent=2)
         if dossier is not None:
             dossier_json = render_dossier_json_for_prompt(dossier)
@@ -156,7 +234,7 @@ class ProposalCriticAgent:
             "--- TASK ---\n"
             "Evaluate the proposal against the rubric in your system prompt. "
             "Compute the ROI arithmetic yourself before flagging or clearing "
-            "rule 1. Return a single ProposalCriticReport JSON object only."
+            "rule 1."
         )
 
 

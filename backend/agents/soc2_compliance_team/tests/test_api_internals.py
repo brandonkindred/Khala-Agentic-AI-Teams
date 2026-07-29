@@ -185,3 +185,16 @@ def test_stale_job_threshold_covers_longest_temporal_activity_ceiling() -> None:
         api_main._STALE_JOB_THRESHOLD_SECONDS
         > wmod.REPORT_SCHEDULE_TO_CLOSE_TIMEOUT.total_seconds()
     )
+
+
+def test_stale_job_threshold_covers_thread_mode_combined_ceiling() -> None:
+    """Thread mode has no per-stage timeout of its own and no job-row touch
+    between the criteria and report stages inside ``SOC2AuditOrchestrator.run``
+    — the uninterrupted window the stale monitor must outlast is their
+    combined ceiling, not either one alone."""
+    from soc2_compliance_team import orchestrator as orch_mod
+
+    combined_thread_mode_ceiling = (
+        orch_mod._CRITERIA_TIMEOUT_SECONDS + orch_mod._REPORT_TIMEOUT_SECONDS
+    )
+    assert api_main._STALE_JOB_THRESHOLD_SECONDS > combined_thread_mode_ceiling

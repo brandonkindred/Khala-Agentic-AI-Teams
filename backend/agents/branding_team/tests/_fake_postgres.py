@@ -7,11 +7,12 @@ Matching contract (read before changing store SQL):
     stores emit* — a wording, column-order, or clause change in a store query
     must be mirrored here or the cursor raises ``AssertionError("unexpected
     SQL")``. The matcher is intentionally NOT a SQL parser; that fragility is
-    accepted because the authoritative correctness check is
-    ``tests/test_store_real_postgres.py`` (the ``real_postgres`` marker), which
-    runs the real queries against a live Postgres in the integration job. Keep
-    the two in sync: when you add/alter store SQL, update a handler here and add
-    real-Postgres coverage there.
+    accepted because the authoritative correctness check for ``store.py`` SQL is
+    ``tests/test_store.py`` (live Postgres via ``real_postgres_schema``);
+    conversation-only coverage remains in ``tests/test_store_real_postgres.py``.
+    Keep handlers here in sync for suites that still use this fake until it is
+    retired: when you add/alter store SQL those suites hit, update a handler
+    here and ensure real-Postgres coverage exists.
 
 Boilerplate (``FakeCursor`` / ``FakeConn`` / normalize / install) lives in
 ``shared.postgres.fake`` (re-exported from ``shared.postgres.testing``); this module owns only the branding SQL→handler
@@ -50,7 +51,9 @@ def _merge_brand(cur: FakeCursor, params: tuple, *, returning: bool) -> None:
     """Apply ``jsonb ||`` shallow merge for ``branding_brands``.
 
     Preconditions:
-        ``params`` is ``(patch, brand_id, client_id)``.
+        ``cur.db`` contains a ``'brands'`` key mapping brand IDs to row dicts;
+        ``params`` is ``(patch, brand_id, client_id)``; ``returning`` is a
+        boolean flag controlling ``fetchone`` output behavior.
     Postconditions:
         On ownership match, merges ``patch`` into the brand's data and sets
         ``rowcount`` to 1; if ``returning`` is True, ``fetchone`` yields the
@@ -615,6 +618,12 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("select session_json from branding_sessions where session_id")
 
     def handle_select_session(cur: FakeCursor, params: tuple) -> None:
+        """Emulate SELECT session_json from branding_sessions.
+
+        Params: ``(session_id,)``.
+        Sets ``cur`` to ``{'session_json': ...}`` when the session exists,
+        otherwise sets it to ``None``.
+        """
         (session_id,) = params
         row = cur.db["sessions"].get(session_id)
         cur.set_one({"session_json": row["session_json"]} if row else None)
@@ -681,9 +690,10 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
         ``shared.postgres.PostgresHelperMixin``, which calls ``pg_cursor()``
         in ``shared.postgres.client`` (their own modules are not patched here).
     Postconditions:
-        ``POSTGRES_HOST`` is set (preserving a real, already-configured value
-        rather than overwriting it) so ``pg_cursor``'s ``is_postgres_enabled()``
-        guard falls through instead of yielding ``None``.
+        ``POSTGRES_HOST`` is set.  If a real value already exists it is
+        preserved; otherwise a placeholder (``postgres``) is set so
+        ``pg_cursor``'s ``is_postgres_enabled()`` guard falls through
+        instead of yielding ``None``.
         ``shared.postgres.client.get_conn`` is patched to yield a shared
         ``FakeConn`` backed by the returned default db and branding's SQL
         dispatch table.

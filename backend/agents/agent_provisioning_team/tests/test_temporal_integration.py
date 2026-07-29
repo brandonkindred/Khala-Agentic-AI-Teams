@@ -2,7 +2,7 @@
 
 Covers routing (including the Temporal-required 503 path), skip_phases/
 prior_results plumbing on /resume, progress writes from activities, and
-Pattern A exports. Mocks Temporal at the HTTP boundary to keep the suite fast.
+WORKFLOWS/ACTIVITIES exports. Mocks Temporal at the HTTP boundary to keep the suite fast.
 """
 
 from __future__ import annotations
@@ -250,36 +250,27 @@ def test_setup_activity_restores_prior_snapshot_without_running_setup() -> None:
     assert any(u.get("status_text", "").startswith("Restored") for u in recorded_updates)
 
 
-def test_pattern_a_exports_workflows_and_activities() -> None:
-    import agent_provisioning_team.temporal as t
-    from agent_provisioning_team.temporal.activities import (
-        audit_activity,
-        credentials_activity,
-        deliver_activity,
-        documentation_activity,
-        list_manifest_tools_activity,
-        provision_tool_activity,
-        setup_activity,
-    )
-    from agent_provisioning_team.temporal.workflows import (
-        AgentDeprovisioningWorkflow,
-        AgentProvisioningWorkflow,
-    )
+def test_temporal_package_exports_workflows_and_activities() -> None:
+    """WORKFLOWS/ACTIVITIES expose the expected provisioning surface by name.
 
-    provisioning = [w for w in t.WORKFLOWS if w.__name__ == "AgentProvisioningWorkflow"]
-    deprovisioning = [w for w in t.WORKFLOWS if "Deprovisioning" in w.__name__]
-    assert len(t.WORKFLOWS) == 2
-    assert len(provisioning) == 1
-    assert provisioning[0] is AgentProvisioningWorkflow
-    assert len(deprovisioning) == 1
-    assert deprovisioning[0] is AgentDeprovisioningWorkflow
-    for fn in (
-        setup_activity,
-        list_manifest_tools_activity,
-        credentials_activity,
-        provision_tool_activity,
-        audit_activity,
-        documentation_activity,
-        deliver_activity,
+    Compare by ``__name__`` rather than object identity: bootstrap tests purge
+    and re-import ``agent_provisioning_team.temporal*`` under xdist, so the
+    same class can exist as two objects that print identically but fail ``is``.
+    """
+    import agent_provisioning_team.temporal as t
+
+    assert {w.__name__ for w in t.WORKFLOWS} == {
+        "AgentProvisioningWorkflow",
+        "AgentDeprovisioningWorkflow",
+    }
+    activity_names = {getattr(a, "__name__", str(a)) for a in t.ACTIVITIES}
+    for name in (
+        "setup_activity",
+        "list_manifest_tools_activity",
+        "credentials_activity",
+        "provision_tool_activity",
+        "audit_activity",
+        "documentation_activity",
+        "deliver_activity",
     ):
-        assert fn in t.ACTIVITIES, f"{fn.__name__} missing from ACTIVITIES"
+        assert name in activity_names, f"{name} missing from ACTIVITIES"

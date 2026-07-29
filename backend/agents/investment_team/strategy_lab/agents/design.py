@@ -96,6 +96,7 @@ def _resolve_diversity_mode() -> str:
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+
 # Shared stop-order semantics reference (stop-market / stop-limit / trailing
 # stop). Appended to the designer's system prompts so a trailing stop's
 # above-entry ratchet is understood as intended gain-locking behavior, and so
@@ -111,7 +112,8 @@ def _get_stop_order_semantics() -> str:
     Invariants: module import does not invoke this helper.
     """
     text = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
-    assert text, "_stop_order_semantics.md must be non-empty"
+    if not text:
+        raise ValueError("_stop_order_semantics.md must be non-empty")
     return text
 
 
@@ -127,7 +129,8 @@ def _get_design_system_prompt() -> str:
     Invariants: module import does not invoke this helper.
     """
     body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
-    assert body, "design_system.md must be non-empty"
+    if not body:
+        raise ValueError("design_system.md must be non-empty")
     return body + "\n\n" + _get_stop_order_semantics()
 
 
@@ -143,8 +146,10 @@ def _get_self_review_system_prompt() -> str:
     Invariants: module import does not invoke this helper.
     """
     body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
-    assert body, "design_self_review_system.md must be non-empty"
+    if not body:
+        raise ValueError("design_self_review_system.md must be non-empty")
     return body + "\n\n" + _get_stop_order_semantics()
+
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
@@ -293,7 +298,11 @@ class DesignAgent:
         Every underlying LLM call (generation, each parse-retry, and the
         optional self-review / self-revision) charges the active design-phase
         budget via :func:`charge_active_budget` and raises
-        :class:`DesignBudgetExhausted` when the per-cycle cap is hit.
+        :class:`DesignBudgetExhausted` when the per-cycle cap is hit. When
+        structured output is available, generation itself is a reasoning-then-
+        formatting pair of provider calls (see :meth:`_invoke_and_parse` /
+        :meth:`_structured_preflight`) charged as two budget units up front,
+        not one.
         """
         prior_text = (
             format_prior_results(prior_records)
@@ -424,7 +433,13 @@ class DesignAgent:
         shape miss) and :meth:`_legacy_parse_retry_loop` (the unconstrained
         JSON-and-DSL retry loop) — see their docstrings for the full degrade
         contract. This method's own contract — inputs, outputs, exceptions
-        — is unchanged by the split.
+        — is unchanged by the split, but under the hood
+        ``_structured_preflight`` now issues two sequential LLM calls
+        (reasoning then formatting) via :func:`so.invoke_structured_with_schema`,
+        which charges the active design-phase budget twice up front — one
+        unit per call — and runs both under a single timeout/retry envelope.
+        It degrades to ``_legacy_parse_retry_loop`` (a single-call path) on
+        either pass's ``schema_forced`` semantic exhaustion.
         """
         structured_available = so.structured_output_available()
         prompt = user_prompt
@@ -438,7 +453,9 @@ class DesignAgent:
     def _structured_preflight(
         self, system_prompt: str, user_prompt: str
     ) -> Tuple[Optional[Tuple[Dict[str, Any], str]], str]:
-        """Attempt one provider-enforced schema-constrained design call.
+        """Attempt one provider-enforced schema-constrained design call —
+        a reasoning pass followed by a formatting pass, via
+        :func:`so.invoke_structured_with_schema`.
 
         Pre: :func:`so.structured_output_available` is True (checked by the
         caller, :meth:`_invoke_and_parse`); ``system_prompt`` / ``user_prompt``
@@ -471,7 +488,23 @@ class DesignAgent:
         availability; only the unparseable-JSON
         (``build_json_correction_prompt``) resend is eliminated on the
         structured happy path.
+
+        Timeout/retry tradeoff: ``so.invoke_structured_with_schema`` keeps
+        both of its sub-calls (reasoning then formatting) under the SAME
+        single charge/timeout/retry envelope as the pre-split single call —
+        a transport-level retry re-runs both sub-calls together, not just
+        the one that (may have) failed. This is a deliberate tradeoff to
+        keep the existing envelope plumbing untouched rather than threading
+        two independent retry budgets through it; see that function's own
+        docstring for the timeout-doubling math this implies.
         """
+        # ``user_prompt`` (built from ``_DESIGN_USER_TEMPLATE``) ends with a
+        # "Return ONLY a JSON object" directive that would otherwise outrank
+        # the reasoning-pass system prompt's prose-only instruction. That
+        # conflict is resolved centrally, not here: ``invoke_structured_with_schema``
+        # appends ``_REASONING_USER_PROMPT_SUFFIX`` to this same ``user_prompt``
+        # for its internal reasoning-pass call only, re-asserting prose-only
+        # last (see that constant's docstring in ``_structured_output.py``).
         try:
             parsed = so.invoke_structured_with_schema(
                 "strategy_design",
@@ -482,6 +515,7 @@ class DesignAgent:
                 charge=True,
                 objective="strategy design (structured)",
                 logger=logger,
+                reasoning_system_prompt=so.build_reasoning_system_prompt(system_prompt),
             )
         except StrategyLabLLMError as exc:
             cause = exc.cause
@@ -714,9 +748,12 @@ class DesignAgent:
 
         Pre: ``strategy_dict`` is a parsed, DSL-valid spec dict (no
         ``strategy_code`` key).
-        Post: returns a :class:`SpecCritique`. Best-effort — any LLM
-        transport or JSON parse failure raises and the caller falls back
-        to the original spec.
+        Post: returns a :class:`SpecCritique`. Best-effort — JSON parse
+        failures and most LLM transport failures raise and the caller falls
+        back to the original spec. When structured output is enabled, a
+        reasoning-pass ``LLMSemanticExhaustionError`` with
+        ``schema_forced=True`` does not raise: it degrades to the legacy
+        single-shot call instead, which only then raises if it also fails.
         """
         spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
         user_prompt = (
@@ -753,6 +790,9 @@ class DesignAgent:
                     charge=True,
                     objective="strategy design review (structured)",
                     logger=logger,
+                    reasoning_system_prompt=so.build_reasoning_system_prompt(
+                        _get_self_review_system_prompt()
+                    ),
                 )
             except StrategyLabLLMError as exc:
                 cause = exc.cause
@@ -796,10 +836,11 @@ def _design_self_review_enabled() -> bool:
 
     Reads ``STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED`` (default ``true``;
     accepted truthy values are ``"true"`` / ``"1"`` / ``"yes"``, case-
-    insensitive; anything else is treated as ``false``). When disabled
-    the designer reverts to its pre-change single-call behaviour on
-    both ``run()`` and ``revise()`` — the external review loop still
-    runs unchanged.
+    insensitive; anything else is treated as ``false``). When disabled,
+    the designer skips the internal self-review and self-revision loop in
+    ``_with_self_review``; the external review loop and the main
+    generation/revision calls (``run()`` / ``revise()`` via
+    ``_invoke_and_parse``) remain unchanged.
     """
     raw = os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
     return raw.strip().lower() in {"true", "1", "yes"}
@@ -865,7 +906,7 @@ def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") ->
     failed for this specific reason; reissue the corrected JSON."
     """
     cause = exc.__cause__ or exc
-    payload = exc.payload if isinstance(exc.payload, str) else repr(exc.payload)
+    payload = exc.payload if isinstance(exc.payload, str) else json.dumps(exc.payload, indent=2, default=str)
     return _CORRECTION_PREAMBLE.format(
         field=exc.field,
         payload=payload,

@@ -40,10 +40,19 @@ _TSC_CRITERIA = [c.value for c in TSCCategory]
 # instead of hanging indefinitely).
 LOAD_TIMEOUT = timedelta(minutes=10)
 LOAD_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(minutes=20)
-AUDIT_TIMEOUT = timedelta(minutes=30)
-AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(hours=1)
-REPORT_TIMEOUT = timedelta(minutes=30)
-REPORT_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(hours=1)
+# audit_criterion_activity (_run_tsc_agent) and write_report_activity
+# (_produce_compliance_report / _produce_next_steps) each now issue two
+# sequential LLM calls (a think=True reasoning pass, then a think=False
+# JSON-formatting pass, via complete_json_via_reasoning) instead of one —
+# doubled from the single-call budget so two individually healthy calls
+# can't trip the activity timeout and force a full (expensive) two-call
+# retry. schedule_to_close is bumped by the same 30-minute queue-wait
+# headroom the original 30min-timeout/1hr-schedule-to-close pairing gave,
+# so a doubled start_to_close doesn't eat all of it.
+AUDIT_TIMEOUT = timedelta(minutes=60)
+AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(minutes=90)
+REPORT_TIMEOUT = timedelta(minutes=60)
+REPORT_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(minutes=90)
 MARK_FAILED_TIMEOUT = timedelta(minutes=1)
 MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(minutes=15)
 

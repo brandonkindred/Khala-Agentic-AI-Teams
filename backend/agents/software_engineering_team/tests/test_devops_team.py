@@ -47,6 +47,10 @@ from software_engineering_team.devops_team.tool_agents import (
     TerraformExecutionOutput,
 )
 from software_engineering_team.shared.git_utils import initialize_new_repo
+from software_engineering_team.tests.conftest import (
+    _patch_fenced_response,
+    _strands_model_double,
+)
 
 
 class _StubClient(DummyLLMClient):
@@ -608,6 +612,7 @@ class TestCICDLintToolAgent:
             )
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_gate_check"] == "fail"
+            assert out.success is False
 
     def test_skipped_no_workflows(self) -> None:
         from software_engineering_team.devops_team.tool_agents import (
@@ -1374,6 +1379,13 @@ class TestDevOpsTeamLeadAgentIntegration:
                 build_verifier=MagicMock(return_value=(True, "")),
                 task_id="devops-backend",
             )
+            dev_head = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
         assert result.success
         assert result.completion_package is not None
         assert result.completion_package.status == "completed"
@@ -1386,8 +1398,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert gitops.merge is not None
         assert gitops.merge.status == "merged"
         assert gitops.merge.target_branch == "development"
-        assert len(gitops.merge.merge_commit_hash) == 40
-        assert gitops.commits and gitops.commits[0].hash == gitops.merge.merge_commit_hash
+        assert gitops.merge.merge_commit_hash == dev_head
+        assert any(c.hash == gitops.merge.merge_commit_hash for c in gitops.commits)
 
     def test_happy_path_direct_run(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
@@ -1399,7 +1411,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert len(pkg.acceptance_criteria_trace) == 2
         assert pkg.release_readiness.deployment_strategy == "rolling"
 
-    def test_multiple_sequential_runs_on_same_lead_agent(self) -> None:
+    def test_multiple_sequential_runs_on_same_lead_agent(self, monkeypatch) -> None:
         """Regression guard for the fresh-Strands-Agent-per-call fix.
 
         A single ``DevOpsTeamLeadAgent`` instance constructs all 10 DevOps
@@ -1431,7 +1443,7 @@ class TestDevOpsTeamLeadAgentIntegration:
                 }
             ]
 
-        agent._run_execution_tools = _failing_exec  # type: ignore[method-assign]
+        monkeypatch.setattr(agent, "_run_execution_tools", _failing_exec)
         for i in range(2):
             pkg = agent.run(_base_task_spec())
             assert pkg.status == "completed", f"iter {i}: {pkg.status}"
@@ -1649,9 +1661,7 @@ class TestDevOpsTeamLeadAgentIntegration:
                 task_id="devops-bv-fail",
             )
         assert not result.success
-        assert "Build verification failed" in (
-            result.failure_reason or ""
-        ) or "Docker build failed" in (result.failure_reason or "")
+        assert result.failure_reason == "Docker build failed"
 
     def test_completion_package_git_operations_real_merge(self) -> None:
         """A real ``run_workflow`` delivers the artifacts by cutting a feature
@@ -2036,21 +2046,19 @@ class TestToolDispatchRunValidationTools:
 class TestMainOrchestratorRegistration:
     def test_devops_team_lead_registered(self) -> None:
         """Verify the main orchestrator registers DevOpsTeamLeadAgent."""
-        import importlib
+        from orchestrator import _get_agents
 
-        mod = importlib.import_module("orchestrator")
-        source = Path(mod.__file__).read_text()
-        assert "DevOpsTeamLeadAgent" in source
-        assert "devops_team" in source
+        agents = _get_agents()
+        assert isinstance(agents["devops"], DevOpsTeamLeadAgent)
 
     def test_build_fix_specialist_registered(self) -> None:
         """Verify the main orchestrator registers BuildFixSpecialistAgent."""
-        import importlib
+        from orchestrator import _get_agents
 
-        mod = importlib.import_module("orchestrator")
-        source = Path(mod.__file__).read_text()
-        assert "build_fix_specialist" in source
-        assert "BuildFixSpecialistAgent" in source
+        from software_engineering_team.build_fix_specialist import BuildFixSpecialistAgent
+
+        agents = _get_agents()
+        assert isinstance(agents["build_fix_specialist"], BuildFixSpecialistAgent)
 
 
 # ===========================================================================
@@ -2064,184 +2072,248 @@ class TestMainOrchestratorRegistration:
 # ===========================================================================
 
 
-from software_engineering_team.tests.conftest import (  # noqa: E402
-    _patch_fenced_response,
-    _strands_model_double,
-)
+def _fenced_iac_case():
+    from software_engineering_team.devops_team.iac_agent import (
+        IaCAgentInput,
+        InfrastructureAsCodeAgent,
+    )
+
+    return (
+        InfrastructureAsCodeAgent(_strands_model_double()),
+        IaCAgentInput(task_spec=_base_task_spec()),
+    )
+
+
+def _fenced_cicd_case():
+    from software_engineering_team.devops_team.cicd_pipeline_agent import (
+        CICDPipelineAgent,
+        CICDPipelineAgentInput,
+    )
+
+    return (
+        CICDPipelineAgent(_strands_model_double()),
+        CICDPipelineAgentInput(task_spec=_base_task_spec()),
+    )
+
+
+def _fenced_deploy_case():
+    from software_engineering_team.devops_team.deployment_strategy_agent import (
+        DeploymentStrategyAgent,
+        DeploymentStrategyAgentInput,
+    )
+
+    return (
+        DeploymentStrategyAgent(_strands_model_double()),
+        DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+    )
+
+
+def _fenced_infra_debug_case():
+    from software_engineering_team.devops_team.infra_debug_agent import (
+        IaCDebugInput,
+        InfraDebugAgent,
+    )
+
+    return (
+        InfraDebugAgent(_strands_model_double()),
+        IaCDebugInput(
+            execution_output="Error: bad hcl",
+            tool_name="terraform",
+            command="plan",
+            artifacts={"main.tf": "resource {}"},
+        ),
+    )
+
+
+def _fenced_doc_runbook_case():
+    from software_engineering_team.devops_team.doc_runbook_agent import (
+        DocumentationRunbookAgent,
+        DocumentationRunbookInput,
+    )
+
+    return (
+        DocumentationRunbookAgent(_strands_model_double()),
+        DocumentationRunbookInput(
+            task_id="DO-1",
+            task_title="test",
+            artifacts={"a.tf": "resource"},
+            quality_gates={"iac_validate": "pass"},
+        ),
+    )
+
+
+def _fenced_infra_patch_case():
+    from software_engineering_team.devops_team.infra_debug_agent.models import (
+        IaCDebugOutput,
+        IaCExecutionError,
+    )
+    from software_engineering_team.devops_team.infra_patch_agent import (
+        IaCPatchInput,
+        InfraPatchAgent,
+    )
+
+    debug_output = IaCDebugOutput(
+        errors=[IaCExecutionError(error_type="syntax", error_message="bad hcl")],
+        summary="debug",
+        fixable=True,
+    )
+    return (
+        InfraPatchAgent(_strands_model_double()),
+        IaCPatchInput(
+            debug_output=debug_output,
+            original_artifacts={"main.tf": "resource {}"},
+        ),
+    )
+
+
+def _fenced_devsecops_case():
+    from software_engineering_team.devops_team.devsecops_review_agent import (
+        DevSecOpsReviewAgent,
+        DevSecOpsReviewInput,
+    )
+
+    return (
+        DevSecOpsReviewAgent(_strands_model_double()),
+        DevSecOpsReviewInput(task_description="test", artifacts={}),
+    )
+
+
+def _fenced_task_clarifier_case():
+    return (
+        DevOpsTaskClarifierAgent(_strands_model_double()),
+        DevOpsTaskClarifierInput(task_spec=_base_task_spec()),
+    )
+
+
+def _check_fenced_iac(out) -> None:
+    assert "infra/main.tf" in out.artifacts
+    assert out.summary == "fenced iac ok"
+
+
+def _check_fenced_cicd(out) -> None:
+    assert ".github/workflows/ci.yml" in out.artifacts
+
+
+def _check_fenced_deploy(out) -> None:
+    assert out.strategy == "rolling"
+
+
+def _check_fenced_infra_debug(out) -> None:
+    assert out.summary == "fenced debug ok"
+    assert out.fixable is True
+
+
+def _check_fenced_doc_runbook(out) -> None:
+    assert "docs/runbook.md" in out.files
+
+
+def _check_fenced_infra_patch(out) -> None:
+    assert "main.tf" in out.patched_artifacts
+
+
+def _check_fenced_devsecops(out) -> None:
+    assert out.approved is True
+
+
+def _check_fenced_task_clarifier(out) -> None:
+    assert out.approved_for_execution is True
+
+
+_FENCED_RECOVERY_CASES = [
+    (
+        "iac",
+        _fenced_iac_case,
+        {
+            "artifacts": {"infra/main.tf": "resource {}"},
+            "summary": "fenced iac ok",
+            "destructive_changes_detected": False,
+            "blast_radius_notes": [],
+        },
+        _check_fenced_iac,
+    ),
+    (
+        "cicd_pipeline",
+        _fenced_cicd_case,
+        {
+            "artifacts": {".github/workflows/ci.yml": "on: push"},
+            "pipeline_job_graph_summary": "build -> test",
+            "required_gates_present": True,
+            "summary": "fenced cicd ok",
+        },
+        _check_fenced_cicd,
+    ),
+    (
+        "deployment_strategy",
+        _fenced_deploy_case,
+        {
+            "artifacts": {"deploy/values.yaml": "replicas: 2"},
+            "strategy": "rolling",
+            "rollback_plan": ["helm rollback"],
+            "health_checks": ["/healthz"],
+            "rollout_timeout_minutes": 10,
+            "summary": "fenced deploy ok",
+        },
+        _check_fenced_deploy,
+    ),
+    (
+        "infra_debug",
+        _fenced_infra_debug_case,
+        {
+            "errors": [{"error_type": "syntax", "error_message": "bad hcl"}],
+            "summary": "fenced debug ok",
+            "fixable": True,
+        },
+        _check_fenced_infra_debug,
+    ),
+    (
+        "doc_runbook",
+        _fenced_doc_runbook_case,
+        {
+            "files": {"docs/runbook.md": "# Runbook"},
+            "summary": "fenced doc ok",
+        },
+        _check_fenced_doc_runbook,
+    ),
+    (
+        "infra_patch",
+        _fenced_infra_patch_case,
+        {
+            "patched_artifacts": {"main.tf": "resource {} # fixed"},
+            "summary": "fenced patch ok",
+            "edits_applied": 1,
+        },
+        _check_fenced_infra_patch,
+    ),
+    (
+        "devsecops_review",
+        _fenced_devsecops_case,
+        {"approved": True, "findings": [], "summary": "fenced sec ok"},
+        _check_fenced_devsecops,
+    ),
+    (
+        "task_clarifier",
+        _fenced_task_clarifier_case,
+        {
+            "approved_for_execution": True,
+            "checklist": ["done"],
+            "gaps": [],
+            "clarification_requests": [],
+        },
+        _check_fenced_task_clarifier,
+    ),
+]
 
 
 class TestDevOpsAgentsRecoverFencedJson:
-    def test_iac_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.iac_agent import (
-            IaCAgentInput,
-            InfrastructureAsCodeAgent,
-        )
+    """Markdown-fenced LLM JSON must recover for every DevOps LLM agent."""
 
-        _patch_fenced_response(
-            monkeypatch,
-            {
-                "artifacts": {"infra/main.tf": "resource {}"},
-                "summary": "fenced iac ok",
-                "destructive_changes_detected": False,
-                "blast_radius_notes": [],
-            },
-        )
-        agent = InfrastructureAsCodeAgent(_strands_model_double())
-        out = agent.run(IaCAgentInput(task_spec=_base_task_spec()))
-        assert "infra/main.tf" in out.artifacts
-        assert out.summary == "fenced iac ok"
-
-    def test_cicd_pipeline_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.cicd_pipeline_agent import (
-            CICDPipelineAgent,
-            CICDPipelineAgentInput,
-        )
-
-        _patch_fenced_response(
-            monkeypatch,
-            {
-                "artifacts": {".github/workflows/ci.yml": "on: push"},
-                "pipeline_job_graph_summary": "build -> test",
-                "required_gates_present": True,
-                "summary": "fenced cicd ok",
-            },
-        )
-        agent = CICDPipelineAgent(_strands_model_double())
-        out = agent.run(CICDPipelineAgentInput(task_spec=_base_task_spec()))
-        assert ".github/workflows/ci.yml" in out.artifacts
-
-    def test_deployment_strategy_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.deployment_strategy_agent import (
-            DeploymentStrategyAgent,
-            DeploymentStrategyAgentInput,
-        )
-
-        _patch_fenced_response(
-            monkeypatch,
-            {
-                "artifacts": {"deploy/values.yaml": "replicas: 2"},
-                "strategy": "rolling",
-                "rollback_plan": ["helm rollback"],
-                "health_checks": ["/healthz"],
-                "rollout_timeout_minutes": 10,
-                "summary": "fenced deploy ok",
-            },
-        )
-        agent = DeploymentStrategyAgent(_strands_model_double())
-        out = agent.run(DeploymentStrategyAgentInput(task_spec=_base_task_spec()))
-        assert out.strategy == "rolling"
-
-    def test_infra_debug_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.infra_debug_agent import (
-            IaCDebugInput,
-            InfraDebugAgent,
-        )
-
-        _patch_fenced_response(
-            monkeypatch,
-            {
-                "errors": [{"error_type": "syntax", "error_message": "bad hcl"}],
-                "summary": "fenced debug ok",
-                "fixable": True,
-            },
-        )
-        agent = InfraDebugAgent(_strands_model_double())
-        out = agent.run(
-            IaCDebugInput(
-                execution_output="Error: bad hcl",
-                tool_name="terraform",
-                command="plan",
-                artifacts={"main.tf": "resource {}"},
-            )
-        )
-        assert out.summary == "fenced debug ok"
-        assert out.fixable is True
-
-    def test_doc_runbook_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.doc_runbook_agent import (
-            DocumentationRunbookAgent,
-            DocumentationRunbookInput,
-        )
-
-        _patch_fenced_response(
-            monkeypatch,
-            {
-                "files": {"docs/runbook.md": "# Runbook"},
-                "summary": "fenced doc ok",
-            },
-        )
-        agent = DocumentationRunbookAgent(_strands_model_double())
-        out = agent.run(
-            DocumentationRunbookInput(
-                task_id="DO-1",
-                task_title="test",
-                artifacts={"a.tf": "resource"},
-                quality_gates={"iac_validate": "pass"},
-            )
-        )
-        assert "docs/runbook.md" in out.files
-
-    def test_infra_patch_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.infra_debug_agent.models import (
-            IaCDebugOutput,
-            IaCExecutionError,
-        )
-        from software_engineering_team.devops_team.infra_patch_agent import (
-            IaCPatchInput,
-            InfraPatchAgent,
-        )
-
-        _patch_fenced_response(
-            monkeypatch,
-            {
-                "patched_artifacts": {"main.tf": "resource {} # fixed"},
-                "summary": "fenced patch ok",
-                "edits_applied": 1,
-            },
-        )
-        agent = InfraPatchAgent(_strands_model_double())
-        debug_output = IaCDebugOutput(
-            errors=[IaCExecutionError(error_type="syntax", error_message="bad hcl")],
-            summary="debug",
-            fixable=True,
-        )
-        out = agent.run(
-            IaCPatchInput(
-                debug_output=debug_output,
-                original_artifacts={"main.tf": "resource {}"},
-            )
-        )
-        assert "main.tf" in out.patched_artifacts
-
-    def test_devsecops_review_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.devsecops_review_agent import (
-            DevSecOpsReviewAgent,
-            DevSecOpsReviewInput,
-        )
-
-        _patch_fenced_response(
-            monkeypatch,
-            {"approved": True, "findings": [], "summary": "fenced sec ok"},
-        )
-        agent = DevSecOpsReviewAgent(_strands_model_double())
-        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
-        assert out.approved
-
-    def test_task_clarifier_recovers_fenced_response(self, monkeypatch) -> None:
-        from software_engineering_team.devops_team.task_clarifier import (
-            DevOpsTaskClarifierAgent,
-            DevOpsTaskClarifierInput,
-        )
-
-        _patch_fenced_response(
-            monkeypatch,
-            {
-                "approved_for_execution": True,
-                "checklist": ["done"],
-                "gaps": [],
-                "clarification_requests": [],
-            },
-        )
-        agent = DevOpsTaskClarifierAgent(_strands_model_double())
-        out = agent.run(DevOpsTaskClarifierInput(task_spec=_base_task_spec()))
-        assert out.approved_for_execution is True
+    @pytest.mark.parametrize(
+        "build,payload,check",
+        [(case[1], case[2], case[3]) for case in _FENCED_RECOVERY_CASES],
+        ids=[case[0] for case in _FENCED_RECOVERY_CASES],
+    )
+    def test_recovers_fenced_json(self, monkeypatch, build, payload, check) -> None:
+        """Each DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
+        _patch_fenced_response(monkeypatch, payload)
+        agent, inp = build()
+        check(agent.run(inp))
