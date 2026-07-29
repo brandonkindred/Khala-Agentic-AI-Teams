@@ -292,3 +292,85 @@ def test_skips_side_effect_half_when_pre_numbered() -> None:
     assert len(arch) == 1
     assert arch[0].category == "refactor"
     assert side == []
+
+
+def test_large_architecture_document_shrinks_code_inline_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike the standalone architecture pass, the merged call must reserve
+    the architecture body in its budget so a huge document shrinks changed-file
+    inlining (and caps the document on tiny contexts) instead of overflowing."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+    original_build = pass_mod._build_prompt
+
+    def _spy(index, architecture_body, max_inline_chars, *, max_architecture_chars):
+        captured["max_inline_chars"] = max_inline_chars
+        captured["max_architecture_chars"] = max_architecture_chars
+        captured["architecture_body_len"] = len(architecture_body)
+        return original_build(
+            index,
+            architecture_body,
+            max_inline_chars,
+            max_architecture_chars=max_architecture_chars,
+        )
+
+    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
+
+    # Small context so a 100K architecture body cannot share the map-call code
+    # allowance without overflowing.
+    class _SmallCtx(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 16_384
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+
+    map_budget = compute_code_review_map_chunk_chars(_SmallCtx())
+    arch_doc = SystemArchitecture(overview="", architecture_document="X" * 100_000)
+    find_architecture_and_side_effect_issues(_SmallCtx(), _input(architecture=arch_doc))
+
+    assert captured["architecture_body_len"] == 100_000
+    assert captured["max_architecture_chars"] < 100_000
+    assert captured["max_inline_chars"] < map_budget
+    assert captured["max_inline_chars"] == 0
+
+
+def test_raises_tight_output_cap_for_dual_finding_arrays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When LLM_MAX_TOKENS is set near a single-pass sizing (e.g. 4096), the
+    production LLMClientModel path must raise the merged call to the dual-array
+    floor so both finding lists can fit in one completion."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from llm_service import LLMClientModel
+    from software_engineering_team.shared.context_sizing import (
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    )
+
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    clones: list = []
+
+    class _Empty(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    class _RecordingModel(LLMClientModel):
+        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
+            clones.append(overrides)
+            return super().clone(**overrides)
+
+    backing = _Empty()
+    base = _RecordingModel(backing, agent_key="code_review")
+    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+
+    find_architecture_and_side_effect_issues(backing, _input())
+    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]

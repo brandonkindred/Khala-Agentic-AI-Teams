@@ -869,13 +869,17 @@ architecture-consistency activity independently (one additional LLM call).
 
 An architecture document on `CodeReviewInput.architecture` is optional:
 when present (document, overview, components, and/or decisions), it is inlined
-in full; when absent, the pass still runs and the model must derive
-expectations from established repository structure and patterns. It can only
-ADD findings, in two categories: `architecture` (the change contradicts a
-stated or established boundary/pattern/decision in a way that would break
-integration) and `refactor` (the change duplicates a capability that already
-exists elsewhere in the repository, tool-verified before it is flagged — never
-guessed from naming alone). It never removes or alters any finding the map
+in full when context allows; when absent, the pass still runs and the model must
+derive expectations from established repository structure and patterns. The
+in-process merged call budgets changed-file inlining against the combined
+system prompt, architecture body, and a dual-array response reserve
+(`CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS` / 8192) — and caps the architecture
+text only when it cannot fit — rather than reusing the map-call code allowance
+alone. It can only ADD findings, in two categories: `architecture` (the change
+contradicts a stated or established boundary/pattern/decision in a way that
+would break integration) and `refactor` (the change duplicates a capability that
+already exists elsewhere in the repository, tool-verified before it is flagged —
+never guessed from naming alone). It never removes or alters any finding the map
 phase or the false-positive filter already produced. Any setup or LLM failure
 is fail-safe: it is logged and yields no additional findings, so a broken pass
 never blocks or changes the rest of the review. Set to `false`/`0`/`no` to
@@ -893,7 +897,10 @@ side-effect-impact activity independently (one additional LLM call).
 In Temporal mode this pass makes exactly one additional LLM call (never once
 per chunk). In the in-process coordinator it shares a single merged LLM call
 with the architecture-consistency pass, with `side_effect_findings` split back
-out after the call. Either way it has read access to the rest of the repository
+out after the call. That merged call raises a tight `LLM_MAX_TOKENS` (when set
+below 8192) to the dual-array output floor so both finding lists can fit in one
+completion; unset / already-generous caps keep the provider default. Either
+way it has read access to the rest of the repository
 (the same `read_file`/`list_files`/`search_codebase`/`find_function_at_line`
 tools the false-positive filter and architecture pass use, plus a new
 `search_repository` tool that searches the REST of the repository — beyond the

@@ -15,11 +15,13 @@ from software_engineering_team.shared.context_sizing import (
     CODE_REVIEW_ABS_CHUNK_CHARS,
     CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS,
     CODE_REVIEW_EXISTING_ABS_CHARS,
+    CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS,
     compute_code_review_arch_overview_chars,
     compute_code_review_chunk_chars,
     compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
+    compute_code_review_merged_pass_budgets,
     compute_code_review_spec_excerpt_chars,
     compute_existing_code_chars,
     compute_max_chunk_chars,
@@ -133,3 +135,37 @@ def test_code_review_excerpt_floors_unchanged_for_small_models() -> None:
     assert compute_code_review_spec_excerpt_chars(llm) == 8_000
     assert compute_code_review_arch_overview_chars(llm) == 2_000
     assert compute_code_review_existing_codebase_chars(llm) == 4_000
+
+
+def test_merged_pass_budgets_prefer_full_arch_and_shrink_code() -> None:
+    """A large architecture body must reduce the changed-file inline budget
+    relative to the map-call allowance, instead of reusing that allowance
+    unchanged while still inlining the full document."""
+    llm = _StubLLM(40_000)
+    map_budget = compute_code_review_map_chunk_chars(llm)
+    max_arch, max_code = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=40_000,
+        system_prompt_chars=14_000,
+    )
+    assert max_arch == 40_000
+    assert max_code < map_budget
+    assert max_code <= CODE_REVIEW_ABS_CHUNK_CHARS
+
+
+def test_merged_pass_budgets_cap_architecture_when_it_cannot_fit() -> None:
+    """On a small-context model, an oversized architecture document is capped
+    so the merged call stays inside the window; code inlining yields to it."""
+    llm = _StubLLM(16_384)
+    max_arch, max_code = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=100_000,
+        system_prompt_chars=14_000,
+    )
+    assert max_arch < 100_000
+    assert max_arch > 0
+    assert max_code == 0
+
+
+def test_merged_pass_response_reserve_is_dual_array_floor() -> None:
+    assert CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS == 8192

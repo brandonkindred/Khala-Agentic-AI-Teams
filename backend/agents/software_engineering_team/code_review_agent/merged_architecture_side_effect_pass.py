@@ -14,19 +14,28 @@ Invariants:
       one of the two env flags is enabled.
     - **``CODE_REVIEW`` profile only.** Same restriction as each standalone
       pass.
+    - **Context-aware budgeting.** Changed-file inlining (and, when needed,
+      architecture text) is sized for the combined system prompt, full
+      architecture document, and dual finding-array response — not the
+      map-call code allowance alone.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
 from strands import Agent
+from strands.models.model import Model as _StrandsModel
 
-from llm_service import LLMClient
+from llm_service import LLMClient, LLMClientModel
+from llm_service.config import resolve_max_tokens
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+from software_engineering_team.shared.context_sizing import (
+    CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    compute_code_review_merged_pass_budgets,
+)
 from software_engineering_team.shared.models import SystemArchitecture
 
 from . import architecture_consistency_pass as arch_pass
@@ -122,9 +131,19 @@ def _run_pass(
     if not index.files:
         return [], []
 
-    model = resolve_code_review_model(llm)
-    max_inline_chars = compute_code_review_map_chunk_chars(llm)
-    prompt = _build_prompt(index, input_data.architecture, max_inline_chars)
+    model = _with_merged_pass_output_budget(resolve_code_review_model(llm))
+    arch_body = _architecture_document_text(input_data.architecture)
+    max_arch_chars, max_inline_chars = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=len(arch_body),
+        system_prompt_chars=len(MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT),
+    )
+    prompt = _build_prompt(
+        index,
+        arch_body,
+        max_inline_chars,
+        max_architecture_chars=max_arch_chars,
+    )
     agent = Agent(
         model=model,
         system_prompt=MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT,
@@ -167,6 +186,55 @@ def _run_pass(
     return architecture_findings, side_effect_findings
 
 
+def _with_merged_pass_output_budget(
+    model: "Union[LLMClient, _StrandsModel]",
+) -> "Union[LLMClient, _StrandsModel]":
+    """Raise a tight output cap so both finding arrays can fit.
+
+    Preconditions:
+        - ``model`` is the result of :func:`resolve_code_review_model`.
+
+    Postconditions:
+        - When ``model`` is an ``LLMClientModel`` and the effective
+          ``LLM_MAX_TOKENS`` / pinned ``max_tokens`` is set but below
+          ``CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS``, returns a clone with
+          that dual-array floor. Otherwise returns ``model`` unchanged
+          (injected test models and unset / already-generous caps keep the
+          provider default).
+        - Never mutates ``model``.
+    """
+    if not isinstance(model, LLMClientModel):
+        return model
+    configured = resolve_max_tokens()
+    pinned = model.get_config().get("max_tokens")
+    pinned_int = pinned if isinstance(pinned, int) and pinned > 0 else 0
+    effective = configured if configured > 0 else pinned_int
+    if 0 < effective < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS:
+        return model.clone(max_tokens=CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS)
+    return model
+
+
+def _architecture_document_text(architecture: Optional[SystemArchitecture]) -> str:
+    """Flatten the optional architecture payload into the inlined body text.
+
+    Postconditions:
+        - Returns ``""`` when ``architecture`` is ``None`` or has no document /
+          rendered context content.
+        - Otherwise returns the same joined body ``_build_prompt`` inlines
+          (without fences or section headers).
+    """
+    if architecture is None:
+        return ""
+    return "\n\n".join(
+        p
+        for p in (
+            (architecture.architecture_document or "").strip(),
+            render_architecture_context(architecture),
+        )
+        if p
+    )
+
+
 def _issues_from_half(
     raw_list: object,
     *,
@@ -207,14 +275,22 @@ def _issues_from_half(
 
 def _build_prompt(
     index: CodebaseIndex,
-    architecture: Optional[SystemArchitecture],
+    architecture_body: str,
     max_inline_chars: int,
+    *,
+    max_architecture_chars: int,
 ) -> str:
     """Render the single user prompt for the merged pass.
 
+    Preconditions:
+        - ``architecture_body`` is the flattened document text (may be empty).
+        - ``max_architecture_chars`` / ``max_inline_chars`` are ``>= 0`` budgets
+          from :func:`compute_code_review_merged_pass_budgets`.
+
     Postconditions:
-        - Inlines architecture document/context when present; otherwise states
-          that no formal architecture document was provided.
+        - Inlines architecture document/context when present (truncated to
+          ``max_architecture_chars`` when the budget requires it); otherwise
+          states that no formal architecture document was provided.
         - Inlines changed files up to ``max_inline_chars``; overflow files are
           named as tool-reachable.
         - Ends with a return instruction containing both response keys so
@@ -222,23 +298,18 @@ def _build_prompt(
     """
     parts: List[str] = []
 
-    if architecture is None:
-        arch_doc = ""
-    else:
-        arch_doc = "\n\n".join(
-            p
-            for p in (
-                (architecture.architecture_document or "").strip(),
-                render_architecture_context(architecture),
-            )
-            if p
-        )
-    if arch_doc:
-        doc_fence = code_fence_for(arch_doc)
+    if architecture_body:
+        body = architecture_body[:max_architecture_chars]
+        doc_fence = code_fence_for(body)
         parts.append("**Architecture document:**")
         parts.append(doc_fence)
-        parts.append(arch_doc)
+        parts.append(body)
         parts.append(doc_fence)
+        if len(body) < len(architecture_body):
+            parts.append(
+                f"(Only the first {len(body)} characters of the architecture document "
+                "are shown above — the remainder was omitted to fit the model context.)"
+            )
     else:
         parts.append("**Architecture document:**")
         parts.append(

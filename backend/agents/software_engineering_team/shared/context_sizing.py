@@ -134,6 +134,65 @@ def compute_code_review_map_chunk_chars(llm: LLMClient) -> int:
     return compute_code_review_chunk_chars(llm)
 
 
+# Dual-array response reserve for the merged architecture + side-effect pass
+# (2 × the map-phase ``reserved_response_tokens=4096``). Also used as the
+# floor when raising a tight ``LLM_MAX_TOKENS`` for that call's output budget.
+CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS = 8192
+
+
+def compute_code_review_merged_pass_budgets(
+    llm: LLMClient,
+    *,
+    architecture_chars: int,
+    system_prompt_chars: int,
+) -> tuple[int, int]:
+    """Return ``(max_architecture_chars, max_inline_code_chars)`` for the merged pass.
+
+    The in-process coordinator's merged architecture + side-effect call inlines
+    the architecture document *and* a combined system prompt that is larger than
+    either standalone pass. Reusing the map-call code allowance alone can therefore
+    overflow smaller-context models. This helper:
+
+    1. Reserves the merged system prompt, fixed user-prompt scaffolding, and a
+       dual-array response budget (``CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS``).
+    2. Prefers keeping the full architecture document; leftover capacity goes to
+       changed-file inlining (capped by ``CODE_REVIEW_MAP_CHUNK_CHARS``).
+    3. Caps the architecture text only when it cannot fit after those reserves
+       (overflow changed files remain tool-reachable either way).
+
+    Preconditions:
+        - ``llm.get_max_context_tokens()`` returns a positive context size.
+        - ``architecture_chars`` / ``system_prompt_chars`` are non-negative
+          char counts for the bodies that will be placed in the merged call.
+
+    Postconditions:
+        - Returns two ints ``>= 0``. ``max_inline_code_chars`` never exceeds the
+          map-chunk absolute cap. Never raises.
+    """
+    ctx = llm.get_max_context_tokens()
+    # Headers, file manifest, tool/return instructions in the merged user prompt
+    # beyond the architecture body itself.
+    scaffolding_chars = 2_000
+    reserved_fixed_tokens = (
+        int((max(0, system_prompt_chars) + scaffolding_chars) / CHARS_PER_TOKEN)
+        + CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
+    )
+    available_tokens = max(512, ctx - reserved_fixed_tokens)
+    available_chars = int(available_tokens * CHARS_PER_TOKEN)
+
+    arch_wanted = max(0, architecture_chars)
+    if arch_wanted <= available_chars:
+        max_arch = arch_wanted
+        code_room = available_chars - arch_wanted
+    else:
+        max_arch = available_chars
+        code_room = 0
+
+    code_cap = parse_env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
+    max_code = 0 if code_room <= 0 else min(code_room, code_cap)
+    return max_arch, max_code
+
+
 def compute_spec_chunk_chars(llm: LLMClient) -> int:
     """
     Max chars per spec chunk (SpecChunkAnalyzer). Reserves ~4K for
