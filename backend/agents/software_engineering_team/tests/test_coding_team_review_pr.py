@@ -8,6 +8,7 @@ GitHubClient and a stubbed CodeReviewAgent — no network, no LLM).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock
 
@@ -734,7 +735,7 @@ class _FakeReviewClient:
         ``create_issue_fail`` (set on the instance) raises a 403 to exercise the
         create-issues error path.
         """
-        if getattr(self, "create_issue_fail", False):
+        if self.create_issue_fail:
             raise GitHubAPIError(403, "no issue-write scope")
         self.created_issues.append({"title": title, "body": body, "labels": labels})
         number = len(self.created_issues)
@@ -758,6 +759,15 @@ class _FakeReviewClient:
 
 @pytest.fixture
 def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Build a wired-up PR-review test environment.
+
+    Returns a dictionary used by the integration tests:
+    - ``client``: FastAPI ``TestClient``
+    - ``api``: the monkeypatched ``coding_team_main`` module
+    - ``repo_path``: temporary directory path used as ``repo_path``
+    - ``github``: dict holding the ``_FakeReviewClient`` under ``client``
+    - ``jobs``: fake job service client recording job-store calls
+    """
     _stub_heavy_modules(monkeypatch)
 
     from job_service_client_fake import FakeJobServiceClient
@@ -807,10 +817,18 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 def _review_body(**overrides: Any) -> dict[str, Any]:
+    """Return a default PR-review request body, merged with caller overrides.
+
+    Defaults:
+    - ``owner``: ``"o"``
+    - ``repo``: ``"r"``
+    - ``repo_path``: current working directory
+    - ``pr_number``: ``7``
+    """
     body = {
         "owner": "o",
         "repo": "r",
-        "repo_path": overrides.pop("repo_path", "/tmp/x"),
+        "repo_path": overrides.pop("repo_path", str(Path.cwd())),
         "pr_number": 7,
     }
     body.update(overrides)
