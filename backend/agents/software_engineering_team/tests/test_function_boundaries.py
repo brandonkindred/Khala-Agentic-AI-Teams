@@ -56,6 +56,49 @@ def test_class_method_is_qualified_with_class_name() -> None:
     assert result.kind == "function"
 
 
+def test_class_body_line_resolves_to_class() -> None:
+    """A line inside a class body but outside any method resolves to the class."""
+    content = "\n".join(
+        [
+            "class Widget:",  # 1
+            "    CLASS_CONST = 1",  # 2
+            "",
+        ]
+    )
+    result = enclosing_construct(content, 2)
+    assert result is not None
+    assert result.name == "Widget"
+    assert result.kind == "class"
+    assert result.start_line == 1
+    assert result.end_line == 2
+
+
+def test_nested_class_body_resolves_to_inner_class() -> None:
+    """A line inside a nested class resolves to the innermost class, not the outer."""
+    content = "\n".join(
+        [
+            "class Outer:",  # 1
+            "    class Inner:",  # 2
+            "        x = 1",  # 3
+            "    y = 2",  # 4
+            "",
+        ]
+    )
+    inner = enclosing_construct(content, 3)
+    assert inner is not None
+    assert inner.name == "Inner"
+    assert inner.kind == "class"
+    assert inner.start_line == 2
+    assert inner.end_line == 3
+
+    outer_attr = enclosing_construct(content, 4)
+    assert outer_attr is not None
+    assert outer_attr.name == "Outer"
+    assert outer_attr.kind == "class"
+    assert outer_attr.start_line == 1
+    assert outer_attr.end_line == 4
+
+
 def test_decorated_function_start_includes_decorator_line() -> None:
     """A finding on a decorated function's body is grouped under the function starting at the decorator line, not the ``def`` line."""
     content = "\n".join(
