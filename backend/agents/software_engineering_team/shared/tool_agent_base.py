@@ -517,8 +517,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             :attr:`review_prompt` must be a non-``None`` template string — the
             base class declares it as ``Optional[str] = None`` for subclasses
             that take one of those other two paths, so a subclass using the
-            default one-shot LLM path must set it (a subclass that misconfigures
-            this raises ``ValueError``).
+            default one-shot LLM path must set it.
         Postconditions: takes the first configured path -- :attr:`build_runner`
             (a static analysis/build tool), :attr:`review_via_engine` (the
             shared code-review engine), or the LLM one-shot ``review_prompt`` --
@@ -526,10 +525,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             any) all carry :attr:`issue_source`. Only the default one-shot LLM
             path (neither :attr:`build_runner` nor :attr:`review_via_engine`
             set) degrades a missing model, empty code, or LLM failure to a
-            skipped/failed summary with no issues rather than raising; however,
-            a misconfigured subclass on the default path (no ``review_prompt``,
-            ``review_via_engine``, or ``build_runner``) raises ``ValueError``.
-            When :attr:`build_runner` or :attr:`review_via_engine` is set, an
+            skipped/failed summary with no issues rather than raising.
+            ``ValueError`` is raised only when that default path is reached with
+            a usable model and non-empty code but ``review_prompt`` is still
+            ``None`` (no ``build_runner`` / ``review_via_engine`` either). When
+            :attr:`build_runner` or :attr:`review_via_engine` is set, an
             unexpected exception from the runner/engine is a defect and
             propagates uncaught; see :meth:`_build_review` and
             :meth:`_engine_review`.

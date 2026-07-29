@@ -127,23 +127,23 @@ def _be_review_issue(**kwargs):
 
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(
-        ["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True, check=True
     )
     subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True, check=True
     )
     subprocess.run(
-        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, capture_output=True, check=True
     )
     # Need an initial commit for branches
     (tmp_path / "README.md").write_text("x")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=True)
     # Create development branch
     subprocess.run(
-        ["git", "checkout", "-b", "development"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, capture_output=True, check=True
     )
     return tmp_path
 
