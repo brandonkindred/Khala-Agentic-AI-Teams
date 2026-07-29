@@ -786,6 +786,35 @@ def test_filter_resolves_via_code_review_verify_key(monkeypatch) -> None:
     assert len(out) == 1  # confirmed-real finding kept
 
 
+def test_filter_uses_code_review_verify_model(monkeypatch) -> None:
+    """``filter_false_positives`` resolves the verifier via ``resolve_code_review_verify_model``.
+
+    This pins the wiring at the call site: it must not regress back to the
+    primary ``code_review`` resolver for the verify step.
+    """
+    import code_review_agent.false_positive_filter as fpf
+
+    llm = object()  # non-Strands object so the production path runs
+    issue = _issue()
+
+    calls: list[tuple[Any, Optional[object]]] = []
+    stub_model = _VerdictStub(
+        verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}],
+    )
+
+    def _fake_resolve_verify(_llm: Any, think: Optional[object] = None) -> Any:
+        calls.append((_llm, think))
+        return stub_model
+
+    monkeypatch.setattr(fpf, "resolve_code_review_verify_model", _fake_resolve_verify)
+    # Stub context sizing so a bare non-Model ``llm`` does not fail setup.
+    monkeypatch.setattr(fpf, "compute_code_review_map_chunk_chars", lambda _llm: 8_000)
+
+    out = filter_false_positives(llm, _input(), [issue])  # type: ignore[arg-type]
+    assert out == [issue]
+    assert calls == [(llm, None)]
+
+
 def test_filter_removes_confirmed_false_positive() -> None:
     """A finding with an explicit high-confidence false verdict is dropped; a real one is kept."""
     keep = _issue(description="real bug", line=5)

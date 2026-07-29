@@ -1,11 +1,15 @@
 """Tests for the code-review agents' shared strands-model resolution.
 
 ``resolve_code_review_model`` and ``resolve_code_review_verify_model`` share
-the same shape: return an injected strands ``Model`` unchanged (the test path),
-else build the production model via ``get_strands_model`` keyed on the agent's
-own agent key. The verify resolver additionally pins Ollama failover candidates
-to the verify key's per-agent / default model so a filled provider-list
-``entry.model`` cannot shadow the lighter selection.
+the same shape:
+
+- when given an injected strands ``Model``, return it unchanged (the test
+  path short-circuit)
+- otherwise resolve the production model via ``get_strands_model`` under
+  the correct agent key.
+
+The verify resolver additionally pins Ollama failover candidates so a filled
+provider-list ``entry.model`` cannot shadow the lighter verify selection.
 """
 
 from __future__ import annotations
@@ -42,6 +46,28 @@ def test_resolve_code_review_verify_model_returns_injected_model_unchanged() -> 
     fake = _FakeStrandsModel()
     assert model_resolution.resolve_code_review_verify_model(fake) is fake
     assert model_resolution.resolve_code_review_verify_model(fake, think="low") is fake
+
+
+def test_resolve_code_review_verify_model_non_model_triggers_production_path(
+    monkeypatch,
+) -> None:
+    """Non-``Model`` input must not short-circuit the injected path."""
+    sentinel = MagicMock()
+    calls: list[tuple[Any, ...]] = []
+
+    def _fake_get_strands_model(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        return sentinel
+
+    # For a non-Model sentinel, the helper falls back to `with_model_override`,
+    # which we stub to be a no-op.
+    monkeypatch.setattr(model_resolution, "get_strands_model", _fake_get_strands_model)
+    monkeypatch.setattr(model_resolution, "with_model_override", lambda client, _m: client)
+
+    plain_client = MagicMock()
+    result = model_resolution.resolve_code_review_verify_model(plain_client)
+    assert result is sentinel
+    assert calls == [(("code_review_verify",), {})]
 
 
 def test_resolve_code_review_verify_model_uses_its_own_agent_key(monkeypatch) -> None:
@@ -145,3 +171,21 @@ def test_thinking_override_supported_unaffected_by_new_key() -> None:
     fake = _FakeStrandsModel()
     assert model_resolution.thinking_override_supported(fake) is False
     assert model_resolution.thinking_override_supported(MagicMock()) is True
+
+
+def test_resolve_code_review_model_uses_primary_agent_key(monkeypatch) -> None:
+    """The primary resolver stays on the ``code_review`` agent key."""
+    sentinel = MagicMock()
+    calls: list[tuple[Any, ...]] = []
+
+    def _fake_get_strands_model(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(model_resolution, "get_strands_model", _fake_get_strands_model)
+    monkeypatch.setattr(model_resolution, "with_model_override", lambda client, _m: client)
+
+    dummy_llm = MagicMock()
+    result = model_resolution.resolve_code_review_model(dummy_llm)
+    assert result is sentinel
+    assert calls == [(("code_review",), {})]

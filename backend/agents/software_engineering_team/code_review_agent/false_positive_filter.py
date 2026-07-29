@@ -1030,6 +1030,7 @@ def filter_false_positives(
             "FalsePositiveFilter: verification failed during setup (%s: %s); keeping all findings",
             type(exc).__name__,
             exc,
+            exc_info=True,
         )
         return list(issues)
 

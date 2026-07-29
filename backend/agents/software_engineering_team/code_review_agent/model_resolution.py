@@ -92,8 +92,8 @@ def _code_review_verify_model_pin() -> str:
 
 
 def _apply_code_review_verify_model_pin(
-    model: "Union[LLMClient, _StrandsModel]",
-) -> "Union[LLMClient, _StrandsModel]":
+    model: "Union[LLMClient, LLMClientModel]",
+) -> "Union[LLMClient, LLMClientModel]":
     """Pin Ollama failover candidates on ``model`` to the verify-key model id.
 
     Mirrors the blog pipeline's stage-model override: when the backing client is
@@ -107,7 +107,8 @@ def _apply_code_review_verify_model_pin(
     (or another non-Ollama candidate) is active, the original ``model_id`` is
     preserved so observability does not report the Ollama pin for a Claude call.
 
-    Preconditions: ``model`` is a strands ``LLMClientModel`` or an LLM client.
+    Preconditions: ``model`` is an ``LLMClientModel`` (the normal production
+        path) or an ``LLMClient`` (for callers that bypass resolution).
     Postconditions: returns a ready-to-use model; ``model`` is never mutated.
     """
     pin = _code_review_verify_model_pin()
@@ -133,9 +134,9 @@ def resolve_code_review_verify_model(
     Same shape as :func:`resolve_code_review_model`, but keyed on the
     ``code_review_verify`` agent key (its own, genuinely lighter
     ``AGENT_DEFAULT_MODELS`` entry) instead of ``code_review`` — intended for
-    bounded tasks like false-positive verification and narrative synthesis, as
-    opposed to open-ended chunk review. ``false_positive_filter.py`` already
-    calls this resolver; ``synthesis.py`` still uses
+    bounded tasks like false-positive verification (and potentially narrative
+    synthesis) as opposed to open-ended chunk review. ``false_positive_filter.py``
+    already calls this resolver; ``synthesis.py`` still uses
     :func:`resolve_code_review_model` until its own follow-up wires it over.
 
     After resolving via ``get_strands_model("code_review_verify")``, the
