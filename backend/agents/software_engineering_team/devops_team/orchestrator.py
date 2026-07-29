@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -59,6 +58,33 @@ _DEFAULT_LEGACY_SECURITY_CONSTRAINTS = [
 _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
     "Audit trail required",
 ]
+
+_NEGATION_TOKENS = frozenset({"not", "no", "non"})
+
+
+def _legacy_environment_from_text(combined_text: str) -> str:
+    """Infer ``production`` vs ``staging`` from legacy free text.
+
+    Preconditions:
+        - ``combined_text`` is a str (may be empty); caller lowercases input.
+    Postconditions:
+        - Returns ``\"production\"`` iff some token equals ``prod`` or ``production``
+          (punctuation stripped) and the immediately preceding token is not a
+          negation token (``not``, ``no``, ``non``). Hyphenated forms like
+          ``non-production`` count as negated (leading ``non`` segment).
+        - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
+    """
+    assert isinstance(combined_text, str), "combined_text must be a str"
+    # Split on whitespace and hyphens so "non-production" -> ["non", "production"].
+    raw_tokens = combined_text.replace("-", " ").split()
+    tokens = [t.strip(",.!?;:") for t in raw_tokens]
+    for i, token in enumerate(tokens):
+        if token not in ("prod", "production"):
+            continue
+        if i > 0 and tokens[i - 1] in _NEGATION_TOKENS:
+            continue
+        return "production"
+    return "staging"
 
 
 def _git_ops() -> DeliverGitOps:
@@ -262,8 +288,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             else (str(target_repo) if target_repo else "")
         )
         combined_text = f"{task_description} {requirements}".lower()
-        # Match explicit production intent; avoid false positives like "produce".
-        env = "production" if re.search(r"\b(prod|production)\b", combined_text) else "staging"
+        env = _legacy_environment_from_text(combined_text)
         return DevOpsTaskSpec(
             task_id=task_id,
             title=task_description[:120] or task_id,

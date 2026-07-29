@@ -1850,6 +1850,30 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "staging"
 
+    def test_build_legacy_spec_ignores_non_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-1",
+            task_description="Target non-production only",
+            requirements="Keep staging",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_ignores_not_prod(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-2",
+            task_description="Do not prod deploy",
+            requirements="not prod",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_ignores_no_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-3",
+            task_description="no production traffic",
+            requirements="staging only",
+        )
+        assert spec.environment == "staging"
+
     def test_build_legacy_spec_always_has_rollback(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-3",
