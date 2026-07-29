@@ -47,6 +47,18 @@ def _input(
     return CodeReviewInput(**base)  # type: ignore[arg-type]
 
 
+def _error_chain_text(exc: BaseException) -> str:
+    """Return messages from Temporal's nested ``cause`` wrappers."""
+    messages: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current))
+        current = getattr(current, "cause", None) or current.__cause__
+    return " <- ".join(messages)
+
+
 # ---------------------------------------------------------------------------
 # 1. Resolver + enablement gate
 # ---------------------------------------------------------------------------
@@ -1399,7 +1411,7 @@ async def test_workflow_fails_on_verify_failure_without_leaking_sibling_passes(
 
     cause = exc_info.value.cause
     assert cause is not None
-    assert "verify boom" in str(cause)
+    assert "verify boom" in _error_chain_text(cause)
     assert completed == {"architecture", "side_effect"}
 
 
@@ -1473,8 +1485,9 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
 
     cause = exc_info.value.cause
     assert cause is not None
-    assert "architecture boom" in str(cause)
-    assert "TypeError" not in str(cause)
+    error_chain = _error_chain_text(cause)
+    assert "architecture boom" in error_chain
+    assert "TypeError" not in error_chain
     assert completed == {"side_effect"}
     assert "architecture" not in completed
 
@@ -1566,6 +1579,392 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_workflow_tail_passes_in_flight_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tail-pass activities must not just be scheduled together; they must run
+    concurrently as real worker threads execute them.
+
+    This uses a barrier inside the patched underlying verification/pass
+    functions: if the workflow regressed back to sequential awaiting of the
+    tail passes, the first activity would block forever waiting for the other
+    two parties (and this test would fail fast on the barrier timeout).
+    """
+
+    import concurrent.futures
+    import threading
+    import time
+
+    import code_review_agent.architecture_consistency_pass as acp
+    import code_review_agent.false_positive_filter as fpf
+    import code_review_agent.side_effect_impact_pass as sep
+    from code_review_agent.models import CodeReviewIssue
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-tail-passes-inflight-test"
+
+    filter_issue = CodeReviewIssue(
+        severity="medium",
+        category="logic",
+        file_path="a.py",
+        description="tail-pass filter contribution",
+    )
+    architecture_issue = CodeReviewIssue(
+        severity="medium",
+        category="architecture",
+        file_path="a.py",
+        description="tail-pass architecture contribution",
+    )
+    side_effect_issue = CodeReviewIssue(
+        severity="medium",
+        category="side-effects",
+        file_path="a.py",
+        description="tail-pass side-effect contribution",
+    )
+
+    barrier = threading.Barrier(3, timeout=5)
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def _wait(name: str) -> None:
+        with lock:
+            started.append(name)
+        barrier.wait()
+
+    # Activities are fail-safe; this test only validates orchestration-level
+    # concurrency. Sleeps are intentionally tiny (only to allow thread
+    # scheduling variance without making the test slow).
+    def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        _wait("filter")
+        time.sleep(0.01)
+        return [filter_issue]
+
+    def _architecture(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        _wait("architecture")
+        time.sleep(0.01)
+        return [architecture_issue]
+
+    def _side_effect(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        _wait("side_effect")
+        time.sleep(0.01)
+        return [side_effect_issue]
+
+    monkeypatch.setattr(fpf, "filter_false_positives", _filter)
+    monkeypatch.setattr(acp, "find_architecture_and_redundancy_issues", _architecture)
+    monkeypatch.setattr(sep, "find_side_effect_impact_issues", _side_effect)
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    barrier_aborted = False
+    try:
+        async with test_env as env:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+                worker = Worker(
+                    env.client,
+                    task_queue=TASK_QUEUE,
+                    workflows=[CodeReviewWorkflow],
+                    activities=ACTIVITIES,
+                    activity_executor=activity_executor,
+                )
+                async with worker:
+                    result = await env.client.execute_workflow(
+                        CodeReviewWorkflow.run,
+                        review_input.model_dump(mode="json"),
+                        id=workflow_id,
+                        task_queue=TASK_QUEUE,
+                    )
+    finally:
+        # Always abort so any stray worker threads can't leak into later
+        # tests if the barrier throws early.
+        barrier.abort()
+        barrier_aborted = True
+
+    assert barrier_aborted, "barrier abort should have run"
+    assert sorted(started) == ["architecture", "filter", "side_effect"]
+
+    descriptions = {i["description"] for i in result["issues"]}
+    assert filter_issue.description in descriptions
+    assert architecture_issue.description in descriptions
+    assert side_effect_issue.description in descriptions
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The workflow must merge tail-pass results correctly regardless of the
+    order in which the three tail-pass activities actually complete.
+
+    The workflow uses ``asyncio.gather`` (deterministic fan-in order), so
+    out-of-order completion should not affect the merged verdict. This test
+    forces a completion order that differs from schedule order via explicit
+    event handoffs (not wall-clock sleeps) and asserts that the merged
+    tail-pass issue descriptions match the sequential activity pipeline
+    (``_run_activity_pipeline``).
+    """
+
+    import concurrent.futures
+    import threading
+
+    import code_review_agent.architecture_consistency_pass as acp
+    import code_review_agent.false_positive_filter as fpf
+    import code_review_agent.side_effect_impact_pass as sep
+    from code_review_agent.models import CodeReviewIssue
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-tail-passes-out-of-order-test"
+
+    filter_issue = CodeReviewIssue(
+        severity="medium",
+        category="logic",
+        file_path="a.py",
+        description="tail-pass filter (oOO)",
+    )
+    architecture_issue = CodeReviewIssue(
+        severity="medium",
+        category="architecture",
+        file_path="a.py",
+        description="tail-pass architecture (oOO)",
+    )
+    side_effect_issue = CodeReviewIssue(
+        severity="medium",
+        category="side-effects",
+        file_path="a.py",
+        description="tail-pass side-effect (oOO)",
+    )
+
+    # Force completion order architecture → side_effect → filter (different
+    # from the workflow's schedule order filter → architecture → side_effect)
+    # via explicit event handoffs. A start barrier puts all three in flight
+    # first; then each later pass waits for the previous one's completion
+    # event before finishing. No wall-clock sleeps — CI preemption cannot
+    # reorder these handoffs.
+    expected_completion_order = ["architecture", "side_effect", "filter"]
+
+    barrier = threading.Barrier(3, timeout=5)
+    coordinate = threading.Event()
+    coordinate.set()
+    architecture_done = threading.Event()
+    side_effect_done = threading.Event()
+
+    completion_order: list[str] = []
+    lock = threading.Lock()
+
+    def _record_completion(name: str) -> None:
+        with lock:
+            completion_order.append(name)
+
+    def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        if coordinate.is_set():
+            barrier.wait()
+            # Wait until architecture and side_effect have both finished so
+            # filter is last — independent of thread scheduling.
+            if not side_effect_done.wait(timeout=5):
+                raise AssertionError("side_effect did not signal before filter timeout")
+        _record_completion("filter")
+        return [filter_issue]
+
+    def _architecture(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        if coordinate.is_set():
+            barrier.wait()
+        _record_completion("architecture")
+        architecture_done.set()
+        return [architecture_issue]
+
+    def _side_effect(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        if coordinate.is_set():
+            barrier.wait()
+            if not architecture_done.wait(timeout=5):
+                raise AssertionError("architecture did not signal before side_effect timeout")
+        _record_completion("side_effect")
+        side_effect_done.set()
+        return [side_effect_issue]
+
+    monkeypatch.setattr(fpf, "filter_false_positives", _filter)
+    monkeypatch.setattr(acp, "find_architecture_and_redundancy_issues", _architecture)
+    monkeypatch.setattr(sep, "find_side_effect_impact_issues", _side_effect)
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    try:
+        async with test_env as env:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+                worker = Worker(
+                    env.client,
+                    task_queue=TASK_QUEUE,
+                    workflows=[CodeReviewWorkflow],
+                    activities=ACTIVITIES,
+                    activity_executor=activity_executor,
+                )
+                async with worker:
+                    workflow_out = await env.client.execute_workflow(
+                        CodeReviewWorkflow.run,
+                        review_input.model_dump(mode="json"),
+                        id=workflow_id,
+                        task_queue=TASK_QUEUE,
+                    )
+    finally:
+        # Abort so a mid-test failure cannot leave a party parked on the
+        # barrier and wedge a later test in the same worker process.
+        barrier.abort()
+
+    # Confirm forced out-of-order completion; without this assertion the test
+    # could pass even if the merge regressed.
+    assert completion_order == expected_completion_order, (
+        "expected deterministic out-of-order completion via event handoffs; "
+        f"got {completion_order}"
+    )
+
+    # Disable barrier + handoff waits for the sequential pipeline below;
+    # otherwise it would deadlock because that path calls the tail passes
+    # one at a time.
+    coordinate.clear()
+
+    # Validate the merged verdict is equivalent to the sequential activity
+    # pipeline (which applies the same tail-pass merge ordering explicitly).
+    sequential_out = _run_activity_pipeline(review_input)
+
+    wf_tail_descriptions = [
+        i["description"]
+        for i in workflow_out["issues"]
+        if i["description"]
+        in {
+            filter_issue.description,
+            architecture_issue.description,
+            side_effect_issue.description,
+        }
+    ]
+    seq_tail_descriptions = [
+        i.description
+        for i in sequential_out.issues
+        if i.description
+        in {
+            filter_issue.description,
+            architecture_issue.description,
+            side_effect_issue.description,
+        }
+    ]
+
+    assert wf_tail_descriptions == seq_tail_descriptions
+    assert wf_tail_descriptions == [
+        filter_issue.description,
+        architecture_issue.description,
+        side_effect_issue.description,
+    ]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_tail_pass_partial_failure_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure inside one additive tail pass must not fail the whole
+    durable review; other tail passes still contribute and the workflow
+    returns a merged verdict.
+
+    This uses the tail-pass activities' documented fail-safe posture:
+    architecture / side-effect passes catch unexpected internal errors and
+    degrade to an empty additive contribution instead of raising. Verifies
+    that behavior stays correct under concurrent tail-pass fan-out.
+    """
+
+    import concurrent.futures
+
+    import code_review_agent.architecture_consistency_pass as acp
+    import code_review_agent.false_positive_filter as fpf
+    import code_review_agent.side_effect_impact_pass as sep
+    from code_review_agent.models import CodeReviewIssue
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-tail-passes-partial-failure-test"
+
+    filter_issue = CodeReviewIssue(
+        severity="medium",
+        category="logic",
+        file_path="a.py",
+        description="tail-pass filter (partial failure)",
+    )
+    architecture_issue = CodeReviewIssue(
+        severity="medium",
+        category="architecture",
+        file_path="a.py",
+        description="tail-pass architecture (should be absent)",
+    )
+    side_effect_issue = CodeReviewIssue(
+        severity="medium",
+        category="side-effects",
+        file_path="a.py",
+        description="tail-pass side-effect (partial failure)",
+    )
+
+    architecture_calls = 0
+
+    def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        return [filter_issue]
+
+    def _architecture(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        nonlocal architecture_calls
+        architecture_calls += 1
+        raise RuntimeError("forced architecture pass failure")
+
+    def _side_effect(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        return [side_effect_issue]
+
+    monkeypatch.setattr(fpf, "filter_false_positives", _filter)
+    monkeypatch.setattr(acp, "find_architecture_and_redundancy_issues", _architecture)
+    monkeypatch.setattr(sep, "find_side_effect_impact_issues", _side_effect)
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[CodeReviewWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            async with worker:
+                workflow_out = await env.client.execute_workflow(
+                    CodeReviewWorkflow.run,
+                    review_input.model_dump(mode="json"),
+                    id=workflow_id,
+                    task_queue=TASK_QUEUE,
+                )
+
+    # Distinguish fail-safe handling of an *invoked* failing pass from a
+    # regression that silently skips scheduling the architecture activity.
+    assert architecture_calls == 1, (
+        f"expected architecture pass to be invoked once; got {architecture_calls}"
+    )
+    wf_tail_descriptions = {i["description"] for i in workflow_out["issues"]}
+    assert filter_issue.description in wf_tail_descriptions
+    assert side_effect_issue.description in wf_tail_descriptions
+    assert architecture_issue.description not in wf_tail_descriptions
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_workflow_replays_pre_migration_sequential_tail_pass_history() -> None:
     """A history recorded by the old sequential tail passes still replays.
 
@@ -1589,7 +1988,7 @@ async def test_workflow_replays_pre_migration_sequential_tail_pass_history() -> 
 
     from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
     from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Replayer, Worker
+    from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
     review_input = _input()
     workflow_id = "code-review-workflow-legacy-sequential-history-test"
@@ -1607,6 +2006,11 @@ async def test_workflow_replays_pre_migration_sequential_tail_pass_history() -> 
                 workflows=[_LegacySequentialCodeReviewWorkflow],
                 activities=ACTIVITIES,
                 activity_executor=activity_executor,
+                # This synthetic workflow lives in this test module, whose
+                # ordinary test-only imports are not sandbox-safe. We only
+                # need it to record a legacy history; the current workflow is
+                # still replayed below with the default sandboxed runner.
+                workflow_runner=UnsandboxedWorkflowRunner(),
             )
             async with worker:
                 await env.client.execute_workflow(
