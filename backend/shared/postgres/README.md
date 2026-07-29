@@ -191,11 +191,12 @@ it skips the test when `POSTGRES_HOST` is unset, registers the schema,
 truncates before yielding and again on teardown **when run without
 pytest-xdist**. The returned fixture always has `autouse=True`, so assigning
 it is enough — tests in scope do not need to request it by name. It wraps the
-same `register_team_schemas` / `truncate_team_tables` calls every hand-rolled
-real-Postgres test fixture in this repo already makes (see
-`branding_team/tests/test_store.py`'s `_branding_schema`), so a
-team can opt a test module into real Postgres with one line instead of
-re-deriving the skip/register/truncate boilerplate:
+same `register_team_schemas` / `truncate_team_tables` calls that
+hand-rolled real-Postgres fixtures previously duplicated (skip when
+`POSTGRES_HOST` is unset, register schema, truncate around the test).
+A team can opt a test module into real Postgres with one line instead of
+re-deriving that boilerplate — `branding_team/tests/test_store.py` is the
+canonical consumer:
 
 ```python
 from branding_team.postgres import SCHEMA as BRANDING_SCHEMA

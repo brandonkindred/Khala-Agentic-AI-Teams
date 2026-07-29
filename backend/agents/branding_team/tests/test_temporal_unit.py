@@ -711,7 +711,7 @@ def _drive_workflow(
     mark_failed_error: bool = False,
     mark_failed_result: bool | None = None,
     check_cancel_error: bool = False,
-):
+) -> SimpleNamespace:
     """Run BrandingWorkflow.run with workflow.execute_activity monkeypatched.
 
     Returns a namespace of ``calls`` (one dict per execute_activity), ``prior``
