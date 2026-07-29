@@ -329,13 +329,12 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
 
     assert captured["agent_key"] == "strategy_design"
     assert captured["phase"] == "design_generate_structured"
-    # Both DesignAgent and RefinementAgent charge every real LLM call
-    # including retries — the structured pre-flight is a real call too.
-    # invoke_structured_with_schema now charges the budget itself (two units,
-    # since ``_call`` makes two provider calls) rather than forwarding
-    # charge=True to run_structured_agent (which only charges once).
+    # ``invoke_structured_with_schema`` always forwards charge=False to the
+    # envelope; per-provider-call charging happens inside its ``_call``.
     assert captured["charge"] is False
-    assert budget.calls_made == 2
+    # This spy skips ``_call``, so per-provider-call charges inside the
+    # closure never fire — the bound budget stays untouched.
+    assert budget.calls_made == 0
 
 
 def test_revise_also_uses_structured_path(monkeypatch: pytest.MonkeyPatch) -> None:

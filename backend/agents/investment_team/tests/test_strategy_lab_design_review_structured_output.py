@@ -108,8 +108,8 @@ class _FailingClient:
 
     ``budget``, when set by the test, lets the client snapshot
     ``budget.calls_made`` at the moment ``complete_json`` runs — proving the
-    structured attempt's two up-front pre-charges landed before the
-    (failing) formatting call, not after.
+    structured attempt already charged for the reasoning call and for the
+    formatting call (charge happens immediately before ``complete_json``).
     """
 
     def __init__(self, exc: BaseException) -> None:
@@ -253,14 +253,11 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
 
     assert captured["agent_key"] == "strategy_design_review"
     assert captured["phase"] == "design_review_structured"
-    # Charging happens once per round via `charge_active_budget()` in `run()`,
-    # not inside `_invoke_structured` — unlike DesignAgent's per-attempt loop.
+    # ``invoke_structured_with_schema`` always forwards charge=False to the
+    # envelope; per-provider-call charging happens inside its ``_call`` when
+    # charge=True. This spy skips ``_call``, so the active budget is untouched.
     assert captured["charge"] is False
-    # `run()` charges externally, TWICE, for the structured path (one unit
-    # per provider call `invoke_structured_with_schema` makes) — confirm the
-    # external double-charge actually happened, not just that `charge=False`
-    # was forwarded to `run_structured_agent`.
-    assert budget.calls_made == 2
+    assert budget.calls_made == 0
 
 
 # ---------------------------------------------------------------------------
@@ -328,15 +325,9 @@ def test_schema_forced_starvation_degrades_to_legacy_call_and_succeeds(
     assert agent.calls == 1
     starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
     assert len(starvation_warnings) == 1
-    # Both of the structured attempt's up-front pre-charges (reasoning +
-    # formatting units) already landed by the time the (failing) formatting
-    # call runs — proving they happen before either provider call, not
-    # interleaved with them.
+    # Reasoning + formatting charges both land before/at the failing
+    # formatting call (charge-before-call); legacy fallback adds a third.
     assert starved_client.calls_made_at_formatting_call == 2
-    # 3 real provider calls happen on this path (the structured attempt's
-    # reasoning + formatting calls, then the legacy fallback's single call) —
-    # all 3 must be charged against the per-cycle budget, not just the 2
-    # pre-charged for the structured attempt.
     assert budget.calls_made == 3
 
 
@@ -382,14 +373,11 @@ def test_reasoning_pass_starvation_also_degrades_to_legacy_call(
     assert agent.calls == 1
     starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
     assert len(starvation_warnings) == 1
-    # Both of the structured attempt's up-front pre-charges already landed by
-    # the time the (failing) reasoning call runs — proving they happen before
-    # either provider call, not interleaved with them.
-    assert starved_client.calls_made_at_reasoning_call == 2
-    # Same accounting as the formatting-pass starvation test: 2 pre-charged
-    # for the structured attempt (reasoning + formatting units, even though
-    # the formatting call itself never ran) plus 1 for the legacy fallback.
-    assert budget.calls_made == 3
+    # Only the reasoning unit is charged before the failing reasoning call;
+    # the formatting charge never happens because complete_json is never reached.
+    assert starved_client.calls_made_at_reasoning_call == 1
+    # 2 real provider calls: structured reasoning (failed) + legacy fallback.
+    assert budget.calls_made == 2
 
 
 # ---------------------------------------------------------------------------

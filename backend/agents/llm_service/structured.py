@@ -38,6 +38,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import secrets
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -49,13 +50,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-# Delimiters wrapping the reasoning-pass prose in the formatting prompt.
-# Chosen as markdown-style section markers rather than bare tokens so they
-# are unlikely to appear in ordinary model prose; ``_ensure_prose_has_no_
-# analysis_delimiters`` still fails closed if they do.
-_ANALYSIS_START = "--- ANALYSIS ---"
-_ANALYSIS_END = "--- END ANALYSIS ---"
-
 # Fallback formatting-user-prompt preamble when ``complete_validated_via_reasoning``
 # is called without caller-supplied ``formatting_instructions``.
 _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS = (
@@ -65,32 +59,23 @@ _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS = (
 )
 
 
-def _ensure_prose_has_no_analysis_delimiters(prose: str) -> None:
-    """Reject reasoning output that would collide with the wrap markers.
-
-    Preconditions:
-        - ``prose`` is the raw string returned by the reasoning ``complete`` call.
-    Postconditions:
-        - Returns normally when neither delimiter appears in ``prose``.
-        - Raises ``ValueError`` if either marker is present, so the formatting
-          call never receives an ambiguous prompt.
-    """
-    if _ANALYSIS_START in prose or _ANALYSIS_END in prose:
-        raise ValueError(
-            "Reasoning output contains an analysis delimiter, "
-            "cannot safely wrap it for the formatting call"
-        )
-
-
 def _wrap_with_analysis_delimiters(prose: str) -> str:
-    """Wrap reasoning prose in the shared analysis delimiters.
+    """Wrap reasoning prose in per-call random analysis delimiters.
 
-    Preconditions:
-        - ``prose`` has already passed :func:`_ensure_prose_has_no_analysis_delimiters`.
-    Postconditions:
-        - Returns ``prose`` bracketed by ``_ANALYSIS_START`` / ``_ANALYSIS_END``.
+    A random boundary token (rather than a fixed ``--- ANALYSIS ---`` literal)
+    means the reasoning pass's own prose can never coincidentally collide with
+    the wrap markers and confuse the formatting pass about where the analysis
+    block ends — matching the Strategy Lab helper's approach.
+
+    Preconditions: ``prose`` is the raw string from the reasoning ``complete`` call.
+    Postconditions: returns ``prose`` bracketed by unique start/end markers.
     """
-    return f"{_ANALYSIS_START}\n{prose}\n{_ANALYSIS_END}"
+    boundary = secrets.token_hex(8)
+    return (
+        f"--- ANALYSIS {boundary} ---\n"
+        f"{prose}\n"
+        f"--- END ANALYSIS {boundary} ---"
+    )
 
 
 def _require_non_empty(name: str, value: str) -> None:
@@ -357,9 +342,9 @@ def complete_json_via_reasoning(
     Postconditions: returns the JSON-decoded dict from the formatting call.
     A step-1 exception propagates immediately (step 2 is never invoked) —
     matching the failure behavior of the single-call form this replaces.
-    If the reasoning call's prose contains ``_ANALYSIS_START`` or
-    ``_ANALYSIS_END``, raises ``ValueError`` before the formatting call so
-    an ambiguous wrap is never sent downstream.
+    The reasoning prose is wrapped with a per-call random boundary token so
+    ordinary model output that happens to contain ``--- ANALYSIS ---`` cannot
+    collide with the formatting-prompt delimiters.
 
     Args:
         reasoning_prompt: The user prompt for the reasoning call.
@@ -404,7 +389,6 @@ def complete_json_via_reasoning(
         temperature=reasoning_temperature,
         think=True,
     )
-    _ensure_prose_has_no_analysis_delimiters(prose)
     format_prompt = f"{formatting_instructions}\n\n{_wrap_with_analysis_delimiters(prose)}"
     return client.complete_json(
         format_prompt,
@@ -487,7 +471,6 @@ def complete_validated_via_reasoning(
         temperature=reasoning_temperature,
         think=True,
     )
-    _ensure_prose_has_no_analysis_delimiters(prose)
     instructions_block = f"{formatting_instructions}\n\n" if formatting_instructions else ""
     format_prompt = (
         f"{_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS}\n\n{instructions_block}"

@@ -201,13 +201,12 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
 
     assert captured["agent_key"] == "strategy_refinement"
     assert captured["phase"] == "refinement_structured"
-    # invoke_structured_with_schema now charges the per-cycle LLM budget
-    # itself (two units, since ``_call`` makes two provider calls) rather
-    # than forwarding ``charge=True`` to ``run_structured_agent`` (which only
-    # charges once) — so run_structured_agent always sees charge=False here...
+    # ``invoke_structured_with_schema`` always forwards charge=False to the
+    # envelope; per-provider-call charging happens inside its ``_call``.
     assert captured["charge"] is False
-    # ...and the two units were charged directly against the bound budget.
-    assert budget.calls_made == 2
+    # This spy skips ``_call``, so per-provider-call charges inside the
+    # closure never fire — the bound budget stays untouched.
+    assert budget.calls_made == 0
 
 
 # ---------------------------------------------------------------------------

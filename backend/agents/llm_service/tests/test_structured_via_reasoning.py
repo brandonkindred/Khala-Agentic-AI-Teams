@@ -20,6 +20,7 @@ these two helpers.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 import pytest
@@ -350,26 +351,36 @@ def test_validated_via_reasoning_uses_default_format_instructions_when_omitted()
     assert _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS in client.format_calls[0]["prompt"]
 
 
-def test_json_via_reasoning_rejects_prose_containing_analysis_delimiters() -> None:
-    """Delimiter collision in reasoning output must fail closed before format."""
-    from llm_service.structured import _ANALYSIS_END, _ANALYSIS_START
+def test_json_via_reasoning_tolerates_prose_containing_literal_analysis_markers() -> None:
+    """Fixed ``--- ANALYSIS ---`` text in reasoning prose must not fail the call.
 
+    Per-call random boundary tokens make collision with ordinary model output
+    effectively impossible, so the formatting pass still runs.
+    """
     client = _RecordingClient(
         {"ok": True},
-        prose=f"Findings:\n{_ANALYSIS_START}\nbad\n{_ANALYSIS_END}",
+        prose="Findings:\n--- ANALYSIS ---\nbad\n--- END ANALYSIS ---",
     )
 
-    with pytest.raises(ValueError, match="analysis delimiter"):
-        complete_json_via_reasoning(
-            client,
-            reasoning_prompt="p",
-            reasoning_system_prompt=None,
-            formatting_instructions="f",
-            objective="obj",
-        )
+    out = complete_json_via_reasoning(
+        client,
+        reasoning_prompt="p",
+        reasoning_system_prompt=None,
+        formatting_instructions="f",
+        objective="obj",
+    )
 
-    assert client.order == ["complete"]
-    assert client.format_calls == []
+    assert out == {"ok": True}
+    assert client.order == ["complete", "complete_json"]
+    format_prompt = client.format_calls[0]["prompt"]
+    assert "--- ANALYSIS ---" in format_prompt  # original prose preserved
+    # The wrap markers themselves carry a random hex boundary, not the bare
+    # fixed literals alone as the only delimiters.
+    assert "--- END ANALYSIS " in format_prompt
+    # Extract the boundary token from the wrap and confirm both ends match.
+    matches = re.findall(r"--- (?:END )?ANALYSIS ([0-9a-f]{16}) ---", format_prompt)
+    assert len(matches) >= 2
+    assert matches[0] == matches[1]
 
 
 # ---------------------------------------------------------------------------

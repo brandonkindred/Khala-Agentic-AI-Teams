@@ -61,8 +61,7 @@ def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatc
     assert result == {"ready": True, "rationale": "ok", "issues": []}
     # charge=False means invoke_structured_with_schema must not touch the
     # active budget itself at all — charging it is entirely the caller's
-    # responsibility on this path (see design_review.py's explicit
-    # charge_active_budget() calls around its charge=False invocation).
+    # responsibility on this path.
     assert charge_calls == 0
     assert len(client.reasoning_calls) == 1
     assert client.reasoning_calls[0]["think"] is True
@@ -227,14 +226,15 @@ def test_invoke_structured_with_schema_doubles_timeout_for_two_calls(
     assert captured["timeout_s"] == pytest.approx(60.0)
 
 
-def test_invoke_structured_with_schema_charges_twice_up_front_and_forwards_charge_false(
+def test_invoke_structured_with_schema_charges_per_provider_call_inside_closure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``invoke_structured_with_schema(charge=True)`` charges the active
-    budget TWICE, both before ``run_structured_agent`` runs (i.e. before
-    either provider call), and always forwards ``charge=False`` to
-    ``run_structured_agent`` itself — the two-provider-call accounting lives
-    entirely in this helper, never delegated to the inner envelope.
+    """``invoke_structured_with_schema(charge=True)`` charges once immediately
+    before each provider call inside the retried ``_call`` closure, and always
+    forwards ``charge=False`` to ``run_structured_agent`` itself.
+
+    Charging inside the closure (not once up front) means a transport retry
+    that re-runs both calls also re-charges both units.
     """
     client = _StubClient({"ready": True, "rationale": "ok", "issues": []})
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
@@ -242,6 +242,7 @@ def test_invoke_structured_with_schema_charges_twice_up_front_and_forwards_charg
 
     charge_calls = 0
     charged_before_run_structured_agent: List[int] = []
+    charges_per_call_invocation: List[int] = []
 
     def _counting_charge() -> None:
         nonlocal charge_calls
@@ -252,12 +253,20 @@ def test_invoke_structured_with_schema_charges_twice_up_front_and_forwards_charg
     captured: Dict[str, Any] = {}
     real_run_structured_agent = so_mod.run_structured_agent
 
-    def _spy_run_structured_agent(*args: Any, charge: bool, **kwargs: Any) -> Any:
+    def _spy_run_structured_agent(fn: Any, prompt: str, *args: Any, charge: bool, **kwargs: Any) -> Any:
         captured["charge"] = charge
-        # Snapshot how many pre-charges already happened by the time the
-        # envelope (and therefore either provider call) actually runs.
+        # No up-front charges before the envelope starts.
         charged_before_run_structured_agent.append(charge_calls)
-        return real_run_structured_agent(*args, charge=charge, **kwargs)
+
+        # Simulate one transport retry: drive _call twice. Each attempt must
+        # charge twice (reasoning + formatting).
+        before_first = charge_calls
+        fn(prompt)
+        charges_per_call_invocation.append(charge_calls - before_first)
+        before_second = charge_calls
+        result = real_run_structured_agent(fn, prompt, *args, charge=charge, **kwargs)
+        charges_per_call_invocation.append(charge_calls - before_second)
+        return result
 
     monkeypatch.setattr(so_mod, "run_structured_agent", _spy_run_structured_agent)
 
@@ -274,9 +283,11 @@ def test_invoke_structured_with_schema_charges_twice_up_front_and_forwards_charg
     )
 
     assert result == {"ready": True, "rationale": "ok", "issues": []}
-    assert charge_calls == 2
     assert captured["charge"] is False
-    assert charged_before_run_structured_agent == [2]
+    assert charged_before_run_structured_agent == [0]
+    # Manual first attempt + real envelope attempt: 2 + 2 = 4 charges.
+    assert charge_calls == 4
+    assert charges_per_call_invocation == [2, 2]
 
 
 def test_invoke_structured_with_schema_requires_availability(

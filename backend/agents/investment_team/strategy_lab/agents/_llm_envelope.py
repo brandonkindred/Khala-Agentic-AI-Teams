@@ -43,6 +43,7 @@ with the agents that consume this module.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import random
 import threading
@@ -336,8 +337,14 @@ def _call_with_timeout(fn: Callable[[], Any], timeout_s: float) -> Any:
     raised; raises :class:`_EnvelopeTimeout` if ``fn`` did not finish within
     ``timeout_s`` (the worker thread is left running as a daemon — bounded by
     the transport-level timeout configured in the model factory).
+
+    The worker runs under a copy of the caller's ``contextvars`` context so
+    bindings such as the design-phase LLM budget (``charge_active_budget``)
+    remain visible inside ``fn`` — without this, charges made from a
+    two-pass ``_call`` closure would silently no-op on the worker thread.
     """
     box: dict[str, Any] = {}
+    ctx = contextvars.copy_context()
 
     def _runner() -> None:
         try:
@@ -345,7 +352,9 @@ def _call_with_timeout(fn: Callable[[], Any], timeout_s: float) -> Any:
         except BaseException as exc:  # noqa: BLE001 — propagate to caller thread
             box["error"] = exc
 
-    thread = threading.Thread(target=_runner, daemon=True, name="strategy-lab-llm")
+    thread = threading.Thread(
+        target=ctx.run, args=(_runner,), daemon=True, name="strategy-lab-llm"
+    )
     thread.start()
     thread.join(timeout_s)
     if thread.is_alive():
@@ -379,8 +388,12 @@ def invoke_agent(
     Preconditions:
       * ``agent_callable`` is the constructed ``strands.Agent`` (called as
         ``agent_callable(prompt)``); the caller is responsible for budget
-        charging (``charge_active_budget``) BEFORE calling this — transport
-        retries here intentionally do not re-charge.
+        charging (``charge_active_budget``) either BEFORE calling this or
+        inside ``agent_callable`` itself when that callable owns multiple
+        provider calls per attempt (see
+        ``_structured_output.invoke_structured_with_schema``, which charges
+        inside its retried closure so transport retries re-charge).
+        This envelope does not charge on its own.
       * ``agent_key`` / ``phase`` are non-empty diagnostic labels.
 
     Postconditions:

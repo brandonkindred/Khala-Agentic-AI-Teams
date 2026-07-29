@@ -515,14 +515,12 @@ class DesignReviewAgent:
         # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
         # propagates to ``_run_design_loop`` instead of being converted into
         # a fail-closed critique that would let the loop continue past budget.
-        # The structured path makes two sequential provider calls per attempt
-        # (reasoning + formatting, via ``invoke_structured_with_schema``, which
-        # is invoked here with ``charge=False`` since charging happens
-        # entirely at this call site) — charge two units for it, one for the
-        # single-call legacy path.
+        # Structured path: ``invoke_structured_with_schema(charge=True)``
+        # charges once per provider call inside its retried closure
+        # (reasoning + formatting). Legacy path: charge once here for the
+        # single provider call.
         structured_available = so.structured_output_available()
-        charge_active_budget()
-        if structured_available:
+        if not structured_available:
             charge_active_budget()
 
         try:
@@ -534,7 +532,7 @@ class DesignReviewAgent:
                         user_prompt,
                         phase="design_review_structured",
                         schema=CRITIQUE_SCHEMA,
-                        charge=False,
+                        charge=True,
                         objective="strategy design review (structured)",
                         logger=logger,
                         reasoning_system_prompt=so.build_reasoning_system_prompt(_SYSTEM_PROMPT),
@@ -547,12 +545,10 @@ class DesignReviewAgent:
                         "structured design-review decode starved (schema_forced); "
                         "degrading to the legacy single-shot call."
                     )
-                    # The schema_forced degrade path makes a THIRD real
-                    # provider call (the structured attempt's reasoning +
-                    # formatting calls were already charged above; this legacy
-                    # fallback is a further, only-now-known call) — charge for
-                    # it here, before invoking it, so total charges match
-                    # total real calls even on this less-common path.
+                    # The schema_forced degrade path makes an additional real
+                    # provider call after the structured attempt already charged
+                    # for whichever sub-calls ran — charge for the legacy
+                    # fallback here before invoking it.
                     charge_active_budget()
                     parsed = _invoke_legacy()
                 else:
