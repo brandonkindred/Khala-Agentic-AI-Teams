@@ -686,12 +686,11 @@ def test_parse_spec_review_response_coerces_malformed_question_without_raising()
     assert result.open_questions[0].options == []
 
 
-def test_parse_spec_review_response_truncates_open_questions_to_max() -> None:
-    """parse_spec_review_response caps open questions at MAX_OPEN_QUESTIONS (10).
+def test_parse_spec_review_response_does_not_cap_open_questions() -> None:
+    """parse_spec_review_response keeps all parsed open questions uncapped.
 
-    Preconditions: raw open_questions list longer than MAX_OPEN_QUESTIONS.
-    Postconditions: result.open_questions has length MAX_OPEN_QUESTIONS and keeps
-        the first N questions in order.
+    Cap is applied after organizational/duplicate filters so later material
+    questions are not discarded when earlier entries are filtered out.
     """
     from product_requirements_analysis_agent.question_processing import MAX_OPEN_QUESTIONS
 
@@ -708,8 +707,60 @@ def test_parse_spec_review_response_truncates_open_questions_to_max() -> None:
         }
     )
 
-    assert len(result.open_questions) == MAX_OPEN_QUESTIONS
-    assert [q.id for q in result.open_questions] == [f"q{i}" for i in range(MAX_OPEN_QUESTIONS)]
+    assert len(result.open_questions) == MAX_OPEN_QUESTIONS + 5
+    assert result.open_questions[-1].id == f"q{MAX_OPEN_QUESTIONS + 4}"
+
+
+def test_open_question_cap_applied_after_organizational_filter() -> None:
+    """MAX_OPEN_QUESTIONS is enforced after organizational filtering.
+
+    Ten prohibited process questions followed by a material deployment question
+    must leave the deployment question retained (not truncated before the filter).
+    """
+    from product_requirements_analysis_agent.question_processing import (
+        MAX_OPEN_QUESTIONS,
+        filter_organizational_questions,
+    )
+
+    org_questions = [
+        OpenQuestion(
+            id=f"org_{i}",
+            question_text="Who has final decision / sign-off on this feature?",
+            options=[],
+        )
+        for i in range(MAX_OPEN_QUESTIONS)
+    ]
+    material = OpenQuestion(
+        id="deploy_l1",
+        question_text="Where should the application be deployed?",
+        options=[],
+        category="infrastructure",
+        priority="high",
+    )
+    parsed = parse_spec_review_response(
+        {
+            "issues": [],
+            "gaps": [],
+            "open_questions": [
+                {
+                    "id": q.id,
+                    "question_text": q.question_text,
+                    "options": [],
+                    "category": q.category,
+                    "priority": q.priority,
+                }
+                for q in [*org_questions, material]
+            ],
+            "summary": "Reviewed",
+        }
+    )
+    assert len(parsed.open_questions) == MAX_OPEN_QUESTIONS + 1
+
+    filtered = filter_organizational_questions(parsed.open_questions)
+    if len(filtered) > MAX_OPEN_QUESTIONS:
+        filtered = filtered[:MAX_OPEN_QUESTIONS]
+
+    assert [q.id for q in filtered] == ["deploy_l1"]
 
 
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
@@ -2495,15 +2546,18 @@ def test_assess_sub_phase_gaps_passes_existing_ids_to_prompt() -> None:
 def test_assess_sub_phase_gaps_survives_brace_bearing_spec() -> None:
     """Gap analysis must not raise when the spec contains curly braces.
 
-    Preconditions: spec_content includes brace tokens that would break str.format.
-    Postconditions: assess returns and the substituted prompt includes the brace
-        text literally (brace-safe replace).
+    Preconditions: spec_content includes brace tokens that would break str.format,
+        including a literal later template slot name such as ``{all_decisions}``.
+    Postconditions: assess returns; the substituted prompt includes those tokens
+        literally in the spec excerpt (one-pass substitution, no rescanning).
     """
     llm = _TrackingStubClient(
         {"is_complete": True, "completeness_rationale": "Done.", "follow_up_questions": []}
     )
     agent = ProductRequirementsAnalysisAgent(llm)
-    brace_spec = "Use template {curly} and also }unbalanced{ braces in the spec."
+    brace_spec = (
+        "Use template {curly} and also }unbalanced{ braces; document {all_decisions}."
+    )
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.DEPLOYMENT,
         brace_spec,
@@ -2515,6 +2569,9 @@ def test_assess_sub_phase_gaps_survives_brace_bearing_spec() -> None:
     assert llm.last_prompt is not None
     assert "{curly}" in llm.last_prompt
     assert "}unbalanced{" in llm.last_prompt
+    # Spec excerpt must keep the literal token; it must not be overwritten by the
+    # later decisions payload.
+    assert "document {all_decisions}." in llm.last_prompt
 
 
 def test_gap_analysis_and_context_prompt_invariants() -> None:

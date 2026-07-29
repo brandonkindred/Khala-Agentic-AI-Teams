@@ -1074,8 +1074,9 @@ SOP_SUB_PHASE_OBJECTIVES: Dict[str, str] = {
 # format_context_block's "**Label:**\n---\n...\n---" fencing, plus a dual-schema
 # ("if complete, return...") shape. Low value relative to the reconstruction effort
 # needed; deferred as a candidate for a future follow-up if full coverage is desired.
-# Placeholders use single braces; call sites must substitute via str.replace (not
-# str.format) so brace-bearing user/spec content cannot raise KeyError.
+# Placeholders use single braces; call sites must fill via one-pass substitution
+# (not chained str.replace / str.format) so brace-bearing user/spec content —
+# including literal ``{slot}`` tokens — cannot raise KeyError or be re-matched.
 SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT = """You are an expert Product Analyst performing a gap analysis on the "{sub_phase_name}" sub-phase \
 of a software project's environment constraints and requirements gathering.
 

@@ -168,7 +168,9 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     Preconditions: ``raw`` is the decoded LLM output (any type).
     Postconditions: returns a valid :class:`SpecReviewResult`; issues/gaps are
         deduped and capped at ``MAX_ISSUES``/``MAX_GAPS``; open questions are
-        capped at ``MAX_OPEN_QUESTIONS``; never raises.
+        parsed but not capped here (callers must apply ``MAX_OPEN_QUESTIONS``
+        after organizational/duplicate filters so retained questions are not
+        discarded); never raises.
     """
     if not isinstance(raw, dict):
         return SpecReviewResult(summary="Spec review completed (no structured output)")
@@ -203,14 +205,6 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
                 open_questions.append(parse_open_question(q, i))
             except (ValueError, TypeError) as exc:
                 logger.warning("Skipping malformed open question at index %d: %s", i, exc)
-
-    if len(open_questions) > MAX_OPEN_QUESTIONS:
-        logger.info(
-            "Truncated open questions: %d->%d",
-            len(open_questions),
-            MAX_OPEN_QUESTIONS,
-        )
-        open_questions = open_questions[:MAX_OPEN_QUESTIONS]
 
     return SpecReviewResult(
         issues=issues,
