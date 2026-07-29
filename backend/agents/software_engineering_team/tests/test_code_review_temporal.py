@@ -47,6 +47,18 @@ def _input(
     return CodeReviewInput(**base)  # type: ignore[arg-type]
 
 
+def _error_chain_text(exc: BaseException) -> str:
+    """Return messages from Temporal's nested ``cause`` wrappers."""
+    messages: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current))
+        current = getattr(current, "cause", None) or current.__cause__
+    return " <- ".join(messages)
+
+
 # ---------------------------------------------------------------------------
 # 1. Resolver + enablement gate
 # ---------------------------------------------------------------------------
@@ -1399,7 +1411,7 @@ async def test_workflow_fails_on_verify_failure_without_leaking_sibling_passes(
 
     cause = exc_info.value.cause
     assert cause is not None
-    assert "verify boom" in str(cause)
+    assert "verify boom" in _error_chain_text(cause)
     assert completed == {"architecture", "side_effect"}
 
 
@@ -1473,8 +1485,9 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
 
     cause = exc_info.value.cause
     assert cause is not None
-    assert "architecture boom" in str(cause)
-    assert "TypeError" not in str(cause)
+    error_chain = _error_chain_text(cause)
+    assert "architecture boom" in error_chain
+    assert "TypeError" not in error_chain
     assert completed == {"side_effect"}
     assert "architecture" not in completed
 
@@ -1975,7 +1988,7 @@ async def test_workflow_replays_pre_migration_sequential_tail_pass_history() -> 
 
     from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
     from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Replayer, Worker
+    from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
     review_input = _input()
     workflow_id = "code-review-workflow-legacy-sequential-history-test"
@@ -1993,6 +2006,11 @@ async def test_workflow_replays_pre_migration_sequential_tail_pass_history() -> 
                 workflows=[_LegacySequentialCodeReviewWorkflow],
                 activities=ACTIVITIES,
                 activity_executor=activity_executor,
+                # This synthetic workflow lives in this test module, whose
+                # ordinary test-only imports are not sandbox-safe. We only
+                # need it to record a legacy history; the current workflow is
+                # still replayed below with the default sandboxed runner.
+                workflow_runner=UnsandboxedWorkflowRunner(),
             )
             async with worker:
                 await env.client.execute_workflow(
