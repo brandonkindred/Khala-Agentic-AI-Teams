@@ -209,22 +209,24 @@ def read_qa_history(repo_path: Path) -> str:
     return ""
 
 
-def _is_boundary_line(stripped: str) -> bool:
-    """Return True if a stripped qa_history.md line is a field or section boundary marker.
+def _is_boundary_line(line: str) -> bool:
+    """Return True if a qa_history.md line is a field or section boundary marker.
 
-    Covers the two field markers (``**Answer:**``, ``**Rationale:**``), the three
-    single-line status markers, and any ``##``-prefixed heading (which also covers
-    ``###``, since a 3-hash line always starts with two hashes too). Used both by
-    :func:`_consume_block_body` to stop buffering a continuation line into the
-    current field, and by :func:`_escape_continuation_line` to decide whether a
-    multi-line value's continuation line must be escaped before being written to
-    qa_history.md so it can't be mistaken for one of these markers on read-back.
+    Field/status markers (``**Answer:**``, ``**Rationale:**``, auto/default/custom
+    markers) are detected after stripping. ``##``/``###`` section headers are
+    recognized only at column 0 so an indented markdown heading inside a value is
+    treated as content, not a boundary. Used by :func:`_consume_block_body` and
+    :func:`_escape_continuation_line`.
 
-    Preconditions: ``stripped`` has leading/trailing whitespace already removed.
-    Postconditions: returns ``True`` iff ``stripped`` starts with ``##`` or one of
-        the field/status marker prefixes; ``False`` otherwise; never raises.
+    Preconditions: ``line`` is a single physical line from qa_history.md.
+    Postconditions: returns ``True`` iff ``line`` starts with ``##`` at column 0,
+        or the stripped line starts with a field/status marker prefix; ``False``
+        otherwise; never raises.
     """
-    return stripped.startswith("##") or stripped.startswith(_FIELD_BOUNDARY_MARKERS)
+    stripped = line.strip()
+    if stripped.startswith(_FIELD_BOUNDARY_MARKERS):
+        return True
+    return bool(re.match(r"^##", line))
 
 
 def _escape_continuation_line(line: str) -> str:
@@ -244,7 +246,7 @@ def _escape_continuation_line(line: str) -> str:
         :func:`_is_boundary_line`; otherwise returns ``line`` unchanged; never
         raises.
     """
-    if line.startswith("\\") or _is_boundary_line(line.strip()):
+    if line.startswith("\\") or _is_boundary_line(line):
         return "\\" + line
     return line
 
@@ -294,10 +296,13 @@ def _consume_block_body(lines: List[str]) -> _ParsedBlockBody:
     Preconditions: ``lines`` are the lines of a qa_history.md block following its
         ``### question`` header (may be empty).
     Postconditions: returns a :class:`_ParsedBlockBody` whose answer/rationale/
-        other_text fields are built by joining continuation lines (unescaped but
-        otherwise preserved verbatim, including interior whitespace) and stripping
-        only the final joined string; provenance flags and confidence reflect any
-        status markers found; never raises.
+        other_text fields are built as follows: the first line of each field is
+        taken from the marker line after ``.strip()`` (so leading/trailing
+        whitespace on that first line is normalized away); continuation lines are
+        unescaped but otherwise preserved verbatim (including interior
+        whitespace); the final joined string for each field is then stripped;
+        provenance flags and confidence reflect any status markers found; never
+        raises.
     """
     answer_lines: List[str] = []
     rationale_lines: List[str] = []
@@ -329,7 +334,7 @@ def _consume_block_body(lines: List[str]) -> _ParsedBlockBody:
             was_default = True
             was_auto_answered = False
             current_field = None
-        elif _is_boundary_line(stripped):
+        elif _is_boundary_line(line):
             current_field = None
         elif current_field is not None:
             current_field.append(_unescape_continuation_line(line))
@@ -368,8 +373,9 @@ def extract_answer_from_qa_history(
         :class:`AnsweredQuestion` (including ``was_auto_answered`` /
         ``was_default`` / ``confidence`` / ``other_text`` parsed from the block's
         status markers when present), or ``None`` when no block matches or the
-        question has no keyword longer than 4 characters; never raises for input
-        satisfying the preconditions above.
+        question has no keyword longer than 4 characters; when multiple blocks
+        share the same match ratio, the later (more recent) block wins; never
+        raises for input satisfying the preconditions above.
     """
     if not qa_history:
         return None
@@ -380,11 +386,15 @@ def extract_answer_from_qa_history(
     if not key_words:
         return None
 
-    # Parse qa_history.md sections - format is:
+    # Parse qa_history.md sections - format is (fields may span continuation lines
+    # until the next known marker / column-0 section boundary):
     # ### Question text
-    # **Answer:** Answer text
-    # **Rationale:** Optional rationale
-    # *Auto-answered with X% confidence* or *(Default applied)*
+    # **Answer:** First line
+    # second line
+    # **Rationale:** Line one
+    # Line two
+    # *Auto-answered with 80% confidence*
+    #   or *(Default applied)*
 
     # Split into Q&A blocks by "### " headers
     blocks = re.split(r"\n###\s+", qa_history)
@@ -408,7 +418,8 @@ def extract_answer_from_qa_history(
         ):  # Good enough match based on extract_answer keyword coverage
             parsed = _consume_block_body(lines[1:])
 
-            if parsed.answer and (best_match is None or match_ratio > best_match[0]):
+            # >= so equal scores prefer the later (more recent) block
+            if parsed.answer and (best_match is None or match_ratio >= best_match[0]):
                 best_match = (match_ratio, recorded_question, parsed)
 
     if best_match:
@@ -450,11 +461,14 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
         ``full_block_text`` when the block is written back out.
 
     Preconditions: ``qa_history`` is a string (possibly empty).
-    Postconditions: returns one tuple per ``### question`` block found that has a
-        non-empty question text or answer, tagged with the iteration heading it
-        falls under; blocks that appear before any explicit ``## Iteration N``
-        heading are tagged as iteration 1; a block with neither (e.g. a stray
-        ``###`` header with no content) is skipped; empty list for empty input.
+    Postconditions: returns one tuple per column-0 ``### question`` block found
+        that has a non-empty question text or answer, tagged with the iteration
+        heading it falls under; blocks that appear before any explicit
+        ``## Iteration N`` heading are tagged as iteration 1; a block with
+        neither (e.g. a stray ``###`` header with no content) is skipped; empty
+        list for empty input. Structural headers (``###`` / ``## Iteration``)
+        are recognized only at column 0 — an indented ``### `` / ``## Iteration``
+        line inside a value is treated as content, not a block boundary.
     """
     if not qa_history or not qa_history.strip():
         return []
@@ -464,7 +478,8 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        iter_match = re.match(r"^##\s+Iteration\s+(\d+)", line.strip())
+        # Column-0 only: writers always emit headers at the start of the line.
+        iter_match = re.match(r"^##\s+Iteration\s+(\d+)", line)
         if iter_match:
             current_iteration = int(iter_match.group(1))
             i += 1
@@ -476,9 +491,9 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
             i += 1
             while i < len(lines):
                 next_line = lines[i]
-                if next_line.strip().startswith("### ") or re.match(
-                    r"^##\s+Iteration", next_line.strip()
-                ):
+                # Match at column 0 only so an indented "### " / "## Iteration"
+                # continuation inside a value cannot truncate the block.
+                if re.match(r"^###\s+", next_line) or re.match(r"^##\s+Iteration", next_line):
                     break
                 block_lines.append(next_line)
                 i += 1

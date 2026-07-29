@@ -465,6 +465,46 @@ def test_parse_qa_history_blocks_empty_input_returns_empty_list() -> None:
     assert parse_qa_history_blocks("   \n  ") == []
 
 
+def test_parse_qa_history_blocks_keeps_block_with_empty_question_but_answer() -> None:
+    """A ### header with empty question text is kept when an answer is present."""
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### \n"
+        "**Answer:** yes\n\n"
+    )
+
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, question_text, answer, _full_block = blocks[0]
+    assert question_text == ""
+    assert answer == "yes"
+
+
+def test_parse_qa_history_blocks_indented_question_header_is_content_not_boundary() -> None:
+    """An indented '### ' line inside an answer does not truncate the block.
+
+    Structural ### headers are recognized only at column 0; writers escape
+    column-0 collisions, but an indented heading (e.g. quoted markdown) must
+    still stay inside the current answer field.
+    """
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### What docs format should we use?\n"
+        "**Answer:** Use Markdown.\n"
+        "  ### Details\n"
+        "More info below.\n\n"
+    )
+
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, _question_text, answer, _full_block = blocks[0]
+    assert answer == "Use Markdown.\n  ### Details\nMore info below."
+
+
 # ---------------------------------------------------------------------------
 # other_text escaping (record_answers / format_answered_questions_for_prompt)
 # ---------------------------------------------------------------------------
@@ -537,6 +577,25 @@ def test_extract_answer_retrieves_answer_at_exactly_the_match_threshold() -> Non
 
     assert result is not None
     assert result.selected_answer == "Recorded answer."
+
+
+def test_extract_answer_prefers_later_block_on_equal_match_ratio() -> None:
+    """When two blocks share the same match ratio, the later (more recent) block wins."""
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### aaaaa ccccc\n"
+        "**Answer:** Earlier answer.\n\n"
+        "## Iteration 2\n\n"
+        "### aaaaa ddddd\n"
+        "**Answer:** Later answer.\n\n"
+    )
+    question = _open_question("aaaaa bbbbb")
+
+    result = extract_answer_from_qa_history(question, qa_history)
+
+    assert result is not None
+    assert result.selected_answer == "Later answer."
 
 
 # ---------------------------------------------------------------------------
