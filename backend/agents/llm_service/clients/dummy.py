@@ -2,8 +2,12 @@
 Dummy LLM client for tests and environments without an LLM.
 
 Returns heuristic stub responses matching SE team prompts so existing tests keep passing.
-Also implements the ``strands.models.model.Model`` ABC so it can be passed directly to
-``strands.Agent(model=DummyLLMClient())`` in tests without requiring a live Ollama server.
+
+Strands ``Model`` compatibility is opt-in and lazy: importing / using this module as a
+plain :class:`~llm_service.interface.LLMClient` does not import ``strands``. Call
+:func:`ensure_strands_model_registration` (or any Strands ``Model`` ABC method such as
+``stream`` / ``update_config``) when tests need ``isinstance(..., Model)`` or
+``strands.Agent(model=DummyLLMClient())``.
 """
 
 from __future__ import annotations
@@ -12,15 +16,35 @@ import hashlib
 import json
 import re
 from collections.abc import AsyncIterable
-from typing import Any, Dict, Optional
-
-from strands.models.model import Model
-from strands.types.content import Message as StrandsMessage
-from strands.types.content import SystemContentBlock
-from strands.types.streaming import StreamEvent
-from strands.types.tools import ToolChoice, ToolSpec
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; runtime uses lazy strands imports
+    from strands.types.content import Message as StrandsMessage
+    from strands.types.content import SystemContentBlock
+    from strands.types.streaming import StreamEvent
+    from strands.types.tools import ToolChoice, ToolSpec
+
+_STRANDS_MODEL_REGISTERED = False
+
+
+def ensure_strands_model_registration() -> None:
+    """Register :class:`DummyLLMClient` as a virtual Strands ``Model`` subclass.
+
+    Preconditions:
+        The ``strands`` package is installed and importable.
+    Postconditions:
+        ``isinstance(DummyLLMClient(), strands.models.model.Model)`` is True.
+        Idempotent: subsequent calls are no-ops once registration has succeeded.
+    """
+    global _STRANDS_MODEL_REGISTERED
+    if _STRANDS_MODEL_REGISTERED:
+        return
+    from strands.models.model import Model  # noqa: PLC0415 - intentional lazy import
+
+    Model.register(DummyLLMClient)
+    _STRANDS_MODEL_REGISTERED = True
 
 _STRIP_VERBS = {
     "implement",
@@ -121,11 +145,14 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
     return result or f"item{separator}1"
 
 
-class DummyLLMClient(LLMClient, Model):
+class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM.
 
-    Also implements the Strands ``Model`` ABC so tests can pass this directly
-    to ``strands.Agent(model=DummyLLMClient())``.
+    Also provides the Strands ``Model`` method surface. Importing or using this
+    class as a plain :class:`~llm_service.interface.LLMClient` never loads
+    ``strands``; call :func:`ensure_strands_model_registration` (or any Model
+    ABC method below) when tests need virtual-subclass ``isinstance`` checks or
+    ``strands.Agent(model=DummyLLMClient())``.
     """
 
     _call_counter: int = 0
@@ -135,13 +162,27 @@ class DummyLLMClient(LLMClient, Model):
         self._model_config: dict[str, Any] = {}
 
     # -----------------------------------------------------------------------
-    # strands.models.model.Model ABC implementation
+    # strands.models.model.Model ABC surface (lazy registration)
     # -----------------------------------------------------------------------
 
     def update_config(self, **model_config: Any) -> None:
+        """Update Strands model config.
+
+        Preconditions: none (registers as Strands Model on first call).
+        Postconditions: ``model_config`` keys are merged into the local config dict;
+            ``DummyLLMClient`` is registered as a virtual Strands ``Model``.
+        """
+        ensure_strands_model_registration()
         self._model_config.update(model_config)
 
     def get_config(self) -> dict[str, Any]:
+        """Return a copy of the Strands model config.
+
+        Preconditions: none (registers as Strands Model on first call).
+        Postconditions: returned dict is a shallow copy of the local config;
+            ``DummyLLMClient`` is registered as a virtual Strands ``Model``.
+        """
+        ensure_strands_model_registration()
         return dict(self._model_config)
 
     def structured_output(
@@ -151,6 +192,12 @@ class DummyLLMClient(LLMClient, Model):
         system_prompt: str | None = None,
         **kwargs: Any,
     ) -> Any:
+        """Strands Model hook — intentionally unimplemented for the dummy client.
+
+        Preconditions: none (registers as Strands Model on first call).
+        Postconditions: always raises ``NotImplementedError``.
+        """
+        ensure_strands_model_registration()
         raise NotImplementedError("DummyLLMClient.structured_output is not implemented for tests")
 
     async def stream(
@@ -170,7 +217,12 @@ class DummyLLMClient(LLMClient, Model):
         when ``structured_output_model=...`` is used), yields a tool-use event
         invoking that tool with data from the ``complete_json`` pattern matcher.
         Otherwise yields a plain text response.
+
+        Preconditions: ``messages`` is a sequence of Strands-shaped message dicts.
+        Postconditions: yields a complete assistant stream; registers as virtual
+            Strands ``Model`` on first call.
         """
+        ensure_strands_model_registration()
         # Extract user text from the last user message
         user_text = ""
         for msg in reversed(messages):
