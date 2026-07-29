@@ -67,9 +67,10 @@ def invoke_structured_with_schema(
     strings; ``schema`` is a non-empty mapping.
     Postconditions: returns the parsed JSON dict on success. Raises
     :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
-    transport retries or hits a fatal LLM error, and ``ValueError`` when
-    :func:`extract_json_object` cannot recover a balanced JSON object from the
-    response.
+    transport retries or hits a fatal LLM error.
+
+    ``ValueError`` from :func:`extract_json_object` propagates as a raw
+    ``ValueError`` (it is not wrapped in :class:`~..exceptions.StrategyLabLLMError`).
     """
     assert structured_output_available(), (
         "precondition: caller must verify structured_output_available() before "
