@@ -39,7 +39,8 @@ from .tool_agents.safety_governance import SafetyGovernanceToolAgent
 logger = logging.getLogger(__name__)
 # Default bound for the review/problem-solving gate. Kept as a module constant
 # (not env/settings) so tests can assert exhaustion against a stable value;
-# subclasses may override via the class attribute of the same name.
+# subclasses may override via the class attribute ``max_review_iterations``
+# (which defaults to this module constant).
 MAX_REVIEW_ITERATIONS = 15
 
 
