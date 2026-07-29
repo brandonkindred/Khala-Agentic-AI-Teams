@@ -616,6 +616,12 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("select session_json from branding_sessions where session_id")
 
     def handle_select_session(cur: FakeCursor, params: tuple) -> None:
+        """Emulate SELECT session_json from branding_sessions.
+
+        Params: ``(session_id,)``.
+        Sets ``cur`` to ``{'session_json': ...}`` when the session exists,
+        otherwise sets it to ``None``.
+        """
         (session_id,) = params
         row = cur.db["sessions"].get(session_id)
         cur.set_one({"session_json": row["session_json"]} if row else None)
@@ -682,9 +688,10 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
         ``shared.postgres.PostgresHelperMixin``, which calls ``pg_cursor()``
         in ``shared.postgres.client`` (their own modules are not patched here).
     Postconditions:
-        ``POSTGRES_HOST`` is set (preserving a real, already-configured value
-        rather than overwriting it) so ``pg_cursor``'s ``is_postgres_enabled()``
-        guard falls through instead of yielding ``None``.
+        ``POSTGRES_HOST`` is set.  If a real value already exists it is
+        preserved; otherwise a placeholder (``postgres``) is set so
+        ``pg_cursor``'s ``is_postgres_enabled()`` guard falls through
+        instead of yielding ``None``.
         ``shared.postgres.client.get_conn`` is patched to yield a shared
         ``FakeConn`` backed by the returned default db and branding's SQL
         dispatch table.

@@ -171,6 +171,12 @@ class BrandingTeamOrchestrator:
         The pipeline is built as a Strands SDK ``Graph`` whose nodes are
         per-phase sub-graphs and swarms.  Brand-compliance checks run outside
         the graph because their inputs come from the API request.
+
+        Raises:
+            RuntimeError: If ``append_brand_version`` returns ``None``
+                (brand row deleted between resolve and finalize), so the
+                caller can mark the run as failed instead of reporting
+                success without persistence.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)

@@ -402,7 +402,7 @@ def test_run_with_store_appends_version(fake_pg) -> None:
 
 
 def test_run_with_store_append_brand_version_none_raises() -> None:
-    """A non-idempotent brand-version append must never be ignored.
+    """A brand-version append that returns None must never be ignored.
 
     When ``append_brand_version`` returns ``None`` (brand deleted between
     resolve and append), the orchestrator must raise so the run can be
