@@ -3046,13 +3046,45 @@ def test_filter_duplicate_questions_preserves_lexical_doubled_consonants() -> No
 
 
 def test_filter_duplicate_questions_matches_inflectional_doubled_l() -> None:
-    """controlled→control and compelled→compel while install/fill stay lexical."""
+    """controlled/signalled/equalled collapse while install/fill stay lexical."""
     questions = [
         OpenQuestion(id="q1", question_text="Which service controls retries?")
     ]
     qa_history = (
         "Q: Which service controlled retries when callers were compelled to wait?\n"
         "A: The gateway controlled retries after callers were compelled to back off."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_inflectional_doubled_l_after_a() -> None:
+    """signalled/equalled/rivalled → signal/equal/rival (not only e/o before ll)."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which signal should equal rival alerts?")
+    ]
+    qa_history = (
+        "Q: Which signalled event should have equalled rivalled alerts?\n"
+        "A: The primary signalled event equalled the rivalled alerts threshold."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_inserted_ck_verbs() -> None:
+    """mimicked/mimicking/panicked drop spelling-only k to match mimic/panic."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which services mimic panic behavior?")
+    ]
+    qa_history = (
+        "Q: Which services mimicked panic behavior while mimicking outages?\n"
+        "A: Edge services mimicked failures after operators panicked."
     )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
@@ -3104,6 +3136,25 @@ def test_filter_duplicate_questions_matches_single_s_es_plurals() -> None:
     qa_history = (
         "Q: Which deployment statuses should APIs expose?\n"
         "A: Expose the documented deployment statuses from the health endpoint."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_oes_plurals() -> None:
+    """echoes→echo and heroes→hero so singular questions match -oes history."""
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which services echo health checks?",
+        )
+    ]
+    qa_history = (
+        "Q: Which services echoes health checks for heroes dashboards?\n"
+        "A: Edge services echoes health checks used by heroes dashboards."
     )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)

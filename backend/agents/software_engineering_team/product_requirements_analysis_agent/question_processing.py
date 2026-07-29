@@ -90,25 +90,62 @@ def filter_duplicate_questions(
             may have dropped a silent ``e`` (``stored`` -> ``stor``, ``making`` ->
             ``mak``, ``houses`` -> ``hous``); it is False for ``ied``
             (``carried`` -> ``carry``), inflectional consonant doubling
-            (``planned`` -> ``plan``, ``controlled`` -> ``control``), and lexical
-            doubles that must be preserved (``installed`` -> ``install``,
-            ``filled`` -> ``fill``). Always strip ``ed`` (not just ``d``) so
-            regular CVC pasts like ``fixed`` -> ``fix`` while silent-e pasts
-            like ``moved``/``freed`` still match via the silent-e flag.
-            Plurals: ``ies`` -> ``y``, ``-es`` after s/x/z/ch/sh (including
-            single-``s`` bases like ``statuses``), else trailing ``s``.
+            (``planned`` -> ``plan``, ``controlled`` -> ``control``,
+            ``signalled`` -> ``signal``), lexical doubles that must be preserved
+            (``installed`` -> ``install``, ``filled`` -> ``fill``), and
+            spelling-only ``k`` insertion (``mimicked`` -> ``mimic``).
+            Always strip ``ed`` (not just ``d``) so regular CVC pasts like
+            ``fixed`` -> ``fix`` while silent-e pasts like ``moved``/``freed``
+            still match via the silent-e flag.
+            Plurals: ``ies`` -> ``y``, ``-es`` after s/x/z/ch/sh/o (including
+            ``statuses`` and ``echoes``), else trailing ``s``.
         """
         w = w.strip()
         vowels = set("aeiou")
+        # Bases whose -ll is lexical (keep after -ed/-ing), not inflectional.
+        lexical_ll = frozenset(
+            {
+                "appall",
+                "ball",
+                "call",
+                "distill",
+                "enrol",
+                "enroll",
+                "fall",
+                "fill",
+                "forestall",
+                "fulfil",
+                "fulfill",
+                "install",
+                "instill",
+                "kill",
+                "misspell",
+                "pull",
+                "quell",
+                "recall",
+                "reinstall",
+                "roll",
+                "sell",
+                "shell",
+                "small",
+                "spell",
+                "spill",
+                "stall",
+                "tell",
+                "thrill",
+                "uninstall",
+                "wall",
+            }
+        )
 
         def _undouble_inflectional(base: str) -> str:
             """Undouble only when -ed/-ing spelling doubled a final consonant.
 
             Undouble trailing CC when the base is long enough that the double
             is inflectional (``planned``/``running``), not lexical (``added``).
-            Never undouble ``s``/``z``. Undouble ``l`` only after ``e``/``o``
-            (``controlled``/``compelled``) so lexical ``ll`` in ``install``/
-            ``fill`` stays intact.
+            Never undouble ``s``/``z``. Undouble ``l`` unless the ``ll`` stem
+            is a known lexical base (``install``/``fill``), so inflectional
+            forms like ``signalled``/``controlled`` still collapse.
             """
             if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
                 return base
@@ -116,12 +153,19 @@ def filter_duplicate_questions(
             if doubled in "sz":
                 return base
             if doubled == "l":
-                # Inflectional -l doubling is common after e/o (control, compel);
-                # a/i/u typically mark lexical ll (install, fill, pull).
-                if len(base) >= 3 and base[-3] in "eo":
-                    return base[:-1]
-                return base
+                if base in lexical_ll:
+                    return base
+                return base[:-1]
             return base[:-1]
+
+        def _strip_inserted_ck(base: str) -> str:
+            """Remove spelling-only k after -c verbs (mimick→mimic), keep click."""
+            if (
+                base.endswith("ick")
+                and sum(1 for c in base if c in vowels) >= 2
+            ):
+                return base[:-1]
+            return base
 
         if len(w) <= 4:
             return w, False
@@ -133,30 +177,35 @@ def filter_duplicate_questions(
             # Strip full "ed" for all longer forms so fixed→fix (not fixe) while
             # moved/freed/glued become mov/fre/glu and match via silent-e.
             if len(w) >= 5:
-                base = _undouble_inflectional(w[:-2])
+                raw = w[:-2]
+                base = _strip_inserted_ck(_undouble_inflectional(raw))
                 if len(base) >= 3:
-                    # stored → stor, created → creat, moved → mov, freed → fre
-                    # (may need silent e). planned → plan; controlled → control;
-                    # installed → install. Flag whenever -ed stripping did not
-                    # undouble, including vowel-final stubs (fre/glu).
-                    silent_e = base == w[:-2]
+                    # silent-e when neither undoubling nor ck-stripping rewrote
+                    # the stem (stored→stor, freed→fre; not mimicked→mimic).
+                    silent_e = base == raw
                     return base, silent_e
 
         if w.endswith("ing") and len(w) > 5:
             # carrying → carry (exact after stripping ing).
-            base = _undouble_inflectional(w[:-3])
+            raw = w[:-3]
+            base = _strip_inserted_ck(_undouble_inflectional(raw))
             if len(base) >= 3:
-                # monitoring → monitor; running → run; making → mak (silent e).
-                silent_e = base == w[:-3]
+                # monitoring → monitor; running → run; making → mak;
+                # mimicking → mimic.
+                silent_e = base == raw
                 return base, silent_e
 
-        # Plurals: policies→policy, processes→process, statuses→status, tokens→token.
+        # Plurals: policies→policy, processes→process, statuses→status,
+        # echoes→echo, tokens→token.
         if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
             return w[:-3] + "y", False
         if w.endswith(("sses", "xes", "zes", "ches", "shes")) and len(w) > 4:
             return w[:-2], False
         # Single-s bases take -es (statuses→status); also houses→hous (silent e).
         if w.endswith("ses") and len(w) > 4:
+            return w[:-2], True
+        # consonant + oes (echoes→echo, heroes→hero); shoes→sho + silent e.
+        if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
             return w[:-2], True
         if (
             w.endswith("s")
