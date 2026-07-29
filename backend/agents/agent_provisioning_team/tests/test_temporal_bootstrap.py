@@ -9,7 +9,8 @@ Guards the failure modes the shared-infra wiring was designed to avoid:
 2. **The team_service entrypoint contract.** ``docker-compose`` looks up
    ``TEAM_TEMPORAL_WORKER_FUNC`` on ``TEAM_TEMPORAL_WORKER_MODULE``; keep that
    ``start_agent_provisioning_temporal_worker_thread`` symbol pinned so a rename
-   can't silently break the container wiring.
+   can't silently break the container wiring. Standalone ``uvicorn`` runs use
+   the same helper via ``api.main``'s lifespan backstop.
 """
 
 from __future__ import annotations

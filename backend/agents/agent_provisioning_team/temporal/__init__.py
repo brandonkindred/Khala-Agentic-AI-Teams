@@ -5,7 +5,8 @@ shape): the worker bootstrap in :mod:`.worker` registers these with
 ``shared.temporal.start_team_worker``. This package ``__init__`` performs no
 worker boot (no import-time side effects); startup is the ``team_service``
 entrypoint's job via :func:`start_agent_provisioning_temporal_worker_thread`
-(with ``shared.temporal.teams_registry.start_all_team_workers`` as a
+(with the API lifespan as a standalone-dev backstop, and
+``shared.temporal.teams_registry.start_all_team_workers`` as a
 consolidated-process path).
 
 Sandbox workflows/activities are exported separately, as ``SANDBOX_WORKFLOWS``

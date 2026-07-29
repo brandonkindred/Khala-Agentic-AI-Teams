@@ -426,15 +426,53 @@ def _require_deprovision_runner():
     return run_deprovision_workflow
 
 
+def _start_temporal_worker_backstop() -> None:
+    """Start the Temporal worker when serving the app outside team_service.
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC`` before
+    uvicorn accepts requests. This backstop covers standalone runs
+    (``uvicorn agent_provisioning_team.api.main:app``) after package import
+    stopped auto-booting the worker. Idempotent with the entrypoint path.
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
+          as a warning so it cannot abort app boot.
+    """
+    try:
+        from agent_provisioning_team.temporal.worker import (
+            start_agent_provisioning_temporal_worker_thread,
+        )
+
+        start_agent_provisioning_temporal_worker_thread()
+    except Exception:  # noqa: BLE001 - backstop must not abort app boot
+        logger.warning(
+            "agent_provisioning Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     """API lifespan.
 
-    Provisioning/deprovisioning are Temporal-owned. On pod restart this process
+    Starts the Temporal worker as a standalone-dev backstop, then yields.
+    Provisioning/deprovisioning are Temporal-owned: on pod restart this process
     must not mark running jobs failed or compensate agents — that would race
     durable workflows that continue on the Temporal worker and may later update
     the same job_store rows.
+
+    Preconditions:
+        - ``app`` is the FastAPI application being started.
+    Postconditions:
+        - Worker backstop has been invoked (best-effort) before the first
+          request is accepted; no shutdown compensation of Temporal-owned jobs.
     """
+    _start_temporal_worker_backstop()
     yield
 
 

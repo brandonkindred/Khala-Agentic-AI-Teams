@@ -44,7 +44,8 @@ registered in the `WORKFLOWS` / `ACTIVITIES` lists in `temporal/__init__.py`,
 served by the worker started explicitly via
 `start_agent_provisioning_temporal_worker_thread` (task queue
 `agent-provisioning`) from the `agent-provisioning-service` team_service
-entrypoint (`TEAM_TEMPORAL_WORKER_MODULE` / `TEAM_TEMPORAL_WORKER_FUNC`).
+entrypoint (`TEAM_TEMPORAL_WORKER_MODULE` / `TEAM_TEMPORAL_WORKER_FUNC`), with
+the API lifespan as a standalone-dev backstop (`uvicorn ...:app`).
 Importing the package does not start a worker.
 **Sandbox workflows/activities are the exception**: they are exported
 separately as `SANDBOX_WORKFLOWS` / `SANDBOX_ACTIVITIES` and are *not* part of
