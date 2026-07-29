@@ -127,23 +127,27 @@ def _be_review_issue(**kwargs):
 
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    # Explicit initial branch so a global init.defaultBranch=development does not
+    # make the later ``checkout -b development`` fail (branch already exists).
     subprocess.run(
-        ["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True
     )
     subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True, check=True
     )
     subprocess.run(
-        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True, check=True
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, capture_output=True, check=True
     )
     # Need an initial commit for branches
     (tmp_path / "README.md").write_text("x")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=True)
     # Create development branch
     subprocess.run(
-        ["git", "checkout", "-b", "development"], cwd=tmp_path, capture_output=True, check=False
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, capture_output=True, check=True
     )
     return tmp_path
 
@@ -289,7 +293,7 @@ class TestFEBuildSpecialist:
         a, _ = self._agent()
         out = a.review(_fe_phase_input(repo_path=str(tmp_path)))
         # Project not detected -> empty issues
-        assert isinstance(out.issues, list)
+        assert out.issues == []
 
     def test_problem_solve_no_model(self):
         a, _ = self._agent()
@@ -321,16 +325,14 @@ class TestFEBuildSpecialist:
         assert "3 of 3" in out.summary
 
     def test_problem_solve_llm_exception(self, monkeypatch):
+        from llm_service.interface import LLMError
+
         a, mod = self._agent()
         a._model = object()
 
-        def _raise(*args, **kwargs):
-            raise RuntimeError("err")
-
-        # Returns a callable that raises
         class _StubAgent:
             def __call__(self, prompt):
-                raise RuntimeError("err")
+                raise LLMError("err")
 
         monkeypatch.setattr(mod, "Agent", lambda *a, **kw: _StubAgent())
         out = a.problem_solve(
@@ -386,7 +388,7 @@ class TestBEBuildSpecialist:
     def test_review_no_python_files(self, tmp_path: Path):
         a, _ = self._agent()
         out = a.review(_be_phase_input(repo_path=str(tmp_path)))
-        assert isinstance(out.issues, list)
+        assert out.issues == []
 
     def test_problem_solve_no_model(self):
         a, _ = self._agent()
