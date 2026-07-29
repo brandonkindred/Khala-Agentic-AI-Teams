@@ -140,8 +140,10 @@ def test_transitive_reference_chain_merges_three() -> None:
 # --------------------------------------------------------------------------- non-python fallback
 
 
-def test_non_python_files_group_by_heuristic_start_line() -> None:
-    """Non-Python findings sharing the same heuristic column-0 declaration start merge together."""
+def test_non_python_files_do_not_group_by_heuristic() -> None:
+    """Non-Python findings stay separate: column-0 heuristics would false-merge indented methods."""
+    # Top-level TS function where the heuristic *would* have grouped — still
+    # left alone so class-based languages with indented methods are safe.
     content = "\n".join(
         [
             "function foo() {",  # 1
@@ -157,7 +159,84 @@ def test_non_python_files_group_by_heuristic_start_line() -> None:
         _issue(file_path="app/foo.ts", line=3, description="ts finding two"),
     ]
     result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 2
+    assert result[0].description == "ts finding one"
+    assert result[1].description == "ts finding two"
+
+
+def test_java_style_indented_methods_do_not_false_merge() -> None:
+    """Findings in distinct indented methods of one class must not share a group key."""
+    content = "\n".join(
+        [
+            "public class Widget {",  # 1
+            "    public void draw() {",  # 2
+            "        int x = 1;",  # 3
+            "    }",  # 4
+            "    public void erase() {",  # 5
+            "        int y = 2;",  # 6
+            "    }",  # 7
+            "}",  # 8
+            "",
+        ]
+    )
+    index = _index({"Widget.java": content})
+    issues = [
+        _issue(file_path="Widget.java", line=3, description="draw side effect"),
+        _issue(file_path="Widget.java", line=6, description="erase side effect"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 2
+
+
+def test_basename_citation_matches_canonical_path() -> None:
+    """A prose citation of a basename resolves to the same key as the canonical finding path."""
+    content = "\n".join(
+        [
+            "def foo():",  # 1
+            "    return 1",  # 2
+            "",
+            "def bar():",  # 4
+            "    return foo()",  # 5
+            "",
+        ]
+    )
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(
+            file_path="app/foo.py",
+            line=2,
+            description="foo's contract changed",
+        ),
+        _issue(
+            file_path="app/foo.py",
+            line=5,
+            description="bar breaks because of foo.py:2 (old contract)",
+        ),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
     assert len(result) == 1
+    assert "foo's contract changed" in result[0].description
+    assert "bar breaks" in result[0].description
+
+
+def test_aliased_file_paths_group_under_canonical_key() -> None:
+    """Findings citing the same file via basename vs full path share a construct key."""
+    content = "\n".join(
+        [
+            "def foo():",  # 1
+            "    x = 1",  # 2
+            "    return x",  # 3
+            "",
+        ]
+    )
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(file_path="app/foo.py", line=2, description="full-path finding"),
+        _issue(file_path="foo.py", line=3, description="basename finding"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert result[0].file_path == "app/foo.py"
 
 
 # --------------------------------------------------------------------------- passthrough / non-merge cases

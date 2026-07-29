@@ -35,7 +35,6 @@ from software_engineering_team.shared.deduplication import dedupe_strings
 from .false_positive_filter import CodebaseIndex
 from .function_boundaries import (
     enclosing_construct,
-    enclosing_construct_start_heuristic,
     strip_numbered_prefixes,
 )
 from .models import CodeReviewIssue
@@ -44,8 +43,9 @@ _SIDE_EFFECT_CATEGORY = "side-effects"
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
-# Extensions resolved via the AST-based enclosing_construct (exact ranges);
-# everything else falls back to the column-0 start-line heuristic.
+# Extensions resolved via the AST-based enclosing_construct (exact ranges).
+# Non-Python extensions intentionally contribute no same-construct key: the
+# column-0 heuristic cannot distinguish indented methods and would false-merge.
 _PYTHON_EXTS = frozenset({".py", ".pyi"})
 
 # Matches a "path:line" citation embedded in a finding's prose, e.g. the
@@ -98,37 +98,47 @@ class _ConstructResolver:
         return self._content_cache[file_path]
 
     def construct_key(self, file_path: str, line: Optional[int]) -> Optional[_ConstructKey]:
-        """Return ``(file_path, construct_start_line)``, or None if unresolvable.
+        """Return ``(canonical_path, construct_start_line)``, or None if unresolvable.
 
         Postconditions:
-            - Returns None when ``file_path``/``line`` is blank/None, the file
+            - Returns None when ``file_path``/``line`` is blank/None, the path
+              cannot be resolved via ``CodebaseIndex.resolve_path``, the file
               cannot be read from ``shared_index``, or no enclosing construct
-              (or heuristic start line) is found. Never raises.
-            - Python files (``.py``/``.pyi``) resolve via the exact AST-based
-              ``enclosing_construct``; every other extension resolves via the
-              coarser ``enclosing_construct_start_heuristic`` (start line only).
+              is found. Never raises.
+            - The returned path is the canonical key from ``resolve_path`` (so
+              a basename citation like ``foo.py`` and a finding keyed as
+              ``app/foo.py`` share a group key when they resolve to the same
+              file).
+            - Only Python files (``.py``/``.pyi``) contribute a grouping key,
+              via the exact AST-based ``enclosing_construct``. Non-Python
+              files return None: the column-0 start-line heuristic cannot
+              distinguish indented methods inside a class (Java, C#,
+              class-based TypeScript), and consolidating on it would merge
+              independent findings. Prefer no consolidation over false merges.
             - Content carrying the PR-review path's ``"N: "``-prefixed hunk
               annotations is normalized (prefixes stripped, ``line`` remapped
               to its physical index) before resolution, exactly as
               ``find_function_at_line`` does, so a pre-numbered excerpt
-              parses correctly instead of failing (Python) or spuriously
-              treating every prefixed line as column-0 (heuristic).
+              parses correctly instead of failing.
         """
         if not file_path or not line or line < 1:
             return None
-        content = self._content(file_path)
+        canonical = self._shared_index.resolve_path(file_path)
+        if not canonical:
+            return None
+        content = self._content(canonical)
         if not content:
             return None
         stripped, physical, _mapper = strip_numbered_prefixes(content, line)
-        _, ext = os.path.splitext(file_path)
-        if ext.lower() in _PYTHON_EXTS:
-            construct = enclosing_construct(stripped, physical)
-            start = construct.start_line if construct is not None else None
-        else:
-            start = enclosing_construct_start_heuristic(stripped, physical)
-        if start is None:
+        _, ext = os.path.splitext(canonical)
+        if ext.lower() not in _PYTHON_EXTS:
+            # Column-0 heuristics cannot tell indented methods apart; skip
+            # same-construct grouping for non-Python rather than false-merge.
             return None
-        return (file_path, start)
+        construct = enclosing_construct(stripped, physical)
+        if construct is None:
+            return None
+        return (canonical, construct.start_line)
 
     def citation_keys(self, text: str) -> List[_ConstructKey]:
         """Resolve every ``path:line`` citation in ``text`` to a construct key.
@@ -252,10 +262,13 @@ def consolidate_side_effect_issues(
     """Merge related ``"side-effects"`` findings into single, consolidated issues.
 
     Two findings are grouped together when either holds:
-        - They are anchored inside the same enclosing function/method/class
-          (Python: exact AST range; other languages: best-guess start line).
+        - They are anchored inside the same enclosing Python function/method/
+          class (exact AST range). Non-Python files do not contribute a
+          same-construct key — the column-0 heuristic cannot distinguish
+          indented methods and would false-merge independent findings.
         - One finding's description/suggestion cites a ``path:line`` that
-          falls inside the other finding's own enclosing construct.
+          falls inside the other finding's own enclosing construct
+          (citations are resolved through the same Python-only key).
     Grouping is transitive (union-find), so a chain of findings that each
     reference or share a construct with the next all merge into one issue.
 

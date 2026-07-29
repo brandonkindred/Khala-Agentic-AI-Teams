@@ -928,7 +928,11 @@ into a single issue. Every other category (including this same pass's own
 `documentation` findings) passes through unchanged. Runs after the side-effect
 pass and before the coordinator's exact-match dedupe, using the same
 `shared_index` (no extra LLM calls; pure source analysis — AST-based for
-Python, a column-0 heuristic for other languages). Set to `false`/`0`/`no` to
+Python only; non-Python files are not same-construct grouped, because the
+column-0 heuristic cannot distinguish indented methods and would false-merge
+independent findings). Path aliases such as bare basenames are canonicalized
+via `CodebaseIndex.resolve_path` before grouping so a citation of `foo.py`
+matches a finding keyed as `app/foo.py`. Set to `false`/`0`/`no` to
 disable consolidation (any other value, or unset, leaves it enabled) — this
 only turns off merging, the underlying findings are unaffected.
 
