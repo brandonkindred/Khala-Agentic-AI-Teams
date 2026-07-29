@@ -78,7 +78,8 @@ def _attr_or(obj: Any, name: str, default: Any) -> Any:
 
 
 _ACTIONABLE_SEVERITIES = frozenset({"critical", "high", "medium"})
-_ADVISORY_FIX_MARKER = "recommendation"
+# Dedicated flag on fixes_applied entries — do not overload free-form ``fix`` text.
+_ADVISORY_KEY = "advisory"
 # Logging bound only — the returned ``summary`` field stays full-length.
 _LOG_SUMMARY_MAX_CHARS = 120
 
@@ -109,9 +110,9 @@ def _applied_fix_count(fixes_applied: List[Dict[str, Any]]) -> int:
     Preconditions:
         ``fixes_applied`` is a list of dicts.
     Postconditions:
-        Returns the number of entries whose ``fix`` is not the advisory marker.
+        Returns the number of entries that are not marked ``advisory=True``.
     """
-    return sum(1 for entry in fixes_applied if entry.get("fix") != _ADVISORY_FIX_MARKER)
+    return sum(1 for entry in fixes_applied if not entry.get(_ADVISORY_KEY))
 
 
 def _format_summary_for_log(summary: object, max_chars: int = _LOG_SUMMARY_MAX_CHARS) -> str:
@@ -140,9 +141,10 @@ def _format_all_code(
     Preconditions:
         ``current_files`` maps paths to content; ``max_chars`` > 0.
     Postconditions:
-        Returns a code block whose length is ≤ ``max_chars`` (stops at the first
-        file that cannot fit, optionally appending a truncation marker when the
-        marker itself fits); ``"(no code)"`` when empty. Pure.
+        Returns a code block whose length is ≤ ``max_chars``, counting the
+        separators inserted by joining parts (stops at the first file that
+        cannot fit, optionally appending a truncation marker when the marker
+        itself fits); ``"(no code)"`` when empty. Pure.
     """
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
@@ -150,14 +152,18 @@ def _format_all_code(
     total = 0
     for path, content in current_files.items():
         chunk = f"--- {path} ---\n{content}\n"
-        if total + len(chunk) > max_chars:
+        # ``"\n".join(parts)`` inserts one separator char between existing parts.
+        sep = 1 if parts else 0
+        if total + sep + len(chunk) > max_chars:
             marker = f"--- {path} --- (truncated, {len(content)} chars omitted)\n"
-            if total + len(marker) <= max_chars:
+            if total + sep + len(marker) <= max_chars:
                 parts.append(marker)
             break
         parts.append(chunk)
-        total += len(chunk)
-    return "\n".join(parts) if parts else "(no code)"
+        total += sep + len(chunk)
+    out = "\n".join(parts) if parts else "(no code)"
+    assert out == "(no code)" or len(out) <= max_chars
+    return out
 
 
 def _format_issues_for_batch(issues: List[Any]) -> str:
@@ -601,7 +607,7 @@ def _apply_tool_agents_problem_solve(
         failing agent is logged and skipped. A ``.py`` file a tool agent
         returns that fails to parse is discarded before merging -- the prior
         version of that file in ``merged`` is left untouched. Summary parts are
-        appended when the agent returns files and/or recommendations. File rewrites append a counted applied-fix entry; recommendation-only entries use ``fix="recommendation"`` and are excluded from applied-fix counts.
+        appended when the agent returns files and/or recommendations. File rewrites append a counted applied-fix entry; recommendation-only entries set ``advisory=True`` and are excluded from applied-fix counts.
     """
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "problem_solve"):
@@ -645,8 +651,9 @@ def _apply_tool_agents_problem_solve(
                         "source": kind.value,
                         "issue": out.summary or f"Tool {kind.value} recommendation",
                         "recommendation": r,
-                        "fix": _ADVISORY_FIX_MARKER,
+                        "fix": "suggestion noted",
                         "root_cause": "",
+                        _ADVISORY_KEY: True,
                     }
                     if microtask_id:
                         entry["microtask"] = microtask_id

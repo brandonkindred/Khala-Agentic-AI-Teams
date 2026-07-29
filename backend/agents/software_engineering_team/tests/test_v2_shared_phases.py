@@ -1138,6 +1138,13 @@ def test_format_all_code_truncation_marker_respects_budget():
     assert len(out) <= 20
 
 
+def test_format_all_code_counts_join_separators_in_budget():
+    """Many small files must not exceed max_chars via uncounted join separators."""
+    files = {f"f{i}.py": "x" for i in range(30)}
+    out = sh_ps._format_all_code(files, max_chars=50)
+    assert len(out) <= 50
+
+
 def test_format_issues_for_batch_preserves_empty_source():
     out = sh_ps._format_issues_for_batch([_issue(source="")])
     assert "- **Source:** " in out
@@ -1361,8 +1368,40 @@ def test_tool_file_rewrite_counts_as_applied_even_with_recommendations():
         runner=_runner("## FILE ##"),
     )
     assert result.summary.startswith("Applied 2 fix(s);")
-    assert sum(1 for e in result.fixes_applied if e.get("fix") == "recommendation") == 1
+    assert sum(1 for e in result.fixes_applied if e.get("advisory")) == 1
     assert sum(1 for e in result.fixes_applied if str(e.get("fix", "")).startswith("updated ")) == 1
+
+
+def test_applied_fix_count_ignores_freeform_recommendation_summary():
+    """An LLM fix whose summary text is literally 'recommendation' still counts."""
+    parses = iter(
+        [
+            {
+                "files": {"a.py": "x = 1\n"},
+                "resolved": True,
+                "summary": "recommendation",
+                "root_cause": "",
+            }
+        ]
+    )
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=[_issue()]),
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="/tmp",
+        tool_agents=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{language_conventions}{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        runner=_runner("## FILE ##"),
+    )
+    assert result.summary.startswith("Applied 1 fix(s);")
+    assert any(
+        e.get("fix") == "recommendation" and not e.get("advisory") for e in result.fixes_applied
+    )
 
 
 def test_recommendation_only_tool_does_not_inflate_applied_fix_count():
@@ -1396,7 +1435,7 @@ def test_recommendation_only_tool_does_not_inflate_applied_fix_count():
         runner=_runner("## FILE ##"),
     )
     assert result.summary.startswith("Applied 1 fix(s);")
-    assert any(e.get("fix") == "recommendation" for e in result.fixes_applied)
+    assert any(e.get("advisory") for e in result.fixes_applied)
 
 
 def test_fix_issues_one_at_a_time_preserves_braces_and_empty_source():
@@ -1509,7 +1548,7 @@ def test_apply_tool_agents_files_only_updates_summary_and_schema():
     assert parts
     assert len(fixes) == 1
     assert fixes[0]["fix"].startswith("updated ")
-    assert fixes[0]["fix"] != "recommendation"
+    assert not fixes[0].get("advisory")
 
 
 def test_apply_tool_agents_recommendation_schema_includes_llm_keys():
@@ -1537,7 +1576,7 @@ def test_apply_tool_agents_recommendation_schema_includes_llm_keys():
         "root_cause",
         "microtask",
     }
-    assert fixes[0]["fix"] == "recommendation"
+    assert fixes[0].get("advisory") is True
 
 
 # --- deliberate wrapper duplication drift guard ------------------------------
