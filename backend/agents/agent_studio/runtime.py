@@ -27,7 +27,7 @@ def _build_service() -> AgentStudioService:
     """Build the process-wide service with a durable store when Postgres is on.
 
     With ``POSTGRES_HOST`` set the conversation store is Postgres-backed so state is
-    coherent across the 4 uvicorn workers (a conversation created on one worker
+    coherent across uvicorn workers (a conversation created on one worker
     resolves on another; turns serialize via a row lock). Without it — local dev /
     tests — the in-memory store is used.
 
@@ -82,9 +82,10 @@ def get_studio_service() -> AgentStudioService:
     worker starts its own Temporal worker on the shared ``agent-studio-queue``, and
     Temporal does **not** bind an activity to the process that dispatched its workflow.
     So the in-memory store is coherent only in single-process mode (``make run``,
-    tests). A multi-worker deployment (``make deploy`` runs ``--workers 4``) **requires**
-    ``POSTGRES_HOST``: without it, a follow-up request's activity may execute in a
-    different process whose in-memory store lacks the conversation, returning 404.
+    tests, and default ``make deploy`` / Docker ``--workers 1``). A multi-worker
+    deployment **requires** ``POSTGRES_HOST``: without it, a follow-up request's
+    activity may execute in a different process whose in-memory store lacks the
+    conversation, returning 404.
 
     Postconditions:
         - Returns the same instance on every call within a process.
