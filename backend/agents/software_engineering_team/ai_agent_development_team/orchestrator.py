@@ -13,6 +13,7 @@ from software_engineering_team.shared.team_lead_base import BaseTeamLead
 
 from .models import (
     AIAgentDevelopmentWorkflowResult,
+    ExecutionResult,
     IntakeResult,
     Phase,
     PlanningResult,
@@ -28,26 +29,41 @@ from .phases.intake import run_intake
 from .phases.planning import run_planning
 from .phases.problem_solving import run_problem_solving
 from .phases.review import run_review
+from .tool_agents.agent_runtime import AgentRuntimeToolAgent
+from .tool_agents.evaluation_harness import EvaluationHarnessToolAgent
+from .tool_agents.mcp_server_connectivity import MCPServerConnectivityToolAgent
+from .tool_agents.memory_rag import MemoryRagToolAgent
+from .tool_agents.prompt_engineering import PromptEngineeringToolAgent
+from .tool_agents.safety_governance import SafetyGovernanceToolAgent
 
 logger = logging.getLogger(__name__)
+# Default bound for the review/problem-solving gate. Kept as a module constant
+# (not env/settings) so tests can assert exhaustion against a stable value;
+# subclasses may override via the class attribute ``max_review_iterations``
+# (which defaults to this module constant).
 MAX_REVIEW_ITERATIONS = 15
 
 
 class AIAgentDevelopmentTeamLead(BaseTeamLead):
     """Orchestrates intake -> planning -> execution -> review -> problem-solving -> deliver.
 
-    Intake and planning run as gated phases via ``BaseTeamLead._run_gated_phases``;
-    the review/problem-solving retry loop runs via ``BaseTeamLead._run_bounded_retry_loop``.
-    ``run_execution``/``run_deliver`` and the artifact-substring review check /
-    placeholder-file fix logic itself remain team-specific: this team's phase
-    shape (a whole-result review/problem-solving retry loop with no LLM-based
-    gates and no git/branch concerns) does not fit the code-v2 teams'
-    ``BaseV2DevelopmentAgent`` per-microtask gated state machine, mirroring why
-    ``devops_team`` also does not use it. Does not use ``BaseTeamLead``'s
-    per-repo briefing cache (:meth:`BaseTeamLead._repo_context_cache_for`), so
-    ``__init__`` passes empty extension/exclude-dir sets and a zero char budget
-    for that unused feature.
+    Five gated phases are sequenced via ``BaseTeamLead._run_gated_phases``
+    (mirroring ``devops_team``): intake, planning, execution, review/fix, and
+    deliver. Review and problem-solving are combined into a single gated phase
+    that uses ``BaseTeamLead._run_bounded_retry_loop`` internally. Phase
+    callables (``run_intake`` / ``run_planning`` / ``run_execution`` /
+    ``run_review`` / ``run_problem_solving`` / ``run_deliver``) and the
+    artifact-substring review check / placeholder-file fix logic itself remain
+    team-specific: this team's phase shape (a whole-result review/problem-
+    solving retry loop with no LLM-based gates and no git/branch concerns)
+    does not fit the code-v2 teams' ``BaseV2DevelopmentAgent`` per-microtask
+    gated state machine, mirroring why ``devops_team`` also does not use it.
+    Does not use ``BaseTeamLead``'s per-repo briefing cache
+    (:meth:`BaseTeamLead._repo_context_cache_for`), so ``__init__`` passes empty
+    extension/exclude-dir sets and a zero char budget for that unused feature.
     """
+
+    max_review_iterations = MAX_REVIEW_ITERATIONS
 
     def __init__(self, llm_client: LLMClient) -> None:
         BaseTeamLead.__init__(
@@ -61,13 +77,6 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
     def _build_tool_runners(
         self,
     ) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
-        from .tool_agents.agent_runtime import AgentRuntimeToolAgent
-        from .tool_agents.evaluation_harness import EvaluationHarnessToolAgent
-        from .tool_agents.mcp_server_connectivity import MCPServerConnectivityToolAgent
-        from .tool_agents.memory_rag import MemoryRagToolAgent
-        from .tool_agents.prompt_engineering import PromptEngineeringToolAgent
-        from .tool_agents.safety_governance import SafetyGovernanceToolAgent
-
         prompt = PromptEngineeringToolAgent(self.llm)
         memory = MemoryRagToolAgent(self.llm)
         safety = SafetyGovernanceToolAgent(self.llm)
@@ -127,20 +136,22 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
 
         logger.info("[%s] AI Agent Development workflow started", task.id)
 
-        # Phase outputs shared with the still-hand-rolled execution/review/deliver
-        # tail below (set by the gated phase callables).
+        # Phase outputs shared across gated-phase closures (set by earlier gates).
         intake: Optional[IntakeResult] = None
         planning: Optional[PlanningResult] = None
+        execution: Optional[ExecutionResult] = None
 
         def _phase_intake() -> Optional[AIAgentDevelopmentWorkflowResult]:
             """Intake gate: normalize mission/constraints via run_intake.
 
             Preconditions: none (first phase).
-            Postconditions: sets nonlocal ``intake`` and ``result.intake_result``;
-              always returns None today (run_intake has no soft-failure branch —
-              exceptions propagate to run_workflow's outer try/except unchanged).
+            Postconditions: sets ``result.current_phase`` to ``Phase.INTAKE``,
+              nonlocal ``intake``, and ``result.intake_result``; always returns
+              None today (run_intake has no soft-failure branch — exceptions
+              propagate to run_workflow's outer try/except unchanged).
             """
             nonlocal intake
+            result.current_phase = Phase.INTAKE
             _trace(Phase.INTAKE, "Starting intake")
             intake = run_intake(llm=self.llm, task=task, spec_content=spec_content)
             result.intake_result = intake
@@ -164,11 +175,16 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
             result.planning_result = planning
             return None
 
-        try:
-            gate_failure = self._run_gated_phases([_phase_intake, _phase_planning])
-            if gate_failure is not None:
-                return gate_failure
+        def _phase_execution() -> Optional[AIAgentDevelopmentWorkflowResult]:
+            """Execution gate: run planned microtasks via run_execution.
 
+            Preconditions: ``_phase_planning`` has run (``planning`` is set).
+            Postconditions: sets nonlocal ``execution`` and
+              ``result.execution_result``; always returns None today
+              (``run_execution`` has no soft-failure branch — exceptions
+              propagate to ``run_workflow``'s outer try/except).
+            """
+            nonlocal execution
             result.current_phase = Phase.EXECUTION
             _trace(Phase.EXECUTION, "Executing microtasks")
             execution = run_execution(
@@ -179,6 +195,19 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                 tool_runners=self._build_tool_runners(),
             )
             result.execution_result = execution
+            return None
+
+        def _phase_review_fix() -> Optional[AIAgentDevelopmentWorkflowResult]:
+            """Review/problem-solving gate via ``_run_bounded_retry_loop``.
+
+            Preconditions: ``_phase_execution`` has run (``execution`` is set).
+            Postconditions: always sets ``result.final_files`` to the last
+              attempted file set (including problem-solving patches). On review
+              success returns None so deliver runs. On abort or exhausted
+              retries, populates ``failure_reason``/``summary``/``needs_followup``
+              (abort path may already have set them) and returns ``result``.
+            """
+            assert execution is not None, "execution must be set by _phase_execution"
 
             def _attempt_review_cycle(i: int) -> Optional[ReviewResult]:
                 """One review/problem-solving iteration for ``_run_bounded_retry_loop``.
@@ -231,7 +260,7 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
             # ``None`` from attempt is the explicit abort signal;
             # ``is_success`` is only invoked on non-``None`` values.
             succeeded, _final_review = self._run_bounded_retry_loop(
-                max_iterations=MAX_REVIEW_ITERATIONS,
+                max_iterations=self.max_review_iterations,
                 attempt=_attempt_review_cycle,
                 is_success=lambda r: r.passed,
             )
@@ -249,6 +278,20 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                 )
                 result.needs_followup = True
                 return result
+            return None
+
+        def _phase_deliver() -> Optional[AIAgentDevelopmentWorkflowResult]:
+            """Deliver gate: package handoff summary via run_deliver.
+
+            Preconditions: ``_phase_review_fix`` returned None (review passed);
+              ``execution`` and ``result.review_result`` are set.
+            Postconditions: sets ``result.deliver_result``, ``result.success``,
+              and ``result.summary``; always returns None today
+              (``run_deliver`` has no soft-failure branch — exceptions
+              propagate to ``run_workflow``'s outer try/except).
+            """
+            assert execution is not None, "execution must be set by _phase_execution"
+            assert result.review_result is not None, "review_result must be set"
 
             result.current_phase = Phase.DELIVER
             _trace(Phase.DELIVER, "Preparing handoff package")
@@ -258,6 +301,20 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
             result.deliver_result = deliver
             result.success = True
             result.summary = deliver.summary or "AI agent system blueprint generated."
+            return None
+
+        try:
+            gate_failure = self._run_gated_phases(
+                [
+                    _phase_intake,
+                    _phase_planning,
+                    _phase_execution,
+                    _phase_review_fix,
+                    _phase_deliver,
+                ]
+            )
+            if gate_failure is not None:
+                return gate_failure
             return result
         except Exception as exc:
             logger.exception("[%s] AI Agent Development workflow failed", task.id)

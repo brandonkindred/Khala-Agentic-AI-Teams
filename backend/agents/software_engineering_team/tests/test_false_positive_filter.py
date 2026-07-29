@@ -71,12 +71,14 @@ def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeRevi
 
 
 class _VerdictStub(DummyLLMClient):
-    """Returns canned verdicts for the verification call; rejects on chunk review.
+    """Returns canned verdicts for the verification call.
 
-    ``complete_json`` branches on the prompt: the verification user prompt
-    contains the anchor "verdicts" (the contract asks for a ``verdicts`` array),
-    so the stub can serve both the chunk reviewer and the verifier from one
-    injected client in an end-to-end coordinator run.
+    Optionally serves a configured chunk-review response when ``chunk_issues`` is
+    supplied; otherwise delegates to the base client (which rejects) for
+    chunk-review prompts. ``complete_json`` branches on the prompt: the
+    verification user prompt contains the anchor "verdicts" (the contract asks
+    for a ``verdicts`` array), so the stub can serve both the chunk reviewer and
+    the verifier from one injected client in an end-to-end coordinator run.
     """
 
     def __init__(self, verdicts: List[Dict[str, Any]], chunk_issues: Optional[List[Dict]] = None):
@@ -626,6 +628,26 @@ def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
     assert "first 10 characters" not in prompt
 
 
+def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
+    """Task description and acceptance criteria are capped at ``_CONTEXT_FIELD_CHARS``."""
+    from code_review_agent.false_positive_filter import _CONTEXT_FIELD_CHARS
+
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    huge = "T" * (_CONTEXT_FIELD_CHARS + 50)
+    huge_ac = "A" * (_CONTEXT_FIELD_CHARS + 10)
+    inp = CodeReviewInput(
+        files={"app/main.py": "x = 1\n"},
+        task_description=huge,
+        acceptance_criteria=[huge_ac, "short ok"],
+    )
+    prompt = _build_group_prompt(idx, "app/main.py", [_issue()], inp, max_inline_chars=10)
+    assert "T" * _CONTEXT_FIELD_CHARS in prompt
+    assert "T" * (_CONTEXT_FIELD_CHARS + 1) not in prompt
+    assert "... (truncated)" in prompt
+    assert "A" * _CONTEXT_FIELD_CHARS in prompt
+    assert "short ok" in prompt
+
+
 def test_group_prompt_caps_manifest_and_notes_overflow() -> None:
     """A submission with more files than the manifest cap lists only the cap and notes the rest."""
     files = {f"f{i:04d}.py": "x = 1\n" for i in range(305)}
@@ -737,6 +759,60 @@ def test_resolve_path_exact_suffix_and_misses() -> None:
         with_excerpt.resolve_path(CodebaseIndex.EXISTING_CODEBASE_PATH)
         == CodebaseIndex.EXISTING_CODEBASE_PATH
     )
+
+
+def test_filter_resolves_via_code_review_verify_key(monkeypatch) -> None:
+    """Production path resolves the verifier model via the lighter ``code_review_verify``
+    agent key (not the primary ``code_review`` key used by chunk review)."""
+    import code_review_agent.false_positive_filter as fpf
+    import code_review_agent.model_resolution as mr
+
+    calls: List[str] = []
+    stub = _VerdictStub(
+        verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}],
+    )
+
+    def _fake_get(agent_key: str, **_kw: Any) -> Any:
+        calls.append(agent_key)
+        return stub
+
+    monkeypatch.setattr(mr, "get_strands_model", _fake_get)
+    # Stub context sizing so a bare non-Model ``llm`` does not fail setup before
+    # the verification call (``compute_code_review_map_chunk_chars`` probes the
+    # injected client; production resolution only needs a non-strands object).
+    monkeypatch.setattr(fpf, "compute_code_review_map_chunk_chars", lambda _llm: 8_000)
+    out = filter_false_positives(object(), _input(), [_issue()])  # type: ignore[arg-type]
+    assert calls == ["code_review_verify"]
+    assert len(out) == 1  # confirmed-real finding kept
+
+
+def test_filter_uses_code_review_verify_model(monkeypatch) -> None:
+    """``filter_false_positives`` resolves the verifier via ``resolve_code_review_verify_model``.
+
+    This pins the wiring at the call site: it must not regress back to the
+    primary ``code_review`` resolver for the verify step.
+    """
+    import code_review_agent.false_positive_filter as fpf
+
+    llm = object()  # non-Strands object so the production path runs
+    issue = _issue()
+
+    calls: list[tuple[Any, Optional[object]]] = []
+    stub_model = _VerdictStub(
+        verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}],
+    )
+
+    def _fake_resolve_verify(_llm: Any, think: Optional[object] = None) -> Any:
+        calls.append((_llm, think))
+        return stub_model
+
+    monkeypatch.setattr(fpf, "resolve_code_review_verify_model", _fake_resolve_verify)
+    # Stub context sizing so a bare non-Model ``llm`` does not fail setup.
+    monkeypatch.setattr(fpf, "compute_code_review_map_chunk_chars", lambda _llm: 8_000)
+
+    out = filter_false_positives(llm, _input(), [issue])  # type: ignore[arg-type]
+    assert out == [issue]
+    assert calls == [(llm, None)]
 
 
 def test_filter_removes_confirmed_false_positive() -> None:
