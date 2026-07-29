@@ -363,24 +363,23 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         repo_path: Path,
         task_description: str,
         requirements: str,
-        architecture: Optional[Any] = None,
-        existing_pipeline: Optional[str] = None,
         target_repo: Optional[Any] = None,
-        tech_stack: Optional[List[str]] = None,
         build_verifier: Optional[Any] = None,
         task_id: str = "devops",
         subdir: str = "",
-        max_iterations: int = 1,
-        devops_review_agent: Optional[Any] = None,
     ) -> DevOpsTeamResult:
-        """Compatibility workflow adapter for existing orchestrator/tech lead calls."""
-        _ = (
-            architecture,
-            existing_pipeline,
-            tech_stack,
-            max_iterations,
-            devops_review_agent,
-        )  # reserved for future routing
+        """Legacy adapter: repo/task free-text → ``_build_legacy_spec`` → ``_run_pipeline`` with ``write_changes=True``.
+
+        Preconditions:
+            - ``repo_path`` is a path to an existing directory initialised as a git repo.
+            - ``task_description`` and ``requirements`` are strings (may be empty).
+            - ``task_id`` is a non-empty string when provided; defaults to ``"devops"``.
+            - ``build_verifier``, when provided, is callable and returns ``(bool, str)``.
+        Postconditions:
+            - Returns a ``DevOpsTeamResult`` reflecting the full pipeline outcome.
+            - Artifacts are written to the repo on a feature branch and merged into
+              ``development`` when the pipeline completes successfully.
+        """
         task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id=task_id,
             task_description=task_description,

@@ -1813,18 +1813,26 @@ class TestBackwardCompatibility:
                 repo_path=Path(tmp),
                 task_description="Add CI/CD",
                 requirements="Include prod approval gate and rollback plan",
-                architecture=None,
-                existing_pipeline=None,
                 target_repo=None,
-                tech_stack=["python"],
                 build_verifier=MagicMock(return_value=(True, "")),
                 task_id="devops-legacy",
                 subdir="",
-                max_iterations=1,
-                devops_review_agent=None,
             )
         assert isinstance(result, DevOpsTeamResult)
         assert result.success
+
+    def test_run_workflow_signature_excludes_unused_kwargs(self) -> None:
+        import inspect
+
+        params = inspect.signature(DevOpsTeamLeadAgent.run_workflow).parameters
+        for name in (
+            "architecture",
+            "existing_pipeline",
+            "tech_stack",
+            "max_iterations",
+            "devops_review_agent",
+        ):
+            assert name not in params
 
     def test_build_legacy_spec_prod_detection(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
