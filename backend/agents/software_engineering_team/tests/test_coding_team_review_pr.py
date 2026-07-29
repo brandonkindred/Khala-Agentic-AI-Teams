@@ -59,6 +59,38 @@ def _pr_payload(number: int = 7, **overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _pr_detail(
+    *,
+    number: int,
+    html_url: str,
+    head_sha: str = "sha1",
+    author: str = "alice",
+    body: str = "body",
+    head: str = "feature",
+    base: str = "main",
+    title: str = "Add feature",
+    draft: bool = False,
+    state: str = "open",
+    updated_at: str = "2026-01-01T00:00:00Z",
+    labels: tuple[str, ...] = (),
+) -> PullRequestDetail:
+    """Build a `PullRequestDetail` test object with stable defaults."""
+    return PullRequestDetail(
+        number=number,
+        html_url=html_url,
+        head=head,
+        base=base,
+        head_sha=head_sha,
+        title=title,
+        body=body,
+        draft=draft,
+        author=author,
+        state=state,
+        updated_at=updated_at,
+        labels=labels,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Client: list_open_pull_requests
 # ---------------------------------------------------------------------------
@@ -677,19 +709,10 @@ class _FakeReviewClient:
             raise GitHubAPIError(404, "missing PR")
         if self.fail_get_pr_after_first_call and self.get_pull_request_calls > 1:
             raise GitHubAPIError(404, "missing PR")
-        return PullRequestDetail(
+        return _pr_detail(
             number=n,
             html_url=f"https://example/pull/{n}",
-            head="feature",
-            base="main",
-            head_sha="sha1",
-            title="Add feature",
-            body="body",
-            draft=False,
             author=self.author,
-            state="open",
-            updated_at="2026-01-01T00:00:00Z",
-            labels=(),
         )
 
     def get_pull_request_files(self, _o: str, _r: str, _n: int) -> list[PullRequestFile]:
@@ -1182,7 +1205,9 @@ class TestReviewEndpoint:
         # attached traceback still shows the raw exception (inherent to
         # ``logger.exception``/``exc_info`` and out of scope for this fix — the bug
         # is about the message text passed through, not Python's traceback capture).
-        [record] = [r for r in caplog.records if r.getMessage().startswith("PR review hook failed")]
+        matches = [r for r in caplog.records if r.getMessage().startswith("PR review hook failed")]
+        assert len(matches) == 1
+        record = matches[0]
         assert "ghp_LEAKEDTOKEN" not in record.getMessage()
         assert "ghp_LEAKEDTOKEN" not in (job.get("error") or "")
 
@@ -1485,6 +1510,7 @@ class TestReviewEndpoint:
         assert fake_jobs.get_job(job_id).get("last_heartbeat_at") is not None
 
     def test_agent_failure_marks_job_failed(self, review_app) -> None:
+        """Agent exceptions fail the job and post a neutral outage note only."""
         review_app["github"]["agent_output"] = RuntimeError("llm down")
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1503,7 +1529,8 @@ class TestReviewEndpoint:
             + [r.get("body", "") for r in gh.reviews]
             + [c.get("body", "") for c in gh.review_comments]
         )
-        assert not any(("llm down" in b or "RuntimeError" in b) for b in all_bodies)
+        assert not any("llm down" in b for b in all_bodies)
+        assert not any("RuntimeError" in b for b in all_bodies)
 
     def test_no_changed_files_completes(self, review_app) -> None:
         review_app["github"]["client"].files = []
@@ -1865,10 +1892,7 @@ class TestReviewEndpoint:
         assert gh.reactions == []
 
     def test_non_422_review_error_marks_job_failed_not_degraded(self, review_app) -> None:
-        # A non-422 review failure (e.g. 403 permission / rate-limit) is a real
-        # error, not a bad diff line: it must propagate and mark the job failed
-        # rather than be silently degraded to file-level/standalone comments and
-        # reported as completed.
+        """A non-422 review failure (e.g. 403) must fail the job, not degrade."""
         gh = review_app["github"]["client"]
         gh.review_fail_times = 1
         gh.review_fail_status = 403
@@ -1885,15 +1909,12 @@ class TestReviewEndpoint:
         assert any(
             "could not complete and did not post findings" in body for _n, body in gh.comments
         )
-        assert not any(
-            "403" in body or "rate limited" in body or "code review failed" in body
-            for _n, body in gh.comments
-        )
+        assert not any("403" in body for _n, body in gh.comments)
+        assert not any("rate limited" in body for _n, body in gh.comments)
+        assert not any("code review failed" in body for _n, body in gh.comments)
 
     def test_non_422_file_comment_error_marks_job_failed_not_degraded(self, review_app) -> None:
-        # A non-422 failure from the dedicated file-comment endpoint is likewise a
-        # real error and must propagate, not silently fall through to a standalone
-        # conversation comment.
+        """A non-422 file-comment failure must fail the job, not fall through."""
         gh = review_app["github"]["client"]
         gh.review_comment_fail_paths = {"a.py"}
         gh.review_comment_fail_status = 403
@@ -3113,12 +3134,11 @@ class TestWholeFileReview:
             PullRequestFile("img.png", "added", "", 0, 0, None),  # binary: no patch
         ]
 
-        class _C:
-            def get_file_contents(self, o, r, path, ref):
-                assert ref == "sha1"
-                return "WHOLE\n" if path == "a.py" else None
+        def _contents(o, r, path, ref):
+            assert ref == "sha1"
+            return "WHOLE\n" if path == "a.py" else None
 
-        out = _fetch_head_files(_C(), "o", "r", files, "sha1")
+        out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
         assert out == {"a.py": "WHOLE\n"}  # removed + binary skipped
 
     def test_fetch_head_files_degrades_on_client_without_method(self, review_app) -> None:
@@ -3147,14 +3167,13 @@ class TestWholeFileReview:
         seen_threads: set[int] = set()
         lock = threading.Lock()
 
-        class _C:
-            def get_file_contents(self, o, r, path, ref):
-                with lock:
-                    seen_threads.add(threading.get_ident())
-                time.sleep(0.01)  # widen the race window so fetches overlap
-                return f"WHOLE-{path}\n"
+        def _contents(o, r, path, ref):
+            with lock:
+                seen_threads.add(threading.get_ident())
+            time.sleep(0.01)  # widen the race window so fetches overlap
+            return f"WHOLE-{path}\n"
 
-        out = _fetch_head_files(_C(), "o", "r", files, "sha1")
+        out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
         assert len(seen_threads) > 1, "fetches were distributed across more than one worker thread"
 
@@ -3426,34 +3445,10 @@ class TestParallelReviewReads:
 
         barrier = threading.Barrier(3)
 
-        class _C:
-            def get_pull_request(self, o, r, n):
-                barrier.wait(timeout=5)
-                return PullRequestDetail(
-                    number=n,
-                    html_url=f"https://example/pull/{n}",
-                    head="feature",
-                    base="main",
-                    head_sha="sha1",
-                    title="Add feature",
-                    body="body",
-                    draft=False,
-                    author="alice",
-                    state="open",
-                    updated_at="2026-01-01T00:00:00Z",
-                    labels=(),
-                )
-
-            def get_pull_request_files(self, o, r, n):
-                barrier.wait(timeout=5)
-                return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
-
-            def get_authenticated_login(self):
-                barrier.wait(timeout=5)
-                return "khala-bot"
+        client = _pr_metadata_client(on_each=lambda: barrier.wait(timeout=5))
 
         try:
-            pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+            pr, files, reviewer_login = _fetch_pr_metadata(client, "o", "r", 7)
         except threading.BrokenBarrierError:
             pytest.fail("fetches did not run concurrently: barrier timed out waiting for 3 parties")
         assert pr.number == 7
@@ -3464,47 +3459,24 @@ class TestParallelReviewReads:
     def test_fetch_pr_metadata_get_pull_request_failure_propagates(self, review_app) -> None:
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        class _C:
-            def get_pull_request(self, o, r, n):
-                raise GitHubAPIError(404, "missing PR")
-
-            def get_pull_request_files(self, o, r, n):
-                return []
-
-            def get_authenticated_login(self):
-                return "khala-bot"
-
         with pytest.raises(GitHubAPIError, match="missing PR"):
-            _fetch_pr_metadata(_C(), "o", "r", 7)
+            _fetch_pr_metadata(
+                _pr_metadata_client(fail_pr=GitHubAPIError(404, "missing PR"), files=[]),
+                "o",
+                "r",
+                7,
+            )
 
     def test_fetch_pr_metadata_get_pull_request_files_failure_propagates(self, review_app) -> None:
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        class _C:
-            def get_pull_request(self, o, r, n):
-                return PullRequestDetail(
-                    number=n,
-                    html_url=f"https://example/pull/{n}",
-                    head="feature",
-                    base="main",
-                    head_sha="sha1",
-                    title="Add feature",
-                    body="body",
-                    draft=False,
-                    author="alice",
-                    state="open",
-                    updated_at="2026-01-01T00:00:00Z",
-                    labels=(),
-                )
-
-            def get_pull_request_files(self, o, r, n):
-                raise GitHubAPIError(502, "files unavailable")
-
-            def get_authenticated_login(self):
-                return "khala-bot"
-
         with pytest.raises(GitHubAPIError, match="files unavailable"):
-            _fetch_pr_metadata(_C(), "o", "r", 7)
+            _fetch_pr_metadata(
+                _pr_metadata_client(fail_files=GitHubAPIError(502, "files unavailable")),
+                "o",
+                "r",
+                7,
+            )
 
     def test_fetch_pr_metadata_get_authenticated_login_failure_degrades(self, review_app) -> None:
         """A get_authenticated_login failure must degrade to "" without blocking
@@ -3512,30 +3484,12 @@ class TestParallelReviewReads:
         get_pull_request_files, which are not best-effort."""
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        class _C:
-            def get_pull_request(self, o, r, n):
-                return PullRequestDetail(
-                    number=n,
-                    html_url=f"https://example/pull/{n}",
-                    head="feature",
-                    base="main",
-                    head_sha="sha1",
-                    title="Add feature",
-                    body="body",
-                    draft=False,
-                    author="alice",
-                    state="open",
-                    updated_at="2026-01-01T00:00:00Z",
-                    labels=(),
-                )
-
-            def get_pull_request_files(self, o, r, n):
-                return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
-
-            def get_authenticated_login(self):
-                raise GitHubAPIError(403, "no scope")
-
-        pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        pr, files, reviewer_login = _fetch_pr_metadata(
+            _pr_metadata_client(fail_login=GitHubAPIError(403, "no scope")),
+            "o",
+            "r",
+            7,
+        )
         assert pr.number == 7
         assert [f.filename for f in files] == ["a.py"]
         assert reviewer_login == ""
@@ -3549,30 +3503,12 @@ class TestParallelReviewReads:
         just for GitHubAPIError."""
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        class _C:
-            def get_pull_request(self, o, r, n):
-                return PullRequestDetail(
-                    number=n,
-                    html_url=f"https://example/pull/{n}",
-                    head="feature",
-                    base="main",
-                    head_sha="sha1",
-                    title="Add feature",
-                    body="body",
-                    draft=False,
-                    author="alice",
-                    state="open",
-                    updated_at="2026-01-01T00:00:00Z",
-                    labels=(),
-                )
-
-            def get_pull_request_files(self, o, r, n):
-                return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
-
-            def get_authenticated_login(self):
-                raise RuntimeError("unexpected")
-
-        pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        pr, files, reviewer_login = _fetch_pr_metadata(
+            _pr_metadata_client(fail_login=RuntimeError("unexpected")),
+            "o",
+            "r",
+            7,
+        )
         assert pr.number == 7
         assert [f.filename for f in files] == ["a.py"]
         assert reviewer_login == ""
@@ -4303,21 +4239,27 @@ class TestDetectDuplicateProposalsUnit:
         }
 
     def test_empty_proposals_never_calls_the_client(self) -> None:
+        """An empty proposals list must not touch GitHub at all."""
         from software_engineering_team.api import pr_review
+
+        calls: list[str] = []
 
         class _Client:
             def list_open_issues(self, _o, _r):
-                raise AssertionError("should not be called for an empty proposals list")
+                calls.append("list_open_issues")
+                return iter(())
 
         result = pr_review._detect_duplicate_proposals([], _Client(), "o", "r", 1)
         assert result == []
+        assert calls == [], "empty proposals must not call list_open_issues"
 
     def test_matches_against_a_fetched_open_issue(self) -> None:
+        """A proposal whose description matches an open issue title is annotated."""
         from software_engineering_team.api import pr_review
 
-        class _Client:
-            def list_open_issues(self, _o, _r):
-                yield Issue(
+        client = _open_issues_client(
+            [
+                Issue(
                     number=42,
                     title="off-by-one error in loop bound",
                     body="",
@@ -4325,22 +4267,25 @@ class TestDetectDuplicateProposalsUnit:
                     html_url="https://example/issues/42",
                     labels=(),
                 )
-
-        [proposal] = pr_review._detect_duplicate_proposals(
-            [self._proposal("p0", "off-by-one error in loop bound")], _Client(), "o", "r", 1
+            ]
+        )
+        proposal = _assert_exactly_one(
+            pr_review._detect_duplicate_proposals(
+                [self._proposal("p0", "off-by-one error in loop bound")], client, "o", "r", 1
+            ),
+            label="proposals",
         )
         assert proposal["matched_existing"] is True
         assert proposal["issue_url"] == "https://example/issues/42"
 
     def test_list_open_issues_failure_degrades_to_unmatched(self) -> None:
+        """A list_open_issues GitHubAPIError must fail open (unmatched, no raise)."""
         from software_engineering_team.api import pr_review
 
-        class _Client:
-            def list_open_issues(self, _o, _r):
-                raise GitHubAPIError(500, "boom")
-
-        [proposal] = pr_review._detect_duplicate_proposals(
-            [self._proposal("p0")], _Client(), "o", "r", 1
+        client = _open_issues_client(error=GitHubAPIError(500, "boom"))
+        proposal = _assert_exactly_one(
+            pr_review._detect_duplicate_proposals([self._proposal("p0")], client, "o", "r", 1),
+            label="proposals",
         )
         assert proposal["matched_existing"] is False
         assert proposal["issue_url"] is None
@@ -4348,38 +4293,25 @@ class TestDetectDuplicateProposalsUnit:
     def test_annotation_failure_falls_back_to_unmatched(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """If annotate_duplicate_proposals itself raises, proposals stay unmatched."""
         from software_engineering_team.api import pr_review
-
-        class _Client:
-            def list_open_issues(self, _o, _r):
-                return iter(())
 
         def _raise(*_a, **_k):
             raise RuntimeError("boom")
 
         monkeypatch.setattr(pr_review, "annotate_duplicate_proposals", _raise)
-        [proposal] = pr_review._detect_duplicate_proposals(
-            [self._proposal("p0")], _Client(), "o", "r", 1
+        proposal = _assert_exactly_one(
+            pr_review._detect_duplicate_proposals(
+                [self._proposal("p0")], _open_issues_client(), "o", "r", 1
+            ),
+            label="proposals",
         )
         assert proposal["matched_existing"] is False
         assert proposal["issue_url"] is None
 
 
 def _mode_pr(head_sha: str = "sha1") -> PullRequestDetail:
-    return PullRequestDetail(
-        number=7,
-        html_url="https://example/pull/7",
-        head="feature",
-        base="main",
-        head_sha=head_sha,
-        title="Add feature",
-        body="",
-        draft=False,
-        author="alice",
-        state="open",
-        updated_at="2026-01-01T00:00:00Z",
-        labels=(),
-    )
+    return _pr_detail(number=7, html_url="https://example/pull/7", head_sha=head_sha, body="")
 
 
 class TestDecideReviewModeUnit:
@@ -4438,12 +4370,13 @@ class TestDecideReviewModeUnit:
             PullRequestFile("b.py", "modified", "@@ -1 +1 @@\n+y", 1, 0, None),
         ]
 
-        class _C:
-            def get_file_contents(self, o, r, path, ref):
-                assert ref == "sha1"
-                return f"WHOLE {path}\n"
+        def _contents(o, r, path, ref):
+            assert ref == "sha1"
+            return f"WHOLE {path}\n"
 
-        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        result = pr_review._decide_review_mode(
+            _file_contents_client(_contents), "job1", "o", "r", 7, _mode_pr(), files
+        )
         assert result is not None
         assert result.code == ""
         assert result.files_reviewed == 2
@@ -4459,11 +4392,15 @@ class TestDecideReviewModeUnit:
             PullRequestFile("b.py", "modified", "@@ -1,1 +1,2 @@\n x\n+y", 1, 0, None),
         ]
 
-        class _C:
-            def get_file_contents(self, o, r, path, ref):
-                return "whole a\n" if path == "a.py" else None
-
-        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        result = pr_review._decide_review_mode(
+            _file_contents_client(lambda o, r, path, ref: "whole a\n" if path == "a.py" else None),
+            "job1",
+            "o",
+            "r",
+            7,
+            _mode_pr(),
+            files,
+        )
         assert result is not None
         assert set(result.head_files) == {"a.py"}
         assert "b.py" in result.code  # missing file's hunk was rendered
@@ -4475,11 +4412,15 @@ class TestDecideReviewModeUnit:
 
         files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
 
-        class _C:
-            def get_file_contents(self, o, r, path, ref):
-                return None
-
-        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        result = pr_review._decide_review_mode(
+            _file_contents_client(lambda o, r, path, ref: None),
+            "job1",
+            "o",
+            "r",
+            7,
+            _mode_pr(),
+            files,
+        )
         assert result is not None
         assert result.head_files == {}
         assert result.code
@@ -4503,11 +4444,15 @@ class TestDecideReviewModeUnit:
         # render_annotated_hunks emits nothing for it.
         files = [PullRequestFile("a.py", "modified", "@@ -1,2 +1,0 @@\n-x\n-y", 0, 2, None)]
 
-        class _C:
-            def get_file_contents(self, o, r, path, ref):
-                return None
-
-        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        result = pr_review._decide_review_mode(
+            _file_contents_client(lambda o, r, path, ref: None),
+            "job1",
+            "o",
+            "r",
+            7,
+            _mode_pr(),
+            files,
+        )
         assert result is None
         assert noop_calls == [
             {
@@ -4957,6 +4902,162 @@ class TestFinalizeReviewOutcomeUnit:
         assert summary["severity_counts"] == {"high": 1}
 
 
+def _assert_exactly_one(items: list[Any], *, label: str = "items") -> Any:
+    """Return the sole element of ``items``.
+
+    Preconditions:
+        - ``items`` is a sized collection.
+    Postconditions:
+        - Raises AssertionError unless ``len(items) == 1``; otherwise returns
+          that single element. Prefer this over list-unpacking (``[x] = ...``)
+          so a wrong count fails with a clear message instead of ValueError.
+    """
+    assert len(items) == 1, f"expected exactly 1 {label}, got {len(items)}: {items!r}"
+    return items[0]
+
+
+def _assert_no_aliased_dicts(merged: list[Any], *sources: list[Any]) -> None:
+    """Assert every dict in ``merged`` is a fresh copy of its sources.
+
+    Preconditions:
+        - ``merged`` and each ``sources`` entry are lists of dict-like objects.
+    Postconditions:
+        - Raises AssertionError if any ``merged`` entry is identity-equal to any
+          entry in any source list (centralized check for the
+          ``_merge_filed_proposals`` "fresh dicts / no aliasing" contract).
+    """
+    for m in merged:
+        for source in sources:
+            for s in source:
+                assert m is not s, f"merged entry aliases a source dict: {m!r}"
+
+
+def _github_issue_client(
+    *,
+    on_create: Optional[Callable[..., Any]] = None,
+    number: int = 1,
+    html_url: str = "u1",
+) -> Callable[..., Any]:
+    """Build a GitHubClient stand-in for create_review_issues unit tests.
+
+    Preconditions:
+        - ``on_create``, when provided, matches
+          ``(owner, repo, *, title, body, labels=None) -> issue-like``.
+    Postconditions:
+        - Returns a kwargs-factory suitable for
+          ``monkeypatch.setattr(api_main, "GitHubClient", factory)``. The
+          constructed client supports ``with`` and either delegates
+          ``create_issue`` to ``on_create`` or returns a default issue with
+          ``number`` / ``html_url``.
+    """
+
+    class _Client:
+        def __enter__(self) -> "_Client":
+            return self
+
+        def __exit__(self, *_a: Any) -> None:
+            return None
+
+        def create_issue(
+            self, _o: str, _r: str, *, title: str, body: str, labels: Any = None
+        ) -> Any:
+            if on_create is not None:
+                return on_create(_o, _r, title=title, body=body, labels=labels)
+            return type("_I", (), {"number": number, "html_url": html_url})()
+
+    return lambda **_k: _Client()
+
+
+def _open_issues_client(
+    issues: Any = (),
+    *,
+    error: Optional[BaseException] = None,
+) -> Any:
+    """Build a client stub whose ``list_open_issues`` yields ``issues`` or raises.
+
+    Preconditions:
+        - ``issues`` is an iterable of Issue-like objects when ``error`` is None.
+    Postconditions:
+        - Returns an instance with ``list_open_issues`` that either raises
+          ``error`` or yields from ``issues``.
+    """
+
+    class _Client:
+        def list_open_issues(self, _o: str, _r: str) -> Any:
+            if error is not None:
+                raise error
+            yield from issues
+
+    return _Client()
+
+
+def _file_contents_client(get_contents: Callable[..., Any]) -> Any:
+    """Build a client stub exposing only ``get_file_contents``.
+
+    Preconditions:
+        - ``get_contents`` matches ``(owner, repo, path, ref) -> Optional[str]``.
+    Postconditions:
+        - Returns an instance whose ``get_file_contents`` delegates to
+          ``get_contents``. Consistent stand-in for the scattered ``_C`` /
+          ``_Client`` stubs used by whole-file / decide-mode unit tests.
+    """
+
+    class _Client:
+        def get_file_contents(self, o: str, r: str, path: str, ref: str) -> Any:
+            return get_contents(o, r, path, ref)
+
+    return _Client()
+
+
+def _pr_metadata_client(
+    *,
+    pr: Any = None,
+    files: Any = None,
+    login: str = "khala-bot",
+    fail_pr: Optional[BaseException] = None,
+    fail_files: Optional[BaseException] = None,
+    fail_login: Optional[BaseException] = None,
+    on_each: Optional[Callable[[], None]] = None,
+) -> Any:
+    """Build a client stub for ``_fetch_pr_metadata`` unit tests.
+
+    Preconditions:
+        - At most one of ``pr`` / ``fail_pr`` applies for get_pull_request; same
+          for files/login. ``on_each``, when set, runs before every method body
+          (used by the concurrency barrier tests).
+    Postconditions:
+        - Returns an instance exposing ``get_pull_request``,
+          ``get_pull_request_files``, and ``get_authenticated_login``.
+    """
+    default_files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+
+    class _Client:
+        def get_pull_request(self, o: str, r: str, n: int) -> Any:
+            if on_each is not None:
+                on_each()
+            if fail_pr is not None:
+                raise fail_pr
+            if pr is not None:
+                return pr if not callable(pr) else pr(n)
+            return _pr_detail(number=n, html_url=f"https://example/pull/{n}")
+
+        def get_pull_request_files(self, o: str, r: str, n: int) -> Any:
+            if on_each is not None:
+                on_each()
+            if fail_files is not None:
+                raise fail_files
+            return list(files if files is not None else default_files)
+
+        def get_authenticated_login(self) -> str:
+            if on_each is not None:
+                on_each()
+            if fail_login is not None:
+                raise fail_login
+            return login
+
+    return _Client()
+
+
 class TestCreateReviewIssuesUnit:
     """Direct unit tests for create_review_issues / its context loader."""
 
@@ -4993,18 +5094,11 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: row)
         created_titles: list[str] = []
 
-        class _Client:
-            def __enter__(self):
-                return self
+        def _create(_o, _r, *, title, body, labels=None):
+            created_titles.append(title)
+            return type("_I", (), {"number": 11, "html_url": "u11"})()
 
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                created_titles.append(title)
-                return type("_I", (), {"number": 11, "html_url": "u11"})()
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client(on_create=_create))
         monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
 
@@ -5046,22 +5140,15 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
         persisted: dict[str, Any] = {}
 
-        class _Client:
-            def __enter__(self):
-                return self
+        def _create(_o, _r, *, title, body, labels=None):
+            # Fail specifically for p1 (identified by structured title from
+            # description "b", not by grepping issue-body markdown — proposals
+            # are filed concurrently, so call order is not guaranteed).
+            if title == "[info] b":
+                raise GitHubAPIError(403, "boom")
+            return type("_I", (), {"number": 1, "html_url": "u1"})()
 
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                # Fail specifically for p1's proposal (identified by its own
-                # description, not call order — proposals are filed concurrently,
-                # so no ordering between them is guaranteed).
-                if "### Description\nb" in body:
-                    raise GitHubAPIError(403, "boom")
-                return type("_I", (), {"number": 1, "html_url": "u1"})()
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client(on_create=_create))
         monkeypatch.setattr(api_main, "update_review", lambda _j, **kw: persisted.update(kw))
         monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
 
@@ -5103,20 +5190,14 @@ class TestCreateReviewIssuesUnit:
         }
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
 
-        class _Client:
-            def __enter__(self):
-                return self
+        def _create(_o, _r, *, title, body, labels=None):
+            # Both proposals fail, each with a distinguishable error — identify
+            # by structured title (from description), not body markdown.
+            if title == "[info] a":
+                raise GitHubAPIError(403, "boom-a")
+            raise GitHubAPIError(500, "boom-b")
 
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                # Both proposals fail, each with a distinguishable error.
-                if "### Description\na" in body:
-                    raise GitHubAPIError(403, "boom-a")
-                raise GitHubAPIError(500, "boom-b")
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client(on_create=_create))
         monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
 
@@ -5173,18 +5254,11 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
         calls: list[str] = []
 
-        class _Client:
-            def __enter__(self):
-                return self
+        def _create(_o, _r, *, title, body, labels=None):
+            calls.append(title)
+            return type("_I", (), {"number": 2, "html_url": "u2"})()
 
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                calls.append(title)
-                return type("_I", (), {"number": 2, "html_url": "u2"})()
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client(on_create=_create))
         # Both requested, but p0 is already filed -> only p1 opens a new issue.
         out = pr_review_issues.create_review_issues("job1", ["p0", "p1"], token="t")
         assert len(calls) == 1
@@ -5213,18 +5287,11 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
         calls: list[str] = []
 
-        class _Client:
-            def __enter__(self):
-                return self
+        def _create(_o, _r, *, title, body, labels=None):
+            calls.append(title)
+            return type("_I", (), {"number": 4, "html_url": "u4"})()
 
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                calls.append(title)
-                return type("_I", (), {"number": 4, "html_url": "u4"})()
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client(on_create=_create))
         out = pr_review_issues.create_review_issues("job1", ["p0", "p0", "p0"], token="t")
         assert len(calls) == 1
         assert [c["proposal_id"] for c in out["created"]] == ["p0"]
@@ -5250,17 +5317,7 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "update_job", _boom)
         monkeypatch.setattr(api_main, "update_review", _boom)
 
-        class _Client:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                return type("_I", (), {"number": 1, "html_url": "u1"})()
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client())
         # Both stores fail, but the issue was created, so the call still succeeds.
         out = pr_review_issues.create_review_issues("job1", ["p0"], token="t")
         assert out["created"][0]["issue_url"] == "u1"
@@ -5305,17 +5362,7 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
 
-        class _Client:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                return type("_I", (), {"number": 1, "html_url": "u1"})()
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client())
         # "acme/widget" matches the stored "Acme/Widget" (GitHub is case-insensitive).
         out = pr_review_issues.create_review_issues(
             "job1", ["p0"], token="t", expected_owner="acme", expected_repo="widget"
@@ -5387,8 +5434,8 @@ class TestCreateReviewIssuesUnit:
         Preconditions:
             - Both input lists carry proposal dicts with "id" keys.
         Postconditions:
-            - The merge preserves the preferred list's order and returns fresh
-              dicts (no aliasing of either input's entries).
+            - The merge preserves the preferred list's order; freshness/no-aliasing
+              is checked via ``_assert_no_aliased_dicts`` (single source of truth).
         """
         from software_engineering_team.api import pr_review_issues
 
@@ -5406,8 +5453,7 @@ class TestCreateReviewIssuesUnit:
         assert merged[0]["issue_url"] == "u-other"  # other side already filed -> wins
         assert merged[1]["issue_url"] == "u-preferred"  # filed preferred copy is kept
         assert merged[2]["issue_url"] is None  # unknown to other -> unchanged
-        # The merge returns fresh dicts, never aliases of either input list's entries.
-        assert merged[0] is not other[0] and merged[2] is not preferred[2]
+        _assert_no_aliased_dicts(merged, preferred, other)
 
     def test_context_merges_row_proposals_when_job_and_row_both_exist(
         self, monkeypatch: pytest.MonkeyPatch
