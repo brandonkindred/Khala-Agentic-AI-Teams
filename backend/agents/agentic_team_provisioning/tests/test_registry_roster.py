@@ -51,9 +51,8 @@ class _FakeRegistry:
 
     def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
         # Mirror AgentRegistry.manifests_with_id_prefix so register_team_manifests'
-        # stale-cleanup scan runs against the fake instead of AttributeError-ing
-        # into register_team_manifests' best-effort try/except (which would silently
-        # skip the register/unregister path in every test using this fake).
+        # stale-cleanup scan runs against the fake (without this method the call
+        # would raise AttributeError and fail the register/unregister path).
         return [m for m in self._by_id.values() if m.id.startswith(prefix)]
 
     def register(self, manifest: AgentManifest, source_path=None) -> None:
@@ -404,9 +403,9 @@ def test_register_team_manifests_skips_registry_agents(
 ) -> None:
     """register_team_manifests must not install a generated wrapper for a
     registry-source agent (which would duplicate it on every restart), while it DOES
-    register the generated wrapper and unregister this team's stale generated entries
-    — the register/unregister path that silently no-ops if the fake registry lacks
-    ``manifests_with_id_prefix`` (register_team_manifests swallows the AttributeError)."""
+    register the generated wrapper and unregister this team's stale generated entries.
+    The fake registry must implement ``manifests_with_id_prefix`` — without it
+    register_team_manifests raises AttributeError."""
     from agentic_team_provisioning.manifest_generation import (
         build_agent_manifest,
         register_team_manifests,
@@ -597,7 +596,9 @@ def test_update_generated_agent_reregisters_manifest_with_new_summary(
     from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(agent_name="Writer", role="Writes drafts", skills=["seo"], source="generated")
+    gen = AgenticTeamAgent(
+        agent_name="Writer", role="Writes drafts", skills=["seo"], source="generated"
+    )
     AgenticTeamStore().save_team_agents(team_id, [gen])
     manifest = build_agent_manifest(team_id, gen)
     registry.register(manifest)  # simulate the LLM save path's install
@@ -619,7 +620,9 @@ def test_update_registry_agent_does_not_register_a_generated_wrapper(
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
-    resp = client.put(f"/teams/{team_id}/agents/blogging.planner", json={"role": "Team-specific role"})
+    resp = client.put(
+        f"/teams/{team_id}/agents/blogging.planner", json={"role": "Team-specific role"}
+    )
     assert resp.status_code == 200
     assert resp.json()["source"] == "registry"
     # No generated wrapper was registered for the registry agent's team-namespaced id.

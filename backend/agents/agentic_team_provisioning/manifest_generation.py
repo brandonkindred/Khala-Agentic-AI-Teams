@@ -15,13 +15,17 @@ discovery paths.
 from __future__ import annotations
 
 import hashlib
-import logging
 
-from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
+from agent_registry.models import (
+    AgentManifest,
+    CognitionKnowledgeGraphSpec,
+    CognitionMemorySpec,
+    CognitionSpec,
+    IOSchema,
+    SourceInfo,
+)
 from agentic_team_provisioning.agent_env_provisioning import _slug
 from agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
-
-logger = logging.getLogger(__name__)
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
@@ -53,7 +57,7 @@ _HASH_HEX_LEN = 16
 
 
 def _id_hash(s: str) -> str:
-    """Stable, collision-resistant hex digest used to keep derived ids injective."""
+    """Stable, practically collision-resistant hex digest for derived ids."""
     return hashlib.sha256(s.encode()).hexdigest()[:_HASH_HEX_LEN]
 
 
@@ -71,17 +75,19 @@ def team_id_prefix(team_id: str) -> str:
 
 
 def manifest_agent_id(team_id: str, agent_name: str) -> str:
-    """Stable, collision-free manifest id for a generated agent.
+    """Stable, practically unique manifest id for a generated agent.
 
     Preconditions:
         * ``team_id`` and ``agent_name`` are non-empty.
     Postconditions:
-        * Deterministic for a given ``(team_id, agent_name)`` pair, and **never**
-          collides for distinct pairs: the team-injective :func:`team_id_prefix`
-          plus a short hash of the original strings disambiguates names that share
-          a normalized slug (e.g. ``"QA Agent"`` and ``"qa-agent"``, or names
-          agreeing on their first 40 slug chars). Always starts with
-          :func:`team_id_prefix`.
+        * Deterministic for a given ``(team_id, agent_name)`` pair. Distinct pairs
+          produce distinct ids at any realistic roster size: the team-injective
+          :func:`team_id_prefix` plus a 64-bit (``_HASH_HEX_LEN`` hex) hash of the
+          original strings disambiguates names that share a normalized slug
+          (e.g. ``"QA Agent"`` and ``"qa-agent"``, or names agreeing on their first
+          40 slug chars). Accidental birthday collision on the truncated digest is
+          mathematically possible but negligible far past realistic team/agent
+          counts (see ``_HASH_HEX_LEN``). Always starts with :func:`team_id_prefix`.
     """
     pair_hash = _id_hash(f"{team_id}\x00{agent_name}")
     return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
@@ -103,7 +109,13 @@ def default_cognition_block() -> CognitionSpec:
     registries (``LlmToolsService`` + a caller-supplied integration registry + ``agent_git_tools``),
     so they are never stamped here — that would only break later tool resolution.
     """
-    return CognitionSpec(rule_packs=["default_guardrails"])
+    return CognitionSpec(
+        memory=CognitionMemorySpec(retention_days_events=90),
+        tools=[],
+        rule_packs=["default_guardrails"],
+        requires_idempotency_key=False,
+        knowledge_graph=CognitionKnowledgeGraphSpec(),
+    )
 
 
 def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest:
@@ -117,7 +129,7 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
           equals :func:`default_cognition_block` (``rule_packs ==
           ["default_guardrails"]``), ``team == "agentic_team_provisioning"``,
           ``source.entrypoint`` points at the roster-agent factory, and ``id`` is
-          the stable, collision-free :func:`manifest_agent_id`.
+          the stable, practically unique :func:`manifest_agent_id`.
     """
     # Explicit validation rather than ``assert`` (which ``python -O`` strips): these
     # are real boundary preconditions — silently skipping them under ``-O`` would
@@ -196,8 +208,9 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
           absent from this roster are unregistered, so removed/renamed agents stop
           appearing in the catalog. Idempotent; persisted to the dynamic store
           when one is active, in-memory-only otherwise (see Scope above).
-          Best-effort — a registry failure is logged, never raised, so
-          generation still succeeds.
+          Registry failures propagate — callers that must keep the DB roster and
+          registry in sync (e.g. chat-save ``on_merged``) let the raise roll back
+          the roster write; import-time retroactive registration wraps this call.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -213,26 +226,23 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     agents = [a for a in agents if a.source == SOURCE_GENERATED]
     manifests = [build_agent_manifest(team_id, a) for a in agents]
     new_ids = {m.id for m in manifests}
-    try:
-        from agent_registry import get_registry
+    from agent_registry import get_registry
 
-        registry = get_registry()
-        # Drop stale entries from a prior roster (removed/renamed agents) before
-        # registering the replacement set. Scope strictly to this team's generated
-        # ids (prefix + the "generated" tag) so a hand-authored disk manifest is
-        # never touched. ``manifests_with_id_prefix`` materializes only this team's
-        # entries (not a copy of the whole registry) — this runs under the team lock
-        # on the chat-save path, so keeping the scan's allocation small matters.
-        prefix = team_id_prefix(team_id)
-        stale = [
-            m.id
-            for m in registry.manifests_with_id_prefix(prefix)
-            if is_generated_manifest(m) and m.id not in new_ids
-        ]
-        for agent_id in stale:
-            registry.unregister(agent_id)
-        for manifest in manifests:
-            registry.register(manifest)
-    except Exception:
-        logger.warning("Could not register generated manifests for team %s", team_id, exc_info=True)
+    registry = get_registry()
+    # Drop stale entries from a prior roster (removed/renamed agents) before
+    # registering the replacement set. Scope strictly to this team's generated
+    # ids (prefix + the "generated" tag) so a hand-authored disk manifest is
+    # never touched. ``manifests_with_id_prefix`` materializes only this team's
+    # entries (not a copy of the whole registry) — this runs under the team lock
+    # on the chat-save path, so keeping the scan's allocation small matters.
+    prefix = team_id_prefix(team_id)
+    stale = [
+        m.id
+        for m in registry.manifests_with_id_prefix(prefix)
+        if is_generated_manifest(m) and m.id not in new_ids
+    ]
+    for agent_id in stale:
+        registry.unregister(agent_id)
+    for manifest in manifests:
+        registry.register(manifest)
     return manifests

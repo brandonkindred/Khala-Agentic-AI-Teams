@@ -300,8 +300,9 @@ class AgenticTeamStore:
         invoked with the merged roster **under that lock**, before commit, so a
         caller's dependent registry registration is serialized with the roster write
         (and with the single-agent helpers' registry cleanup) — closing the gap where
-        a chat-save register could race a concurrent add/delete cleanup. It must be
-        non-raising (best-effort); a raising callback would roll back the roster write.
+        a chat-save register could race a concurrent add/delete cleanup. A raising
+        callback (e.g. ``register_team_manifests`` on registry failure) rolls back
+        the roster write so the DB roster and live registry stay consistent.
 
         Preconditions: ``team_id`` should name an existing team (callers validate).
         Postconditions: returns the merged roster actually written (``[]`` if the team
