@@ -169,7 +169,11 @@ def invoke_structured_with_schema(
 
     Postconditions: returns the parsed JSON dict on success. Raises
     :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
-    transport retries or hits a fatal LLM error.
+    transport retries or hits a fatal LLM error. Raises
+    :class:`~._llm_budget.DesignBudgetExhausted` immediately (unwrapped /
+    unretried by the envelope) when ``charge`` is True and a per-call charge
+    trips the active design-phase budget — including mid-attempt after the
+    reasoning charge but before the formatting call.
 
     ``ValueError`` from :func:`extract_json_object` propagates as a raw
     ``ValueError`` (it is not wrapped in :class:`~..exceptions.StrategyLabLLMError`).

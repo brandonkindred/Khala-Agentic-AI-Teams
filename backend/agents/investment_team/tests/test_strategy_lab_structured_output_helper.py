@@ -290,6 +290,47 @@ def test_invoke_structured_with_schema_charges_per_provider_call_inside_closure(
     assert charges_per_call_invocation == [2, 2]
 
 
+def test_invoke_structured_with_schema_mid_attempt_budget_trip_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With one budget unit left, the reasoning charge consumes it and the
+    formatting charge must raise ``DesignBudgetExhausted`` out of the envelope
+    unmodified — not retried / wrapped as ``StrategyLabLLMError``.
+    """
+    from investment_team.strategy_lab.agents._llm_budget import (
+        DesignBudgetExhausted,
+        LLMCallBudget,
+        use_budget,
+    )
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+
+    client = _StubClient({"ready": True})
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
+
+    budget = LLMCallBudget(limit=1)
+    with use_budget(budget):
+        with pytest.raises(DesignBudgetExhausted) as ei:
+            so_mod.invoke_structured_with_schema(
+                "strategy_design_review",
+                "sys",
+                "user",
+                phase="design_review_structured",
+                schema={"type": "object"},
+                charge=True,
+                objective="strategy design review (structured)",
+                logger=logging.getLogger("test.so"),
+                reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+            )
+    assert ei.value.limit == 1
+    assert ei.value.calls_made == 1
+    # Reasoning call ran (and was charged); formatting never started.
+    assert len(client.reasoning_calls) == 1
+    assert client.calls == []
+    # And it must not have been wrapped.
+    assert not isinstance(ei.value, StrategyLabLLMError)
+
+
 def test_invoke_structured_with_schema_requires_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

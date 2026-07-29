@@ -66,7 +66,7 @@ from llm_service.interface import (
 from shared.env_config import env_float, env_int
 
 from ..exceptions import StrategyLabLLMError
-from ._llm_budget import charge_active_budget
+from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 
 _module_logger = logging.getLogger(__name__)
 
@@ -398,12 +398,19 @@ def invoke_agent(
 
     Postconditions:
       * Returns ``str(result)`` on the first successful attempt.
+      * Re-raises :class:`~._llm_budget.DesignBudgetExhausted` immediately,
+        unmodified — a per-cycle design-budget trip is a cycle-level stop, not
+        a transport fault. Callables that charge inside the attempt (e.g.
+        ``invoke_structured_with_schema``'s two-pass ``_call``) must still
+        surface this to callers that catch it distinctly from
+        :class:`StrategyLabLLMError` / fail-closed paths.
       * Raises :class:`StrategyLabLLMError` (an ``LLMTemporaryError`` subclass,
         so existing broad ``except`` clauses keep their fail-closed contract)
         when attempts are exhausted, the total budget is spent, or the
         exception classifies as fatal.
       * Emits one structured ``logger.exception`` per failed attempt and one
-        summary ``logger.error`` on terminal failure.
+        summary ``logger.error`` on terminal failure. Budget trips skip that
+        logging — they are not LLM-call failures.
       * A retriable 429 rate limit backs off on the dedicated rate-limit schedule
         (first retry ~30s, ``STRATEGY_LAB_LLM_RATE_LIMIT_*`` /
         ``LLM_RATE_LIMIT_*``); transient faults keep the fast backoff. A
@@ -428,6 +435,10 @@ def invoke_agent(
         try:
             result = _call_with_timeout(lambda: agent_callable(prompt), effective_ts)
             return str(result)
+        except DesignBudgetExhausted:
+            # Cycle-level stop from a charge inside agent_callable — do not
+            # classify, retry, log as an LLM failure, or wrap.
+            raise
         except Exception as exc:  # noqa: BLE001 — classify + log every failure
             latency_ms = int((time.monotonic() - t0) * 1000)
             last_exc = exc
