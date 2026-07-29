@@ -592,6 +592,78 @@ def test_llm_calls_counts_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report.llm_calls == 2 and canned.text_calls
 
 
+def test_llm_calls_counts_complete_validated_correction_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If schema validation fails once, ``complete_validated`` retries once."""
+
+    monkeypatch.setenv("AGENT_COGNITION_REFLECTION_INPUT_CHARS", "999999")  # no compaction
+
+    class FlakyCannedLLM(LLMClient):
+        def __init__(self) -> None:
+            self.json_calls: list[dict[str, Any]] = []
+            self.calls = 0
+
+        def complete_json(
+            self,
+            prompt: str,
+            *,
+            objective: str,
+            temperature: float = 0.0,
+            system_prompt: str | None = None,
+            tools: list | None = None,
+            think: bool = False,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            self.calls += 1
+            self.json_calls.append({"prompt": prompt, "objective": objective})
+            if self.calls == 1:
+                # Trigger a schema validation error so ``complete_validated`` retries.
+                return {"proposals": "not-a-list"}
+            return {"proposals": [{"action": "add", "text": "derived rule"}]}
+
+        def complete(
+            self,
+            prompt: str,
+            *,
+            temperature: float = 0.7,
+            max_tokens: int | None = None,
+            system_prompt: str | None = None,
+            tools: list | None = None,
+            think: bool = False,
+            objective: str,
+            **kwargs: object,
+        ) -> str:
+            raise AssertionError("compact_text should not call complete for large budgets")
+
+    canned = FlakyCannedLLM()
+    created: list[RuleProposal] = []
+
+    def _fetch(
+        agent_id: str,
+        scale: Scale,
+        *,
+        limit: int | None = None,
+        exclude_stale: bool = False,
+    ) -> list[PeriodSummary]:
+        rows = [_summary()]
+        return [s for s in rows if not s.stale] if exclude_stale else rows
+
+    monkeypatch.setattr(reflection, "get_client", lambda key: canned)
+    monkeypatch.setattr(reflection.memory_store, "fetch_summaries", _fetch)
+    monkeypatch.setattr(reflection.rules_store, "list_rules", lambda aid, status=None: [])
+    monkeypatch.setattr(reflection.rules_store, "list_proposals", lambda aid, status=None: [])
+    monkeypatch.setattr(reflection.rules_store, "create_proposal", lambda aid, p: created.append(p))
+    monkeypatch.setattr(
+        reflection.rules_store, "supersede_proposal", lambda aid, pid, now=None: None
+    )
+
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 1
+    assert report.llm_calls == 2
+    assert len(created) == 1 and created[0].proposed_rule is not None
+
+
 def test_priority_out_of_int32_range_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     _canned, created = _wire(
         monkeypatch,
@@ -606,6 +678,32 @@ def test_priority_out_of_int32_range_is_dropped(monkeypatch: pytest.MonkeyPatch)
     # here; the boundary value is accepted.
     assert report.dropped_invalid == 2 and report.proposed == 1
     assert created[0].proposed_rule["priority"] == 2**31 - 1
+
+
+def test_non_int_priority_is_dropped_without_raising() -> None:
+    item = reflection._ProposedAction.model_construct(  # type: ignore[attr-defined]
+        action="add",
+        target_rule_id=None,
+        text="ok",
+        mode=None,
+        predicate=None,
+        rationale=None,
+        priority=1.5,
+    )
+    assert reflection._materialize("a", item, {}, [], _NOW) is None  # type: ignore[attr-defined]
+
+
+def test_non_string_text_is_dropped_without_raising() -> None:
+    item = reflection._ProposedAction.model_construct(  # type: ignore[attr-defined]
+        action="add",
+        target_rule_id=None,
+        text=123,
+        mode=None,
+        predicate=None,
+        rationale=None,
+        priority=0,
+    )
+    assert reflection._materialize("a", item, {}, [], _NOW) is None  # type: ignore[attr-defined]
 
 
 def test_stale_pending_is_superseded_and_does_not_block_fresh(
