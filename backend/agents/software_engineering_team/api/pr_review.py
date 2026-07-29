@@ -147,9 +147,11 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
                         error="review worker heartbeat went stale (process died mid-review)",
                         completed=True,
                     )
-                except Exception:  # noqa: BLE001 - unblocking admission must not depend on cleanup
+                except Exception as exc:  # noqa: BLE001 - unblocking admission must not depend on cleanup
                     logger.warning(
-                        "could not mark stale review job %s failed", job_id, exc_info=True
+                        "could not mark stale review job %s failed: %s",
+                        job_id,
+                        scrub_token_from_text(str(exc)),
                     )
     return None
 
@@ -453,10 +455,13 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           bot did not author, else COMMENT) whose body carries only the summary.
           A finding the reviewer tagged ``pre_existing`` (a bug in unchanged code
           the PR did not touch, per its own line/file — see
-          :func:`_partition_review_issues`) is NOT commented — instead it is
-          serialized into ``review_summary["pending_issue_proposals"]`` for a
-          human to optionally file as a GitHub issue, and it drives neither the
-          review event nor the "no issues" reaction. Every other finding IS
+          :func:`_partition_review_issues`) is NOT commented and is serialized
+          into ``review_summary["pending_issue_proposals"]`` for a human to
+          optionally file as a GitHub issue, and it drives neither the review
+          event nor the "no issues" reaction. If :func:`_partition_review_issues`
+          proves the finding lies on a line the PR actually ADDED, the
+          pre_existing tag is overridden back to a PR finding and the finding
+          is commented like any other. Every other finding IS
           posted, including one naming a file this PR never touched at all (see
           below) — such a finding is not necessarily pre-existing (it is often
           "this PR should have added/modified file X but didn't"), so only the
@@ -516,7 +521,11 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                     f"Code review could not run: {scrub_token_from_text(error)}",
                 )
         except Exception as exc:  # noqa: BLE001 - notification is best-effort
-            logger.warning("PR review %s: failed to post abort notice: %s", job_id, exc)
+            logger.warning(
+                "PR review %s: failed to post abort notice: %s",
+                job_id,
+                scrub_token_from_text(str(exc)),
+            )
         return
     _main.update_job(
         job_id,
@@ -539,7 +548,11 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         _REVIEW_HEARTBEAT_INTERVAL_S,
         name=f"review-heartbeat-{job_id}",
         beat_first=True,
-        on_error=lambda exc: logger.warning("review heartbeat error for job %s: %s", job_id, exc),
+        on_error=lambda exc: logger.warning(
+            "review heartbeat error for job %s: %s",
+            job_id,
+            scrub_token_from_text(str(exc)),
+        ),
     )
     # ``_run_pr_review_body`` already marks the job failed for exceptions raised
     # inside the review itself. This outer guard is the last line of defense for
@@ -551,8 +564,12 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         with review_hb:
             _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
     except Exception as exc:  # noqa: BLE001 - the daemon thread must never die with the job left running
-        logger.exception("PR review %s: unhandled exception escaped the review body", job_id)
         scrubbed_error = scrub_token_from_text(str(exc))
+        logger.error(
+            "PR review %s: unhandled exception escaped the review body: %s",
+            job_id,
+            scrubbed_error,
+        )
         try:
             # phase="completed" (terminal), matching the success and provider-abort
             # paths — a failed job must not keep a mid-review "reviewing" phase.
@@ -562,9 +579,12 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 phase="completed",
                 error=scrubbed_error,
             )
-        except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
-            logger.exception(
-                "PR review %s: last-resort finalize failed after escaped exception", job_id
+        except Exception as finalize_exc:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
+            safe_finalize_error = scrub_token_from_text(str(finalize_exc))
+            logger.error(
+                "PR review %s: last-resort finalize failed after escaped exception: %s",
+                job_id,
+                safe_finalize_error,
             )
         # Tell the PR too, same as the no-engine-provider path above: whoever
         # triggered the review is watching it, not the job store, and this is
@@ -808,7 +828,13 @@ def _run_reviewer(
             try:
                 output = provider.run_pr_code_review(**common, **mode_kwargs)
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
-                logger.exception("PR review agent failed: %s", e)
+                raw_message = str(e)
+                detail = (
+                    scrub_token_from_text(raw_message)
+                    if raw_message.strip()
+                    else f"{type(e).__name__} (no error message)"
+                )
+                logger.error("PR review agent failed: %s", detail)
                 # A reviewer-side failure (LLM outage, unrecoverable exhaustion,
                 # etc.) is not a code defect: record the detail in the job
                 # store but never post the raw exception on the PR — degrade
@@ -818,7 +844,6 @@ def _run_reviewer(
                 # review failed: " is useless for later triage, so fall back
                 # to naming the exception type when it carries no message of
                 # its own.
-                detail = str(e) if e.args else f"{type(e).__name__} (no error message)"
                 _main._record_review_outage(
                     client, owner, repo, pr_number, job_id, f"code review failed: {detail}"
                 )
@@ -880,7 +905,11 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
             review_comments, resolved_ids, issue_comments = (f.result() for f in futures)
         return build_existing_comments(review_comments, resolved_ids, issue_comments)
     except Exception as e:  # noqa: BLE001 - this lookup is best-effort, never fails the review
-        logger.warning("Could not fetch existing comments for PR #%s: %s", pr_number, e)
+        logger.warning(
+            "Could not fetch existing comments for PR #%s: %s",
+            pr_number,
+            scrub_token_from_text(str(e)),
+        )
         return []
 
 
@@ -927,23 +956,23 @@ def _detect_duplicate_proposals(
         logger.warning(
             "PR review #%s: could not list open issues for duplicate-detection: %s",
             pr_number,
-            e,
+            scrub_token_from_text(str(e)),
         )
         open_issues = []
-    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+    except Exception as exc:  # noqa: BLE001 - duplicate-detection must never fail the review
         logger.warning(
-            "PR review #%s: unexpected error listing open issues for duplicate-detection",
+            "PR review #%s: unexpected error listing open issues for duplicate-detection: %s",
             pr_number,
-            exc_info=True,
+            scrub_token_from_text(str(exc)),
         )
         open_issues = []
     try:
         return annotate_duplicate_proposals(proposals, open_issues)
-    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+    except Exception as exc:  # noqa: BLE001 - duplicate-detection must never fail the review
         logger.warning(
-            "PR review #%s: duplicate annotation failed, proceeding without duplicate detection",
+            "PR review #%s: duplicate annotation failed, proceeding without duplicate detection: %s",
             pr_number,
-            exc_info=True,
+            scrub_token_from_text(str(exc)),
         )
         # annotate_duplicate_proposals's own "no match" branch does exactly this
         # ({**p, "matched_existing": False}); mirrored here as a safety net so a
@@ -982,7 +1011,11 @@ def _fetch_pr_metadata(
         try:
             return client.get_authenticated_login()
         except Exception as e:  # noqa: BLE001 - reviewer_login is best-effort, never fails the review
-            logger.warning("Could not resolve reviewer login for PR #%s: %s", pr_number, e)
+            logger.warning(
+                "Could not resolve reviewer login for PR #%s: %s",
+                pr_number,
+                scrub_token_from_text(str(e)),
+            )
             return ""
 
     tasks = (_get_pr, _get_files, _get_login)
@@ -1672,7 +1705,7 @@ def _run_pr_review_body(
         # dies and the job is stuck in "running" forever. Mark it failed (mirroring
         # post_run) and post a best-effort, token-scrubbed PR comment.
         safe_err = scrub_token_from_text(str(review_exc))
-        logger.exception("PR review hook failed: %s", safe_err)
+        logger.error("PR review hook failed: %s", safe_err)
         try:
             with _main.GitHubClient(token=token) as client:
                 # Same graceful-degradation contract as the reviewer paths: record
@@ -1694,8 +1727,13 @@ def _run_pr_review_body(
             # self-consistent means it never depends on that.
             try:
                 _finalize_review(job_id, JobStatus.FAILED, phase="completed", error=safe_err)
-            except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do
-                logger.exception("PR review %s: last-resort finalize failed", job_id)
+            except Exception as finalize_exc:  # noqa: BLE001 - store unreachable; nothing more we can do
+                safe_finalize_err = scrub_token_from_text(str(finalize_exc))
+                logger.error(
+                    "PR review %s: last-resort finalize failed: %s",
+                    job_id,
+                    safe_finalize_err,
+                )
 
 
 def _react_to_pr(client: _main.GitHubClient, owner: str, repo: str, pr_number: int) -> None:
@@ -1707,8 +1745,12 @@ def _react_to_pr(client: _main.GitHubClient, owner: str, repo: str, pr_number: i
     """
     try:
         client.create_issue_reaction(owner, repo, pr_number, content="+1")
-    except Exception:  # noqa: BLE001 - reaction is a courtesy signal only
-        logger.warning("Could not add +1 reaction to PR #%s", pr_number, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - reaction is a courtesy signal only
+        logger.warning(
+            "Could not add +1 reaction to PR #%s: %s",
+            pr_number,
+            scrub_token_from_text(str(exc)),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1731,5 +1773,9 @@ def _safe_comment(
         client.add_issue_comment(owner, repo, number, scrub_token_from_text(body))
         return True
     except Exception as e:  # noqa: BLE001 - comment is best-effort, never fails the job
-        logger.warning("Failed to comment on issue #%s: %s", number, e)
+        logger.warning(
+            "Failed to comment on issue #%s: %s",
+            number,
+            scrub_token_from_text(str(e)),
+        )
         return False
