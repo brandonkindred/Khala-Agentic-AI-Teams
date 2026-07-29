@@ -539,10 +539,9 @@ def test_max_children_capped(root_spec, mock_llm):
         )
 
     mock_llm.complete_json.side_effect = analysis_responses
-    # One reasoning-pass placeholder per analysis (root + each spawned child)
-    # is consumed by objective via _complete_side_effect; "deliberation
-    # notes" and "Synthesised" are consumed positionally by the two
-    # non-reasoning calls that follow decomposition.
+    # "deliberation notes" is the reasoning-pass placeholder consumed by the
+    # single deliberation .complete() call; "Synthesised" is consumed by the
+    # single non-reasoning synthesis .complete() call after decomposition.
     mock_llm.complete.side_effect = _complete_side_effect("deliberation notes", "Synthesised")
 
     spawned = []
