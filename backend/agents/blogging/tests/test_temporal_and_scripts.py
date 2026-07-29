@@ -218,8 +218,10 @@ def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None
     assert scheduled[0][1] is fake_loop
 
 
-def test_shutdown_blogging_temporal_components_force_stop(monkeypatch) -> None:
+def test_shutdown_blogging_temporal_components_force_stop(monkeypatch, caplog) -> None:
     """When worker.shutdown() future raises, we force-stop the loop."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     fake_worker = MagicMock()
@@ -230,19 +232,24 @@ def test_shutdown_blogging_temporal_components_force_stop(monkeypatch) -> None:
             raise TimeoutError("timed out")
 
     class _FakeLoop:
+        def __init__(self):
+            self.call_soon_threadsafe = MagicMock()
+
         def is_running(self):
             return True
 
-        def call_soon_threadsafe(self, fn):
-            pass
-
+    fake_loop = _FakeLoop()
     monkeypatch.setattr(worker.asyncio, "run_coroutine_threadsafe", lambda coro, loop: _Future())
     monkeypatch.setattr(worker, "_worker_instance", fake_worker)
-    monkeypatch.setattr(worker, "_worker_running_loop", _FakeLoop())
+    monkeypatch.setattr(worker, "_worker_running_loop", fake_loop)
     monkeypatch.setattr(worker, "_worker_thread", None)
     monkeypatch.setattr(worker, "_activity_executor", None)
 
-    worker.shutdown_blogging_temporal_components()
+    with caplog.at_level(logging.WARNING, logger="agents.blogging.temporal.worker"):
+        worker.shutdown_blogging_temporal_components()
+
+    fake_loop.call_soon_threadsafe.assert_called_once()
+    assert any("forcing loop stop" in r.message for r in caplog.records)
 
 
 def test_shutdown_blogging_temporal_components_worker_only(monkeypatch) -> None:
@@ -405,7 +412,8 @@ def _patch_context(monkeypatch, tmp_path):
     return acts, ctx
 
 
-def _v2():
+def _blog_writing_process_v2_module():
+    """Import and return the blog_writing_process_v2 shim module for monkeypatching."""
     import importlib
 
     return importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
@@ -420,7 +428,7 @@ def test_plan_stage_activity_returns_planning_dto(monkeypatch, tmp_path) -> None
         c.elicited_stories_text = "story"
         return None
 
-    monkeypatch.setattr(_v2(), "run_planning_stage", fake_planning)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_planning_stage", fake_planning)
 
     out = acts.plan_stage_activity("j1", {"brief": "x"})
     assert out["status"] == "PASS"
@@ -434,7 +442,7 @@ def test_plan_stage_activity_abort_returns_fail(monkeypatch, tmp_path) -> None:
     # Dual contract of run_planning_stage: success returns None and mutates ctx;
     # HITL abort returns (planning_phase_result, None, "FAIL").
     monkeypatch.setattr(
-        _v2(),
+        _blog_writing_process_v2_module(),
         "run_planning_stage",
         lambda c: (_Dumpable({"content_plan": {}}), None, "FAIL"),
     )
@@ -450,7 +458,7 @@ def test_plan_stage_activity_error_fails_job_and_returns_fail(monkeypatch, tmp_p
     def boom(c):
         raise ValueError("kaboom")
 
-    monkeypatch.setattr(_v2(), "run_planning_stage", boom)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_planning_stage", boom)
     failed: dict = {}
     monkeypatch.setattr(
         acts,
@@ -508,7 +516,7 @@ def test_draft_stage_activity_returns_draft_dto(monkeypatch, tmp_path) -> None:
         c.elicited_stories_text = "s2"
         return None
 
-    monkeypatch.setattr(_v2(), "run_draft_stage", fake_draft)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_draft_stage", fake_draft)
 
     planning = {"planning_phase_result": {"content_plan": {}}, "status": "PASS"}
     out = acts.draft_stage_activity("j1", {"brief": "x"}, planning)
@@ -534,7 +542,7 @@ def test_gates_stage_activity_returns_gates_dto(monkeypatch, tmp_path) -> None:
         c.status = "NEEDS_HUMAN_REVIEW"
         return None
 
-    monkeypatch.setattr(_v2(), "run_gates_stage", fake_gates)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_gates_stage", fake_gates)
 
     planning = {"planning_phase_result": {"content_plan": {}}}
     draft = {"draft": {"draft": "d"}, "status": "PASS"}
@@ -588,7 +596,7 @@ def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_pat
     # a name binding resolved once at import time; importing it while that name
     # is monkeypatched would permanently poison v2's own binding for every test
     # that runs afterward in this process, well past this test's teardown.
-    v2_mod = _v2()
+    v2_mod = _blog_writing_process_v2_module()
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
     rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
@@ -619,7 +627,7 @@ def test_draft_stage_activity_abort_returns_fail_with_partial_draft(monkeypatch,
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
     monkeypatch.setattr(
-        _v2(), "run_draft_stage", lambda c: (None, _Dumpable({"draft": "partial"}), "FAIL")
+        _blog_writing_process_v2_module(), "run_draft_stage", lambda c: (None, _Dumpable({"draft": "partial"}), "FAIL")
     )
 
     planning = {"planning_phase_result": {"content_plan": {}}}
@@ -643,7 +651,7 @@ def test_draft_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
     def boom(c):
         raise CancelledError("cancel")
 
-    monkeypatch.setattr(_v2(), "run_draft_stage", boom)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_draft_stage", boom)
     with pytest.raises(CancelledError):
         acts.draft_stage_activity("j1", {"brief": "x"}, {"planning_phase_result": {}})
 
@@ -667,7 +675,7 @@ def test_gates_stage_activity_hard_error_returns_fail(monkeypatch, tmp_path) -> 
     def boom(c):
         raise ValueError("gate blew up")
 
-    monkeypatch.setattr(_v2(), "run_gates_stage", boom)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_gates_stage", boom)
     planning = {"planning_phase_result": {"content_plan": {}}}
     draft = {"draft": {"draft": "d"}}
     out = acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
