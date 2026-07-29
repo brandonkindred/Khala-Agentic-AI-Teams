@@ -34,7 +34,6 @@ from llm_service.config import resolve_max_tokens
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import (
     CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
-    CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     compute_code_review_merged_pass_budgets,
 )
 from software_engineering_team.shared.models import SystemArchitecture
@@ -70,7 +69,8 @@ def find_architecture_and_side_effect_issues(
 
     Postconditions:
         - Returns ``([], [])`` with no LLM call when both halves are disabled
-          (env flags off, or side-effect disabled by ``pre_numbered`` with
+          (env flags off, architecture disabled for lack of repository /
+          document evidence, or side-effect disabled by ``pre_numbered`` with
           architecture also off), profile is not ``CODE_REVIEW``, or there are
           no readable files.
         - Otherwise returns two lists of NEW ``CodeReviewIssue``s
@@ -78,13 +78,21 @@ def find_architecture_and_side_effect_issues(
           each validated like the corresponding standalone pass; never raises.
         - When only one half is enabled, still makes the merged call but returns
           ``[]`` for the disabled half. ``pre_numbered`` forces the side-effect
-          half off (same guard as the standalone side-effect pass).
+          half off (same guard as the standalone side-effect pass). Architecture
+          is forced off when there is no architecture payload and no
+          ``repo_reader`` / ``existing_codebase`` evidence.
     """
     arch_on = env_flag_enabled(_ARCH_ENV)
     # Mirror ``find_side_effect_impact_issues``: pre-numbered hunk mode only has
     # partial file excerpts, so caller-impact analysis must not run (architecture
     # half may still proceed).
     side_on = env_flag_enabled(_SIDE_ENV) and not input_data.pre_numbered
+    # Architecture half needs either a formal architecture payload or off-diff /
+    # existing-codebase evidence. Without those, list_files()/read_file() only
+    # see the changed submission files, so "established repository structure"
+    # cannot be verified and any architecture finding would be speculation.
+    if arch_on and not _architecture_evidence_available(input_data, repo_reader, index):
+        arch_on = False
     if not arch_on and not side_on:
         return [], []
     if input_data.profile != ReviewProfile.CODE_REVIEW:
@@ -105,6 +113,30 @@ def find_architecture_and_side_effect_issues(
             exc,
         )
         return [], []
+
+
+def _architecture_evidence_available(
+    input_data: CodeReviewInput,
+    repo_reader: Optional[RepoReader],
+    index: Optional[CodebaseIndex],
+) -> bool:
+    """Whether Part 1 has a source for architecture / redundancy judgments.
+
+    Postconditions:
+        - Returns ``True`` when a nonempty architecture document/context is on
+          the input, a ``repo_reader`` is attached, or a nonempty
+          ``existing_codebase`` excerpt is available (on the input or a shared
+          ``index``). Otherwise ``False``. Never raises.
+    """
+    if _architecture_document_text(input_data.architecture):
+        return True
+    if repo_reader is not None:
+        return True
+    if (input_data.existing_codebase or "").strip():
+        return True
+    if index is not None and (index.existing_codebase or "").strip():
+        return True
+    return False
 
 
 def _run_pass(
@@ -261,17 +293,11 @@ def _with_merged_pass_output_budget(
           :func:`compute_code_review_merged_pass_budgets` (``>= 1024``).
 
     Postconditions:
-        - When ``model`` is an ``LLMClientModel``:
-          - The model's pinned ``max_tokens`` takes precedence over
-            ``LLM_MAX_TOKENS`` when determining the effective cap (matching how
-            the adapter passes an explicit per-call argument to providers).
-          - If the reserve was shrunk below the dual-array floor, clones with
-            ``max_tokens=response_tokens`` whenever the effective cap differs
-            (including when it is larger), so the completion cannot exceed the
-            input budget's reserve.
-          - If the reserve is the full dual-array floor and the effective cap is
-            a positive value below that floor, clones upward to ``response_tokens``.
-          - Otherwise returns ``model`` unchanged.
+        - When ``model`` is an ``LLMClientModel``, clones with
+          ``max_tokens=response_tokens`` whenever the effective cap (model pin
+          first, else ``LLM_MAX_TOKENS``, else unset ``0``) differs from that
+          reserve — raising tight caps and clamping oversized / unset provider
+          defaults so the completion cannot exceed the input budget.
         - Injected non-``LLMClientModel`` test models are returned unchanged.
         - Never mutates ``model``.
     """
@@ -282,11 +308,7 @@ def _with_merged_pass_output_budget(
     pinned_int = pinned if isinstance(pinned, int) and pinned > 0 else 0
     # Match provider precedence: an explicit model pin wins over the env cap.
     effective = pinned_int if pinned_int > 0 else configured
-    if response_tokens < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS:
-        if effective != response_tokens:
-            return model.clone(max_tokens=response_tokens)
-        return model
-    if 0 < effective < response_tokens:
+    if effective != response_tokens:
         return model.clone(max_tokens=response_tokens)
     return model
 

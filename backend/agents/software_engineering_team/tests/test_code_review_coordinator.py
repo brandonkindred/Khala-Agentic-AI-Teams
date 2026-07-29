@@ -2685,8 +2685,12 @@ def test_large_synthetic_input_is_fully_covered_with_bounded_prompts() -> None:
     # Every file appears in at least one map prompt.
     for path in files:
         assert any(f"### {path} ###" in p for p in client.prompts)
-    # Every prompt is bounded: chunk cap plus the fixed instruction overhead.
-    assert all(len(p) <= cap + 2_000 for p in client.prompts)
+    # Map prompts are bounded: chunk cap plus the fixed instruction overhead.
+    # (Tail-pass prompts — false-positive filter / merged architecture+side-effect —
+    # intentionally use their own budgets and are not subject to this map-call bound.)
+    chunk_prompts = [p for p in client.prompts if CHUNK_REVIEW_NOTE in p]
+    assert chunk_prompts
+    assert all(len(p) <= cap + 2_000 for p in chunk_prompts)
 
 
 # ---------------------------------------------------------------------------
