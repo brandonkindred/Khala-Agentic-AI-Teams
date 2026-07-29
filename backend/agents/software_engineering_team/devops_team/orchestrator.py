@@ -59,6 +59,8 @@ _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
     "Audit trail required",
 ]
 
+MAX_LEGACY_TITLE_LENGTH: int = 120
+
 _NEGATION_TOKENS = frozenset({"not", "no", "non"})
 
 
@@ -198,6 +200,16 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
     _debug_patch_once = debug_patch.debug_patch_once
 
     def __init__(self, llm_client: LLMClient) -> None:
+        """Initialize the DevOps team lead and its specialist agents/tools.
+
+        Preconditions:
+            - ``llm_client`` is non-None.
+        Postconditions:
+            - All specialist agents and execution/validation tools are
+              constructed and bound on ``self``.
+            - ``_status_callback`` remains the mixin default (``None``) until
+              a caller assigns it for a run.
+        """
         assert llm_client is not None, "llm_client is required"
         BaseTeamLead.__init__(
             self,
@@ -267,8 +279,9 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Preconditions: ``phase`` is a non-empty str.
         Postconditions: emits the historical INFO line via ``_log_pipeline_status``;
           then invokes ``TeamLeadSharedState._report_status`` (no-op when callback
-          is None; forwards kwargs when set; swallows callback errors). Never
-          raises when preconditions hold.
+          is None; forwards kwargs when set; errors are logged and swallowed by
+          ``TeamLeadSharedState._report_status``). Never raises when
+          preconditions hold.
         """
         assert isinstance(phase, str) and phase, "phase must be a non-empty str"
         self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
@@ -282,6 +295,24 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         requirements: str,
         target_repo: Optional[Any] = None,
     ) -> DevOpsTaskSpec:
+        """Build a ``DevOpsTaskSpec`` from the legacy free-text workflow args.
+
+        Preconditions:
+            - ``task_id`` is a non-empty string.
+            - ``task_description`` and ``requirements`` are strings (may be empty).
+        Postconditions:
+            - Returns a valid ``DevOpsTaskSpec`` using module-level defaults for
+              all fields not derivable from the arguments.
+            - ``title`` is ``task_description[:MAX_LEGACY_TITLE_LENGTH]`` or
+              ``task_id`` when ``task_description`` is empty.
+            - ``environment`` is inferred from the combined text of
+              ``task_description`` and ``requirements`` via
+              ``_legacy_environment_from_text``; defaults to ``\"staging\"``.
+            - Module-level ``_DEFAULT_LEGACY_*`` constants supply acceptance
+              criteria, rollback requirements, security and compliance
+              constraints, and secret-source defaults; callers must not mutate
+              those shared list objects.
+        """
         repo_name = (
             target_repo.value
             if hasattr(target_repo, "value")
@@ -291,7 +322,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         env = _legacy_environment_from_text(combined_text)
         return DevOpsTaskSpec(
             task_id=task_id,
-            title=task_description[:120] or task_id,
+            title=task_description[:MAX_LEGACY_TITLE_LENGTH] or task_id,
             platform_scope={"cloud": _DEFAULT_LEGACY_CLOUD, "environments": ["dev", env]},
             repo_context={
                 "app_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
@@ -366,6 +397,15 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
 
     @staticmethod
     def _build_subtask_contracts(task_spec: DevOpsTaskSpec) -> List[SubtaskContract]:
+        """Create the IaC, CI/CD, and deployment subtask contracts for a run.
+
+        Preconditions:
+            - ``task_spec.task_id`` is a non-empty string.
+        Postconditions:
+            - Returns exactly three ``SubtaskContract`` objects owned by
+              ``InfrastructureAsCodeAgent``, ``CICDPipelineAgent``, and
+              ``DeploymentStrategyAgent`` respectively.
+        """
         return [
             SubtaskContract(
                 subtask_id=f"{task_spec.task_id}-T1",
@@ -413,6 +453,16 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Invariants:
             - The method does not mutate ``task_spec``.
         """
+        assert task_spec.platform_scope.environments is not None, (
+            "task_spec.platform_scope.environments must be set"
+        )
+        assert hasattr(task_spec.platform_scope.environments, "__iter__"), (
+            "task_spec.platform_scope.environments must be iterable"
+        )
+        assert task_spec.scope.included is not None, "task_spec.scope.included must be set"
+        assert all(isinstance(item, str) for item in task_spec.scope.included), (
+            "task_spec.scope.included must be an iterable of strings"
+        )
         for env in task_spec.platform_scope.environments:
             policy = ENV_POLICY.get(env)
             if policy is None:
@@ -450,6 +500,19 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         LLM-planning contract, and this team's phases (env-policy gating,
         3-way parallel design fan-out, a debug-patch retry loop, gate-name
         tracking) don't share that shape.
+
+        Preconditions:
+            - ``task_spec`` is a valid ``DevOpsTaskSpec`` with a non-empty ``task_id``.
+            - ``repo_path`` is a ``Path`` (need not exist when ``write_changes=False``).
+        Postconditions:
+            - On success: returns a ``DevOpsTeamResult`` with ``success=True`` and
+              ``completion_package`` set; ``completion_package`` is never ``None``.
+            - On any phase failure: returns a ``DevOpsTeamResult`` with
+              ``success=False`` and ``failure_reason`` set.
+            - Raises ``RuntimeError`` if Phase 5 returns without assigning the
+              completion package (internal contract violation).
+        Invariants:
+            - ``task_spec`` is not mutated by this method or its phase closures.
         """
         self._report_status(
             "start",
@@ -628,7 +691,8 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         if early_exit is not None:
             return early_exit
 
-        assert completion is not None  # phase 5 success path always assigns it
+        if completion is None:
+            raise RuntimeError("Phase 5 did not assign a completion package")
         return DevOpsTeamResult(
             success=True, iterations=infra_fix_iterations, completion_package=completion
         )

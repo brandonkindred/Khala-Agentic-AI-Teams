@@ -29,6 +29,7 @@ from software_engineering_team.devops_team.models import (
 from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
+    MAX_LEGACY_TITLE_LENGTH,
     criterion_traces_from_phase4,
 )
 from software_engineering_team.devops_team.task_clarifier import (
@@ -1889,6 +1890,26 @@ class TestBackwardCompatibility:
             requirements="Ship it",
         )
         assert len(spec.acceptance_criteria) > 0
+
+    def test_build_legacy_spec_truncates_title_to_constant(self) -> None:
+        long_desc = "x" * (MAX_LEGACY_TITLE_LENGTH + 40)
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-title",
+            task_description=long_desc,
+            requirements="staging",
+        )
+        assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
+
+    def test_enforce_env_policy_rejects_non_string_included(self) -> None:
+        from types import SimpleNamespace
+
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments=["production"]),
+            scope=SimpleNamespace(included=[None]),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="scope.included"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
 
 
 # ===========================================================================
