@@ -20,9 +20,10 @@ from typing import Any
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-# ``agent_provisioning_team.temporal`` package ``__init__`` has import-time
-# side effects (Pattern A worker boot), so TASK_QUEUE — despite being a plain
-# string — must stay inside the pass-through block with the other package imports.
+# Import activities/constants via the pass-through block so the temporalio
+# workflow sandbox does not re-execute their module bodies during registration.
+# Prefer ``temporal.constants`` over the package ``__init__`` for TASK_QUEUE so
+# we never pull the heavy activities list into the workflow sandbox path.
 with workflow.unsafe.imports_passed_through():
     from agent_provisioning_team.shared.fencing import StaleFencingTokenError
     from agent_provisioning_team.temporal import activities as _activities
