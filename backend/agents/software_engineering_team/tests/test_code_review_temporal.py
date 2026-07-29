@@ -567,6 +567,53 @@ def test_consolidation_activity_disabled_passthrough_and_fails_safe(
     assert A.consolidate_side_effect_issues_activity(payload, issues) == issues
 
 
+def test_consolidation_activity_enabled_merges_same_function_issues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabled toggle merges same-function side-effects; non-side-effects pass through."""
+    from code_review_agent.temporal import activities as A
+
+    content = "def foo():\n    x = 1\n    return x\n"
+    inp = _input(code=f"### a.py ###\n{content}")
+    payload = inp.model_dump(mode="json")
+    issues = [
+        {
+            "severity": "high",
+            "category": "side-effects",
+            "file_path": "a.py",
+            "line": 2,
+            "description": "foo mutates shared state",
+            "suggestion": "",
+        },
+        {
+            "severity": "medium",
+            "category": "side-effects",
+            "file_path": "a.py",
+            "line": 3,
+            "description": "foo return type changed",
+            "suggestion": "",
+        },
+        {
+            "severity": "low",
+            "category": "documentation",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "stale docstring",
+            "suggestion": "",
+        },
+    ]
+
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION", "true")
+    result = A.consolidate_side_effect_issues_activity(payload, issues)
+    side_effects = [i for i in result if i["category"] == "side-effects"]
+    doc_issues = [i for i in result if i["category"] == "documentation"]
+    assert len(side_effects) == 1, "two same-function findings should merge into one"
+    assert "foo mutates shared state" in side_effects[0]["description"]
+    assert "foo return type changed" in side_effects[0]["description"]
+    assert len(doc_issues) == 1, "non-side-effects pass through unchanged"
+    assert doc_issues[0]["description"] == "stale docstring"
+
+
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
     from code_review_agent.temporal import activities as A
 

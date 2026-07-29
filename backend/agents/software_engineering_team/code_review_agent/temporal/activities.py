@@ -405,7 +405,11 @@ def consolidate_side_effect_issues_activity(
     review_input: Dict[str, Any],
     issues: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Merge related ``side-effects`` findings after the three tail passes.
+    """Merge related ``side-effects`` findings before the final dedupe/gate.
+
+    Called after the false-positive, architecture, and side-effect tail passes
+    have contributed their findings, and before ``finalize_review_activity``
+    applies the exact-match dedupe and approval reconciliation.
 
     Preconditions:
         - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict.
