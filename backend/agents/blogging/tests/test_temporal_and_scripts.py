@@ -83,54 +83,76 @@ def test_worker_thread_target_handles_runtime_error_loop_stopped(monkeypatch) ->
         def close(self):
             self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
 
     worker._worker_thread_target()  # Must not raise
+    assert loop._closed is True
 
 
-def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None:
+def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch, caplog) -> None:
     """An unrelated RuntimeError in the worker loop is logged, not raised."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
     class _FakeLoop:
+        def __init__(self):
+            self._closed = False
+
         def run_until_complete(self, coro):
             raise RuntimeError("totally different error")
 
         def close(self):
-            pass
+            self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
 
-    worker._worker_thread_target()  # Logs but must not raise
+    with caplog.at_level(logging.ERROR, logger="agents.blogging.temporal.worker"):
+        worker._worker_thread_target()  # Logs but must not raise
+
+    assert loop._closed is True
+    assert any("Blogging Temporal worker failed" in r.message for r in caplog.records)
 
 
-def test_worker_thread_target_handles_generic_exception(monkeypatch) -> None:
+def test_worker_thread_target_handles_generic_exception(monkeypatch, caplog) -> None:
     """A generic exception in the worker loop is logged, not raised."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
     class _FakeLoop:
+        def __init__(self):
+            self._closed = False
+
         def run_until_complete(self, coro):
             raise ValueError("oops")
 
         def close(self):
-            pass
+            self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
 
-    worker._worker_thread_target()  # Must not raise
+    with caplog.at_level(logging.ERROR, logger="agents.blogging.temporal.worker"):
+        worker._worker_thread_target()  # Must not raise
+
+    assert loop._closed is True
+    assert any("Blogging Temporal worker failed" in r.message for r in caplog.records)
 
 
 def test_worker_thread_target_handles_cancelled(monkeypatch) -> None:
@@ -142,17 +164,23 @@ def test_worker_thread_target_handles_cancelled(monkeypatch) -> None:
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
     class _FakeLoop:
+        def __init__(self):
+            self._closed = False
+
         def run_until_complete(self, coro):
             raise asyncio.CancelledError()
 
         def close(self):
-            pass
+            self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
+
     worker._worker_thread_target()
+    assert loop._closed is True
 
 
 def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None:
@@ -160,7 +188,10 @@ def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None
     from agents.blogging.temporal import worker
 
     fake_worker = MagicMock()
-    fake_worker.shutdown = MagicMock(return_value=None)
+    async def fake_shutdown():
+        return None
+
+    fake_worker.shutdown = MagicMock(side_effect=fake_shutdown)
 
     class _FakeFuture:
         def result(self, timeout=None):
@@ -170,22 +201,31 @@ def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None
         def is_running(self):
             return True
 
-    monkeypatch.setattr(
-        worker.asyncio,
-        "run_coroutine_threadsafe",
-        lambda coro, loop: _FakeFuture(),
-    )
+    fake_loop = _FakeLoop()
+    scheduled = []
 
+    def fake_run_coroutine_threadsafe(coro, loop):
+        scheduled.append((coro, loop))
+        return _FakeFuture()
+
+    monkeypatch.setattr(worker.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
     monkeypatch.setattr(worker, "_worker_instance", fake_worker)
-    monkeypatch.setattr(worker, "_worker_running_loop", _FakeLoop())
+    monkeypatch.setattr(worker, "_worker_running_loop", fake_loop)
     monkeypatch.setattr(worker, "_worker_thread", None)
     monkeypatch.setattr(worker, "_activity_executor", None)
 
     worker.shutdown_blogging_temporal_components()
 
+    fake_worker.shutdown.assert_called_once()
+    assert len(scheduled) == 1
+    assert scheduled[0][1] is fake_loop
+    assert scheduled[0][0].cr_code is fake_shutdown.__code__
 
-def test_shutdown_blogging_temporal_components_force_stop(monkeypatch) -> None:
+
+def test_shutdown_blogging_temporal_components_force_stop(monkeypatch, caplog) -> None:
     """When worker.shutdown() future raises, we force-stop the loop."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     fake_worker = MagicMock()
@@ -196,19 +236,33 @@ def test_shutdown_blogging_temporal_components_force_stop(monkeypatch) -> None:
             raise TimeoutError("timed out")
 
     class _FakeLoop:
+        def __init__(self):
+            self.scheduled_callback = None
+            self.stopped = False
+
         def is_running(self):
             return True
 
         def call_soon_threadsafe(self, fn):
-            pass
+            self.scheduled_callback = fn
 
+        def stop(self):
+            self.stopped = True
+
+    fake_loop = _FakeLoop()
     monkeypatch.setattr(worker.asyncio, "run_coroutine_threadsafe", lambda coro, loop: _Future())
     monkeypatch.setattr(worker, "_worker_instance", fake_worker)
-    monkeypatch.setattr(worker, "_worker_running_loop", _FakeLoop())
+    monkeypatch.setattr(worker, "_worker_running_loop", fake_loop)
     monkeypatch.setattr(worker, "_worker_thread", None)
     monkeypatch.setattr(worker, "_activity_executor", None)
 
-    worker.shutdown_blogging_temporal_components()
+    with caplog.at_level(logging.WARNING, logger="agents.blogging.temporal.worker"):
+        worker.shutdown_blogging_temporal_components()
+
+    assert fake_loop.scheduled_callback is not None
+    fake_loop.scheduled_callback()  # callback must stop the loop when executed
+    assert fake_loop.stopped is True
+    assert any("forcing loop stop" in r.message for r in caplog.records)
 
 
 def test_shutdown_blogging_temporal_components_worker_only(monkeypatch) -> None:
@@ -258,8 +312,10 @@ def test_shutdown_blogging_temporal_components_with_executor(monkeypatch) -> Non
     executor.shutdown.assert_called()
 
 
-def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch) -> None:
+def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch, caplog) -> None:
     """If executor.shutdown raises, log but don't crash."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     executor = MagicMock()
@@ -268,7 +324,11 @@ def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch) -
     monkeypatch.setattr(worker, "_worker_running_loop", None)
     monkeypatch.setattr(worker, "_worker_thread", None)
     monkeypatch.setattr(worker, "_activity_executor", executor)
-    worker.shutdown_blogging_temporal_components()
+
+    with caplog.at_level(logging.ERROR, logger="agents.blogging.temporal.worker"):
+        worker.shutdown_blogging_temporal_components()
+
+    assert any("ThreadPoolExecutor shutdown failed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +425,8 @@ def _patch_context(monkeypatch, tmp_path):
     return acts, ctx
 
 
-def _v2():
+def _blog_writing_process_v2_module():
+    """Import and return the blog_writing_process_v2 shim module for monkeypatching."""
     import importlib
 
     return importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
@@ -380,7 +441,7 @@ def test_plan_stage_activity_returns_planning_dto(monkeypatch, tmp_path) -> None
         c.elicited_stories_text = "story"
         return None
 
-    monkeypatch.setattr(_v2(), "run_planning_stage", fake_planning)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_planning_stage", fake_planning)
 
     out = acts.plan_stage_activity("j1", {"brief": "x"})
     assert out["status"] == "PASS"
@@ -391,7 +452,13 @@ def test_plan_stage_activity_returns_planning_dto(monkeypatch, tmp_path) -> None
 def test_plan_stage_activity_abort_returns_fail(monkeypatch, tmp_path) -> None:
     """A planning abort (cancel/failed job) yields a FAIL DTO, not a raise."""
     acts, _ = _patch_context(monkeypatch, tmp_path)
-    monkeypatch.setattr(_v2(), "run_planning_stage", lambda c: (None, None, "FAIL"))
+    # Dual contract of run_planning_stage: success returns None and mutates ctx;
+    # HITL abort returns (planning_phase_result, None, "FAIL").
+    monkeypatch.setattr(
+        _blog_writing_process_v2_module(),
+        "run_planning_stage",
+        lambda c: (_Dumpable({"content_plan": {}}), None, "FAIL"),
+    )
 
     out = acts.plan_stage_activity("j1", {"brief": "x"})
     assert out["status"] == "FAIL"
@@ -404,7 +471,7 @@ def test_plan_stage_activity_error_fails_job_and_returns_fail(monkeypatch, tmp_p
     def boom(c):
         raise ValueError("kaboom")
 
-    monkeypatch.setattr(_v2(), "run_planning_stage", boom)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_planning_stage", boom)
     failed: dict = {}
     monkeypatch.setattr(
         acts,
@@ -462,7 +529,7 @@ def test_draft_stage_activity_returns_draft_dto(monkeypatch, tmp_path) -> None:
         c.elicited_stories_text = "s2"
         return None
 
-    monkeypatch.setattr(_v2(), "run_draft_stage", fake_draft)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_draft_stage", fake_draft)
 
     planning = {"planning_phase_result": {"content_plan": {}}, "status": "PASS"}
     out = acts.draft_stage_activity("j1", {"brief": "x"}, planning)
@@ -488,7 +555,7 @@ def test_gates_stage_activity_returns_gates_dto(monkeypatch, tmp_path) -> None:
         c.status = "NEEDS_HUMAN_REVIEW"
         return None
 
-    monkeypatch.setattr(_v2(), "run_gates_stage", fake_gates)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_gates_stage", fake_gates)
 
     planning = {"planning_phase_result": {"content_plan": {}}}
     draft = {"draft": {"draft": "d"}, "status": "PASS"}
@@ -542,7 +609,7 @@ def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_pat
     # a name binding resolved once at import time; importing it while that name
     # is monkeypatched would permanently poison v2's own binding for every test
     # that runs afterward in this process, well past this test's teardown.
-    v2_mod = _v2()
+    v2_mod = _blog_writing_process_v2_module()
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
     rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
@@ -573,7 +640,7 @@ def test_draft_stage_activity_abort_returns_fail_with_partial_draft(monkeypatch,
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
     monkeypatch.setattr(
-        _v2(), "run_draft_stage", lambda c: (None, _Dumpable({"draft": "partial"}), "FAIL")
+        _blog_writing_process_v2_module(), "run_draft_stage", lambda c: (None, _Dumpable({"draft": "partial"}), "FAIL")
     )
 
     planning = {"planning_phase_result": {"content_plan": {}}}
@@ -597,7 +664,7 @@ def test_draft_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
     def boom(c):
         raise CancelledError("cancel")
 
-    monkeypatch.setattr(_v2(), "run_draft_stage", boom)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_draft_stage", boom)
     with pytest.raises(CancelledError):
         acts.draft_stage_activity("j1", {"brief": "x"}, {"planning_phase_result": {}})
 
@@ -621,7 +688,7 @@ def test_gates_stage_activity_hard_error_returns_fail(monkeypatch, tmp_path) -> 
     def boom(c):
         raise ValueError("gate blew up")
 
-    monkeypatch.setattr(_v2(), "run_gates_stage", boom)
+    monkeypatch.setattr(_blog_writing_process_v2_module(), "run_gates_stage", boom)
     planning = {"planning_phase_result": {"content_plan": {}}}
     draft = {"draft": {"draft": "d"}}
     out = acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
@@ -688,7 +755,7 @@ def test_finalize_job_activity_reraises_before_last_attempt(monkeypatch, tmp_pat
         acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}})
 
 
-def test_finalize_job_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+def test_finalize_job_activity_malformed_dto_raises_loudly(monkeypatch) -> None:
     """A malformed finalize input DTO raises out of the activity (code/schema defect),
     bypassing the retry-then-mark funnel — matching the draft/gates contract."""
     import importlib
@@ -828,6 +895,7 @@ def test_run_copy_editor_agent_main_smoke(monkeypatch, capsys) -> None:
 
 
 def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None:
+    """`run_publication_agent.main` should run end-to-end with stubbed submit_draft."""
     import agents.blogging.agent_implementations.run_publication_agent as mod
     from agents.blogging.blog_publication_agent.models import PublicationSubmission
 
@@ -854,11 +922,16 @@ def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None
 
 
 def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
+    """run_writer_agent.main runs end-to-end with a stubbed BlogWriterAgent.
+
+    Verifies that main constructs a valid WriterInput/ContentPlan (so
+    WriterInput validation is exercised for real) and prints the generated draft.
+    """
     import agents.blogging.agent_implementations.run_writer_agent as mod
 
     from llm_service import DummyLLMClient
 
-    from .conftest import _STUB_WRITER_DRAFT
+    stub_writer_draft = "# Draft\n\nBody."
 
     monkeypatch.setattr(mod, "get_strands_model", lambda key: DummyLLMClient())
     monkeypatch.setattr(mod, "load_style_file", lambda *a, **kw: "")
@@ -870,15 +943,15 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
     # for real rather than mocked away.
     captured_input: dict = {}
 
-    class _Stub:
+    class _StubBlogWriterAgent:
         def __init__(self, *a, **kw):
             pass
 
         def run(self, inp):
             captured_input["inp"] = inp
-            return WriterOutput(draft=_STUB_WRITER_DRAFT)
+            return WriterOutput(draft=stub_writer_draft)
 
-    monkeypatch.setattr(mod, "BlogWriterAgent", _Stub)
+    monkeypatch.setattr(mod, "BlogWriterAgent", _StubBlogWriterAgent)
 
     mod.main()
     captured = capsys.readouterr()
