@@ -4,10 +4,12 @@ Dummy LLM client for tests and environments without an LLM.
 Returns heuristic stub responses matching SE team prompts so existing tests keep passing.
 
 Strands ``Model`` compatibility is opt-in and lazy: importing / using this module as a
-plain :class:`~llm_service.interface.LLMClient` does not import ``strands``. Call
-:func:`ensure_strands_model_registration` (or any Strands ``Model`` ABC method such as
-``stream`` / ``update_config``) when tests need ``isinstance(..., Model)`` or
-``strands.Agent(model=DummyLLMClient())``.
+plain :class:`~llm_service.interface.LLMClient` does not import ``strands``. Concrete
+``Model`` members that ``strands.Agent`` reads at construction time (``stateful``,
+``context_window_limit``, ``count_tokens``) are provided here without loading Strands.
+Call :func:`ensure_strands_model_registration` (or any Strands Model ABC method, or
+construct ``DummyLLMClient`` after ``strands`` is already imported) when callers need
+real ``isinstance(..., Model)`` / MRO inheritance.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -29,21 +32,38 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; runtime uses lazy strands i
 _STRANDS_MODEL_REGISTERED = False
 
 
+def _strands_already_imported() -> bool:
+    """Return True when any ``strands`` package module is already in ``sys.modules``.
+
+    Preconditions: none.
+    Postconditions: returns True iff ``strands`` or a ``strands.*`` module is loaded.
+    """
+    return "strands" in sys.modules or any(name.startswith("strands.") for name in sys.modules)
+
+
 def ensure_strands_model_registration() -> None:
-    """Register :class:`DummyLLMClient` as a virtual Strands ``Model`` subclass.
+    """Attach Strands ``Model`` as a real base of :class:`DummyLLMClient`.
+
+    Virtual ``Model.register()`` is intentionally *not* used: ``Agent(model=...)``
+    reads concrete ``Model`` members (``stateful``, ``count_tokens``, …) before any
+    model method runs, and virtual subclasses do not inherit those members.
 
     Preconditions:
         The ``strands`` package is installed and importable.
     Postconditions:
-        ``isinstance(DummyLLMClient(), strands.models.model.Model)`` is True.
-        Idempotent: subsequent calls are no-ops once registration has succeeded.
+        ``isinstance(DummyLLMClient(), strands.models.model.Model)`` is True and
+        ``Model`` appears in ``DummyLLMClient.__mro__``.
+        Idempotent: subsequent calls are no-ops once inheritance is attached.
     """
     global _STRANDS_MODEL_REGISTERED
     if _STRANDS_MODEL_REGISTERED:
         return
     from strands.models.model import Model  # noqa: PLC0415 - intentional lazy import
 
-    Model.register(DummyLLMClient)
+    # Real inheritance (not ABC.register) so instances expose Model's concrete
+    # properties/methods, matching the pre-lazy ``(LLMClient, Model)`` bases.
+    if Model not in DummyLLMClient.__mro__:
+        DummyLLMClient.__bases__ = (*DummyLLMClient.__bases__, Model)
     _STRANDS_MODEL_REGISTERED = True
 
 _STRIP_VERBS = {
@@ -150,27 +170,92 @@ class DummyLLMClient(LLMClient):
 
     Also provides the Strands ``Model`` method surface. Importing or using this
     class as a plain :class:`~llm_service.interface.LLMClient` never loads
-    ``strands``; call :func:`ensure_strands_model_registration` (or any Model
-    ABC method below) when tests need virtual-subclass ``isinstance`` checks or
-    ``strands.Agent(model=DummyLLMClient())``.
+    ``strands``. Concrete Agent-facing Model members (``stateful``, etc.) are
+    defined here so ``strands.Agent(model=DummyLLMClient())`` works without
+    relying on virtual ABC registration. Call
+    :func:`ensure_strands_model_registration` (or construct after ``strands`` is
+    already imported) when ``isinstance(..., Model)`` / MRO inheritance is needed.
     """
 
     _call_counter: int = 0
 
     def __init__(self) -> None:
+        """Construct a dummy client.
+
+        Preconditions: none.
+        Postconditions: request counters/config are initialized; if ``strands`` is
+            already present in ``sys.modules``, Strands ``Model`` is attached to
+            the class MRO (see :func:`ensure_strands_model_registration`).
+        """
         self._request_count = 0
         self._model_config: dict[str, Any] = {}
+        # When Strands is already loaded (typical in agent/test processes),
+        # attach real Model inheritance immediately so resolve_strands_model's
+        # ``isinstance(..., Model)`` short-circuit matches pre-lazy behaviour.
+        # Cold LLMClient paths leave strands unloaded and skip this.
+        if _strands_already_imported():
+            ensure_strands_model_registration()
 
     # -----------------------------------------------------------------------
-    # strands.models.model.Model ABC surface (lazy registration)
+    # strands.models.model.Model concrete members (no strands import required)
+    # -----------------------------------------------------------------------
+
+    @property
+    def stateful(self) -> bool:
+        """Whether the model manages conversation state server-side.
+
+        Preconditions: none.
+        Postconditions: returns False (matches Strands ``Model`` default). Defined
+            here so ``Agent(model=...)`` can read ``model.stateful`` at construction
+            without requiring Strands inheritance yet.
+        """
+        return False
+
+    @property
+    def context_window_limit(self) -> int | None:
+        """Maximum context window size in tokens from local model config.
+
+        Preconditions: none.
+        Postconditions: returns ``context_window_limit`` from ``_model_config`` when
+            set, else None (matches Strands ``Model.context_window_limit`` semantics).
+        """
+        config = self._model_config
+        return config.get("context_window_limit") if isinstance(config, dict) else None
+
+    async def count_tokens(
+        self,
+        messages: list[StrandsMessage],
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+        system_prompt_content: list[SystemContentBlock] | None = None,
+    ) -> int:
+        """Estimate input tokens via Strands ``Model.count_tokens`` once Model is attached.
+
+        Preconditions: ``strands`` is importable.
+        Postconditions: returns the Model default estimate; attaches Model to the
+            DummyLLMClient MRO if not already attached.
+        """
+        ensure_strands_model_registration()
+        from strands.models.model import Model  # noqa: PLC0415 - intentional lazy import
+
+        return await Model.count_tokens(
+            self,
+            messages,
+            tool_specs=tool_specs,
+            system_prompt=system_prompt,
+            system_prompt_content=system_prompt_content,
+        )
+
+    # -----------------------------------------------------------------------
+    # strands.models.model.Model ABC surface (lazy real inheritance)
     # -----------------------------------------------------------------------
 
     def update_config(self, **model_config: Any) -> None:
         """Update Strands model config.
 
-        Preconditions: none (registers as Strands Model on first call).
+        Preconditions: none.
         Postconditions: ``model_config`` keys are merged into the local config dict;
-            ``DummyLLMClient`` is registered as a virtual Strands ``Model``.
+            Strands ``Model`` is attached to the class MRO when importable.
         """
         ensure_strands_model_registration()
         self._model_config.update(model_config)
@@ -178,9 +263,9 @@ class DummyLLMClient(LLMClient):
     def get_config(self) -> dict[str, Any]:
         """Return a copy of the Strands model config.
 
-        Preconditions: none (registers as Strands Model on first call).
+        Preconditions: none.
         Postconditions: returned dict is a shallow copy of the local config;
-            ``DummyLLMClient`` is registered as a virtual Strands ``Model``.
+            Strands ``Model`` is attached to the class MRO when importable.
         """
         ensure_strands_model_registration()
         return dict(self._model_config)
@@ -194,8 +279,9 @@ class DummyLLMClient(LLMClient):
     ) -> Any:
         """Strands Model hook — intentionally unimplemented for the dummy client.
 
-        Preconditions: none (registers as Strands Model on first call).
-        Postconditions: always raises ``NotImplementedError``.
+        Preconditions: none.
+        Postconditions: always raises ``NotImplementedError``; attaches Model when
+            importable.
         """
         ensure_strands_model_registration()
         raise NotImplementedError("DummyLLMClient.structured_output is not implemented for tests")
@@ -219,8 +305,8 @@ class DummyLLMClient(LLMClient):
         Otherwise yields a plain text response.
 
         Preconditions: ``messages`` is a sequence of Strands-shaped message dicts.
-        Postconditions: yields a complete assistant stream; registers as virtual
-            Strands ``Model`` on first call.
+        Postconditions: yields a complete assistant stream; attaches Strands
+            ``Model`` to the class MRO when importable.
         """
         ensure_strands_model_registration()
         # Extract user text from the last user message

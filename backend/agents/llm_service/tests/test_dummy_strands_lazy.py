@@ -42,8 +42,10 @@ assert "strands" not in sys.modules, (
     f"importing dummy loaded strands: "
     f"{[m for m in sys.modules if m == 'strands' or m.startswith('strands.')]}"
 )
-# Plain LLMClient construction/use must still leave Strands unloaded.
+# Plain LLMClient construction/use must still leave Strands unloaded, and Agent-facing
+# Model members (stateful) must be available without inheritance.
 client = dummy.DummyLLMClient()
+assert client.stateful is False
 _ = client.complete("hello", objective="test")
 _ = client.complete_json("hello", objective="test")
 assert "strands" not in sys.modules, "using DummyLLMClient as LLMClient loaded strands"
@@ -63,20 +65,27 @@ print("ok")
     assert "ok" in result.stdout
 
 
-def test_dummy_registers_as_strands_model_when_strands_path_used() -> None:
-    """Strands ``Model`` registration remains available when a Strands path is used.
+def test_dummy_attaches_real_strands_model_base_when_strands_path_used() -> None:
+    """Strands ``Model`` real inheritance remains available when a Strands path is used.
 
     Preconditions: ``strands`` is importable.
     Postconditions: after ``ensure_strands_model_registration``, ``DummyLLMClient``
-    is a virtual subclass of ``strands.models.model.Model``.
+    has ``Model`` in its MRO (not merely a virtual ABC registration), and
+    ``Agent(model=DummyLLMClient())`` can read ``stateful`` at construction.
     """
     pytest.importorskip("strands")
+    from strands import Agent
     from strands.models.model import Model
 
     from llm_service.clients.dummy import DummyLLMClient, ensure_strands_model_registration
 
     ensure_strands_model_registration()
+    assert Model in DummyLLMClient.__mro__
     client = DummyLLMClient()
     assert isinstance(client, Model)
+    assert client.stateful is False
     client.update_config(model_id="dummy")
     assert client.get_config()["model_id"] == "dummy"
+    # Agent reads model.stateful before any stream/update_config call.
+    agent = Agent(model=client)
+    assert agent.model is client
