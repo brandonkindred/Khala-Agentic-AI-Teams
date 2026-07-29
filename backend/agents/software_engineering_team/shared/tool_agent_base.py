@@ -533,7 +533,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         if self.review_via_engine:
             return self._engine_review(inp)
         review_label = f"{self.name} review"
-        model = getattr(self, self.review_model_attr)
+        model = getattr(self, self.review_model_attr, None)
         if self._fallback_no_model(model) is not None:
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no LLM).")
         if not getattr(inp, "current_files", None):
@@ -547,12 +547,19 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                 "review_prompt, review_via_engine=True, or build_runner when using the "
                 "default review() path."
             )
-        # Keyword ``str.format`` inserts values without re-scanning them, so
-        # braces in ``code_text`` / ``task_description`` stay literal and a
-        # literal ``{code}`` inside the task text is not re-substituted.
-        prompt = self.review_prompt.format(
-            task_description=inp.task_description or "N/A",
-            code=code_text,
+        # Substitute only the two known placeholders.
+        #
+        # We must not treat braces from inserted values as format fields, and we
+        # also must not re-substitute placeholder-like tokens that appear inside
+        # inserted task text/code. Using sentinels ensures single-placeholder
+        # replacement without a second pass over inserted values.
+        task_sentinel = "__KHALA_TASK_DESCRIPTION__"
+        code_sentinel = "__KHALA_CODE__"
+        prompt = self.review_prompt.replace("{task_description}", task_sentinel).replace(
+            "{code}", code_sentinel
+        )
+        prompt = prompt.replace(task_sentinel, inp.task_description or "N/A").replace(
+            code_sentinel, code_text
         )
         status, result = self._call_with_single_fallback(
             lambda: self._invoke_llm(model, prompt),

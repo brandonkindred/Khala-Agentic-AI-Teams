@@ -295,7 +295,8 @@ def test_review_uses_review_model_attr_for_no_model_guard(monkeypatch):
 
 def test_review_code_with_braces_reaches_llm_uncorrupted(monkeypatch):
     """Literal braces in file contents must reach the LLM uncorrupted on the
-    one-shot review path (keyword ``str.format`` does not re-parse values)."""
+    one-shot review path (placeholder substitution must not escape or
+    re-interpret braces in inserted values)."""
     seen: list[str] = []
     code = 'cfg = {"a": 1}\nf"{x}"'
 
@@ -317,7 +318,7 @@ def test_review_code_with_braces_reaches_llm_uncorrupted(monkeypatch):
 
 def test_review_task_description_literal_code_placeholder_not_resubstituted(monkeypatch):
     """A literal ``{code}`` inside ``task_description`` must not be replaced with
-    the file payload (chained ``str.replace`` would; keyword ``format`` does not)."""
+    the file payload."""
     seen: list[str] = []
     task = "Document the {code} placeholder in the prompt template."
     code = "UNIQUE_CODE_PAYLOAD"
@@ -366,7 +367,7 @@ def test_review_llm_exception(monkeypatch):
     agent.llm = None
 
     def boom(*a, **k):
-        raise RuntimeError("err")
+        raise LLMError("err")
 
     _patch_agent(monkeypatch, boom)
     out = agent.review(_Input(current_files={"a.ts": "code"}))
