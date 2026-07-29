@@ -285,8 +285,8 @@ class CodebaseIndex:
               one, or when ``key`` is blank.
             - ``(exact_key, [])`` on an exact file match.
             - ``(sole_hit, hits)`` when exactly one suffix match, else
-              ``(None, hits)``, where ``hits`` are the bare-name suffix matches —
-              never raises.
+              ``(None, hits)``, where ``hits`` are the candidate paths that
+              share the requested final segment or path suffix — never raises.
         """
         if not key:
             return None, []
@@ -294,31 +294,58 @@ class CodebaseIndex:
             return (self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None), []
         if key in self.files:
             return key, []
-        # Bare-name fallback: the model often cites ``main.py`` for
-        # ``app/services/main.py``. Match every stored path whose final
-        # ``/``-segment equals ``key`` (a leading ``./`` or ``/`` stripped
-        # without mangling hidden names like ``.env``); a unique hit resolves,
-        # and the full list lets ``read_file`` distinguish ambiguity.
-        normalized = key
-        while normalized.startswith("./"):
-            normalized = normalized[2:]
-        if normalized.startswith("/"):
-            normalized = normalized[1:]
-
-        def _final_segment(p: str) -> str:
-            seg = p
-            while seg.startswith("./"):
-                seg = seg[2:]
-            if seg.startswith("/"):
-                seg = seg[1:]
-            return seg.rsplit("/", 1)[-1]
+        # Bare-name / suffix fallback: the model often cites ``main.py`` for
+        # ``app/services/main.py``, or ``config/.env`` for ``src/config/.env``.
+        # Match every stored path whose final ``/``-segment (bare name) or
+        # trailing path suffix equals ``key`` after stripping a leading ``./``
+        # or ``/`` from both sides (without mangling hidden names like
+        # ``.env``); a unique hit resolves, and the full list lets
+        # ``read_file`` distinguish ambiguity.
+        normalized = self._normalize_leading(key)
 
         if "/" in normalized:
-            hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+            hits = [
+                p
+                for p in self.files
+                if self._normalize_leading(p) == normalized
+                or self._normalize_leading(p).endswith("/" + normalized)
+            ]
         else:
-            hits = [p for p in self.files if _final_segment(p) == normalized]
+            hits = [p for p in self.files if self._final_segment(p) == normalized]
 
         return (hits[0] if len(hits) == 1 else None), hits
+
+    @staticmethod
+    def _normalize_leading(p: str) -> str:
+        """Strip leading ``./`` repeats and a single leading ``/`` from ``p``.
+
+        Preconditions:
+            - ``p`` is a string (may be empty).
+
+        Postconditions:
+            - Returns ``p`` with any leading ``./`` prefixes and at most one
+              leading ``/`` removed; a leading single-dot name like ``.env``
+              is preserved.
+        """
+        while p.startswith("./"):
+            p = p[2:]
+        if p.startswith("/"):
+            p = p[1:]
+        return p
+
+    @classmethod
+    def _final_segment(cls, p: str) -> str:
+        """Return the final path segment of ``p`` after leading-prefix normalize.
+
+        Preconditions:
+            - ``p`` is a string (may be empty).
+
+        Postconditions:
+            - Returns the substring after the last ``/`` in the
+              leading-normalized form of ``p`` (the whole string when it
+              contains no ``/``).
+        """
+        return cls._normalize_leading(p).rsplit("/", 1)[-1]
 
     def resolve_path(self, path: str) -> Optional[str]:
         """Resolve a cited path to a canonical readable key, or None.
@@ -702,7 +729,7 @@ def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
     return text[:max_len] + "..."
 
 
-def _build_tools(index: CodebaseIndex) -> list:
+def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:

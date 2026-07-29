@@ -81,7 +81,11 @@ class _VerdictStub(DummyLLMClient):
     injected client in an end-to-end coordinator run.
     """
 
-    def __init__(self, verdicts: List[Dict[str, Any]], chunk_issues: Optional[List[Dict]] = None):
+    def __init__(
+        self,
+        verdicts: List[Dict[str, Any]],
+        chunk_issues: Optional[List[Dict[str, Any]]] = None,
+    ):
         super().__init__()
         self._verdicts = verdicts
         self._chunk_issues = chunk_issues
@@ -430,11 +434,19 @@ def test_find_function_at_line_unknown_path() -> None:
 
 def test_find_function_at_line_content_literally_starting_with_error() -> None:
     """A readable file whose content starts with 'Error:' is not mistaken for a failure."""
-    code = '"""Error: this is a docstring, not a read failure."""\ndef alpha():\n    pass\n'
+    code = "Error: this is file content, not a read failure.\ndef alpha():\n    pass\n"
     idx = CodebaseIndex(files={"fixtures/log_sample.py": code})
+    # Contract under test: content beginning with ``Error:`` is still readable.
+    assert idx.read_file_or_none("fixtures/log_sample.py") == code
+    assert code.startswith("Error:")
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("fixtures/log_sample.py", 2)
-    assert "alpha" in result
+    # Must not treat the content as a read-failure sentinel.
+    assert "is not a readable path" not in result
+    # Content is invalid Python, so the AST path reports a parse error —
+    # which still proves the bytes were obtained and inspected.
+    assert "Could not parse" in result
+    assert not result.startswith("Error:")
 
 
 def test_find_function_at_line_python_syntax_error() -> None:
@@ -862,7 +874,7 @@ def test_resolve_preserves_hidden_file_basename() -> None:
 
 
 def test_resolve_preserves_stored_leading_dot_slash_and_absolute_prefix() -> None:
-    """Bare-name resolution should ignore stored leading ``./`` and single leading ``/``."""
+    """Bare-name and slash-suffix resolution ignore stored leading ``./`` and ``/``."""
     idx = CodebaseIndex(files={"./main.py": "BODY"})
     assert idx.resolve_path("main.py") == "./main.py"
     assert idx.read_file("main.py") == "BODY"
@@ -870,6 +882,15 @@ def test_resolve_preserves_stored_leading_dot_slash_and_absolute_prefix() -> Non
     idx2 = CodebaseIndex(files={"/app/main.py": "BODY2"})
     assert idx2.resolve_path("main.py") == "/app/main.py"
     assert idx2.read_file("main.py") == "BODY2"
+
+    # Slash-containing citations must also normalize stored prefixes.
+    idx3 = CodebaseIndex(files={"./config/.env": "SECRET=1\n"})
+    assert idx3.resolve_path("config/.env") == "./config/.env"
+    assert idx3.read_file("config/.env") == "SECRET=1\n"
+
+    idx4 = CodebaseIndex(files={"/src/config/.env": "SECRET=2\n"})
+    assert idx4.resolve_path("config/.env") == "/src/config/.env"
+    assert idx4.read_file("config/.env") == "SECRET=2\n"
 
 
 def test_ambiguous_submission_does_not_fall_through_to_reader() -> None:
