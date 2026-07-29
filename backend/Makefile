@@ -74,7 +74,7 @@ run: _check_job_service_url
 	$(VENV_PYTHON) run_unified_api.py --host $(HOST) --port $(PORT) --reload
 
 deploy: _check_job_service_url
-	$(VENV_PYTHON) run_unified_api.py --host $(HOST) --port $(PORT) --workers 4 --log-level warning
+	$(VENV_PYTHON) run_unified_api.py --host $(HOST) --port $(PORT) --workers 1 --log-level warning
 
 clean:
 	rm -rf $(VENV) .pytest_cache
