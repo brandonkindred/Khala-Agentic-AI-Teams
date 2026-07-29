@@ -155,11 +155,17 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
 def _last_user_text(messages: list) -> str:
     """Return concatenated text from the most recent user message.
 
+    Mirrors ``_strands_messages_to_openai``: every text (or bare-string) block
+    in that message is collected and joined with newlines so later blocks that
+    carry routing anchors are not dropped.
+
     Preconditions:
         - ``messages`` is a list of Strands-style message dicts (role/content).
 
     Postconditions:
         - Returns a string (empty when no user text is present).
+        - When the latest user message has multiple text blocks, all of them
+          appear in the returned string (newline-joined).
     """
     assert isinstance(messages, list)
     for msg in reversed(messages):
@@ -170,12 +176,13 @@ def _last_user_text(messages: list) -> str:
             return content
         if not isinstance(content, list):
             return ""
+        parts: list[str] = []
         for block in content:
             if isinstance(block, dict) and "text" in block:
-                return str(block["text"])
-            if isinstance(block, str):
-                return block
-        return ""
+                parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
     return ""
 
 

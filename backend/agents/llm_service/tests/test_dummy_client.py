@@ -12,6 +12,7 @@ from llm_service.clients.dummy import (
     _STRIP_VERBS,
     CODE_REVIEW_MIN_PROMPT_LENGTH,
     _extract_name_from_hint,
+    _last_user_text,
 )
 
 
@@ -58,6 +59,49 @@ def test_dummy_complete_json_accepts_schema_kwarg_as_noop() -> None:
     assert c.supports_structured_output() is False
     j = c.complete_json("hello", temperature=0.1, schema={"type": "object"})
     assert isinstance(j, dict)
+
+
+def test_last_user_text_concatenates_all_text_blocks() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"text": "prefix context"},
+                {"text": "architecture_document with components and overview"},
+            ],
+        }
+    ]
+    assert _last_user_text(messages) == (
+        "prefix context\narchitecture_document with components and overview"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_output_uses_later_user_text_blocks_for_routing() -> None:
+    """Anchors in a later content block must still select the intended stub."""
+
+    class _ArchStub(BaseModel):
+        overview: str
+        architecture_document: str
+        components: list
+        diagrams: dict
+        decisions: list
+
+    c = DummyLLMClient()
+    prompt = [
+        {
+            "role": "user",
+            "content": [
+                {"text": "Please produce the deliverable."},
+                {"text": "Need architecture_document with components and overview."},
+            ],
+        }
+    ]
+    events = []
+    async for event in c.structured_output(_ArchStub, prompt):
+        events.append(event)
+    assert isinstance(events[0]["output"], _ArchStub)
+    assert "Dummy architecture" in events[0]["output"].overview
 
 
 def test_extract_name_from_hint_keeps_usable_words() -> None:
