@@ -52,7 +52,7 @@ from agent_cognition.models import (
 from agent_cognition.rules import store as rules_store
 from agent_cognition.rules.predicate import is_valid_predicate
 from agent_cognition.runtime_config import read_positive_int
-from llm_service import compact_text, complete_validated, get_client
+from llm_service import compact_text, complete_validated_via_reasoning, get_client
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,10 @@ _PG_INT32_MAX = 2**31 - 1
 # drive rule learning and the month/week/day window already spans it.
 _REFLECTION_SCALES: tuple[Scale, ...] = (Scale.MONTH, Scale.WEEK, Scale.DAY)
 
-_REFLECTION_SYSTEM_PROMPT = (
+# Shared faculty framing for both the combined (single-call) prompt and the
+# reasoning-only variant below — kept as one constant so the two can't drift
+# apart accidentally; only the trailing sentence differs per variant.
+_REFLECTION_FACULTY_FRAMING = (
     "You are the reflection faculty of an autonomous agent. You read the "
     "agent's recent memory summaries and its current operating rules, then "
     "propose changes to those rules: ADD a new guardrail, RETIRE one that no "
@@ -82,8 +85,10 @@ _REFLECTION_SYSTEM_PROMPT = (
     "would have prevented a real mistake. Do not restate rules that already "
     "exist. Be conservative: an empty proposal list is the correct answer when "
     "nothing in memory warrants a change. Every proposal is reviewed by a human "
-    "before it can take effect. Return only the requested JSON object."
+    "before it can take effect."
 )
+
+_REFLECTION_SYSTEM_PROMPT = _REFLECTION_FACULTY_FRAMING + " Return only the requested JSON object."
 
 _TASK_INSTRUCTION = (
     "--- TASK ---\n"
@@ -105,6 +110,34 @@ _TASK_INSTRUCTION = (
     "- `priority`: integer, higher applies first (add default 0; on amend, omit "
     "to keep the existing priority).\n"
     "No other keys."
+)
+
+# Reasoning-only variants: same faculty framing / task, but ending with a
+# prose instruction instead of a JSON directive. Used for the think=True
+# first pass of the two-call split — the formatting pass (think=False)
+# transcribes this prose into the _ReflectionResult schema, guided by
+# _REFLECTION_SYSTEM_PROMPT + _TASK_INSTRUCTION (the original combined
+# prompt) as its system prompt.
+_REFLECTION_SYSTEM_PROMPT_REASONING = _REFLECTION_FACULTY_FRAMING
+
+_TASK_INSTRUCTION_REASONING = (
+    "--- TASK ---\n"
+    "Think this through, then answer in structured prose (not JSON) listing your proposed "
+    "rule changes, if any (an empty list is a valid and often correct answer). For each "
+    "proposal, cover:\n"
+    '- The action: "add", "retire", or "amend".\n'
+    "- For retire/amend: the id of the EXISTING active rule you're targeting (listed above).\n"
+    "- For add/amend: the rule's instruction text.\n"
+    '- The mode: "advisory" (prompt guidance) or "enforced" (a hard, machine-checked '
+    "pre/postcondition) — for add, advisory unless you have reason to enforce; for amend, "
+    "state explicitly only if you're changing the existing rule's mode.\n"
+    '- If enforced: the machine-checkable predicate as {"phase": ..., "check": ...} — for an '
+    "amend that keeps an enforced rule enforced, state explicitly only if you're changing it.\n"
+    "- The rationale: a short why, citing what in the memory motivates it.\n"
+    "- The priority: higher applies first (add default 0; on amend, state explicitly only if "
+    "changing it from the existing priority).\n"
+    "Write your answer as prose, not as JSON, code, or a key-value list — the field names "
+    "above describe what to cover, not how to format it."
 )
 
 
@@ -153,8 +186,9 @@ class ReflectionReport(BaseModel):
     pending proposal (or of an earlier suggestion in the same batch);
     ``superseded`` counts stale-evidence pending proposals retired this run;
     ``llm_calls`` is ``0`` on the empty-history fast path, otherwise the true
-    count of model calls made (the proposal call plus any compaction or
-    structured-output retry calls).
+    count of model calls made (the reasoning and formatting calls for the
+    proposal — two calls under ``complete_validated_via_reasoning`` — plus any
+    compaction or structured-output retry calls).
     """
 
     agent_id: str
@@ -168,18 +202,30 @@ class ReflectionReport(BaseModel):
 class _CallCountingClient:
     """Wrap an ``LLMClient`` and count every model call routed through it.
 
-    ``compact_text`` may call the model one or more times before the proposal
-    call, and ``complete_validated`` may retry on a schema miss; counting all of
-    them keeps ``ReflectionReport.llm_calls`` honest. This wrapper increments
-    ``calls`` when one of the model-entry methods is invoked directly on the
-    wrapper: ``complete``, ``complete_json``, ``complete_text`` (alias), and
-    ``chat``. Every other attribute delegates unchanged.
+    ``compact_text`` may call the model one or more times before the proposal;
+    the proposal itself makes two calls through ``complete_validated_via_reasoning``
+    — a reasoning ``complete()`` call and a formatting ``complete_json()`` call
+    (with possible correction retries inside ``complete_validated``) — each of
+    which is counted here. Counting all of them keeps ``ReflectionReport.llm_calls``
+    honest. This wrapper increments ``calls`` when one of the model-entry methods
+    is invoked directly on the wrapper: ``complete``, ``complete_json``,
+    ``complete_text`` (alias), and ``chat``. Every other attribute delegates
+    unchanged.
 
     Invariant: ``calls`` equals the number of counted entry-point invocations
     made through this wrapper.
     """
 
     def __init__(self, inner: Any) -> None:
+        """Wrap an LLM client and initialize the call counter.
+
+        Preconditions:
+            ``inner`` must expose ``complete`` and ``complete_json`` methods.
+        Postconditions:
+            ``self.calls`` is ``0``; attributes other than ``complete`` /
+            ``complete_json`` / ``complete_text`` / ``chat`` / ``calls`` /
+            ``_inner`` delegate to ``inner``.
+        """
         self._inner = inner
         self.calls = 0
 
@@ -216,8 +262,11 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
           bug.
     Postconditions:
         * Reads the agent's recent summaries, active rules, and pending
-          proposals. When the agent has no summaries yet, returns a
-          zero-``llm_calls`` report having made **no LLM call and no write**.
+          proposals. Stale-evidence pending proposals are superseded (a
+          durable write) even when there are no fresh summaries. When the
+          agent has no summaries yet, returns a zero-``llm_calls`` report
+          having made **no LLM call and no new proposal** after that
+          cleanup.
         * Every proposal written has ``status='pending'`` with
           ``proposed_rule.source='derived'`` and ``(summary_id, version)``
           evidence refs spanning the reflection window; **no rule is created or
@@ -381,6 +430,16 @@ def _propose(
 ) -> _ReflectionResult:
     """Render the inputs, bound them to budget, and ask the LLM to propose.
 
+    Two-pass structured-output flow via :func:`complete_validated_via_reasoning`:
+    a ``think=True`` reasoning pass (``reasoning_temperature=0.0``, deterministic
+    since this faculty must be conservative) over
+    ``_REFLECTION_SYSTEM_PROMPT_REASONING`` / ``_TASK_INSTRUCTION_REASONING``
+    that answers in structured prose (no JSON), followed by a ``think=False``
+    formatting pass — guided by ``_REFLECTION_SYSTEM_PROMPT`` +
+    ``_TASK_INSTRUCTION`` as its system prompt — that transcribes that prose
+    into the ``_ReflectionResult`` schema, retrying up to
+    ``correction_attempts=1`` time on a schema-validation miss.
+
     Preconditions: ``summaries`` is non-empty.
     Postconditions: returns a validated :class:`_ReflectionResult` (whose
     proposal list may be empty); the input is compacted to the configured char
@@ -395,14 +454,15 @@ def _propose(
     bounded = compact_text(
         text, _input_char_budget(), llm, content_description="agent memory and rules"
     )
-    prompt = f"{bounded}\n\n{_TASK_INSTRUCTION}"
-    return complete_validated(
+    prompt = f"{bounded}\n\n{_TASK_INSTRUCTION_REASONING}"
+    return complete_validated_via_reasoning(
         llm,
-        prompt,
         schema=_ReflectionResult,
+        reasoning_prompt=prompt,
+        reasoning_system_prompt=_REFLECTION_SYSTEM_PROMPT_REASONING,
+        formatting_system_prompt=f"{_REFLECTION_SYSTEM_PROMPT}\n\n{_TASK_INSTRUCTION}",
         objective="propose rule changes",
-        system_prompt=_REFLECTION_SYSTEM_PROMPT,
-        temperature=0.0,
+        reasoning_temperature=0.0,
         correction_attempts=1,
     )
 

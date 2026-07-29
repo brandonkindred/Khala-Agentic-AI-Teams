@@ -26,7 +26,12 @@ def default_repo_context(**overrides: Any) -> RepoContext:
 
 
 class FakeLLM:
-    """Minimal LLM stand-in returning a canned JSON dict per call.
+    """Minimal LLM stand-in for the two-call reasoning+JSON pattern.
+
+    - ``complete_json`` returns the canned JSON dict (the formatting pass).
+    - ``complete`` returns a string: the prompt truncated to ``max_chars``
+      for ``compact_text``, or the prompt echoed back for ``think=True``
+      reasoning (recorded on ``reasoning_calls``).
 
     Shared by ``test_agents.py`` (the class-based TSC/report-writer agents)
     and ``test_pipeline.py`` (the pipeline steps that wrap them) — both stub
@@ -39,6 +44,7 @@ class FakeLLM:
         self._response = response
         self._ctx_tokens = ctx_tokens
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
 
     def complete_json(
         self,
@@ -52,7 +58,20 @@ class FakeLLM:
         return self._response
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
-        return prompt[: kwargs.get("max_chars", 100)] if "max_chars" in kwargs else prompt
+        # ``complete`` serves two callers here: ``compact_text``, which passes
+        # ``max_chars`` and wants the text back, and the two-call split's
+        # think=True reasoning pass, which always passes ``think=True``.
+        # Gate compact_text detection on the absence of the reasoning marker
+        # (not just max_chars' presence) so a future reasoning call that also
+        # happens to carry ``max_chars`` alongside ``think=True`` is not
+        # misclassified as compact_text. Record the reasoning call so tests
+        # can assert the criterion's reasoning temperature actually reaches
+        # the pass that does the analysis — ``self.calls`` only ever sees the
+        # think=False formatting call.
+        if "max_chars" in kwargs and not kwargs.get("think"):
+            return prompt[: kwargs["max_chars"]]
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
+        return prompt
 
     def get_max_context_tokens(self) -> int:
         return self._ctx_tokens

@@ -792,7 +792,6 @@ def test_run_batch_coding_fixes_impl_skips_non_dict_issues_addressed():
         issues=[_issue(), _issue(description="bug2"), _issue(description="bug3")],
         current_files={"a.py": "orig"},
         language="python",
-        repo_path="",
         task_id="t1",
         phase_name="code_review",
         detail_callback=None,
@@ -820,7 +819,6 @@ def test_run_batch_coding_fixes_impl_ignores_non_dict_files():
         issues=[_issue()],
         current_files={"a.py": "orig"},
         language="python",
-        repo_path="",
         task_id="t1",
         phase_name="code_review",
         detail_callback=None,
@@ -861,7 +859,6 @@ def test_run_batch_coding_fixes_impl_tracks_unresolved_by_index_not_identity():
         issues=[issue1, issue2, issue3],
         current_files={"a.py": "orig", "b.py": "orig"},
         language="python",
-        repo_path="",
         task_id="t1",
         phase_name="code_review",
         detail_callback=None,
@@ -903,7 +900,6 @@ def test_run_batch_coding_fixes_impl_detects_duplicate_addressed_indices():
         issues=[_issue(), _issue(description="bug2")],
         current_files={"a.py": "orig"},
         language="python",
-        repo_path="",
         task_id="t1",
         phase_name="code_review",
         detail_callback=None,
@@ -1095,6 +1091,515 @@ def test_write_files_and_commit_reports_unsafe_path_as_failure(tmp_path: Path):
     assert ok is False
     assert "unsafe" in msg.lower()
     assert not (tmp_path / "good.py").exists()
+
+
+# --- problem-solving cleanup helpers / batch / runners ----------------------
+
+
+def test_format_summary_for_log_collapses_and_bounds():
+    long = "line1\nline2 " + ("x" * 200)
+    out = sh_ps._format_summary_for_log(long, max_chars=40)
+    assert "\n" not in out
+    assert len(out) == 40
+    assert out.endswith("…")
+    assert "line1 line2" in out
+
+
+def test_fill_named_placeholders_preserves_unrelated_braces():
+    out = sh_ps._fill_named_placeholders(
+        "conv={language_conventions} code={current_code}",
+        language_conventions="PY",
+        current_code="def f(x):\n    return {x}\n",
+    )
+    assert out == "conv=PY code=def f(x):\n    return {x}\n"
+    assert "{x}" in out
+
+
+def test_fill_named_placeholders_does_not_rescan_inserted_values():
+    """A value containing another placeholder token must not be expanded later."""
+    out = sh_ps._fill_named_placeholders(
+        "desc={description}|code={current_code}",
+        description="see {current_code} for context",
+        current_code="BODY",
+    )
+    assert out == "desc=see {current_code} for context|code=BODY"
+
+
+def test_attr_or_preserves_empty_string():
+    issue = SimpleNamespace(source="", severity=None, description="d")
+    assert sh_ps._attr_or(issue, "source", "review") == ""
+    assert sh_ps._attr_or(issue, "severity", "medium") == "medium"
+    assert sh_ps._attr_or(issue, "description", "No description") == "d"
+
+
+def test_format_all_code_truncation_marker_respects_budget():
+    files = {"a.py": "AAAA", "b.py": "BBBBBBBBBB"}
+    out = sh_ps._format_all_code(files, max_chars=20)
+    assert len(out) <= 20
+
+
+def test_format_all_code_counts_join_separators_in_budget():
+    """Many small files must not exceed max_chars via uncounted join separators."""
+    files = {f"f{i}.py": "x" for i in range(30)}
+    out = sh_ps._format_all_code(files, max_chars=50)
+    assert len(out) <= 50
+
+
+def test_format_issues_for_batch_normalizes_empty_severity():
+    out = sh_ps._format_issues_for_batch([_issue(severity="")])
+    assert "- **Severity:** medium" in out
+
+
+def test_fix_issues_one_at_a_time_prompt_normalizes_empty_severity():
+    captured: list[str] = []
+    issue = _issue(severity="")
+    runner = _runner("## RESOLVED ##\ntrue\n", on_prompt=captured.append)
+    sh_ps._fix_issues_one_at_a_time_impl(
+        llm=object(),
+        actionable=[issue],
+        current_files={"a.py": "x"},
+        lang_conv="PY",
+        task_id="t1",
+        single_issue_prompt="{severity}|{description}|{current_code}",
+        parse_single=lambda _raw: {"files": {}, "resolved": True},
+        has_language_conventions=False,
+        runner=runner,
+    )
+    assert captured[0].startswith("medium|")
+
+
+def test_format_issues_for_batch_preserves_empty_source():
+    out = sh_ps._format_issues_for_batch([_issue(source="")])
+    assert "- **Source:** " in out
+    # Empty string must not be replaced with the "review" default.
+    assert "- **Source:** review" not in out
+
+
+def test_run_batch_coding_fixes_impl_preserves_braces_in_code():
+    captured: list[str] = []
+    parsed = {
+        "files": {"a.py": "def f(x):\n    return x\n"},
+        "issues_addressed": [{"issue_index": 1}],
+        "summary": "ok",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue()],
+        current_files={"a.py": "def f(x):\n    return {x}\n"},
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt=(
+            "{language_conventions}|{issue_count}|{phase_name}|{formatted_issues}|{current_code}"
+        ),
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("x", on_prompt=captured.append),
+    )
+    assert result.resolved is True
+    assert "{x}" in captured[0]
+
+
+def test_run_batch_coding_fixes_impl_parse_failure_returns_unresolved():
+    def _boom(_raw: str):
+        raise ValueError("bad json")
+
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue()],
+        current_files={"a.py": "orig"},
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=_boom,
+        runner=_runner("raw"),
+    )
+    assert result.resolved is False
+    assert len(result.unresolved_issues) == 1
+    assert "parse" in result.summary.lower()
+
+
+def test_run_batch_coding_fixes_impl_rejects_non_list_issues_addressed():
+    parsed = {
+        "files": {"a.py": "fixed"},
+        "issues_addressed": {"issue_index": 1},
+        "summary": "did it",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue()],
+        current_files={"a.py": "orig"},
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("x"),
+    )
+    assert result.resolved is False
+    assert len(result.unresolved_issues) == 1
+
+
+def test_run_batch_coding_fixes_impl_addressed_count_uses_valid_indices():
+    parsed = {
+        "files": {"a.py": "fixed"},
+        "issues_addressed": ["nope", {"issue_index": 1}, {"issue_index": 1}, {"issue_index": 99}],
+        "summary": "did it",
+    }
+    details: list[str] = []
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue(), _issue(description="bug2")],
+        current_files={"a.py": "orig"},
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=details.append,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("x"),
+    )
+    assert result.resolved is False
+    assert len(result.unresolved_issues) == 1
+    assert any("1/2" in d for d in details)
+
+
+def test_run_batch_coding_fixes_impl_coerces_non_str_summary():
+    parsed = {
+        "files": {"a.py": "def broken(:\n"},
+        "issues_addressed": [{"issue_index": 1}],
+        "summary": 12345,
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue()],
+        current_files={"a.py": "orig"},
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("x"),
+    )
+    assert isinstance(result.summary, str)
+    assert "12345" in result.summary
+    assert "rejected" in result.summary.lower()
+
+
+def test_run_batch_coding_fixes_impl_no_actionable_returns_fresh_dict():
+    current = {"a.py": "orig"}
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue(severity="low")],
+        current_files=current,
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: {},
+        runner=_runner("x"),
+    )
+    assert result.resolved is True
+    assert result.files == current
+    assert result.files is not current
+
+
+def test_run_batch_coding_fixes_impl_treats_empty_severity_as_actionable():
+    """Empty severity must default to medium and enter the batch fix path."""
+    captured: list[str] = []
+    parsed = {
+        "files": {"a.py": "x = 1\n"},
+        "issues_addressed": [{"issue_index": 1}],
+        "summary": "ok",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue(severity="")],
+        current_files={"a.py": "orig"},
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=captured.append,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("x"),
+    )
+    assert result.resolved is True
+    assert any("Fixing all 1" in d for d in captured)
+
+
+def test_tool_file_rewrite_counts_as_applied_even_with_recommendations():
+    """Tool file updates count as applied; recommendations still do not."""
+
+    class _Agent:
+        def problem_solve(self, _inp):
+            return SimpleNamespace(
+                files={"a.py": "x = 1\n"},
+                recommendations=["also consider Y"],
+                summary="tool rewrite",
+            )
+
+    parses = iter(
+        [
+            {
+                "files": {"a.py": "llm = 1\n"},
+                "resolved": True,
+                "summary": "llm fix",
+                "root_cause": "",
+            }
+        ]
+    )
+    kind = be_models.ToolAgentKind.GENERAL
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=[_issue()]),
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="/tmp",
+        tool_agents={kind: _Agent()},
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{language_conventions}{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        runner=_runner("## FILE ##"),
+    )
+    assert result.summary.startswith("Applied 2 fix(s);")
+    assert sum(1 for e in result.fixes_applied if e.get("advisory")) == 1
+    assert sum(1 for e in result.fixes_applied if str(e.get("fix", "")).startswith("updated ")) == 1
+
+
+def test_applied_fix_count_ignores_freeform_recommendation_summary():
+    """An LLM fix whose summary text is literally 'recommendation' still counts."""
+    parses = iter(
+        [
+            {
+                "files": {"a.py": "x = 1\n"},
+                "resolved": True,
+                "summary": "recommendation",
+                "root_cause": "",
+            }
+        ]
+    )
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=[_issue()]),
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="/tmp",
+        tool_agents=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{language_conventions}{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        runner=_runner("## FILE ##"),
+    )
+    assert result.summary.startswith("Applied 1 fix(s);")
+    assert any(
+        e.get("fix") == "recommendation" and not e.get("advisory") for e in result.fixes_applied
+    )
+
+
+def test_recommendation_only_tool_does_not_inflate_applied_fix_count():
+    class _Agent:
+        def problem_solve(self, _inp):
+            return SimpleNamespace(files={}, recommendations=["do X"], summary="advise")
+
+    parses = iter(
+        [
+            {
+                "files": {"a.py": "x = 1\n"},
+                "resolved": True,
+                "summary": "llm fix",
+                "root_cause": "",
+            }
+        ]
+    )
+    kind = be_models.ToolAgentKind.GENERAL
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=[_issue()]),
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="/tmp",
+        tool_agents={kind: _Agent()},
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{language_conventions}{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        runner=_runner("## FILE ##"),
+    )
+    assert result.summary.startswith("Applied 1 fix(s);")
+    assert any(e.get("advisory") for e in result.fixes_applied)
+
+
+def test_fix_issues_one_at_a_time_preserves_braces_and_empty_source():
+    captured: list[str] = []
+    issue = _issue(source="", description="use {placeholder} carefully")
+    runner = _runner("## RESOLVED ##\ntrue\n", on_prompt=captured.append)
+    merged, fixes, unresolved = sh_ps._fix_issues_one_at_a_time_impl(
+        llm=object(),
+        actionable=[issue],
+        current_files={"a.py": "return {x}"},
+        lang_conv="PY",
+        task_id="t1",
+        single_issue_prompt=(
+            "{source}|{severity}|{description}|{file_path}|{recommendation}|{current_code}"
+        ),
+        parse_single=lambda _raw: {"files": {}, "resolved": True},
+        has_language_conventions=False,
+        runner=runner,
+    )
+    assert not unresolved
+    assert captured[0].startswith("|")
+    assert "{placeholder}" in captured[0]
+    assert "{x}" in captured[0]
+
+
+def test_run_problem_solving_impl_handles_none_issues():
+    current = {"a.py": "orig"}
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=None),
+        current_files=current,
+        language="python",
+        repo_path="/tmp",
+        tool_agents=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: {},
+        runner=_runner("x"),
+    )
+    assert result.resolved is True
+    assert result.files == current
+    assert result.files is not current
+
+
+def test_run_problem_solving_impl_combines_tool_and_fix_summaries():
+    class _Agent:
+        def problem_solve(self, _inp):
+            return SimpleNamespace(
+                files={"a.py": "x = 1\n"},
+                recommendations=["r1"],
+                summary="tool did work",
+            )
+
+    parses = iter(
+        [
+            {
+                "files": {"a.py": "llm = 1\n"},
+                "resolved": True,
+                "summary": "llm fix",
+                "root_cause": "",
+            }
+        ]
+    )
+    kind = be_models.ToolAgentKind.BUILD_SPECIALIST
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=[_issue()]),
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="/tmp",
+        tool_agents={kind: _Agent()},
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{language_conventions}{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        runner=_runner("## FILE ##"),
+    )
+    assert "Applied" in result.summary
+    assert "Tool" in result.summary
+    assert any(
+        set(e) >= {"source", "issue", "recommendation", "fix", "root_cause"}
+        for e in result.fixes_applied
+        if e.get("source") == kind.value
+    )
+
+
+def test_apply_tool_agents_files_only_updates_summary_and_schema():
+    class _Agent:
+        def problem_solve(self, _inp):
+            return SimpleNamespace(files={"a.py": "x = 1\n"}, recommendations=[], summary="patched")
+
+    kind = be_models.ToolAgentKind.GENERAL
+    merged = {"a.py": "orig"}
+    fixes: list = []
+    parts: list = []
+    sh_ps._apply_tool_agents_problem_solve(
+        tool_agents={kind: _Agent()},
+        phase_inp=SimpleNamespace(),
+        merged=merged,
+        fixes_applied=fixes,
+        summary_parts=parts,
+        task_id="t1",
+        microtask_id="mt-1",
+    )
+    assert merged["a.py"].startswith("x")
+    assert any("Tool" in p for p in parts)
+    assert parts
+    assert len(fixes) == 1
+    assert fixes[0]["fix"].startswith("updated ")
+    assert not fixes[0].get("advisory")
+
+
+def test_apply_tool_agents_recommendation_schema_includes_llm_keys():
+    class _Agent:
+        def problem_solve(self, _inp):
+            return SimpleNamespace(files={}, recommendations=["do X"], summary="s")
+
+    kind = be_models.ToolAgentKind.GENERAL
+    fixes: list = []
+    parts: list = []
+    sh_ps._apply_tool_agents_problem_solve(
+        tool_agents={kind: _Agent()},
+        phase_inp=SimpleNamespace(),
+        merged={},
+        fixes_applied=fixes,
+        summary_parts=parts,
+        task_id="t1",
+        microtask_id="mt-1",
+    )
+    assert set(fixes[0]) >= {
+        "source",
+        "issue",
+        "recommendation",
+        "fix",
+        "root_cause",
+        "microtask",
+    }
+    assert fixes[0].get("advisory") is True
 
 
 # --- deliberate wrapper duplication drift guard ------------------------------

@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
+from llm_service import complete_json_via_reasoning
+
 from ..models import JobPosting, RankedJob, SubScores
 from ..profile.model import WEIGHT_FIELDS, JobSeekerProfile
-from ..prompts import RANKER_SYSTEM_PROMPT
+from ..prompts import RANKER_FORMAT_INSTRUCTIONS, RANKER_SYSTEM_PROMPT_REASONING
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +91,13 @@ class JobRankerAgent:
                 f"Job seeker criteria (JSON):\n{profile_json}\n\n"
                 f"Job posting (JSON):\n{posting.model_dump_json(indent=2)}"
             )
-            data = self._client().complete_json(
-                prompt,
-                temperature=0.1,
-                system_prompt=RANKER_SYSTEM_PROMPT,
-                objective="rank job candidates",
-                think=False,
+            data = complete_json_via_reasoning(
+                self._client(),
+                reasoning_prompt=prompt,
+                reasoning_system_prompt=RANKER_SYSTEM_PROMPT_REASONING,
+                formatting_instructions=RANKER_FORMAT_INSTRUCTIONS,
+                reasoning_temperature=0.1,
+                objective="score job posting fit",
             )
         except Exception:  # noqa: BLE001 - scoring is best-effort per posting
             logger.warning("Ranker LLM call failed for %s", posting.url, exc_info=True)

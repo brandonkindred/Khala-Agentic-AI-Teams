@@ -73,14 +73,14 @@ single self-scheduling `SandboxReaperWorkflow`). Read-only ops (`status`,
 `list_active`, `metrics`, `note_activity`) stay direct on the API loop. Dispatch
 lives in `agent_provisioning_team.temporal.sandbox_dispatch`; the workflows and
 activities are exported from `temporal/__init__.py` as `SANDBOX_WORKFLOWS` /
-`SANDBOX_ACTIVITIES` — deliberately **not** part of the team's Pattern A
+`SANDBOX_ACTIVITIES` — deliberately **not** part of the team's main
 `WORKFLOWS`/`ACTIVITIES` lists. They run on their own `SANDBOX_TASK_QUEUE`
 (`temporal/constants.py`), served only by a worker started explicitly from
 `unified_api/main.py`'s own lifespan
-(`start_agent_provisioning_sandbox_temporal_worker_thread`) — never by Pattern
-A's auto-boot, which also runs unchanged inside the standalone
-`agent-provisioning-service` team container. Sharing a task queue between the
-two would let Temporal dispatch a sandbox activity into that other process,
+(`start_agent_provisioning_sandbox_temporal_worker_thread`) — never by the
+main provisioning worker that team_service boots on `TASK_QUEUE`. Sharing a
+task queue between the two would let Temporal dispatch a sandbox activity into
+that other process,
 against a different, unsynchronized `Lifecycle` instance than the one this
 API's `status`/`list`/`metrics`/`note_activity` routes read — silently
 diverging state (e.g. the reaper tearing down a sandbox it wrongly believes
