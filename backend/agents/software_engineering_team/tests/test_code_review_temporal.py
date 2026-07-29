@@ -1518,6 +1518,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
         find_side_effect_impact_activity,
@@ -1548,6 +1549,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         filter_false_positives_activity,
         _raising_architecture_activity,
         find_side_effect_impact_activity,
+        consolidate_side_effect_issues_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
