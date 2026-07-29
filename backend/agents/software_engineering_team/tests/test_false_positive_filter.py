@@ -15,6 +15,8 @@ chunk review and the verification call in an end-to-end run.
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -81,7 +83,11 @@ class _VerdictStub(DummyLLMClient):
     the verifier from one injected client in an end-to-end coordinator run.
     """
 
-    def __init__(self, verdicts: List[Dict[str, Any]], chunk_issues: Optional[List[Dict]] = None):
+    def __init__(
+        self,
+        verdicts: List[Dict[str, Any]],
+        chunk_issues: Optional[List[Dict[str, Any]]] = None,
+    ):
         super().__init__()
         self._verdicts = verdicts
         self._chunk_issues = chunk_issues
@@ -151,10 +157,34 @@ def _enable_filter(monkeypatch):
 # --------------------------------------------------------------------------- CodebaseIndex
 
 
-def test_index_from_files_keeps_nonblank() -> None:
-    """``from_input`` keeps only files with non-blank content (blank/empty dropped)."""
-    idx = CodebaseIndex.from_input(_input(files={"a.py": "x = 1\n", "b.py": "   ", "c.py": ""}))
-    assert set(idx.files) == {"a.py"}
+def test_index_from_files_keeps_whitespace_only() -> None:
+    """``from_input`` keeps whitespace-only files; only None/empty-string content is dropped."""
+    idx = CodebaseIndex.from_input(
+        _input(files={"a.py": "x = 1\n", "b.py": "   ", "c.py": "", "d.py": "\n"})
+    )
+    assert set(idx.files) == {"a.py", "b.py", "d.py"}
+
+
+def test_verdict_invariant_rejects_low_confidence_false_positive() -> None:
+    """``_Verdict`` rejects is_false_positive=True without high/medium confidence."""
+    from code_review_agent.false_positive_filter import _Verdict
+
+    with pytest.raises(ValueError):
+        _Verdict(is_false_positive=True, confidence="low")
+    with pytest.raises(ValueError):
+        _Verdict(is_false_positive=True, confidence="")
+    ok = _Verdict(is_false_positive=True, confidence="high")
+    assert ok.is_false_positive is True
+
+
+def test_codebase_index_is_frozen_and_isolates_files_dict() -> None:
+    """Frozen index isolates its files map from the caller's dict and rejects reassignment."""
+    src = {"a.py": "x"}
+    idx = CodebaseIndex(files=src)
+    src["a.py"] = "mutated"
+    assert idx.files["a.py"] == "x"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        idx.files = {}  # type: ignore[misc]
 
 
 def test_index_from_legacy_code_parses_headers() -> None:
@@ -187,6 +217,22 @@ def test_read_file_blank_and_missing() -> None:
     assert "not found" in idx.read_file("does/not/exist.py")
     # Existing-codebase pseudo-path with no excerpt is an error, not an empty hit.
     assert idx.read_file(CodebaseIndex.EXISTING_CODEBASE_PATH).startswith("Error")
+
+
+def test_existing_codebase_pseudo_path_ignores_repo_reader_when_no_excerpt() -> None:
+    """The existing-codebase pseudo-path never consults the repo reader when the excerpt is missing."""
+    reader = _FakeReader({CodebaseIndex.EXISTING_CODEBASE_PATH: "REPO_CONTENT"})
+    idx = CodebaseIndex(
+        files={"app/main.py": "BODY"},
+        existing_codebase="",
+        repo_reader=reader,  # type: ignore[arg-type]
+    )
+    msg = idx.read_file(CodebaseIndex.EXISTING_CODEBASE_PATH)
+    assert msg.startswith("Error")
+    assert "no existing-codebase excerpt" in msg
+    assert "REPO_CONTENT" not in msg
+    # resolve_path must also return None — never fall through to the repo reader
+    assert idx.resolve_path(CodebaseIndex.EXISTING_CODEBASE_PATH) is None
 
 
 def test_read_file_unique_suffix_match() -> None:
@@ -284,6 +330,40 @@ def test_list_files_tool_handles_empty_index() -> None:
     assert list_files() == "(no files available)"
 
 
+def test_truncate_for_log_caps_length() -> None:
+    """``_truncate_for_log`` leaves short text alone and caps long text with an ellipsis."""
+    from code_review_agent.false_positive_filter import _truncate_for_log
+
+    assert _truncate_for_log("abc", 10) == "abc"
+    assert _truncate_for_log(None, 10) == ""
+    assert len(_truncate_for_log("x" * 500, 400)) == 403  # 400 + "..."
+    assert _truncate_for_log("x" * 500, 400).endswith("...")
+    with pytest.raises(ValueError):
+        _truncate_for_log("x", 0)
+
+
+def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
+    """Index-backed tools return Error strings when the underlying index raises."""
+    idx = CodebaseIndex(files={"a.py": "x"})
+    read_file, list_files, search_codebase, _find = _build_tools(idx)
+
+    def _boom_read(_self: CodebaseIndex, path: str) -> str:
+        raise RuntimeError("index boom")
+
+    def _boom_list(_self: CodebaseIndex) -> List[str]:
+        raise RuntimeError("index boom")
+
+    def _boom_search(_self: CodebaseIndex, query: str, max_matches: int = 60):
+        raise RuntimeError("index boom")
+
+    monkeypatch.setattr(CodebaseIndex, "read_file", _boom_read)
+    monkeypatch.setattr(CodebaseIndex, "list_files", _boom_list)
+    monkeypatch.setattr(CodebaseIndex, "search", _boom_search)
+    assert read_file("a.py").startswith("Error")
+    assert list_files().startswith("Error")
+    assert search_codebase("x").startswith("Error")
+
+
 # --------------------------------------------------------------------------- find_function_at_line
 
 
@@ -295,6 +375,16 @@ def test_find_function_at_line_python_top_level() -> None:
     result = find_function_at_line("app/main.py", 2)
     assert "alpha" in result
     assert "beta" not in result
+
+
+def test_find_function_at_line_line_one_is_one_based() -> None:
+    """``line_number=1`` resolves the construct starting on the first line (1-based contract)."""
+    code = "def alpha():\n    return 1\n"
+    idx = CodebaseIndex(files={"app/main.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("app/main.py", 1)
+    assert "alpha" in result
+    assert not result.startswith("Error:")
 
 
 def test_find_function_at_line_python_nested() -> None:
@@ -356,11 +446,19 @@ def test_find_function_at_line_unknown_path() -> None:
 
 def test_find_function_at_line_content_literally_starting_with_error() -> None:
     """A readable file whose content starts with 'Error:' is not mistaken for a failure."""
-    code = '"""Error: this is a docstring, not a read failure."""\ndef alpha():\n    pass\n'
+    code = "Error: this is file content, not a read failure.\ndef alpha():\n    pass\n"
     idx = CodebaseIndex(files={"fixtures/log_sample.py": code})
+    # Contract under test: content beginning with ``Error:`` is still readable.
+    assert idx.read_file_or_none("fixtures/log_sample.py") == code
+    assert code.startswith("Error:")
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("fixtures/log_sample.py", 2)
-    assert "alpha" in result
+    # Must not treat the content as a read-failure sentinel.
+    assert "is not a readable path" not in result
+    # Content is invalid Python, so the AST path reports a parse error —
+    # which still proves the bytes were obtained and inspected.
+    assert "Could not parse" in result
+    assert not result.startswith("Error:")
 
 
 def test_find_function_at_line_python_syntax_error() -> None:
@@ -415,10 +513,11 @@ def test_find_function_at_line_never_raises(monkeypatch: pytest.MonkeyPatch) -> 
     """
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
 
-    def _boom(path: str) -> str:
+    def _boom(_self: CodebaseIndex, path: str) -> str:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(idx, "resolve_path", _boom)
+    # Patch on the class: CodebaseIndex is frozen, so instance setattr fails.
+    monkeypatch.setattr(CodebaseIndex, "resolve_path", _boom)
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("app/main.py", 1)
     assert result.startswith("Error")
@@ -467,6 +566,45 @@ def test_strip_numbered_prefixes_empty_content() -> None:
     assert stripped == ""
     assert physical == 1
     assert mapper is None
+
+
+def test_find_function_at_line_rejects_nonpositive_line() -> None:
+    """Tool returns an error string for invalid line numbers instead of guessing or raising."""
+    idx = CodebaseIndex(files={"app/main.py": "def f():\n    return 1\n"})
+    _, _, _, find_fn = _build_tools(idx)
+    for bad in (0, -1, -3, True, False, "5"):
+        msg = find_fn("app/main.py", bad)  # type: ignore[arg-type]
+        assert msg.startswith("Error:"), bad
+        assert "positive" in msg.lower(), bad
+    missing = find_fn("does/not/exist.py", 1)
+    assert missing.startswith("Error:")
+    assert "not a readable path" in missing
+
+
+def test_strip_numbered_prefixes_rejects_bad_preconditions() -> None:
+    """Helper raises when documented preconditions are violated."""
+    with pytest.raises((TypeError, ValueError, AssertionError)):
+        _strip_numbered_prefixes(None, 1)  # type: ignore[arg-type]
+    with pytest.raises((TypeError, ValueError, AssertionError)):
+        _strip_numbered_prefixes("x = 1\n", 0)
+
+
+def test_find_heuristic_beyond_eof() -> None:
+    """Heuristic finder reports beyond-EOF instead of attributing the last construct."""
+    from code_review_agent.false_positive_filter import _find_heuristic_function_at_line
+
+    content = "function alpha() {\n  return 1;\n}\n"
+    msg = _find_heuristic_function_at_line(content, 99, "app.ts")
+    assert "beyond" in msg.lower()
+
+
+def test_find_function_at_line_python_beyond_eof() -> None:
+    """Python AST finder returns an explicit beyond-EOF message for out-of-range lines."""
+    idx = CodebaseIndex(files={"app/main.py": "def alpha():\n    return 1\n"})
+    _, _, _, find_fn = _build_tools(idx)
+    msg = find_fn("app/main.py", 99)
+    assert "beyond the end" in msg.lower()
+    assert "file has" in msg.lower()
 
 
 def test_find_function_at_line_pre_numbered_python() -> None:
@@ -581,6 +719,10 @@ def test_coerce_verdict_variants() -> None:
     assert _coerce_verdict({"is_real_issue": False, "confidence": "high"}) is None
     assert _coerce_verdict({"index": "x"}) is None
     assert _coerce_verdict("not a dict") is None
+    # bool / float / negative indices are rejected (not coerced)
+    assert _coerce_verdict({"index": True, "is_real_issue": False, "confidence": "high"}) is None
+    assert _coerce_verdict({"index": 1.9, "is_real_issue": False, "confidence": "high"}) is None
+    assert _coerce_verdict({"index": -1, "is_real_issue": False, "confidence": "high"}) is None
 
 
 def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:
@@ -620,7 +762,7 @@ def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
     """``_build_group_prompt`` emits per-finding anchor indices, the task description, and the full file body."""
     idx = CodebaseIndex(files={"app/main.py": "X" * 50}, existing_codebase="old")
     issues = [_issue(description="d0"), _issue(description="d1", line=None)]
-    prompt = _build_group_prompt(idx, "app/main.py", issues, _input(), max_inline_chars=10)
+    prompt = _build_group_prompt(idx, "app/main.py", issues, _input())
     assert "verdicts" in prompt.lower()
     assert "Finding index 0" in prompt and "Finding index 1" in prompt
     assert "wire up foo" in prompt  # task description
@@ -630,7 +772,10 @@ def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
 
 def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
     """Task description and acceptance criteria are capped at ``_CONTEXT_FIELD_CHARS``."""
-    from code_review_agent.false_positive_filter import _CONTEXT_FIELD_CHARS
+    from code_review_agent.false_positive_filter import (
+        _CONTEXT_FIELD_CHARS,
+        _CONTEXT_FIELD_TRUNCATION_MARKER,
+    )
 
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     huge = "T" * (_CONTEXT_FIELD_CHARS + 50)
@@ -640,22 +785,32 @@ def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
         task_description=huge,
         acceptance_criteria=[huge_ac, "short ok"],
     )
-    prompt = _build_group_prompt(idx, "app/main.py", [_issue()], inp, max_inline_chars=10)
+    prompt = _build_group_prompt(idx, "app/main.py", [_issue()], inp)
     assert "T" * _CONTEXT_FIELD_CHARS in prompt
     assert "T" * (_CONTEXT_FIELD_CHARS + 1) not in prompt
-    assert "... (truncated)" in prompt
+    assert _CONTEXT_FIELD_TRUNCATION_MARKER.strip() in prompt
     assert "A" * _CONTEXT_FIELD_CHARS in prompt
     assert "short ok" in prompt
+
+
+def test_group_prompt_unreadable_file_uses_placeholder() -> None:
+    """``_build_group_prompt`` never raises when the cited path is unreadable."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    prompt = _build_group_prompt(idx, "missing.py", [_issue()], _input())
+    assert "(file content unavailable)" in prompt
+    assert "Finding index 0" in prompt
+    assert "verdicts" in prompt.lower()
 
 
 def test_group_prompt_caps_manifest_and_notes_overflow() -> None:
     """A submission with more files than the manifest cap lists only the cap and notes the rest."""
     files = {f"f{i:04d}.py": "x = 1\n" for i in range(305)}
     idx = CodebaseIndex(files=files)
-    prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input(), 1000)
+    prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input())
     assert "f0000.py" in prompt
     assert "f0304.py" not in prompt
     assert "call list_files()" in prompt
+
 
 def test_code_fence_for_grows_past_backtick_runs() -> None:
     """``_code_fence_for`` returns a fence longer than the longest backtick run in the content."""
@@ -669,9 +824,7 @@ def test_code_fence_for_grows_past_backtick_runs() -> None:
 def test_group_prompt_uses_safe_fence_for_backtick_content() -> None:
     """A file body containing a ``` fence is wrapped in a longer fence so it cannot close early."""
     idx = CodebaseIndex(files={"app/doc.md": "before\n```python\nx = 1\n```\nafter\n"})
-    prompt = _build_group_prompt(
-        idx, "app/doc.md", [_issue(file_path="app/doc.md")], _input(), 1000
-    )
+    prompt = _build_group_prompt(idx, "app/doc.md", [_issue(file_path="app/doc.md")], _input())
     # The wrapping fence is four backticks (one longer than the body's run); the
     # body's own ``` survives intact between them.
     assert "````" in prompt
@@ -761,10 +914,50 @@ def test_resolve_path_exact_suffix_and_misses() -> None:
     )
 
 
+def test_resolve_preserves_hidden_file_basename() -> None:
+    """Bare-name normalization must not strip the leading dot from ``.env``."""
+    idx = CodebaseIndex(files={"config/.env": "SECRET=1\n"})
+    assert idx.resolve_path(".env") == "config/.env"
+    assert idx.resolve_path("./.env") == "config/.env"
+    assert idx.read_file(".env") == "SECRET=1\n"
+
+
+def test_resolve_preserves_stored_leading_dot_slash_and_absolute_prefix() -> None:
+    """Bare-name and slash-suffix resolution ignore stored leading ``./`` and ``/``."""
+    idx = CodebaseIndex(files={"./main.py": "BODY"})
+    assert idx.resolve_path("main.py") == "./main.py"
+    assert idx.read_file("main.py") == "BODY"
+
+    idx2 = CodebaseIndex(files={"/app/main.py": "BODY2"})
+    assert idx2.resolve_path("main.py") == "/app/main.py"
+    assert idx2.read_file("main.py") == "BODY2"
+
+    # Slash-containing citations must also normalize stored prefixes.
+    idx3 = CodebaseIndex(files={"./config/.env": "SECRET=1\n"})
+    assert idx3.resolve_path("config/.env") == "./config/.env"
+    assert idx3.read_file("config/.env") == "SECRET=1\n"
+
+    idx4 = CodebaseIndex(files={"/src/config/.env": "SECRET=2\n"})
+    assert idx4.resolve_path("config/.env") == "/src/config/.env"
+    assert idx4.read_file("config/.env") == "SECRET=2\n"
+
+
+def test_ambiguous_submission_does_not_fall_through_to_reader() -> None:
+    """Multiple submission suffix hits must not resolve via a same-basename repo file."""
+    reader = _FakeReader({"helpers.py": "REPO"})
+    idx = CodebaseIndex(
+        files={"a/helpers.py": "A", "b/helpers.py": "B"},
+        repo_reader=reader,  # type: ignore[arg-type]
+    )
+    assert idx.resolve_path("helpers.py") is None
+    msg = idx.read_file("helpers.py")
+    assert "ambiguous" in msg
+    assert "REPO" not in msg
+
+
 def test_filter_resolves_via_code_review_verify_key(monkeypatch) -> None:
     """Production path resolves the verifier model via the lighter ``code_review_verify``
     agent key (not the primary ``code_review`` key used by chunk review)."""
-    import code_review_agent.false_positive_filter as fpf
     import code_review_agent.model_resolution as mr
 
     calls: List[str] = []
@@ -777,10 +970,6 @@ def test_filter_resolves_via_code_review_verify_key(monkeypatch) -> None:
         return stub
 
     monkeypatch.setattr(mr, "get_strands_model", _fake_get)
-    # Stub context sizing so a bare non-Model ``llm`` does not fail setup before
-    # the verification call (``compute_code_review_map_chunk_chars`` probes the
-    # injected client; production resolution only needs a non-strands object).
-    monkeypatch.setattr(fpf, "compute_code_review_map_chunk_chars", lambda _llm: 8_000)
     out = filter_false_positives(object(), _input(), [_issue()])  # type: ignore[arg-type]
     assert calls == ["code_review_verify"]
     assert len(out) == 1  # confirmed-real finding kept
@@ -807,8 +996,6 @@ def test_filter_uses_code_review_verify_model(monkeypatch) -> None:
         return stub_model
 
     monkeypatch.setattr(fpf, "resolve_code_review_verify_model", _fake_resolve_verify)
-    # Stub context sizing so a bare non-Model ``llm`` does not fail setup.
-    monkeypatch.setattr(fpf, "compute_code_review_map_chunk_chars", lambda _llm: 8_000)
 
     out = filter_false_positives(llm, _input(), [issue])  # type: ignore[arg-type]
     assert out == [issue]
@@ -834,6 +1021,29 @@ def test_filter_removes_confirmed_false_positive() -> None:
     assert out == [keep]
 
 
+def test_filter_drop_log_truncates_description(caplog) -> None:
+    """Drop INFO logs truncate oversized description and reasoning fields."""
+    keep = _issue(description="real", line=5)
+    drop = _issue(description="D" * 1000, line=1)
+    stub = _VerdictStub(
+        verdicts=[
+            {"index": 0, "is_real_issue": True, "confidence": "high"},
+            {
+                "index": 1,
+                "is_real_issue": False,
+                "confidence": "high",
+                "reasoning": "R" * 1000,
+            },
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        out = filter_false_positives(stub, _input(), [keep, drop])
+    assert out == [keep]
+    joined = " ".join(r.message for r in caplog.records)
+    assert "D" * 1000 not in joined
+    assert "R" * 1000 not in joined
+
+
 def test_filter_keeps_blank_path_issue_even_with_other_removals() -> None:
     """A blank-path finding is never verified, so it survives alongside removals."""
     blank = _issue(file_path="", description="overall rejection")
@@ -850,18 +1060,17 @@ def test_filter_keeps_on_verifier_error() -> None:
     assert out == issues
 
 
-def test_filter_keeps_on_setup_exception() -> None:
+def test_filter_keeps_on_setup_exception(monkeypatch) -> None:
     """A failure in the verification *setup* (before the per-group loop) must be
     caught by the fail-safe guard and keep all findings — not crash the review."""
+    import code_review_agent.false_positive_filter as mod
 
-    class BoomCtxStub(DummyLLMClient):
-        # context sizing (compute_code_review_map_chunk_chars) calls this during
-        # setup, after the index is built — a perfect injection point.
-        def get_max_context_tokens(self) -> int:  # type: ignore[override]
-            raise RuntimeError("context sizing boom")
+    def _boom(*_a, **_k):
+        raise RuntimeError("model resolve boom")
 
+    monkeypatch.setattr(mod, "resolve_code_review_verify_model", _boom)
     issues = [_issue()]
-    out = filter_false_positives(BoomCtxStub(), _input(), issues)
+    out = filter_false_positives(DummyLLMClient(), _input(), issues)
     assert out == issues  # kept, no exception propagated
 
 
