@@ -33,6 +33,35 @@ MAX_ITERATIONS_PER_ISSUE = 5
 MAX_BATCH_FIX_CODE_CHARS = 60_000  # Cap context to avoid blowing up the LLM context window
 
 
+def _fill_named_placeholders(template: str, **values: object) -> str:
+    """Replace exact ``{name}`` tokens; leave all other braces untouched.
+
+    Preconditions:
+        ``template`` is a str; each value is convertible via ``str(...)``.
+    Postconditions:
+        Every ``{key}`` for a provided key is replaced with ``str(value)``;
+        braces that are not exact provided keys remain; returns a new string.
+    """
+    assert isinstance(template, str), "template must be a str"
+    result = template
+    for key, value in values.items():
+        result = result.replace("{" + key + "}", str(value))
+    return result
+
+
+def _attr_or(obj: Any, name: str, default: Any) -> Any:
+    """Return attribute ``name`` unless it is ``None`` (empty string is kept).
+
+    Preconditions:
+        ``name`` is a non-empty str.
+    Postconditions:
+        Returns ``default`` only when the attribute is missing or ``None``.
+    """
+    assert isinstance(name, str) and name, "name must be a non-empty str"
+    value = getattr(obj, name, None)
+    return default if value is None else value
+
+
 def _format_all_code(
     current_files: Dict[str, str], max_chars: int = MAX_BATCH_FIX_CODE_CHARS
 ) -> str:
@@ -41,8 +70,9 @@ def _format_all_code(
     Preconditions:
         ``current_files`` maps paths to content; ``max_chars`` > 0.
     Postconditions:
-        Returns a code block within ``max_chars`` (a trailing file is marked
-        truncated); ``"(no code)"`` when empty. Pure.
+        Returns a code block whose length is ≤ ``max_chars`` (stops at the first
+        file that cannot fit, optionally appending a truncation marker when the
+        marker itself fits); ``"(no code)"`` when empty. Pure.
     """
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
@@ -51,7 +81,9 @@ def _format_all_code(
     for path, content in current_files.items():
         chunk = f"--- {path} ---\n{content}\n"
         if total + len(chunk) > max_chars:
-            parts.append(f"--- {path} --- (truncated, {len(content)} chars omitted)\n")
+            marker = f"--- {path} --- (truncated, {len(content)} chars omitted)\n"
+            if total + len(marker) <= max_chars:
+                parts.append(marker)
             break
         parts.append(chunk)
         total += len(chunk)
@@ -64,20 +96,17 @@ def _format_issues_for_batch(issues: List[Any]) -> str:
     Preconditions:
         ``issues`` is a list of review issues with the usual attributes.
     Postconditions:
-        Returns a numbered, human-readable block. Pure.
+        Returns a numbered, human-readable block. Pure. Empty-string attributes
+        are preserved (only ``None``/missing uses the documented default).
     """
     lines: List[str] = []
     for idx, issue in enumerate(issues, 1):
         lines.append(f"### Issue {idx}")
-        lines.append(f"- **Source:** {getattr(issue, 'source', None) or 'review'}")
-        lines.append(f"- **Severity:** {getattr(issue, 'severity', None) or 'medium'}")
-        lines.append(f"- **File:** {getattr(issue, 'file_path', None) or 'N/A'}")
-        lines.append(
-            f"- **Description:** {getattr(issue, 'description', None) or 'No description'}"
-        )
-        lines.append(
-            f"- **Recommendation:** {getattr(issue, 'recommendation', None) or 'Fix the issue.'}"
-        )
+        lines.append(f"- **Source:** {_attr_or(issue, 'source', 'review')}")
+        lines.append(f"- **Severity:** {_attr_or(issue, 'severity', 'medium')}")
+        lines.append(f"- **File:** {_attr_or(issue, 'file_path', 'N/A')}")
+        lines.append(f"- **Description:** {_attr_or(issue, 'description', 'No description')}")
+        lines.append(f"- **Recommendation:** {_attr_or(issue, 'recommendation', 'Fix the issue.')}")
         lines.append("")
     return "\n".join(lines)
 
@@ -109,7 +138,6 @@ def run_batch_coding_fixes_impl(
     issues: List[Any],
     current_files: Dict[str, str],
     language: str,
-    repo_path: str,
     task_id: str,
     phase_name: str,
     detail_callback: Optional[Callable[[str], None]],
@@ -124,32 +152,35 @@ def run_batch_coding_fixes_impl(
     Instead of fixing issues one at a time, this sends all issues to the coding
     agent at once, allowing it to decide how to organize the fixes internally.
 
+    Only issues with severity ``critical``, ``high``, or ``medium`` are
+    considered actionable; ``low``/``info`` issues are silently ignored and
+    will not be included in the batch fix.
+
     Preconditions:
         ``batch_fix_prompt`` has a ``{language_conventions}`` slot (both stacks
         do); ``models`` exposes ``ProblemSolvingResult``; ``profile`` supplies the
         language conventions.
     Postconditions:
-        Returns a ``ProblemSolvingResult``; on LLM failure returns an unresolved
-        result carrying the actionable issues. A ``.py`` rewrite that fails to
-        parse (see :func:`~software_engineering_team.shared.code_completeness.reject_invalid_python`)
+        Returns a ``ProblemSolvingResult``; on LLM or parse failure returns an
+        unresolved result carrying the actionable issues. A ``.py`` rewrite that
+        fails to parse (see :func:`~software_engineering_team.shared.code_completeness.reject_invalid_python`)
         is discarded -- the prior version of that file is kept in ``files`` --
         and any issue whose ``file_path`` matches a rejected file stays in
         ``unresolved_issues`` even if the LLM reported it as addressed.
+        ``files`` is always a fresh dict (never the caller's input object).
     """
     problem_solving_result_cls = models.ProblemSolvingResult
 
     microtask_id = microtask.id
     actionable = [
-        i
-        for i in issues
-        if (getattr(i, "severity", None) or "medium") in ("critical", "high", "medium")
+        i for i in issues if _attr_or(i, "severity", "medium") in ("critical", "high", "medium")
     ]
 
     if not actionable:
         logger.info("[%s] Batch fix for %s: no actionable issues.", task_id, phase_name)
         return problem_solving_result_cls(
             resolved=True,
-            files=current_files,
+            files=dict(current_files),
             summary=f"No actionable {phase_name} issues to fix.",
         )
 
@@ -169,7 +200,8 @@ def run_batch_coding_fixes_impl(
     formatted_issues = _format_issues_for_batch(actionable)
     current_code = _format_all_code(current_files)
 
-    prompt = batch_fix_prompt.format(
+    prompt = _fill_named_placeholders(
+        batch_fix_prompt,
         language_conventions=lang_conv,
         issue_count=len(actionable),
         phase_name=phase_name,
@@ -188,24 +220,40 @@ def run_batch_coding_fixes_impl(
         )
         return problem_solving_result_cls(
             resolved=False,
-            files=current_files,
+            files=dict(current_files),
             summary=f"Batch fix failed: {exc}",
             unresolved_issues=actionable,
         )
 
-    parsed = parse_batch_fix_template(raw)
+    try:
+        parsed = parse_batch_fix_template(raw)
+    except Exception as exc:
+        logger.error(
+            "[%s] Microtask %s: batch fix output parsing failed: %s",
+            task_id,
+            microtask_id,
+            exc,
+        )
+        return problem_solving_result_cls(
+            resolved=False,
+            files=dict(current_files),
+            summary=f"Batch fix failed: could not parse LLM output: {exc}",
+            unresolved_issues=actionable,
+        )
+
     if not isinstance(parsed, dict):  # defensive: a malformed parser result must not crash
         parsed = {}
-    fixed_files = parsed.get("files") or {}
-    if not isinstance(fixed_files, dict):
+    fixed_files_raw = parsed.get("files")
+    fixed_files = fixed_files_raw if isinstance(fixed_files_raw, dict) else {}
+    if fixed_files_raw is not None and not isinstance(fixed_files_raw, dict):
         logger.warning(
             "[%s] Microtask %s: batch fix returned non-dict files; ignoring.",
             task_id,
             microtask_id,
         )
-        fixed_files = {}
-    issues_addressed = parsed.get("issues_addressed") or []
-    summary = parsed.get("summary") or f"Batch fixed {len(fixed_files)} file(s)"
+    issues_addressed_raw = parsed.get("issues_addressed")
+    issues_addressed = issues_addressed_raw if isinstance(issues_addressed_raw, list) else []
+    summary = str(parsed.get("summary") or f"Batch fixed {len(fixed_files)} file(s)")
 
     fixed_files, rejected_files = reject_invalid_python(fixed_files)
     if rejected_files:
@@ -224,8 +272,6 @@ def run_batch_coding_fixes_impl(
     merged = dict(current_files)
     merged.update(fixed_files)
 
-    addressed_count = len(issues_addressed)
-
     unresolved_issues: List[Any] = []
     unresolved_indices: set = set()
     addressed_indices: set = set()
@@ -240,6 +286,7 @@ def run_batch_coding_fixes_impl(
                 addressed_indices.add(idx)
         except (ValueError, TypeError):
             pass
+    addressed_count = len(addressed_indices)
     for idx, issue in enumerate(actionable):
         if idx not in addressed_indices:
             unresolved_issues.append(issue)
@@ -340,7 +387,7 @@ def _fix_issues_one_at_a_time_impl(
     phase_ctx = f"{phase_name} " if phase_name else ""
 
     for issue_idx, issue in enumerate(actionable):
-        desc_short = getattr(issue, "description", None) or ""
+        desc_short = _attr_or(issue, "description", "")
         if detail_callback:
             detail_callback(
                 f"Fixing {phase_ctx}issue {issue_idx + 1}/{len(actionable)}: {desc_short}..."
@@ -361,16 +408,16 @@ def _fix_issues_one_at_a_time_impl(
         for attempt in range(1, MAX_ITERATIONS_PER_ISSUE + 1):
             relevant_code = _relevant_code_for_issue(issue, working)
             fmt: Dict[str, Any] = dict(
-                source=getattr(issue, "source", None) or default_source,
-                severity=getattr(issue, "severity", None) or "medium",
-                description=getattr(issue, "description", None) or "",
-                file_path=getattr(issue, "file_path", None) or "N/A",
-                recommendation=getattr(issue, "recommendation", None) or default_recommendation,
+                source=_attr_or(issue, "source", default_source),
+                severity=_attr_or(issue, "severity", "medium"),
+                description=_attr_or(issue, "description", ""),
+                file_path=_attr_or(issue, "file_path", "N/A"),
+                recommendation=_attr_or(issue, "recommendation", default_recommendation),
                 current_code=relevant_code,
             )
             if has_language_conventions:
                 fmt["language_conventions"] = lang_conv
-            prompt = single_issue_prompt.format(**fmt)
+            prompt = _fill_named_placeholders(single_issue_prompt, **fmt)
             try:
                 raw = runner.run(llm, prompt)
             except Exception as exc:
@@ -485,13 +532,16 @@ def _apply_tool_agents_problem_solve(
         Mutates ``merged``, ``fixes_applied`` and ``summary_parts`` in place; a
         failing agent is logged and skipped. A ``.py`` file a tool agent
         returns that fails to parse is discarded before merging -- the prior
-        version of that file in ``merged`` is left untouched.
+        version of that file in ``merged`` is left untouched. Summary parts are
+        appended when the agent returns files and/or recommendations.
     """
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "problem_solve"):
             continue
         try:
             out = agent.problem_solve(phase_inp)
+            tool_summary = f"Tool {kind.value}: {out.summary or 'suggestions applied.'}"
+            wrote_files = False
             if out.files:
                 valid_files, rejected_files = reject_invalid_python(out.files)
                 if rejected_files:
@@ -504,14 +554,23 @@ def _apply_tool_agents_problem_solve(
                         len(rejected_files),
                         sorted(rejected_files),
                     )
-                merged.update(valid_files)
+                if valid_files:
+                    merged.update(valid_files)
+                    wrote_files = True
             if out.recommendations:
                 for r in out.recommendations:
-                    entry: Dict[str, Any] = {"source": kind.value, "recommendation": r}
+                    entry: Dict[str, Any] = {
+                        "source": kind.value,
+                        "issue": out.summary or f"Tool {kind.value} recommendation",
+                        "recommendation": r,
+                        "fix": "suggestion applied",
+                        "root_cause": "",
+                    }
                     if microtask_id:
                         entry["microtask"] = microtask_id
                     fixes_applied.append(entry)
-                summary_parts.append(f"Tool {kind.value}: {out.summary or 'suggestions applied.'}")
+            if wrote_files or out.recommendations:
+                summary_parts.append(tool_summary)
         except Exception as exc:
             mt_ctx = f"Microtask {microtask_id}: " if microtask_id else ""
             logger.warning(
@@ -546,22 +605,25 @@ def run_problem_solving_impl(
         prompt-slot flag.
     Postconditions:
         Returns a ``ProblemSolvingResult``; unresolved issues are surfaced for
-        the caller to escalate into fix microtasks.
+        the caller to escalate into fix microtasks. ``files`` is always a fresh
+        dict. The summary always includes a quantitative base count and any
+        tool-agent narrative parts.
     """
     problem_solving_result_cls = models.ProblemSolvingResult
     phase_enum = models.Phase
     phase_input_cls = models.ToolAgentPhaseInput
 
     task_id = task.id
+    review_issues = getattr(review_result, "issues", None) or []
     actionable = [
         i
-        for i in review_result.issues
-        if (getattr(i, "severity", None) or "medium") in ("critical", "high", "medium")
+        for i in review_issues
+        if _attr_or(i, "severity", "medium") in ("critical", "high", "medium")
     ]
     if not actionable:
         logger.info("[%s] Problem-solving: no actionable issues.", task_id)
         return problem_solving_result_cls(
-            resolved=True, files=current_files, summary="No actionable issues."
+            resolved=True, files=dict(current_files), summary="No actionable issues."
         )
 
     merged, fixes_applied, unresolved_issues = _fix_issues_one_at_a_time_impl(
@@ -584,7 +646,7 @@ def run_problem_solving_impl(
             spec_context=task.description or "",
             language=language,
             current_files=merged,
-            review_issues=review_result.issues,
+            review_issues=review_issues,
             task_title=task.title or "",
             task_description=task.description or "",
         )
@@ -598,16 +660,13 @@ def run_problem_solving_impl(
         )
 
     resolved = len(unresolved_issues) == 0
-    summary = (
-        " ".join(summary_parts)
-        if summary_parts
-        else f"Applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
-    )
+    base_summary = f"Applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    summary = " ".join([base_summary] + summary_parts) if summary_parts else base_summary
     logger.info(
         "[%s] Problem-solving: %s — %s (%d unresolved)",
         task_id,
         "resolved" if resolved else "partial",
-        summary[:120],
+        summary,
         len(unresolved_issues),
     )
     return problem_solving_result_cls(
@@ -648,14 +707,15 @@ def run_problem_solving_for_microtask_impl(
     phase_input_cls = models.ToolAgentPhaseInput
 
     microtask_id = microtask.id
+    review_issues = getattr(review_result, "issues", None) or []
     actionable = [
         i
-        for i in review_result.issues
-        if (getattr(i, "severity", None) or "medium") in ("critical", "high", "medium")
+        for i in review_issues
+        if _attr_or(i, "severity", "medium") in ("critical", "high", "medium")
     ]
     if not actionable:
         return problem_solving_result_cls(
-            resolved=True, files=current_files, summary="No actionable issues."
+            resolved=True, files=dict(current_files), summary="No actionable issues."
         )
 
     logger.info(
@@ -688,7 +748,7 @@ def run_problem_solving_for_microtask_impl(
             spec_context=microtask.description or "",
             language=language,
             current_files=merged,
-            review_issues=review_result.issues,
+            review_issues=review_issues,
             task_title=microtask.title or "",
             task_description=microtask.description or "",
             task_id=task_id,
@@ -704,11 +764,11 @@ def run_problem_solving_for_microtask_impl(
         )
 
     resolved = len(unresolved_issues) == 0
-    summary = (
-        " ".join(summary_parts)
-        if summary_parts
-        else f"Microtask {microtask_id}: applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    base_summary = (
+        f"Microtask {microtask_id}: applied {len(fixes_applied)} fix(s); "
+        f"{len(unresolved_issues)} unresolved."
     )
+    summary = " ".join([base_summary] + summary_parts) if summary_parts else base_summary
     logger.info("[%s] %s", task_id, summary)
 
     return problem_solving_result_cls(
