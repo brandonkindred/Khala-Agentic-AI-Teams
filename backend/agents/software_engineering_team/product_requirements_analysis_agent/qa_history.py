@@ -294,8 +294,10 @@ def _consume_block_body(lines: List[str]) -> _ParsedBlockBody:
     Preconditions: ``lines`` are the lines of a qa_history.md block following its
         ``### question`` header (may be empty).
     Postconditions: returns a :class:`_ParsedBlockBody` whose answer/rationale/
-        other_text continuation lines are unescaped and stripped; provenance flags
-        and confidence reflect any status markers found; never raises.
+        other_text fields are built by joining continuation lines (unescaped but
+        otherwise preserved verbatim, including interior whitespace) and stripping
+        only the final joined string; provenance flags and confidence reflect any
+        status markers found; never raises.
     """
     answer_lines: List[str] = []
     rationale_lines: List[str] = []
