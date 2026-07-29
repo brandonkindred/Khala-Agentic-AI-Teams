@@ -34,5 +34,7 @@ USER appuser
 
 EXPOSE 8080
 
-# Same as make deploy (host 0.0.0.0, port 8080, workers 4)
-CMD ["python", "run_unified_api.py", "--host", "0.0.0.0", "--port", "8080", "--workers", "4", "--log-level", "warning"]
+# Same as make deploy (host 0.0.0.0, port 8080, workers 1).
+# Single worker keeps idle RSS ~one process footprint (~200 MB class) under the
+# 2G khala mem_limit; scale horizontally with replicas if throughput is needed.
+CMD ["python", "run_unified_api.py", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--log-level", "warning"]

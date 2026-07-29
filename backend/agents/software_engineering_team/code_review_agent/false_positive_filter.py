@@ -46,10 +46,7 @@ from strands.models.model import Model as _StrandsModel
 from llm_service import LLMClient
 from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_map_chunk_chars,
-    parse_env_int,
-)
+from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .function_boundaries import (
@@ -86,6 +83,7 @@ _MANIFEST_LIMIT = 300
 # rest of an oversized task field, so an unbounded field has no fallback path
 # at all if it blows the prompt past context.
 _CONTEXT_FIELD_CHARS = 4_000
+_CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 
 # Default per-group verification call timeout (seconds); see
 # ``_verify_timeout_seconds`` below.
@@ -126,7 +124,7 @@ def _verify_parallelism() -> int:
     return _map_parallelism()
 
 
-@dataclass
+@dataclass(frozen=True)
 class CodebaseIndex:
     """In-memory view of all code the verifier may read to check a finding.
 
@@ -134,8 +132,10 @@ class CodebaseIndex:
         - ``files`` maps a file path to its FULL content (never a chunk or a
           truncated excerpt): seeing the whole file is the entire point — the
           chunk reviewer's partial view is what produced the false positive.
-        - ``existing_codebase`` is the (already capped) pre-existing-code excerpt
-          passed for context; it is exposed as the read-only pseudo-path
+          Whitespace-only bodies (e.g. a newline-only ``__init__.py``) are kept;
+          only ``None`` / empty-string content is excluded at construction.
+        - ``existing_codebase`` is the full pre-existing-code excerpt passed for
+          context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
         - ``repo_reader`` is an optional read-only, thread-safe ``RepoReader``
           giving read access to the rest of the repository (files that already
@@ -144,8 +144,9 @@ class CodebaseIndex:
           existing-codebase excerpt fail to resolve a path, which is what lets
           the verifier confirm "this file already exists" and drop the false
           positive. In-memory search (``search``) never touches it.
-        - The index is read-only after construction: no method mutates ``files``
-          or ``existing_codebase``, and it never mutates ``repo_reader`` (whose
+        - The index is read-only after construction: the dataclass is frozen,
+          ``files`` is shallow-copied at init, no method mutates ``files`` or
+          ``existing_codebase``, and it never mutates ``repo_reader`` (whose
           own reads are internally synchronized), so it is safe to share across
           the parallel verification worker threads.
     """
@@ -156,6 +157,9 @@ class CodebaseIndex:
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "files", dict(self.files))
+
     @classmethod
     def from_input(
         cls, input_data: CodeReviewInput, repo_reader: Optional[RepoReader] = None
@@ -163,19 +167,22 @@ class CodebaseIndex:
         """Build the index from a review input's ``files`` or legacy ``code``.
 
         Postconditions:
-            - When ``files`` is set, every file with non-blank content is
-              included (insertion order preserved), with no header parsing.
+            - When ``files`` is set, every file whose content is not ``None`` and
+              not ``""`` is included (insertion order preserved), including
+              whitespace-only bodies, with no header parsing.
             - Otherwise the legacy ``code`` blob is parsed into ``### path ###``
-              blocks via the coordinator's canonical parser; headerless and
-              blank blocks are dropped (they cannot be addressed by a path).
-            - ``existing_codebase`` carries the input's existing-codebase excerpt
-              (empty string when absent); ``repo_reader`` is stored verbatim.
+              blocks via the coordinator's canonical parser; headerless blocks
+              and empty-string bodies are dropped (they cannot be addressed by
+              a path).
+            - ``existing_codebase`` carries the input's full existing-codebase
+              excerpt (empty string when absent); ``repo_reader`` is stored
+              verbatim.
         """
         if input_data.files is not None:
             files = {
                 path: content
                 for path, content in input_data.files.items()
-                if content and content.strip()
+                if content is not None and content != ""
             }
         else:
             # Lazy import keeps this module free of an import cycle with the
@@ -184,7 +191,7 @@ class CodebaseIndex:
 
             files = {}
             for path, content in parse_code_into_file_blocks(input_data.code or ""):
-                if path and content.strip():
+                if path and content != "":
                     files[path] = content
         return cls(
             files=files,
@@ -279,8 +286,8 @@ class CodebaseIndex:
               one, or when ``key`` is blank.
             - ``(exact_key, [])`` on an exact file match.
             - ``(sole_hit, hits)`` when exactly one suffix match, else
-              ``(None, hits)``, where ``hits`` are the bare-name suffix matches —
-              never raises.
+              ``(None, hits)``, where ``hits`` are the candidate paths that
+              share the requested final segment or path suffix — never raises.
         """
         if not key:
             return None, []
@@ -288,13 +295,58 @@ class CodebaseIndex:
             return (self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None), []
         if key in self.files:
             return key, []
-        # Bare-name fallback: the model often cites ``main.py`` for
-        # ``app/services/main.py``. Match every stored path whose final
-        # ``/``-segment equals ``key`` (a leading ``./`` ignored); a unique hit
-        # resolves, and the full list lets ``read_file`` distinguish ambiguity.
-        normalized = key.lstrip("./")
-        hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+        # Bare-name / suffix fallback: the model often cites ``main.py`` for
+        # ``app/services/main.py``, or ``config/.env`` for ``src/config/.env``.
+        # Match every stored path whose final ``/``-segment (bare name) or
+        # trailing path suffix equals ``key`` after stripping a leading ``./``
+        # or ``/`` from both sides (without mangling hidden names like
+        # ``.env``); a unique hit resolves, and the full list lets
+        # ``read_file`` distinguish ambiguity.
+        normalized = self._normalize_leading(key)
+
+        if "/" in normalized:
+            hits = [
+                p
+                for p in self.files
+                if self._normalize_leading(p) == normalized
+                or self._normalize_leading(p).endswith("/" + normalized)
+            ]
+        else:
+            hits = [p for p in self.files if self._final_segment(p) == normalized]
+
         return (hits[0] if len(hits) == 1 else None), hits
+
+    @staticmethod
+    def _normalize_leading(p: str) -> str:
+        """Strip leading ``./`` repeats and a single leading ``/`` from ``p``.
+
+        Preconditions:
+            - ``p`` is a string (may be empty).
+
+        Postconditions:
+            - Returns ``p`` with any leading ``./`` prefixes and at most one
+              leading ``/`` removed; a leading single-dot name like ``.env``
+              is preserved.
+        """
+        while p.startswith("./"):
+            p = p[2:]
+        if p.startswith("/"):
+            p = p[1:]
+        return p
+
+    @classmethod
+    def _final_segment(cls, p: str) -> str:
+        """Return the final path segment of ``p`` after leading-prefix normalize.
+
+        Preconditions:
+            - ``p`` is a string (may be empty).
+
+        Postconditions:
+            - Returns the substring after the last ``/`` in the
+              leading-normalized form of ``p`` (the whole string when it
+              contains no ``/``).
+        """
+        return cls._normalize_leading(p).rsplit("/", 1)[-1]
 
     def resolve_path(self, path: str) -> Optional[str]:
         """Resolve a cited path to a canonical readable key, or None.
@@ -308,18 +360,26 @@ class CodebaseIndex:
               names it and a non-blank excerpt exists.
             - Returns an exact file key, or the sole suffix match (``main.py`` →
               ``app/main.py``).
-            - Falls through to the repo reader: when the submission cannot
-              resolve the path but the reader can read it, returns the cited path
-              verbatim (so a finding about an existing-but-unchanged repo file is
-              still grouped and verified rather than skipped).
-            - Returns None for a blank, absent, or ambiguous path with no reader
-              hit — the verifier would have no single primary file to read, so the
-              caller keeps the finding rather than verify it.
+            - When the submission has multiple suffix hits for the cited bare
+              name, returns None (ambiguous) and does **not** consult the repo
+              reader — findings about one of several same-basename submission
+              files must not silently resolve to a repository file.
+            - Falls through to the repo reader only when the submission has
+              zero matches: if the reader can read the cited path, returns it
+              verbatim (so a finding about an existing-but-unchanged repo file
+              is still grouped and verified rather than skipped).
+            - Returns None for a blank, absent, or ambiguous path with no
+              eligible reader hit — the verifier would have no single primary
+              file to read, so the caller keeps the finding rather than verify it.
         """
         key = (path or "").strip()
-        resolved, _ = self._resolve(key)
+        resolved, hits = self._resolve(key)
         if resolved is not None:
             return resolved
+        if key == self.EXISTING_CODEBASE_PATH:
+            return None
+        if len(hits) > 1:
+            return None
         if key and self._reader_read(key) is not None:
             return key
         return None
@@ -332,6 +392,11 @@ class CodebaseIndex:
         returned string) and ``read_file_or_none`` (internal-facing: collapses
         ``error_message`` to ``None`` so a real file's content can never be
         mistaken for a sentinel string, however it happens to start).
+
+        Resolution order: exact / existing-codebase / unique suffix match;
+        then ambiguous submission hits as an error (before any repo-reader
+        lookup); then repo-reader fallback for absent submission paths;
+        then missing-excerpt / not-found errors.
         """
         key = (path or "").strip()
         if not key:
@@ -341,22 +406,22 @@ class CodebaseIndex:
             return self.existing_codebase, None
         if resolved is not None:
             return self.files[resolved], None
-        # Not in the submission — fall through to the repo reader so an
-        # existing-but-unchanged file (absent from the diff) is still readable.
-        # This is what lets the verifier confirm a file a finding calls "missing"
-        # actually exists in the repository.
-        reader_content = self._reader_read(key)
-        if reader_content is not None:
-            return reader_content, None
-        # Resolution failed — give the tool a message that distinguishes an
-        # ambiguous citation from an absent one (and a missing excerpt).
-        if key == self.EXISTING_CODEBASE_PATH:
-            return None, "Error: no existing-codebase excerpt available."
         if len(hits) > 1:
             return None, (
                 f"Error: path '{path}' is ambiguous; it matches "
                 f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
             )
+        # Not in the submission — fall through to the repo reader so an
+        # existing-but-unchanged file (absent from the diff) is still readable.
+        # This is what lets the verifier confirm a file a finding calls "missing"
+        # actually exists in the repository. Ambiguous submission hits never
+        # reach here.
+        if key == self.EXISTING_CODEBASE_PATH:
+            return None, "Error: no existing-codebase excerpt available."
+
+        reader_content = self._reader_read(key)
+        if reader_content is not None:
+            return reader_content, None
         return None, f"Error: file not found: {path}. Use list_files() to see available paths."
 
     def read_file(self, path: str) -> str:
@@ -367,10 +432,13 @@ class CodebaseIndex:
             - The ``<existing codebase>`` pseudo-path returns the existing-code
               excerpt.
             - A path that uniquely matches one file by suffix (the model often
-              cites ``main.py`` for ``app/main.py``) returns that file; an
-              ambiguous or absent path returns an ``Error: ...`` string (never
-              raises) so a bad tool argument degrades to a message rather than
-              aborting the verification.
+              cites ``main.py`` for ``app/main.py``) returns that file.
+            - An ambiguous submission suffix match returns an ``Error: ...``
+              string and never falls through to the repo reader.
+            - An absent submission path may fall through to the repo reader; if
+              that also misses, returns an ``Error: ...`` string (never raises)
+              so a bad tool argument degrades to a message rather than aborting
+              the verification.
         """
         content, error = self._read(path)
         return error if content is None else content
@@ -460,7 +528,15 @@ def _find_python_function_at_line(
           which itself uses the shared ``node_start_line``/``node_end_line``
           helpers, so all AST consumers agree on construct ranges.
     """
+    if not isinstance(content, str) or not content:
+        raise ValueError("content must be a non-empty string")
+    if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+        raise ValueError("line_number must be a positive integer")
     shown = display_line if display_line is not None else line_number
+    lines = content.splitlines()
+    if line_number > len(lines):
+        return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
+
     construct = enclosing_construct(content, line_number)
 
     if construct is None:
@@ -519,10 +595,20 @@ def _find_heuristic_function_at_line(
         - Returns a human-readable message identifying the best-guess start line
           of the enclosing construct and advising the use of ``read_file`` for
           the precise construct name.
-        - Returns a "no construct found" message (never raises) when no
-          column-0 declaration precedes ``line_number``.
+        - Returns an explicit beyond-EOF message when ``line_number`` exceeds
+          the file length.
+        - Returns a "no construct found" message (never raises when
+          preconditions hold) when no column-0 declaration precedes
+          ``line_number``.
     """
+    if not isinstance(content, str) or not content:
+        raise ValueError("content must be a non-empty string")
+    if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+        raise ValueError("line_number must be a positive integer")
     shown = display_line if display_line is not None else line_number
+    lines = content.splitlines()
+    if line_number > len(lines):
+        return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
     best_start = enclosing_construct_start_heuristic(content, line_number)
 
     if best_start is None:
@@ -539,7 +625,27 @@ def _find_heuristic_function_at_line(
     )
 
 
-def _build_tools(index: CodebaseIndex) -> list:
+def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
+    """Return ``text`` capped to ``max_len`` characters for log lines.
+
+    Preconditions:
+        - ``max_len`` >= 1.
+
+    Postconditions:
+        - Returns ``""`` when ``text`` is None or empty.
+        - Returns ``text`` unchanged when ``len(text) <= max_len``.
+        - Otherwise returns ``text[:max_len] + "..."``.
+    """
+    if max_len < 1:
+        raise ValueError("max_len must be >= 1")
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
@@ -565,7 +671,10 @@ def _build_tools(index: CodebaseIndex) -> list:
             The file's full text, or an "Error: ..." message if the path is
             unknown or ambiguous.
         """
-        return index.read_file(path)
+        try:
+            return index.read_file(path)
+        except Exception as exc:
+            return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
 
     @tool
     def list_files() -> str:
@@ -574,8 +683,11 @@ def _build_tools(index: CodebaseIndex) -> list:
         Returns:
             One path per line. Read any of them with read_file(path).
         """
-        paths = index.list_files()
-        return "\n".join(paths) if paths else "(no files available)"
+        try:
+            paths = index.list_files()
+            return "\n".join(paths) if paths else "(no files available)"
+        except Exception as exc:
+            return f"Error: could not list files: {type(exc).__name__}: {exc}"
 
     @tool
     def search_codebase(query: str) -> str:
@@ -594,10 +706,13 @@ def _build_tools(index: CodebaseIndex) -> list:
         Returns:
             Matching "path:line: text" lines, or a message that nothing matched.
         """
-        matches = index.search(query)
-        if not matches:
-            return f"No matches for {query!r}."
-        return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+        try:
+            matches = index.search(query)
+            if not matches:
+                return f"No matches for {query!r}."
+            return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+        except Exception as exc:
+            return f"Error: could not search for {query!r}: {type(exc).__name__}: {exc}"
 
     @tool
     def find_function_at_line(path: str, line_number: int) -> str:
@@ -618,11 +733,18 @@ def _build_tools(index: CodebaseIndex) -> list:
             is not readable; never raises.
         """
         try:
+            if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+                return f"Error: line_number must be a positive integer, got {line_number!r}."
             resolved = index.resolve_path(path)
             if not resolved:
                 return f"Error: {path!r} is not a readable path."
-            content = index.read_file(path)
+            content = index.read_file_or_none(path)
+            if content is None:
+                return f"Error: {path!r} is not a readable path."
             display_path = resolved if resolved != index.EXISTING_CODEBASE_PATH else path
+            # Helpers ``_strip_numbered_prefixes``, ``_find_python_function_at_line``,
+            # and ``_find_heuristic_function_at_line`` all take 1-based line numbers
+            # (matching this tool's public contract) — no 0-based conversion.
             # Strip ``N: `` line-number prefixes that the PR-review path injects via
             # ``render_annotated_hunks``; remap to the physical line index so the
             # helper functions operate on plain code, then restore original numbers
@@ -657,13 +779,21 @@ class _Verdict:
     confidence: str = ""
     reasoning: str = ""
 
+    def __post_init__(self) -> None:
+        if self.is_false_positive and self.confidence not in ("high", "medium"):
+            raise ValueError(
+                "is_false_positive=True requires confidence 'high' or 'medium', "
+                f"got confidence={self.confidence!r}"
+            )
+
 
 def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
     """Parse one raw verdict dict into ``(index, _Verdict)``, or None.
 
     Postconditions:
-        - Returns None for any item without a parseable integer ``index`` (a
-          verdict we cannot map back to a finding is ignored, not guessed).
+        - Returns None for any item without a non-negative integer ``index``
+          (bool, float, string, negative, or missing — a verdict we cannot map
+          back to a finding is ignored, not guessed).
         - ``is_false_positive`` is True only for ``is_real_issue is False`` with
           an explicit ``"high"`` or ``"medium"`` confidence; every other shape —
           real, low/blank/missing confidence, OR any unrecognized confidence
@@ -675,10 +805,9 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
     if not isinstance(item, dict):
         return None
     raw_index = item.get("index")
-    try:
-        index = int(raw_index)
-    except (TypeError, ValueError):
+    if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0:
         return None
+    index = raw_index
     confidence = str(item.get("confidence", "") or "").strip().lower()
     is_real = item.get("is_real_issue")
     # Drop ONLY on an explicit, confident "not a real issue". An allowlist (not a
@@ -753,8 +882,9 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
         - Returns the lines for finding ``i``: an ``--- Finding index i ---``
           anchor the verdict contract refers back to, a severity/category/
           location line, the description, and the suggestion when present.
-        - Description and suggestion strings have runs of whitespace collapsed
-          to a single space so they fit cleanly on one prompt line.
+        - ``description`` and ``suggestion`` are whitespace-normalized
+          (``' '.join(text.split())``) so multi-line or oddly spaced text
+          collapses to a single prompt line.
     """
     location = issue.file_path or "(file unknown)"
     if issue.line is not None:
@@ -774,12 +904,12 @@ def _cap_context_field(text: str) -> str:
 
     Preconditions: ``text`` is a non-None string (may be empty).
     Postconditions: returns ``text`` unchanged when within the cap; otherwise
-        a prefix of length ``_CONTEXT_FIELD_CHARS`` plus a truncation marker.
-        Never raises.
+        a prefix of length ``_CONTEXT_FIELD_CHARS`` plus
+        ``_CONTEXT_FIELD_TRUNCATION_MARKER``. Never raises.
     """
     if len(text) <= _CONTEXT_FIELD_CHARS:
         return text
-    return text[:_CONTEXT_FIELD_CHARS] + "\n... (truncated)"
+    return text[:_CONTEXT_FIELD_CHARS] + _CONTEXT_FIELD_TRUNCATION_MARKER
 
 
 def _build_group_prompt(
@@ -787,14 +917,8 @@ def _build_group_prompt(
     file_path: str,
     issues: List[CodeReviewIssue],
     input_data: CodeReviewInput,
-    max_inline_chars: int,
 ) -> str:
     """Render the user prompt for verifying one file's findings.
-
-    ``max_inline_chars`` is accepted but intentionally unused -- retained only
-    for call-site compatibility with callers still computing it. See the
-    module-level fail-safe rationale for why the primary file body is inlined
-    in full rather than bounded by it.
 
     The prompt inlines the cited file's full content (so the model has the
     primary evidence even without a tool call) and lists up to
@@ -803,14 +927,21 @@ def _build_group_prompt(
     tools. The wording is a stable anchor for the verdict contract: it names
     the file, indexes each finding, and asks for a ``verdicts`` array.
 
+    Preconditions:
+        - ``file_path`` is a canonical key previously returned by
+          ``index.resolve_path`` (the production filter only groups resolved
+          paths). Unreadable keys still degrade to a placeholder rather than
+          raising.
+
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order). The primary file body is inlined in full
-          (``max_inline_chars`` is intentionally unused). The task description
-          and each acceptance criterion are capped at ``_CONTEXT_FIELD_CHARS``
-          so an oversized task field cannot dominate the prompt.
+          matching ``issues`` order) and inlines the cited file's full body
+          when readable, otherwise a ``(file content unavailable)`` placeholder.
+          The task description and each acceptance criterion are capped at
+          ``_CONTEXT_FIELD_CHARS`` so an oversized task field cannot dominate
+          the prompt.
+        - Never raises.
     """
-    _ = max_inline_chars  # retained for call-site compatibility
     parts: List[str] = []
     task = input_data.task_description.strip()
     if task:
@@ -829,7 +960,9 @@ def _build_group_prompt(
         parts.append(f"... and {len(manifest) - _MANIFEST_LIMIT} more (call list_files()).")
     parts.append("")
 
-    body = index.read_file(file_path)
+    body = index.read_file_or_none(file_path)
+    if body is None:
+        body = "(file content unavailable)"
     fence = _code_fence_for(body)
     parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
     parts.append(fence)
@@ -861,7 +994,6 @@ def _verify_group(
     file_path: str,
     issues: List[CodeReviewIssue],
     input_data: CodeReviewInput,
-    max_inline_chars: int,
 ) -> Dict[int, _Verdict]:
     """Run one verification LLM call over all findings for a single file.
 
@@ -873,7 +1005,7 @@ def _verify_group(
           the ``issues``/``group`` list the caller passed in), so callers may
           index back into their own list with it.
     """
-    prompt = _build_group_prompt(index, file_path, issues, input_data, max_inline_chars)
+    prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(
         model=model,
         system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
@@ -981,7 +1113,6 @@ def _verify_and_filter(
         return list(issues)
 
     model = resolve_code_review_verify_model(llm)
-    max_inline_chars = compute_code_review_map_chunk_chars(llm)
 
     # Group findings by the resolved canonical path of their cited file so each
     # verification call shares one real file's context (and can still read any
@@ -1014,13 +1145,13 @@ def _verify_and_filter(
     def _verify_one(item: Tuple[str, List[CodeReviewIssue]]) -> Dict[int, _Verdict]:
         file_path, group = item
         try:
-            return _verify_group(model, index, file_path, group, input_data, max_inline_chars)
+            return _verify_group(model, index, file_path, group, input_data)
         except Exception as exc:  # noqa: BLE001 - best-effort; a failure must keep findings, not drop them
             logger.warning(
                 "FalsePositiveFilter: verification failed for %s (%s: %s); keeping its findings",
                 file_path,
                 type(exc).__name__,
-                exc,
+                _truncate_for_log(str(exc)),
             )
             return {}
 
@@ -1062,7 +1193,16 @@ def _verify_and_filter(
     removed_indices: set[int] = set()
     for (file_path, group), verdicts in zip(group_items, group_verdicts):
         orig_indices = group_orig_indices[file_path]
+        group_len = len(group)
         for idx, verdict in verdicts.items():
+            if not isinstance(idx, int) or idx < 0 or idx >= group_len:
+                logger.warning(
+                    "FalsePositiveFilter: ignoring out-of-range verdict index %r for %s (group size %s)",
+                    idx,
+                    file_path,
+                    group_len,
+                )
+                continue
             if verdict.is_false_positive:
                 issue = group[idx]
                 removed_indices.add(orig_indices[idx])
@@ -1071,8 +1211,8 @@ def _verify_and_filter(
                     issue.severity,
                     issue.file_path,
                     issue.line if issue.line is not None else "-",
-                    issue.description,
-                    verdict.reasoning or "no reasoning given",
+                    _truncate_for_log(issue.description),
+                    _truncate_for_log(verdict.reasoning) or "no reasoning given",
                 )
 
     if not removed_indices:

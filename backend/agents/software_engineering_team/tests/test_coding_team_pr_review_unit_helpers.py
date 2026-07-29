@@ -229,6 +229,20 @@ class TestRunningSiblingOnCheckoutUnit:
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [None])
         assert pr_review._running_sibling_on_checkout("/tmp/repo", "own-job") is None
 
+    def test_list_jobs_failure_fail_closes_with_synthetic_sibling(self, monkeypatch) -> None:
+        """A job-service scan failure must not raise — return a synthetic sibling
+        so callers fail-close instead of mutating an unverified checkout."""
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+
+        def _boom(*, active_only: bool = True):
+            raise RuntimeError(f"job service unreachable: {secret_url}")
+
+        monkeypatch.setattr(main, "list_jobs", _boom)
+        sibling = pr_review._running_sibling_on_checkout("/tmp/repo", "own-job")
+        assert sibling is not None
+        assert sibling["job_id"] == "<job-scan-unavailable>"
+        assert sibling["repo_path"] == "/tmp/repo"
+
 
 # ---------------------------------------------------------------------------
 # _infer_review_language
@@ -618,11 +632,17 @@ class TestFinalizeReviewUnit:
     def test_rejects_non_terminal_status(self, monkeypatch) -> None:
         from software_engineering_team.models import JobStatus
 
-        monkeypatch.setattr(main, "update_job", lambda *a, **kw: None)
-        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+        calls: List[Any] = []
+        monkeypatch.setattr(
+            main, "update_job", lambda *a, **kw: calls.append(("update_job", a, kw))
+        )
+        monkeypatch.setattr(
+            main, "update_review", lambda *a, **kw: calls.append(("update_review", a, kw))
+        )
 
-        with pytest.raises(AssertionError, match="COMPLETED or FAILED"):
+        with pytest.raises(ValueError, match="COMPLETED or FAILED"):
             pr_review._finalize_review("job-1", JobStatus.RUNNING)
+        assert calls == []
 
     def test_accepts_completed(self, monkeypatch) -> None:
         from software_engineering_team.models import JobStatus
@@ -636,3 +656,18 @@ class TestFinalizeReviewUnit:
 
         assert jobs[0]["status"] == JobStatus.COMPLETED.value
         assert reviews[0]["completed"] is True
+
+    def test_accepts_failed(self, monkeypatch) -> None:
+        from software_engineering_team.models import JobStatus
+
+        jobs: List[Dict[str, Any]] = []
+        reviews: List[Dict[str, Any]] = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: jobs.append(kw))
+        monkeypatch.setattr(main, "update_review", lambda job_id, **kw: reviews.append(kw))
+
+        pr_review._finalize_review("job-1", JobStatus.FAILED, phase="completed", error="boom")
+
+        assert jobs[0]["status"] == JobStatus.FAILED.value
+        assert jobs[0]["error"] == "boom"
+        assert reviews[0]["completed"] is True
+        assert reviews[0]["error"] == "boom"

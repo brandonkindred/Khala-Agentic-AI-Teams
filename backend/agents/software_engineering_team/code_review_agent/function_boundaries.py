@@ -64,7 +64,7 @@ def strip_numbered_prefixes(
 
     Preconditions:
         - ``content`` is a string (may be empty).
-        - ``line_number`` >= 1.
+        - ``line_number`` is a positive int (not a bool).
 
     Postconditions:
         - If the first non-blank line does NOT match ``r'^\\d+: '``, the
@@ -83,8 +83,13 @@ def strip_numbered_prefixes(
           - ``line_mapper(physical)`` maps a physical line index back to its
             original file line number (or to ``physical`` if the line had no
             numbered prefix, e.g. a separator).
-        - Never raises.
+        - Raises ``TypeError`` / ``ValueError`` when preconditions are violated;
+          otherwise never raises.
     """
+    if not isinstance(content, str):
+        raise TypeError("content must be a string")
+    if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+        raise ValueError("line_number must be a positive integer")
     lines = content.splitlines()
     if not lines:
         return content, line_number, None

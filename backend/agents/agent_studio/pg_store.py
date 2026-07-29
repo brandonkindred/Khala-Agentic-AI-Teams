@@ -6,7 +6,7 @@ Durable, cross-worker twin of the in-memory
 so :class:`~agent_studio.service.AgentStudioService` is agnostic to which one it
 holds; the route module selects this one when ``POSTGRES_HOST`` is set.
 
-Multi-worker coherence (the whole point): all four uvicorn workers share one
+Multi-worker coherence (the whole point): all uvicorn workers share one
 Postgres, so a conversation created on worker A resolves on worker B, and a save
 is visible everywhere. Per-conversation turn serialization uses a
 ``SELECT … FOR UPDATE`` row lock (see :meth:`turn`).

@@ -181,9 +181,28 @@ def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Di
           a sibling registered under a different spelling of the same
           checkout still matches. The caller's own job (``own_job_id``) is
           never reported.
+        - When ``list_jobs`` itself raises (job service unreachable, etc.),
+          logs a scrubbed warning and returns a synthetic sibling so the
+          caller fail-closes instead of mutating a checkout whose liveness
+          cannot be verified. Never raises.
     """
     target = os.path.realpath(repo_path)
-    for j in _main.list_jobs(active_only=True):
+    try:
+        jobs = _main.list_jobs(active_only=True)
+    except Exception as exc:  # noqa: BLE001 - fail-closed: cannot verify checkout is free
+        logger.warning(
+            "could not scan jobs for sibling on checkout %s: %s",
+            repo_path,
+            scrub_token_from_text(str(exc)),
+        )
+        # Synthetic sibling: callers treat any non-None return as "checkout busy"
+        # and mark their own job failed. Prefer that over proceeding blind.
+        return {
+            "job_id": "<job-scan-unavailable>",
+            "repo_path": repo_path,
+            "github_context": {},
+        }
+    for j in jobs:
         if not j or j.get("job_id") == own_job_id:
             continue
         sibling_path = j.get("repo_path")
@@ -637,15 +656,16 @@ def _finalize_review(
     Preconditions:
         - ``status`` is a terminal status (``JobStatus.COMPLETED``/``JobStatus.FAILED``);
           each optional field is supplied only when the originating path set it.
+          Raises ``ValueError`` if ``status`` is not terminal (enforced with an
+          explicit raise so ``python -O`` cannot strip the check).
     Postconditions:
         - ``update_job`` then ``update_review`` are called with exactly the
           non-``None`` fields supplied, ``status`` unwrapped to its plain
           ``.value`` for both (a single conversion point for both consumers);
           ``update_review`` additionally receives ``completed=True``.
     """
-    assert status in (JobStatus.COMPLETED, JobStatus.FAILED), (
-        f"_finalize_review requires COMPLETED or FAILED, got {status!r}"
-    )
+    if status not in (JobStatus.COMPLETED, JobStatus.FAILED):
+        raise ValueError(f"_finalize_review requires COMPLETED or FAILED, got {status!r}")
     job_kwargs: Dict[str, Any] = {"status": status.value}
     review_kwargs: Dict[str, Any] = {"status": status.value, "completed": True}
     if status_text is not None:
