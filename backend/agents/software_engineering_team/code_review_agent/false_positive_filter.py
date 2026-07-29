@@ -51,7 +51,7 @@ from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .code_boundaries import node_end_line, node_start_line
-from .model_resolution import resolve_code_review_model
+from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
 from .repo_reader import RepoReader
@@ -73,6 +73,13 @@ _SEARCH_MATCH_LIMIT = 60
 # read_file(), so nothing is actually inaccessible -- only the inline listing
 # is bounded.
 _MANIFEST_LIMIT = 300
+
+# Cap on the task description / each acceptance criterion inlined into the
+# verification prompt. Unlike the cited file body (deliberately kept in full
+# -- see _build_group_prompt), there is no tool the model can call to read the
+# rest of an oversized task field, so an unbounded field has no fallback path
+# at all if it blows the prompt past context.
+_CONTEXT_FIELD_CHARS = 4_000
 
 # Column-0 token prefixes that should NOT be counted as construct start lines
 # by the heuristic fallback used for non-Python files.
@@ -667,8 +674,9 @@ def _find_heuristic_function_at_line(
         - ``path`` is a non-empty string used only for display.
 
     Postconditions:
-        - Returns the best-guess start line and advises using ``read_file`` for
-          the precise construct name.
+        - Returns a descriptive message naming the best-guess construct start
+          line (not the raw integer) and advising ``read_file`` for the precise
+          construct name.
         - Returns an explicit beyond-EOF message when ``line_number`` exceeds
           the file length.
         - Returns a "no construct found" message (never raises when
@@ -775,11 +783,14 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
 
     @tool
     def search_codebase(query: str) -> str:
-        """Search every file for a substring (case-insensitive).
+        """Search every in-memory file (submission files and existing-codebase
+        excerpt) for a substring (case-insensitive).
 
-        Use this to find where a symbol is defined, imported, registered, used,
-        or tested before deciding whether a finding is real — e.g. search for a
-        function name a finding claims is "never defined".
+        Does not search repository files reached only via the repo reader —
+        inspect those with ``read_file`` / ``list_files`` instead. Use this to
+        find where a symbol is defined, imported, registered, used, or tested
+        before deciding whether a finding is real — e.g. search for a function
+        name a finding claims is "never defined".
 
         Args:
             query: The substring to search for (e.g. a function or class name).
@@ -974,6 +985,19 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     return block
 
 
+def _cap_context_field(text: str) -> str:
+    """Truncate an inlined task/AC field to ``_CONTEXT_FIELD_CHARS``.
+
+    Preconditions: ``text`` is a non-None string (may be empty).
+    Postconditions: returns ``text`` unchanged when within the cap; otherwise
+        a prefix of length ``_CONTEXT_FIELD_CHARS`` plus a truncation marker.
+        Never raises.
+    """
+    if len(text) <= _CONTEXT_FIELD_CHARS:
+        return text
+    return text[:_CONTEXT_FIELD_CHARS] + "\n... (truncated)"
+
+
 def _build_group_prompt(
     index: CodebaseIndex,
     file_path: str,
@@ -992,15 +1016,17 @@ def _build_group_prompt(
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
           matching ``issues`` order) and inlines the cited file's full body.
-          The task description and each acceptance criterion are not capped.
+          The task description and each acceptance criterion are capped at
+          ``_CONTEXT_FIELD_CHARS`` so an oversized task field cannot dominate
+          the prompt.
     """
     parts: List[str] = []
     task = input_data.task_description.strip()
     if task:
-        parts.append(f"**Task being implemented:** {task}")
+        parts.append(f"**Task being implemented:** {_cap_context_field(task)}")
     if input_data.acceptance_criteria:
         parts.append("**Acceptance criteria:**")
-        parts.extend(f"- {c}" for c in input_data.acceptance_criteria)
+        parts.extend(f"- {_cap_context_field(c)}" for c in input_data.acceptance_criteria)
         parts.append("")
 
     manifest = index.list_files()
@@ -1124,6 +1150,7 @@ def filter_false_positives(
             "FalsePositiveFilter: verification failed during setup (%s: %s); keeping all findings",
             type(exc).__name__,
             exc,
+            exc_info=True,
         )
         return list(issues)
 
@@ -1161,7 +1188,7 @@ def _verify_and_filter(
         # repo file is still verifiable, so we proceed.)
         return list(issues)
 
-    model = resolve_code_review_model(llm)
+    model = resolve_code_review_verify_model(llm)
 
     # Group findings by the resolved canonical path of their cited file so each
     # verification call shares one real file's context (and can still read any
