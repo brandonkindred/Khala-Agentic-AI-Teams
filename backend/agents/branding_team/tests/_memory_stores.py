@@ -1,8 +1,8 @@
 """In-memory store doubles for branding API tests.
 
 Method-level replacements for ``BrandingStore``, ``BrandingConversationStore``,
-and ``BrandingSessionStore`` so HTTP tests can exercise route logic without the
-hand-rolled SQL Postgres emulator in ``_fake_postgres.py``.
+and ``BrandingSessionStore`` so HTTP and orchestrator tests can exercise route
+logic without live Postgres.
 
 Example::
 
