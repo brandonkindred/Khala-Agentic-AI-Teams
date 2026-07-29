@@ -179,7 +179,7 @@ def _format_issues_for_batch(issues: List[Any]) -> str:
     for idx, issue in enumerate(issues, 1):
         lines.append(f"### Issue {idx}")
         lines.append(f"- **Source:** {_attr_or(issue, 'source', 'review')}")
-        lines.append(f"- **Severity:** {_attr_or(issue, 'severity', 'medium')}")
+        lines.append(f"- **Severity:** {_issue_severity(issue)}")
         lines.append(f"- **File:** {_attr_or(issue, 'file_path', 'N/A')}")
         lines.append(f"- **Description:** {_attr_or(issue, 'description', 'No description')}")
         lines.append(f"- **Recommendation:** {_attr_or(issue, 'recommendation', 'Fix the issue.')}")
@@ -483,7 +483,7 @@ def _fix_issues_one_at_a_time_impl(
             relevant_code = _relevant_code_for_issue(issue, working)
             fmt: Dict[str, Any] = dict(
                 source=_attr_or(issue, "source", default_source),
-                severity=_attr_or(issue, "severity", "medium"),
+                severity=_issue_severity(issue),
                 description=_attr_or(issue, "description", ""),
                 file_path=_attr_or(issue, "file_path", "N/A"),
                 recommendation=_attr_or(issue, "recommendation", default_recommendation),

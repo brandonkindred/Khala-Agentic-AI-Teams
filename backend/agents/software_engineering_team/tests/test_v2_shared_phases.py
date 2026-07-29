@@ -1145,6 +1145,29 @@ def test_format_all_code_counts_join_separators_in_budget():
     assert len(out) <= 50
 
 
+def test_format_issues_for_batch_normalizes_empty_severity():
+    out = sh_ps._format_issues_for_batch([_issue(severity="")])
+    assert "- **Severity:** medium" in out
+
+
+def test_fix_issues_one_at_a_time_prompt_normalizes_empty_severity():
+    captured: list[str] = []
+    issue = _issue(severity="")
+    runner = _runner("## RESOLVED ##\ntrue\n", on_prompt=captured.append)
+    sh_ps._fix_issues_one_at_a_time_impl(
+        llm=object(),
+        actionable=[issue],
+        current_files={"a.py": "x"},
+        lang_conv="PY",
+        task_id="t1",
+        single_issue_prompt="{severity}|{description}|{current_code}",
+        parse_single=lambda _raw: {"files": {}, "resolved": True},
+        has_language_conventions=False,
+        runner=runner,
+    )
+    assert captured[0].startswith("medium|")
+
+
 def test_format_issues_for_batch_preserves_empty_source():
     out = sh_ps._format_issues_for_batch([_issue(source="")])
     assert "- **Source:** " in out
