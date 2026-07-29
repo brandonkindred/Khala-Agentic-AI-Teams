@@ -686,6 +686,32 @@ def test_parse_spec_review_response_coerces_malformed_question_without_raising()
     assert result.open_questions[0].options == []
 
 
+def test_parse_spec_review_response_truncates_open_questions_to_max() -> None:
+    """parse_spec_review_response caps open questions at MAX_OPEN_QUESTIONS (10).
+
+    Preconditions: raw open_questions list longer than MAX_OPEN_QUESTIONS.
+    Postconditions: result.open_questions has length MAX_OPEN_QUESTIONS and keeps
+        the first N questions in order.
+    """
+    from product_requirements_analysis_agent.question_processing import MAX_OPEN_QUESTIONS
+
+    questions = [
+        {"id": f"q{i}", "question_text": f"Question {i}?", "options": []}
+        for i in range(MAX_OPEN_QUESTIONS + 5)
+    ]
+    result = parse_spec_review_response(
+        {
+            "issues": [],
+            "gaps": [],
+            "open_questions": questions,
+            "summary": "Reviewed",
+        }
+    )
+
+    assert len(result.open_questions) == MAX_OPEN_QUESTIONS
+    assert [q.id for q in result.open_questions] == [f"q{i}" for i in range(MAX_OPEN_QUESTIONS)]
+
+
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
     llm = MagicMock()
@@ -2464,6 +2490,59 @@ def test_assess_sub_phase_gaps_passes_existing_ids_to_prompt() -> None:
     prompt = llm.last_prompt
     assert "P1.deploy.a" in prompt
     assert "P1.deploy.b" in prompt
+
+
+def test_assess_sub_phase_gaps_survives_brace_bearing_spec() -> None:
+    """Gap analysis must not raise when the spec contains curly braces.
+
+    Preconditions: spec_content includes brace tokens that would break str.format.
+    Postconditions: assess returns and the substituted prompt includes the brace
+        text literally (brace-safe replace).
+    """
+    llm = _TrackingStubClient(
+        {"is_complete": True, "completeness_rationale": "Done.", "follow_up_questions": []}
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    brace_spec = "Use template {curly} and also }unbalanced{ braces in the spec."
+    is_complete, follow_ups = agent._assess_sub_phase_gaps(
+        SOPSubPhase.DEPLOYMENT,
+        brace_spec,
+        [],
+        {},
+    )
+    assert is_complete is True
+    assert follow_ups == []
+    assert llm.last_prompt is not None
+    assert "{curly}" in llm.last_prompt
+    assert "}unbalanced{" in llm.last_prompt
+
+
+def test_gap_analysis_and_context_prompt_invariants() -> None:
+    """Prompt catalog invariants for the consolidated prompts cleanup.
+
+    Preconditions: prompts module is importable.
+    Postconditions: gap-analysis schema uses concrete booleans, a generic follow-up
+        example (not AWS regions), and context-discovery schema includes source;
+        unused architecture-approval prompt is absent.
+    """
+    from product_requirements_analysis_agent import prompts as pra_prompts
+
+    gap = pra_prompts.SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT
+    assert '"is_complete": true/false' not in gap
+    assert '"is_complete": false' in gap
+    assert "Which AWS regions should the application be deployed in?" not in gap
+    assert "us-east-1 (Virginia)" not in gap
+    assert "What remaining detail is needed to close this gap for the sub-phase?" in gap
+
+    ctx = pra_prompts.CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT
+    assert '"source": "context_discovery"' in ctx
+
+    consolidate = pra_prompts.CONSOLIDATE_QUESTIONS_PROMPT
+    assert "source," in consolidate or "source, constraint_domain" in consolidate
+
+    assert not hasattr(pra_prompts, "SOP_ARCHITECTURE_APPROVAL_PROMPT")
+    arch = pra_prompts.SOP_ARCHITECTURE_ANALYSIS_PROMPT
+    assert "Mermaid is allowed only inside diagrams" in arch
 
 
 def test_max_gap_rounds_constant() -> None:

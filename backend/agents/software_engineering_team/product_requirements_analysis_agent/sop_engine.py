@@ -364,13 +364,14 @@ def assess_sub_phase_gaps(
     # Build list of existing question IDs so the LLM avoids regenerating them
     existing_ids_str = ", ".join(sorted(decisions_map.keys())) if decisions_map else "(none)"
 
-    prompt = SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT.format(
-        sub_phase_name=sub_phase.value,
-        sub_phase_objective=objective,
-        spec_excerpt=spec_content,
-        sub_phase_decisions=json.dumps(sub_phase_decisions, indent=2),
-        all_decisions=json.dumps(all_decisions_summary, indent=2),
-        existing_question_ids=existing_ids_str,
+    # Literal replace (not str.format): spec/decision text may contain braces.
+    prompt = (
+        SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT.replace("{sub_phase_name}", sub_phase.value)
+        .replace("{sub_phase_objective}", objective)
+        .replace("{spec_excerpt}", spec_content)
+        .replace("{sub_phase_decisions}", json.dumps(sub_phase_decisions, indent=2))
+        .replace("{all_decisions}", json.dumps(all_decisions_summary, indent=2))
+        .replace("{existing_question_ids}", existing_ids_str)
     )
 
     try:

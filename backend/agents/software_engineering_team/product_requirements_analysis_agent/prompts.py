@@ -66,6 +66,7 @@ CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT = build_json_output_prompt(
       "allow_multiple": false,
       "constraint_domain": "",
       "constraint_layer": 0,
+      "source": "context_discovery",
       "options": [
         {{ "id": "opt_startup", "label": "Startup / early-stage (agility, speed, user behavior focus)", "is_default": true, "rationale": "Common for new products.", "confidence": 0.6 }},
         {{ "id": "opt_enterprise", "label": "Enterprise (governance, consistency, compliance)", "is_default": false, "rationale": "For established orgs.", "confidence": 0.5 }}
@@ -80,6 +81,7 @@ CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT = build_json_output_prompt(
       "allow_multiple": false,
       "constraint_domain": "",
       "constraint_layer": 0,
+      "source": "context_discovery",
       "options": [
         {{ "id": "opt_cloud", "label": "Cloud (AWS, GCP, Azure, etc.)", "is_default": true, "rationale": "Most common for new apps.", "confidence": 0.7 }},
         {{ "id": "opt_onprem", "label": "On-premises", "is_default": false, "rationale": "For air-gapped or regulated environments.", "confidence": 0.3 }},
@@ -441,9 +443,10 @@ CONSOLIDATE_QUESTIONS_PROMPT = build_json_output_prompt(
         "- Preserve allow_multiple if any of the merged questions had it true.\n"
         "- Output the same JSON structure so each item preserves metadata fields used by "
         "orchestration: id, question_text, context, category, priority, allow_multiple, "
-        "constraint_domain, constraint_layer, depends_on, blocking, owner, section_impact, "
-        "due_date, status, asked_via, options (each with id, label, is_default, rationale, "
-        "confidence). Use short stable ids (e.g. auth_provider, token_handling).\n\n"
+        "source, constraint_domain, constraint_layer, depends_on, blocking, owner, "
+        "section_impact, due_date, status, asked_via, options (each with id, label, "
+        "is_default, rationale, confidence). Use short stable ids (e.g. auth_provider, "
+        "token_handling).\n\n"
     ),
     context_blocks=(
         "Input questions (JSON array):\n{questions_json}\n\n"
@@ -1071,6 +1074,8 @@ SOP_SUB_PHASE_OBJECTIVES: Dict[str, str] = {
 # format_context_block's "**Label:**\n---\n...\n---" fencing, plus a dual-schema
 # ("if complete, return...") shape. Low value relative to the reconstruction effort
 # needed; deferred as a candidate for a future follow-up if full coverage is desired.
+# Placeholders use single braces; call sites must substitute via str.replace (not
+# str.format) so brace-bearing user/spec content cannot raise KeyError.
 SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT = """You are an expert Product Analyst performing a gap analysis on the "{sub_phase_name}" sub-phase \
 of a software project's environment constraints and requirements gathering.
 
@@ -1107,37 +1112,37 @@ RULES:
 - Each question must have 3-6 options with id, label, is_default (exactly one true), rationale, and confidence.
 - Always include an "Other" option as the last option for each question.
 - Set allow_multiple: true when the user might reasonably select more than one option.
-- Question IDs should follow the pattern "P1.{{sub_phase_short}}.gen_{{n}}" (e.g., "P1.deploy.gen_1").
+- Question IDs should follow the pattern "P1.{sub_phase_short}.gen_{n}" (e.g., "P1.deploy.gen_1").
 
 Respond with a JSON object only, no markdown:
-{{
-  "is_complete": true/false,
+{
+  "is_complete": false,
   "completeness_rationale": "Brief explanation of why the sub-phase is or isn't complete.",
   "follow_up_questions": [
-    {{
-      "id": "P1.deploy.gen_1",
-      "question_text": "Which AWS regions should the application be deployed in?",
-      "context": "Region selection affects latency, compliance, and cost.",
-      "category": "infrastructure",
+    {
+      "id": "P1.example.gen_1",
+      "question_text": "What remaining detail is needed to close this gap for the sub-phase?",
+      "context": "Follow-ups should target concrete gaps left by the objective, spec, and prior decisions.",
+      "category": "general",
       "priority": "high",
-      "allow_multiple": true,
-      "sop_sub_phase": "deployment",
+      "allow_multiple": false,
+      "sop_sub_phase": "example",
       "options": [
-        {{"id": "opt_1", "label": "us-east-1 (Virginia)", "is_default": true, "rationale": "Most common, lowest cost.", "confidence": 0.7}},
-        {{"id": "opt_2", "label": "us-west-2 (Oregon)", "is_default": false, "rationale": "West coast proximity.", "confidence": 0.5}},
-        {{"id": "opt_3", "label": "eu-west-1 (Ireland)", "is_default": false, "rationale": "EU data residency.", "confidence": 0.4}},
-        {{"id": "opt_other", "label": "Other", "is_default": false, "rationale": "Specify your region(s).", "confidence": 0.3}}
+        {"id": "opt_1", "label": "Option aligned with prior decisions", "is_default": true, "rationale": "Fits what is already known.", "confidence": 0.7},
+        {"id": "opt_2", "label": "Conservative alternative", "is_default": false, "rationale": "Lower risk if requirements are unclear.", "confidence": 0.5},
+        {"id": "opt_3", "label": "More advanced alternative", "is_default": false, "rationale": "Higher capability if scale or constraints demand it.", "confidence": 0.4},
+        {"id": "opt_other", "label": "Other", "is_default": false, "rationale": "Specify your preference.", "confidence": 0.3}
       ]
-    }}
+    }
   ]
-}}
+}
 
 If the sub-phase IS complete, return:
-{{
+{
   "is_complete": true,
   "completeness_rationale": "All key aspects of {sub_phase_name} have been addressed: ...",
   "follow_up_questions": []
-}}
+}
 """
 
 # ---------------------------------------------------------------------------
@@ -1231,9 +1236,13 @@ SOP_ARCHITECTURE_ANALYSIS_PROMPT = build_json_output_prompt(
         "granularity levels:\n"
         "   - System overview (high-level components and their interactions)\n"
         "   - Data flow diagram (how data moves through the system)\n"
-        "   Use Mermaid syntax for each diagram, followed by a textual description.\n\n"
+        "   Put Mermaid syntax only as escaped string values inside diagrams.* "
+        "(with a short textual description after the diagram). Do not wrap the "
+        "overall response in markdown fences or add prose outside the JSON.\n\n"
         "6. **Summary**: A concise overall architecture summary.\n\n"
-        "Respond with a JSON object only, no markdown:\n"
+        "Respond with a single JSON object only (no markdown fences, no prose "
+        "before or after). Mermaid is allowed only inside diagrams.* string "
+        "fields:\n"
     ),
     json_schema="""{{
   "architecture_type": "3-tier",
@@ -1261,65 +1270,6 @@ SOP_ARCHITECTURE_ANALYSIS_PROMPT = build_json_output_prompt(
     "data_flow": "sequenceDiagram\\n  Client->>API: HTTP Request\\n  API->>Cache: Check cache\\n  Cache-->>API: Cache miss\\n  API->>DB: Query data\\n  DB-->>API: Return results\\n  API->>Cache: Update cache\\n  API-->>Client: Response\\n\\nTextual Description: Requests flow from the client to the API layer, which first checks the Redis cache. On cache miss, data is fetched from PostgreSQL, cached in Redis, and returned to the client."
   }},
   "summary": "The recommended architecture is a 3-tier system using..."
-}}""",
-    trailer="",
-)
-
-# ---------------------------------------------------------------------------
-# SOP Phase 2: Architecture Approval — Format results for user approval
-# ---------------------------------------------------------------------------
-
-SOP_ARCHITECTURE_APPROVAL_PROMPT = build_json_output_prompt(
-    role_sentence=(
-        "You are an expert Product Analyst. The architecture analysis is complete. "
-        "Format the results as approval questions for the user."
-    ),
-    context_blocks=(
-        format_context_block("Architecture Analysis Results", "{architecture_results_json}")
-        + "Generate approval questions:\n"
-        "1. One question for the overall architecture type recommendation (approve or "
-        "suggest alternative)\n"
-        "2. One question per tool gap that has multiple recommendations (user selects "
-        "preferred option)\n\n"
-        "For the architecture approval question, provide the recommended type as the "
-        "default option plus 2-3 alternatives.\n"
-        "For gap questions, list all recommendations as options with the first as "
-        "default.\n\n"
-        "Respond with a JSON object only, no markdown:\n"
-    ),
-    json_schema="""{{
-  "open_questions": [
-    {{
-      "id": "arch_type_approval",
-      "question_text": "We recommend a 3-tier architecture for this project. Do you approve this approach?",
-      "context": "Rationale: A 3-tier architecture separates concerns...",
-      "category": "architecture",
-      "priority": "high",
-      "allow_multiple": false,
-      "sop_sub_phase": "",
-      "constraint_domain": "",
-      "constraint_layer": 0,
-      "options": [
-        {{ "id": "opt_approve", "label": "Approve 3-tier architecture", "is_default": true, "rationale": "Recommended based on requirements analysis.", "confidence": 0.8 }},
-        {{ "id": "opt_alt1", "label": "Use microservices instead", "is_default": false, "rationale": "Better for independent scaling of services.", "confidence": 0.4 }}
-      ]
-    }},
-    {{
-      "id": "gap_monitoring",
-      "question_text": "Which monitoring solution do you prefer?",
-      "context": "No monitoring solution was specified. This is needed for production readiness.",
-      "category": "infrastructure",
-      "priority": "medium",
-      "allow_multiple": false,
-      "sop_sub_phase": "",
-      "constraint_domain": "",
-      "constraint_layer": 0,
-      "options": [
-        {{ "id": "opt_datadog", "label": "Datadog", "is_default": true, "rationale": "Comprehensive all-in-one solution.", "confidence": 0.7 }},
-        {{ "id": "opt_prometheus", "label": "Prometheus + Grafana", "is_default": false, "rationale": "Open-source, highly customizable.", "confidence": 0.6 }}
-      ]
-    }}
-  ]
 }}""",
     trailer="",
 )
