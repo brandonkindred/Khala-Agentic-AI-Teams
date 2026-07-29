@@ -185,13 +185,14 @@ no fragile regex parsing of the DDL.
 
 ## Real-Postgres pytest fixture
 
-`shared.postgres.testing.real_postgres_schema(schema, *, scope="module")`
-builds a ready-to-use **autouse** pytest fixture for a team's `TeamSchema`:
+`shared.postgres.testing.real_postgres_schema(schema, *, scope="module", autouse=True)`
+builds a ready-to-use pytest fixture for a team's `TeamSchema`:
 it skips the test when `POSTGRES_HOST` is unset, registers the schema,
 truncates before yielding and again on teardown **when run without
-pytest-xdist**. The returned fixture always has `autouse=True`, so assigning
-it is enough — tests in scope do not need to request it by name. It wraps the
-same `register_team_schemas` / `truncate_team_tables` calls that
+pytest-xdist**. The returned fixture defaults to `autouse=True`, so assigning
+it is enough — tests in scope do not need to request it by name. Pass
+`autouse=False` when you want an explicitly requested fixture instead. It
+wraps the same `register_team_schemas` / `truncate_team_tables` calls that
 hand-rolled real-Postgres fixtures previously duplicated (skip when
 `POSTGRES_HOST` is unset, register schema, truncate around the test).
 A team can opt a test module into real Postgres with one line instead of
@@ -204,8 +205,9 @@ from shared.postgres.testing import real_postgres_schema
 
 pytestmark = pytest.mark.integration
 
-# Default module scope; use scope="function" when tests assert global row counts
-# (as branding_team/tests/test_store.py does).
+# Default module scope + autouse=True; use scope="function" when tests assert
+# global row counts (as branding_team/tests/test_store.py does). Pass
+# autouse=False for an explicitly requested fixture.
 _branding_schema = real_postgres_schema(BRANDING_SCHEMA)
 ```
 
