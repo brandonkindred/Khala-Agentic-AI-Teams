@@ -14,6 +14,17 @@ Note for maintainers:
     tests in ``tests/test_store_real_postgres.py`` (which run the same SQL
     against a live Postgres in CI) so the fake can't drift into emulating
     queries the real database would reject.
+
+    This fake-plus-real-Postgres split was deliberately kept rather than
+    migrated onto a single real ephemeral-Postgres fixture: a repo-wide
+    survey found no such fixture already in use elsewhere in this codebase
+    (no ``testcontainers``/``pytest-postgresql`` dependency exists anywhere
+    in the repo), and the ``real_postgres``-marked tests were confirmed to
+    actually execute — not silently skip — against a live Postgres service
+    container in CI. Those tests are the accepted drift-detection
+    mechanism for this module: keep them in sync with the fake, and trust
+    a CI failure in ``test_store_real_postgres.py`` over the fake staying
+    green.
 """
 
 from __future__ import annotations
