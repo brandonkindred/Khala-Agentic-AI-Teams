@@ -133,9 +133,9 @@ class RefinementAgent:
         response are logged and discarded.
 
         Raises:
-            DesignBudgetExhausted: If the active per-cycle design LLM budget
-                is spent (raised by :func:`charge_active_budget` on the
-                legacy parse-retry path, or by the structured path when
+            :class:`~._llm_budget.DesignBudgetExhausted`: If the active per-cycle design
+                LLM budget is spent (raised by :func:`charge_active_budget` on
+                the legacy parse-retry path, or by the structured path when
                 ``charge=True``).
             StrategyLabLLMError: If the LLM envelope exhausts transport retries
                 or hits a fatal LLM error.
@@ -206,10 +206,11 @@ class RefinementAgent:
         its transport retries / budget.
 
         When the active provider supports provider-enforced structured
-        decoding (:func:`so.structured_output_available`), a single
-        schema-constrained call is attempted first via
-        :func:`so.invoke_structured_with_schema` — no parse-retry loop
-        needed, since a conformant decode cannot emit unparseable JSON. Any
+        decoding (:func:`so.structured_output_available`), a reasoning pass
+        followed by a schema-constrained formatting pass is attempted first
+        via :func:`so.invoke_structured_with_schema` (two sequential calls
+        under one budget/timeout envelope) — no parse-retry loop needed,
+        since a conformant decode cannot emit unparseable JSON. Any
         failure OTHER than a ``schema_forced`` starvation signal propagates
         immediately (unchanged fail-fast semantics for a genuine transport/auth
         failure) rather than degrading — a deliberate, narrow reading of
@@ -247,6 +248,7 @@ class RefinementAgent:
                     charge=True,
                     objective="strategy refinement (structured)",
                     logger=logger,
+                    reasoning_system_prompt=so.build_reasoning_system_prompt(system_prompt),
                 )
             except StrategyLabLLMError as exc:
                 cause = exc.cause

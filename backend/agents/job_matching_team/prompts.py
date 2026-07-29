@@ -1,7 +1,11 @@
 """System prompts for the job matching pipeline agents.
 
-Each prompt instructs the model to emit strict JSON so downstream Pydantic
-validation can enforce the contract.
+The scanner/query-builder prompts instruct the model to emit strict JSON so
+downstream Pydantic validation can enforce the contract. The ranker instead
+uses a two-call split: ``RANKER_SYSTEM_PROMPT_REASONING`` drives the
+think=True analysis (prose, no JSON), and ``RANKER_FORMAT_INSTRUCTIONS``
+drives the think=False pass that transcribes that prose into the strict JSON
+the contract still requires.
 """
 
 from __future__ import annotations
@@ -47,7 +51,12 @@ Rules:
 - Keep "description" under 80 words.
 """
 
-RANKER_SYSTEM_PROMPT = """\
+# Ranker prompts come as a pair for the two-call split: this one drives the
+# think=True reasoning pass (prose, no JSON), and RANKER_FORMAT_INSTRUCTIONS
+# drives the think=False pass that transcribes that prose into JSON. The
+# scoring dimensions live here only — the formatting pass never re-derives
+# them, so there is a single source of truth for the rubric.
+RANKER_SYSTEM_PROMPT_REASONING = """\
 You are a career advisor scoring how well an open role fits a specific job
 seeker. You will receive the seeker's criteria and one job posting.
 
@@ -60,8 +69,12 @@ Score each dimension from 0.0 (no fit) to 1.0 (perfect fit):
 - company_fit: stage/size/industry alignment; boost preferred companies.
 - skills_fit: coverage of must-have (heavily weighted) and nice-to-have skills.
 
-Also identify concerns and a recommendation.
+Think this through, then answer in structured prose (not JSON): give each dimension's score
+(0.0-1.0) with a one-line justification, then your overall recommendation (apply/maybe/skip)
+with a 1-2 sentence rationale, and any concerns.
+"""
 
+RANKER_FORMAT_INSTRUCTIONS = """\
 Return STRICT JSON only in exactly this shape:
 {
   "title_fit": 0.0,
@@ -74,4 +87,5 @@ Return STRICT JSON only in exactly this shape:
   "rationale": "1-2 sentences explaining the overall fit",
   "concerns": ["short concern", "..."]
 }
+Transcribe the analysis below faithfully — do not add or invent information beyond it.
 """

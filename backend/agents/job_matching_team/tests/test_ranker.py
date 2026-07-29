@@ -148,6 +148,12 @@ def test_band_recommendation_when_llm_omits_it():
 
 def test_llm_failure_yields_neutral_scores():
     class BrokenLLM:
+        def complete(self, *a, **k):
+            # _judge's reasoning pass (complete_json_via_reasoning) calls this
+            # first — raise here too so the test exercises "LLM call raises"
+            # rather than an incidental AttributeError from a missing method.
+            raise RuntimeError("down")
+
         def complete_json(self, *a, **k):
             raise RuntimeError("down")
 

@@ -1,9 +1,13 @@
 """``DeepthoughtWorkflow`` — deterministic orchestration of the recursive tree.
 
 The workflow re-expresses ``DeepthoughtAgent.execute`` / ``DeepthoughtOrchestrator``
-as a Temporal workflow: every LLM call is an activity
+as a Temporal workflow: every LLM boundary is an activity
 (:mod:`deepthought.temporal.activities`), and the recursion is driven here as
-deterministic workflow code. Cross-cutting state that thread mode kept in shared
+deterministic workflow code. An activity may bundle more than one sequential
+provider call under a single durable boundary — e.g. ``analyse_activity``
+wraps ``DeepthoughtAgent._analyse``'s two-pass reasoning-then-formatting split
+(:func:`llm_service.complete_json_via_reasoning`) as one activity, not two.
+Cross-cutting state that thread mode kept in shared
 objects — the per-run knowledge base (dedup), the agent budget, and the event
 log — lives as workflow-instance state, mutated between ``await`` points on the
 single-threaded, replay-deterministic workflow event loop (so no locks are
@@ -26,6 +30,7 @@ from typing import Any
 from temporalio import workflow
 
 from deepthought.temporal.constants import (
+    ANALYSE_ACTIVITY_OPTS,
     DECOMPOSED_PIPELINE_PATCH,
     JOB_ACTIVITY_OPTS,
     LLM_ACTIVITY_OPTS,
@@ -328,7 +333,19 @@ class DeepthoughtWorkflow:
         strategy: str,
         max_depth: int,
     ) -> QueryAnalysis:
-        """Run the analyse activity and parse its result back into a model."""
+        """Run the analyse activity and parse its result back into a model.
+
+        ``activities.analyse_activity`` bundles ``DeepthoughtAgent._analyse``'s
+        two sequential LLM calls (a ``think=True`` reasoning pass followed by
+        a ``think=False`` formatting pass, via
+        :func:`llm_service.complete_json_via_reasoning`) behind a single
+        durable activity boundary rather than exposing them as two activities
+        — see the module docstring. ``ANALYSE_ACTIVITY_OPTS`` gives this
+        activity a 20-minute ``start_to_close_timeout``, double the plain
+        single-call ``LLM_ACTIVITY_OPTS`` (10 minutes), so that two
+        individually healthy provider calls can't be aborted by a timeout
+        budget sized for one.
+        """
         data = await workflow.execute_activity(
             activities.analyse_activity,
             AnalysePayload(
@@ -340,7 +357,7 @@ class DeepthoughtWorkflow:
                 knowledge_summary=render_knowledge_summary(self._kb, ANALYSIS_KB_SUMMARY_CHARS),
                 max_depth=max_depth,
             ).model_dump(mode="json"),
-            **LLM_ACTIVITY_OPTS,
+            **ANALYSE_ACTIVITY_OPTS,
         )
         return QueryAnalysis.model_validate(data)
 

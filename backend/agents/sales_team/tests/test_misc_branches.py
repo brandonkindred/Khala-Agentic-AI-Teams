@@ -38,9 +38,40 @@ from sales_team.models import (
 
 
 class _CannedLLM(LLMClient):
+    """Test double: placeholder prose for the reasoning pass, queued JSON for formatting.
+
+    ``complete()`` returns a fixed prose string without consuming the response
+    queue (so the reasoning pass cannot steal a canned formatting payload).
+    ``complete_json()`` records the formatting prompt and pops the next queued
+    response.
+    """
+
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str = "",
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+    ) -> str:
+        # The critics' think=True reasoning pass (complete_validated_via_reasoning)
+        # calls this before the real verdict call. Override the LLMClient base's
+        # default (which would otherwise route through complete_json and silently
+        # consume a queued response meant for the real formatting call) with a
+        # harmless placeholder that doesn't touch the response queue — mirrors
+        # CannedLLMClient in test_critics.py. The critic's built prompt (with
+        # any dossier-truncation marker) lands here, not in complete_json's
+        # prompt, so record it separately for tests that inspect it.
+        self.reasoning_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        return "Reasoning: proceeding as configured by the test fixture."
 
     def complete_json(
         self,
@@ -52,6 +83,7 @@ class _CannedLLM(LLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        """Record the formatting prompt and return the next queued JSON response."""
         self.calls.append({"prompt": prompt})
         return self._responses.pop(0)
 
@@ -141,7 +173,10 @@ def test_outreach_critic_embeds_full_dossier_json_untruncated() -> None:
     )
     critic = OutreachCriticAgent(llm_client=llm)
     critic.review(seq, dossier, icp)
-    prompt = llm.calls[0]["prompt"] or ""
+    # The critic's built prompt is sent as the reasoning-pass prompt, not the
+    # formatting call's prompt (which is "convert this prose" + the reasoning
+    # call's output) — inspect reasoning_calls.
+    prompt = llm.reasoning_calls[0]["prompt"] or ""
     assert "dossier truncated" not in prompt
     dossier_block = prompt.split("--- DOSSIER ---\n", 1)[1].split("\n\n--- OUTREACH SEQUENCE", 1)[0]
     parsed = json.loads(dossier_block)
@@ -159,7 +194,7 @@ def test_outreach_critic_emits_no_dossier_marker_when_dossier_none() -> None:
     )
     critic = OutreachCriticAgent(llm_client=llm)
     critic.review(seq, None, icp)
-    assert any("(no dossier supplied)" in (c["prompt"] or "") for c in llm.calls)
+    assert any("(no dossier supplied)" in (c["prompt"] or "") for c in llm.reasoning_calls)
 
 
 def test_proposal_critic_embeds_full_dossier_json_untruncated() -> None:
@@ -190,7 +225,9 @@ def test_proposal_critic_embeds_full_dossier_json_untruncated() -> None:
     )
     critic = ProposalCriticAgent(llm_client=llm)
     critic.review(proposal, dossier, qual)
-    prompt = llm.calls[0]["prompt"] or ""
+    # The critic's built prompt is sent as the reasoning-pass prompt — see the
+    # outreach critic test above for why.
+    prompt = llm.reasoning_calls[0]["prompt"] or ""
     assert "dossier truncated" not in prompt
     dossier_block = prompt.split("--- DOSSIER ---\n", 1)[1].split("\n\n--- QUALIFICATION", 1)[0]
     parsed = json.loads(dossier_block)

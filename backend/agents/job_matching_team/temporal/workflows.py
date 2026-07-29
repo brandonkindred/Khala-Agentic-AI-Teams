@@ -61,10 +61,12 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
 _PREPARE_TIMEOUT = timedelta(minutes=2)
 _BUILD_QUERIES_TIMEOUT = timedelta(minutes=5)
 _SCAN_TIMEOUT = timedelta(minutes=30)
-# Ranking issues one LLM judge call per posting sequentially (up to max_roles,
-# default 40), so it gets the same 30-minute budget as scan rather than a
-# tighter one that could time out a slow-but-valid run and force a full re-rank.
-_RANK_TIMEOUT = timedelta(minutes=30)
+# Ranking issues two sequential LLM calls per posting (a think=True reasoning
+# pass, then a think=False JSON-formatting pass, via complete_json_via_reasoning)
+# sequentially up to max_roles (default 40), so it gets double the scan budget
+# rather than a tighter one that could time out a slow-but-valid run and force
+# a full re-rank.
+_RANK_TIMEOUT = timedelta(minutes=60)
 _FINALIZE_TIMEOUT = timedelta(minutes=2)
 _FAIL_TIMEOUT = timedelta(minutes=2)
 
@@ -628,7 +630,7 @@ class JobMatchingWorkflow:
               ``start_to_close_timeout``. The decomposed phases each have their
               own budget (``_PREPARE_TIMEOUT`` + ``_BUILD_QUERIES_TIMEOUT`` +
               ``_SCAN_TIMEOUT`` + ``_RANK_TIMEOUT`` + ``_FINALIZE_TIMEOUT`` =
-              up to 69 minutes) with no single enforced aggregate deadline, so a
+              up to 99 minutes) with no single enforced aggregate deadline, so a
               run where every phase individually stays within budget can now
               legitimately take more than double the old ceiling. There is no
               Temporal primitive for wrapping a sequence of already-awaited
