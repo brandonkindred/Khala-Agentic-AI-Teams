@@ -133,7 +133,7 @@ def _real_postgres_schema_body(schema: TeamSchema, *, worker_id: str = "master")
     tables (in an unrelated test — possibly even one from the same module)
     when this worker's fixture instance tears down. An uncoordinated
     ``TRUNCATE ... CASCADE`` at that point would wipe rows the sibling worker
-    is mid-test against, so teardown truncation only runs on the
+    is mid-test against, so setup/teardown truncation only runs on the
     ``worker_id == "master"`` (xdist-inactive) path; it's skipped under any
     ``-n`` invocation, logged at DEBUG.
 
@@ -153,6 +153,12 @@ def _real_postgres_schema_body(schema: TeamSchema, *, worker_id: str = "master")
     if not is_postgres_enabled():
         pytest.skip(f"real Postgres tests require POSTGRES_HOST (team={schema.team})")
     register_team_schemas(schema)
+    if worker_id == "master":
+        # Truncate before yield so the first test (and every function-scoped
+        # instance) starts from empty tables even when a prior interrupted
+        # or non-xdist run left rows behind. Under xdist both setup and
+        # teardown truncate are skipped — see docstring above.
+        truncate_team_tables(schema)
     yield
     if worker_id != "master":
         logger.debug(
@@ -181,27 +187,30 @@ def _xdist_worker_id(request: pytest.FixtureRequest) -> str:
     return workerinput["workerid"]
 
 
-def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
+def real_postgres_schema(schema: TeamSchema, *, scope: str = "module", autouse: bool = True):
     """Build an autouse pytest fixture that provisions ``schema`` against live Postgres.
 
-    Registers ``schema`` once per fixture instance (per ``scope``), yields, then
-    truncates its tables on teardown via :func:`truncate_team_tables` when
-    running without pytest-xdist — so a plain (non-``-n``) run always sees a
-    clean table between fixture instances. Skips the test (rather than
-    raising) when ``POSTGRES_HOST`` is unset, matching every other
-    real-Postgres fixture in this repo.
+    Registers ``schema`` once per fixture instance (per ``scope``), truncates
+    its tables via :func:`truncate_team_tables` before yielding and again on
+    teardown when running without pytest-xdist — so a plain (non-``-n``) run
+    always starts each fixture instance from empty tables (including the first
+    test after a polluted local DB) and leaves them empty afterward. Skips the
+    test (rather than raising) when ``POSTGRES_HOST`` is unset, matching every
+    other real-Postgres fixture in this repo.
 
-    Under pytest-xdist (any ``-n``, including ``-n 1``), teardown truncation
-    is skipped entirely rather than attempted per-worker — see
+    Under pytest-xdist (any ``-n``, including ``-n 1``), setup and teardown
+    truncation are skipped entirely rather than attempted per-worker — see
     :func:`_real_postgres_schema_body` for why an uncoordinated cross-worker
     truncate is unsafe, and why safely coordinating it after every worker
     finishes isn't something this fixture factory can do without a caller
     also wiring up a ``conftest.py``-level hook.
 
-    The returned fixture is always ``autouse=True``: assigning
+    The returned fixture defaults to ``autouse=True``: assigning
     ``_my_schema = real_postgres_schema(SCHEMA)`` is enough for every test in
     the fixture's scope to get register/truncate; tests do not request it by
-    name. ``scope`` is passed straight through to ``pytest.fixture(scope=...)`` —
+    name. Pass ``autouse=False`` to build a non-autouse fixture when a caller
+    prefers explicit parameters. ``scope`` is passed straight through to
+    ``pytest.fixture(scope=...)`` —
     valid values are ``"session"``, ``"package"``, ``"module"`` (the default),
     ``"class"``, or ``"function"``; a wider scope amortizes the DDL/register
     cost across more tests at the price of more state shared between them.
@@ -213,13 +222,11 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     fixture, so plain pytest runs work even when pytest-xdist is not installed
     or its plugin is disabled.
 
-    A drop-in replacement for the per-team hand-rolled version of this pattern
-    (see ``branding_team/tests/test_store_real_postgres.py``'s ``_branding_schema``
-    fixture): any team's ``conftest.py`` or test module can do
-    ``_my_schema = real_postgres_schema(SCHEMA)`` instead of re-deriving the
-    skip/register/truncate boilerplate.
-
-    Not itself wired into any team's tests yet — callers opt in explicitly.
+    Drop-in replacement for the per-team hand-rolled skip/register/truncate
+    pattern. ``branding_team`` already wires it in
+    ``tests/test_store.py`` (``scope="function"``) and
+    ``tests/test_store_real_postgres.py`` (default module scope); other teams
+    opt in the same way with ``_my_schema = real_postgres_schema(SCHEMA)``.
     """
     if scope not in _PYTEST_FIXTURE_SCOPES:
         raise ValueError(
@@ -230,7 +237,7 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
         yield from _real_postgres_schema_body(schema, worker_id=_xdist_worker_id(request))
 
     _fixture.__name__ = f"real_postgres_schema_{schema.team}"
-    return pytest.fixture(scope=scope, autouse=True)(_fixture)
+    return pytest.fixture(scope=scope, autouse=autouse)(_fixture)
 
 
 # Re-export the in-memory fake scaffold so callers can import from either

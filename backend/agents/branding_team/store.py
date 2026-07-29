@@ -8,23 +8,13 @@ Every public method is wrapped in ``@timed_query`` so slow reads and
 writes surface as structured log lines.
 
 Note for maintainers:
-    The unit tests run against an in-memory fake (``tests/_fake_postgres.py``)
-    that matches the SQL emitted here by prefix. When you change or add SQL in
-    this module, update that fake's handlers and the ``real_postgres``-marked
-    tests in ``tests/test_store_real_postgres.py`` (which run the same SQL
-    against a live Postgres in CI) so the fake can't drift into emulating
-    queries the real database would reject.
-
-    This fake-plus-real-Postgres split was deliberately kept rather than
-    migrated onto a single real ephemeral-Postgres fixture: a repo-wide
-    survey found no such fixture already in use elsewhere in this codebase
-    (no ``testcontainers``/``pytest-postgresql`` dependency exists anywhere
-    in the repo), and the ``real_postgres``-marked tests were confirmed to
-    actually execute — not silently skip — against a live Postgres service
-    container in CI. Those tests are the accepted drift-detection
-    mechanism for this module: keep them in sync with the fake, and trust
-    a CI failure in ``test_store_real_postgres.py`` over the fake staying
-    green.
+    ``tests/test_store.py`` exercises this module's SQL against live Postgres
+    via ``shared.postgres.testing.real_postgres_schema`` (skips when
+    ``POSTGRES_HOST`` is unset). When you change or add SQL here, update those
+    tests — do not keep a parallel fake handler in sync for this module.
+    Other branding suites still use ``tests/_fake_postgres.py`` until that
+    emulator is retired; conversation-only SQL coverage that
+    ``test_store.py`` does not hit lives in ``tests/test_store_real_postgres.py``.
 """
 
 from __future__ import annotations
@@ -55,6 +45,16 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 _STORE = "branding"
+
+
+class BrandVersionAppendConflict(RuntimeError):
+    """Raised when a brand-version append cannot persist because the brand row is gone.
+
+    Subclasses ``RuntimeError`` so broad ``except Exception`` / job-failure paths
+    still catch it, while the sync ``POST /run`` handler can single it out for
+    HTTP 409 without mapping unrelated runtime failures (e.g. LLM/provider errors)
+    to a client conflict.
+    """
 
 
 def _now_iso() -> str:
@@ -127,6 +127,13 @@ class BrandingStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="get_client")
     def get_client(self, client_id: str) -> Optional[Client]:
+        """Retrieve a client by id.
+
+        Preconditions:
+            ``client_id`` is a non-empty string.
+        Postconditions:
+            Returns the validated ``Client`` when a row exists, else ``None``.
+        """
         row = self._fetch_one("SELECT data FROM branding_clients WHERE id = %s", (client_id,))
         if row is None:
             return None
@@ -161,6 +168,16 @@ class BrandingStore(PostgresHelperMixin):
         contact_info: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> Client:
+        """Insert a new client row and return the created model.
+
+        Preconditions:
+            ``name`` is a non-empty string; ``contact_info`` / ``notes`` are
+            optional free-form strings when provided.
+        Postconditions:
+            Returns a ``Client`` whose ``id`` is freshly minted
+            (``client_<hex>``) and whose timestamps are set. A matching row
+            exists in ``branding_clients``.
+        """
         client_id = f"client_{uuid4().hex[:12]}"
         now = _now_iso()
         client = Client(
@@ -183,6 +200,15 @@ class BrandingStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="get_brand")
     def get_brand(self, client_id: str, brand_id: str) -> Optional[Brand]:
+        """Retrieve a brand scoped to its owning client.
+
+        Preconditions:
+            ``client_id`` and ``brand_id`` are non-empty strings.
+        Postconditions:
+            Returns the validated ``Brand`` when a row exists for that
+            ``(id, client_id)`` pair, else ``None`` (including when the brand
+            exists under a different client).
+        """
         row = self._fetch_one(
             "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
             (brand_id, client_id),
@@ -284,6 +310,20 @@ class BrandingStore(PostgresHelperMixin):
         mission: BrandingMission,
         name: Optional[str] = None,
     ) -> Optional[Brand]:
+        """Insert a draft brand for an existing client.
+
+        Preconditions:
+            ``client_id`` is a non-empty string; ``mission`` is a validated
+            ``BrandingMission``; ``name`` is optional (defaults to
+            ``mission.company_name``).
+        Postconditions:
+            Returns ``None`` when no client row exists for ``client_id``
+            (no brand row is written). Otherwise returns a ``Brand`` with a
+            freshly minted ``brand_<hex>`` id, ``status=draft``,
+            ``version=0``, empty history, and a matching
+            ``branding_brands`` row. Best-effort profile association is
+            attempted after commit and never raises.
+        """
         with self._transaction() as cur:
             cur.execute("SELECT 1 FROM branding_clients WHERE id = %s", (client_id,))
             if cur.fetchone() is None:
@@ -350,6 +390,13 @@ class BrandingStore(PostgresHelperMixin):
         Postconditions:
             Returns the updated Brand, or None when no such brand exists for
             the given client.
+
+            When ``mission`` is provided, the update invalidates any
+            previously generated output: it clears the brand's
+            ``latest_output`` and resets ``current_phase`` back to
+            ``BrandPhase.STRATEGIC_CORE.value`` so downstream consumers
+            recompute against the new mission instead of serving stale
+            positioning.
         """
         patch: dict = {"updated_at": _now_iso()}
         if mission is not None:

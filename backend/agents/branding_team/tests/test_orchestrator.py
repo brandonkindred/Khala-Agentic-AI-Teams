@@ -6,6 +6,7 @@ return a canned result and verify the orchestrator correctly assembles
 ``TeamOutput`` from it.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,9 +21,11 @@ from branding_team import (
 from branding_team.models import (
     AudienceSegment,
     AudienceSegmentsOutput,
+    Brand,
     BrandCheckRequest,
     BrandDiscoveryAuditOutput,
     BrandHealthKPI,
+    BrandStatus,
     ChannelActivationOutput,
     ChannelGuideline,
     ColorEntry,
@@ -44,6 +47,8 @@ from branding_team.models import (
     WikiEntry,
     WritingGuidelines,
 )
+from branding_team.shared.coro_runner import run_coroutine
+from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests._fake_postgres import install_fake_postgres
 from branding_team.tests.conftest import make_mission
 
@@ -399,6 +404,99 @@ def test_run_with_store_appends_version(fake_pg) -> None:
     assert updated.latest_output is not None
 
 
+def test_run_with_store_append_brand_version_none_raises() -> None:
+    """A brand-version append that returns None must never be ignored.
+
+    When ``append_brand_version`` returns ``None`` (brand deleted between
+    resolve and append), the orchestrator must raise so the run can be
+    marked failed instead of reporting success without persistence.
+    """
+    mission = make_mission(
+        company_description="A strategic studio helping product teams ship cohesive digital experiences",
+        values=["clarity", "trust", "momentum"],
+    )
+    brand = Brand(
+        id="brand_deleted",
+        client_id="client_1",
+        name="Deleted Brand",
+        mission=mission,
+        status=BrandStatus.draft,
+    )
+
+    store = MagicMock()
+    store.get_brand.return_value = brand
+    store.append_brand_version.return_value = None
+
+    with _patch_graph_invoke(ALL_PHASES):
+        orchestrator = BrandingTeamOrchestrator()
+        with pytest.raises(
+            BrandVersionAppendConflict,
+            match="Brand row disappeared while appending brand version",
+        ):
+            orchestrator.run(
+                mission=mission,
+                human_review=HumanReview(approved=True),
+                store=store,
+                client_id=brand.client_id,
+                brand_id=brand.id,
+            )
+
+
+def test_run_branding_team_route_maps_append_conflict_to_409() -> None:
+    """Sync ``POST /run`` must map ``BrandVersionAppendConflict`` to HTTP 409.
+
+    Matches the background path's failed-job handling rather than leaking an
+    unhandled 500 when the brand row disappears mid-run. Unrelated
+    ``RuntimeError`` values must not be remapped to 409.
+    """
+    from fastapi import HTTPException
+
+    from branding_team.api.models import RunBrandingTeamRequest
+    from branding_team.api.routes import sessions as sessions_mod
+    from branding_team.store import BrandVersionAppendConflict
+
+    payload = RunBrandingTeamRequest(
+        company_name="Northstar Labs",
+        company_description="A strategic studio helping product teams ship cohesive digital experiences",
+        target_audience="enterprise product leaders",
+        human_approved=True,
+        client_id="c1",
+        brand_id="b1",
+    )
+    with patch(
+        "branding_team.api.main.orchestrator.run",
+        side_effect=BrandVersionAppendConflict(
+            "Brand row disappeared while appending brand version (client_id=c1, brand_id=b1)"
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            sessions_mod.run_branding_team(payload)
+
+    assert exc_info.value.status_code == 409
+    assert "Brand row disappeared" in str(exc_info.value.detail)
+
+
+def test_run_branding_team_route_does_not_remap_unrelated_runtime_error() -> None:
+    """LLM/provider ``RuntimeError`` must not become HTTP 409."""
+    from branding_team.api.models import RunBrandingTeamRequest
+    from branding_team.api.routes import sessions as sessions_mod
+
+    payload = RunBrandingTeamRequest(
+        company_name="Northstar Labs",
+        company_description="A strategic studio helping product teams ship cohesive digital experiences",
+        target_audience="enterprise product leaders",
+        human_approved=True,
+        client_id="c1",
+        brand_id="b1",
+    )
+    with patch(
+        "branding_team.api.main.orchestrator.run",
+        side_effect=RuntimeError("LLM provider unavailable"),
+    ):
+        with pytest.raises(RuntimeError, match="LLM provider unavailable"):
+            sessions_mod.run_branding_team(payload)
+
+
 def test_run_phase_stops_at_strategic_core() -> None:
     with _patch_graph_invoke(["phase1_strategic_core"]):
         orchestrator = BrandingTeamOrchestrator()
@@ -577,7 +675,13 @@ def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None
 def test_extract_phase_output_uses_structured_output_when_present() -> None:
     """Agents built with ``structured_output=`` populate ``AgentResult.structured_output``
     rather than the message's text blocks; extraction must check that field before
-    falling back to text or it silently discards the agent's real output."""
+    falling back to text or it silently discards the agent's real output.
+
+    Calls the private ``_extract_phase_output`` helper directly: the public
+    ``run``/``run_phase`` APIs always go through a full graph invoke, which
+    cannot isolate the structured-output-vs-text branch without rebuilding the
+    entire Strands result shape around this one field.
+    """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
     agent_result.structured_output = PositioningOutput(
@@ -824,8 +928,6 @@ def test_parse_model_from_text_schema_mismatch_returns_none_and_extract_degrades
 
 def test_gather_integrations_market_research_failure_returns_none() -> None:
     """A failing market-research call is swallowed to None; disabled design → None."""
-    import asyncio
-
     from branding_team.orchestrator import _gather_integrations
 
     async def _boom(_mission):
@@ -849,9 +951,6 @@ def test_gather_integrations_market_research_failure_returns_none() -> None:
 
 def test_run_coro_offloads_when_loop_running() -> None:
     """run_coroutine runs a coroutine on a worker thread when a loop is already active."""
-    import asyncio
-
-    from branding_team.shared.coro_runner import run_coroutine
 
     async def _driver():
         async def _val():
