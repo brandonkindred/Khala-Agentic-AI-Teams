@@ -1,11 +1,19 @@
 """Durable code review workflow: map-reduce review as a Temporal workflow.
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
-resumable computation. It orchestrates the review as: prepare → map fan-out →
-three tail passes run concurrently (false-positive verify, architecture-
-consistency / redundancy, side-effect / blast-radius) → deterministic gate →
-(conditional) narrative synthesis — so a worker restart mid-review re-runs only
-the unfinished activities instead of re-reviewing the whole submission.
+resumable computation. It orchestrates the review as: prepare → map fan-out
+(under ``_ADAPTIVE_FANOUT_PATCH``: chunk activities gathered with
+``asyncio.gather(..., return_exceptions=True)``, then a fixed-order scan
+re-raises the earliest-index exception; pre-migration histories keep the
+original unconstrained ``asyncio.gather`` without ``return_exceptions``) →
+three tail passes run concurrently via the same return_exceptions idiom
+(false-positive verify, architecture-consistency / redundancy, side-effect /
+blast-radius; scan order is verify → architecture → side-effect) →
+deterministic gate → (conditional) narrative synthesis — so a worker restart
+mid-review re-runs only the unfinished activities instead of re-reviewing the
+whole submission. New concurrent fan-outs await every sibling and re-raise in
+list order so completion-order races never pick the surfaced exception or
+abandon an activity.
 
 The tail passes have no cross-pass data dependency (each reads only
 ``review_input`` and/or the map phase's aggregated ``issues``, never another
@@ -31,9 +39,11 @@ a field this workflow's return dict does not populate at all.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
-no I/O, time, or randomness — only ``execute_activity`` calls, ``asyncio.gather``
-for deterministic concurrent fan-out of independent activities (the map-phase
-chunks and the tail passes), and pure list aggregation over JSON-native dicts.
+no I/O, time, or randomness — only ``execute_activity`` calls,
+``asyncio.gather(..., return_exceptions=True)`` for the adaptive map fan-out
+and the concurrent tail passes (with a fixed-order scan over those gathered
+results), default ``asyncio.gather`` for pre-migration unconstrained map
+histories, and pure list aggregation over JSON-native dicts.
 """
 
 from __future__ import annotations
@@ -243,10 +253,28 @@ class CodeReviewWorkflow:
                 async with semaphore:
                     return await _review_one(chunk)
 
-            outcomes = await asyncio.gather(*[_review_one_bounded(chunk) for chunk in chunks])
+            # Same return_exceptions + fixed-order re-raise idiom as the
+            # concurrent tail-pass gather below: await every chunk activity
+            # (no abandoned siblings) and surface the earliest-index
+            # failure rather than whichever chunk happens to fail first in
+            # completion order.
+            outcomes = await asyncio.gather(
+                *[_review_one_bounded(chunk) for chunk in chunks],
+                return_exceptions=True,
+            )
+            first_chunk_exception = next(
+                (r for r in outcomes if isinstance(r, BaseException)),
+                None,
+            )
+            if first_chunk_exception is not None:
+                raise first_chunk_exception
         else:
             # Pre-migration history: reproduce the original unconstrained
-            # fan-out exactly (see _ADAPTIVE_FANOUT_PATCH).
+            # fan-out exactly (see _ADAPTIVE_FANOUT_PATCH) — default
+            # ``asyncio.gather`` with no ``return_exceptions``, matching
+            # histories recorded before the adaptive-fanout / orphaning
+            # fix. Do not add ``return_exceptions=True`` here without its
+            # own ``workflow.patched`` gate.
             outcomes = await asyncio.gather(*[_review_one(chunk) for chunk in chunks])
 
         issues: List[Dict[str, Any]] = []
@@ -316,10 +344,11 @@ class CodeReviewWorkflow:
         has_side_effect_findings = False
 
         async def _empty_tail_pass() -> List[Dict[str, Any]]:
-            # Stand-in for a disabled pass in the gather below: no activity is
-            # scheduled, so the gather always has a uniform three-coroutine
-            # shape (and three ActivityTaskScheduledEvents whenever a real
-            # activity is behind it) regardless of which passes are enabled.
+            # Stand-in for a disabled pass in the gather below: schedules no
+            # activity. Keeps ``asyncio.gather``'s coroutine arity fixed at
+            # three (verify / architecture / side-effect slots) regardless of
+            # which passes are enabled; the ActivityTaskScheduledEvent count
+            # equals the number of enabled passes (1-3), not always three.
             return []
 
         if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):
@@ -340,12 +369,40 @@ class CodeReviewWorkflow:
                 _architecture() if run_architecture else _empty_tail_pass(),
                 _side_effect() if run_side_effect else _empty_tail_pass(),
             ]
-            verified, architecture_findings, side_effect_findings = await asyncio.gather(*calls)
-            if architecture_findings:
-                verified = [*verified, *architecture_findings]
+            # return_exceptions=True: wait for every tail pass to finish
+            # (success or failure) instead of asyncio.gather's default of
+            # raising as soon as the first exception surfaces and leaving
+            # the others un-awaited -- that default would leave a sibling
+            # activity un-awaited from the workflow's point of view (an
+            # orphaned command Temporal's workflow sandbox does not
+            # tolerate) and pick whichever exception happens to resolve
+            # first in real time, which is not guaranteed to match on
+            # replay. Unpack each slot into its own local (fixed
+            # verify/architecture/side-effect order) BEFORE checking for
+            # exceptions, so a failed slot's exception object is read once
+            # as itself and never mistaken for (and spread as) a findings
+            # list; only once every local holds its plain result value do
+            # we re-raise the first exception found, in that same fixed
+            # order -- reproducing sequential execution's deterministic
+            # error precedence (verify's failure, if any, always wins) and
+            # total-failure semantics (a tail-pass failure aborts the whole
+            # review before any result is used, exactly as it would if the
+            # later passes were never reached). The gather always has a
+            # uniform three-coroutine shape via ``_empty_tail_pass`` so
+            # disabled passes do not change command count.
+            results = await asyncio.gather(*calls, return_exceptions=True)
+            verify_result, architecture_result, side_effect_result = results
+
+            first_exception = next((r for r in results if isinstance(r, BaseException)), None)
+            if first_exception is not None:
+                raise first_exception
+
+            verified = verify_result
+            if architecture_result:
+                verified = [*verified, *architecture_result]
                 has_architecture_findings = True
-            if side_effect_findings:
-                verified = [*verified, *side_effect_findings]
+            if side_effect_result:
+                verified = [*verified, *side_effect_result]
                 has_side_effect_findings = True
         else:
             # Pre-migration history: reproduce the original sequential
@@ -409,13 +466,16 @@ class CodeReviewWorkflow:
         Mirrors ``coordinator._merge_narrative``: a single sub-review with no
         additive-pass findings (architecture/redundancy or side-effect/blast-radius)
         is used verbatim (no synthesis call); otherwise attempts a synthesis
-        activity so the narrative can reflect those findings too. On synthesis
-        failure, falls back to deterministic concatenation of only the
-        per-chunk ``summaries``/``spec_notes`` — the architecture/redundancy
-        and side-effect/blast-radius passes contribute findings via ``issues``,
-        not summaries, so their findings can be absent from this concatenated
-        narrative text on that failure path (they are never absent from the
-        returned ``issues`` list itself, only from this prose summary).
+        activity so the narrative can reflect those findings too. When the
+        activity returns ``None`` (soft synthesis failure — see
+        ``synthesize_findings_activity``), falls back to deterministic
+        concatenation of only the per-chunk ``summaries``/``spec_notes`` — the
+        architecture/redundancy and side-effect/blast-radius passes contribute
+        findings via ``issues``, not summaries, so their findings can be absent
+        from this concatenated narrative text on that path (they are never
+        absent from the returned ``issues`` list itself, only from this prose
+        summary). An exhausted activity retry / infrastructure failure from
+        ``execute_activity`` still propagates and fails the workflow.
         """
         if len(summaries) == 1 and not has_additive_pass_findings:
             return summaries[0], (spec_notes[0] if spec_notes else "")
