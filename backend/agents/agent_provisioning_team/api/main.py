@@ -346,9 +346,9 @@ def _validate_job_for_reprovision(
             status,
             action_label,
         )
-    # Deferred import: api.main is loaded at process boot; pulling
-    # temporal.start_workflow at module top can create import cycles with
-    # the Temporal package self-boot path (Pattern A).
+    # Deferred import: api.main is loaded at process boot; keep Temporal
+    # start_workflow off the top-level import graph to avoid cycles with
+    # shared Temporal client/worker wiring.
     from agent_provisioning_team.temporal.start_workflow import (
         provisioning_workflow_is_open,
     )

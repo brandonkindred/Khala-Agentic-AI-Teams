@@ -2,7 +2,7 @@
 
 Covers routing (including the Temporal-required 503 path), skip_phases/
 prior_results plumbing on /resume, progress writes from activities, and
-Pattern A exports. Mocks Temporal at the HTTP boundary to keep the suite fast.
+WORKFLOWS/ACTIVITIES exports. Mocks Temporal at the HTTP boundary to keep the suite fast.
 """
 
 from __future__ import annotations

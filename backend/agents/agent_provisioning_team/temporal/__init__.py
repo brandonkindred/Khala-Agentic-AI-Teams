@@ -1,13 +1,18 @@
-"""Temporal workflows and worker for the Agent Provisioning team.
+"""Temporal workflows and activities for the Agent Provisioning team.
 
-Follows shared.temporal Pattern A: exports ``WORKFLOWS``/``ACTIVITIES`` and
-self-boots a worker via ``start_team_worker`` when ``TEMPORAL_ADDRESS`` is
-set, so ``shared.temporal.teams_registry.start_all_team_workers`` picks up
-this team the same way it picks up every other team.
+Exports the ``WORKFLOWS``/``ACTIVITIES`` contract (shared Temporal packaging
+shape): the worker bootstrap in :mod:`.worker` registers these with
+``shared.temporal.start_team_worker``. This package ``__init__`` performs no
+worker boot (no import-time side effects); startup is the ``team_service``
+entrypoint's job via :func:`start_agent_provisioning_temporal_worker_thread`
+(with ``shared.temporal.teams_registry.start_all_team_workers`` as a
+consolidated-process path).
 
 Sandbox workflows/activities are exported separately, as ``SANDBOX_WORKFLOWS``
-/``SANDBOX_ACTIVITIES`` — this module never auto-boots a worker for them (see
-their docstring below for why).
+/``SANDBOX_ACTIVITIES``. They are never served by the main provisioning worker
+(see their comment below for why); unified-api lifespan boots that worker
+explicitly via
+:func:`.worker.start_agent_provisioning_sandbox_temporal_worker_thread`.
 """
 
 from agent_provisioning_team.temporal.activities import (
@@ -65,10 +70,9 @@ ACTIVITIES = [
 ]
 
 # Sandbox workflows/activities are deliberately NOT part of WORKFLOWS/ACTIVITIES
-# above (and so are never served by this Pattern-A auto-boot, which also fires
-# inside the standalone agent-provisioning-service team container). They run
-# on their own SANDBOX_TASK_QUEUE, served only by a worker booted explicitly
-# from unified_api/main.py's own lifespan
+# above (and so are never served by the main provisioning worker that team_service
+# and start_all_team_workers boot). They run on their own SANDBOX_TASK_QUEUE,
+# served only by a worker booted explicitly from unified_api/main.py's lifespan
 # (temporal/worker.py::start_agent_provisioning_sandbox_temporal_worker_thread)
 # — see SANDBOX_TASK_QUEUE's docstring in temporal/constants.py for why this
 # separation exists (the sandbox Lifecycle singleton is process-local state).
@@ -83,13 +87,12 @@ SANDBOX_ACTIVITIES = [
     sandbox_reap_activity,
 ]
 
-# Deferred: ``shared.temporal.worker`` imports team WORKFLOWS/ACTIVITIES at
-# registration time; importing ``start_team_worker`` above those lists would
-# circular-import this package while it is still defining WORKFLOWS/ACTIVITIES.
-from shared.temporal import start_team_worker  # noqa: E402
-
-if is_temporal_enabled():
-    start_team_worker("agent_provisioning", WORKFLOWS, ACTIVITIES, task_queue=TASK_QUEUE)
+# Deferred: importing ``worker`` above WORKFLOWS/ACTIVITIES would be fine today
+# (worker only imports ``constants`` at module level), but keep the start helper
+# after the export lists so readers see packaging first, boot second.
+from agent_provisioning_team.temporal.worker import (  # noqa: E402
+    start_agent_provisioning_temporal_worker_thread,
+)
 
 __all__ = [
     "is_temporal_enabled",
@@ -103,4 +106,5 @@ __all__ = [
     "SandboxAcquireWorkflow",
     "SandboxTeardownWorkflow",
     "SandboxReaperWorkflow",
+    "start_agent_provisioning_temporal_worker_thread",
 ]
