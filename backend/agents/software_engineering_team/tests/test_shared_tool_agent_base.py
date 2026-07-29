@@ -16,6 +16,7 @@ from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     ReviewToolAgent,
     SingleIssueProblemSolveMixin,
+    fill_review_prompt,
     lenient_json_object,
     relevant_code_for_issue,
 )
@@ -337,6 +338,41 @@ def test_review_task_description_literal_code_placeholder_not_resubstituted(monk
     the file payload."""
     seen: list[str] = []
     task = "Document the {code} placeholder in the prompt template."
+    code = "UNIQUE_CODE_PAYLOAD"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    out = agent.review(_Input(current_files={"a.ts": code}, task_description=task))
+    assert "1 issue(s) found." in out.summary
+    assert seen[0].count(code) == 1
+    assert task in seen[0]
+
+
+def test_fill_review_prompt_values_not_rescanned():
+    """Inserted values that contain placeholder tokens must not be re-substituted."""
+    task = "Mentions {code} and {task_description} literally."
+    code = "also has {task_description} and {code}"
+    out = fill_review_prompt(
+        "TASK={task_description}\nCODE={code}",
+        task_description=task,
+        code=code,
+    )
+    assert out == f"TASK={task}\nCODE={code}"
+    assert out.count(code) == 1
+
+
+def test_review_task_description_with_placeholder_tokens_not_corrupted(monkeypatch):
+    """Task text containing the old sentinel strings must not be corrupted by
+    a second substitution pass."""
+    seen: list[str] = []
+    task = "Keep __KHALA_CODE__ and {code} literal in the task."
     code = "UNIQUE_CODE_PAYLOAD"
 
     class _Capture:
@@ -732,6 +768,46 @@ def test_problem_solve_llm_exception(monkeypatch):
         )
     )
     assert "fixed 0 of 1" in out.summary
+
+
+def test_problem_solve_strands_throttle_isolates_per_issue(monkeypatch):
+    """A Strands ``ModelThrottledException`` must not abort the whole fix loop.
+
+    ``_run_agent`` normalizes it to ``LLMError`` so later issues are still
+    attempted.
+    """
+    from strands.types.exceptions import ModelThrottledException
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    calls = {"n": 0}
+
+    class _ThrottleThenOk:
+        def __call__(self, prompt):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ModelThrottledException("throttled")
+            return "fixed"
+
+    _patch_agent(monkeypatch, lambda *a, **k: _ThrottleThenOk())
+    monkeypatch.setattr(
+        type(agent),
+        "_parse_single_issue",
+        staticmethod(lambda raw: {"files": {"x.ts": "new"}}),
+    )
+    out = agent.problem_solve(
+        _Input(
+            current_files={"x.ts": "old"},
+            review_issues=[
+                ReviewIssue(source="demo", file_path="x.ts", description="first"),
+                ReviewIssue(source="demo", file_path="x.ts", description="second"),
+            ],
+        )
+    )
+    assert calls["n"] == 2
+    assert "fixed 1 of 2" in out.summary
+    assert out.files.get("x.ts") == "new"
 
 
 def test_problem_solve_unexpected_error_propagates(monkeypatch):

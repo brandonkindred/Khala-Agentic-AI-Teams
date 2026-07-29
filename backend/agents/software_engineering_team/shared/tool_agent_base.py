@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -51,6 +52,32 @@ from software_engineering_team.shared.v2_models import (
     ToolAgentOutput,
     ToolAgentPhaseOutput,
 )
+from strands.types.exceptions import (
+    ConcurrencyException,
+    ContextWindowOverflowException,
+    EventLoopException,
+    MaxTokensReachedException,
+    ModelThrottledException,
+    ProviderTokenCountError,
+)
+
+# Strands provider/runtime failures that are not subclasses of ``LLMError`` but
+# are still routine model-call failures. ``_run_agent`` normalizes these to
+# ``LLMError`` so per-issue handlers (e.g. ``problem_solve``) can isolate them
+# without catching programming bugs.
+_STRANDS_LLM_CALL_ERRORS = (
+    ModelThrottledException,
+    ContextWindowOverflowException,
+    MaxTokensReachedException,
+    ConcurrencyException,
+    EventLoopException,
+    ProviderTokenCountError,
+)
+
+# Only these named placeholders are substituted on the one-shot review path.
+# Values are never re-scanned, so task text/code may safely contain the
+# placeholder tokens or arbitrary braces.
+_REVIEW_PLACEHOLDER_RE = re.compile(r"\{(task_description|code)\}")
 
 # Default per-issue context budget for the single-issue fix prompt (subclasses
 # may override via class attr). Deliberately generous (on the same scale as
@@ -67,6 +94,20 @@ DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
 _PROBLEM_SOLVE_RESERVED_KEYS = frozenset(
     {"source", "severity", "description", "file_path", "recommendation", "current_code"}
 )
+
+
+def fill_review_prompt(template: str, *, task_description: str, code: str) -> str:
+    """Substitute ``{task_description}`` and ``{code}`` without rescanning values.
+
+    Preconditions:
+        ``template``, ``task_description``, and ``code`` are strings.
+    Postconditions:
+        Each known placeholder is replaced once with the corresponding value.
+        Inserted values are never re-scanned for placeholders or braces; other
+        ``{...}`` sequences in ``template`` are left unchanged.
+    """
+    values = {"task_description": task_description, "code": code}
+    return _REVIEW_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template)
 
 
 def relevant_code_for_issue(
@@ -203,10 +244,12 @@ class SingleIssueProblemSolveMixin:
               no matching issues, ``files`` is empty (the default) and
               ``current_files`` is left untouched; otherwise ``files`` is the
               merged file set after applying each successful single-issue fix.
-            - An ``LLMError`` / ``TimeoutError`` from the LLM call, or a
-              ``ValueError`` / ``json.JSONDecodeError`` from
-              ``_parse_single_issue``, is logged and skips that issue without
-              aborting the loop. Non-mapping parse results are likewise skipped.
+            - An ``LLMError`` / ``TimeoutError`` from the LLM call (including
+              routine Strands provider failures normalized to ``LLMError`` by
+              :meth:`BaseReviewToolAgent._run_agent`), or a ``ValueError`` /
+              ``json.JSONDecodeError`` from ``_parse_single_issue``, is logged
+              and skips that issue without aborting the loop. Non-mapping parse
+              results are likewise skipped.
             - Any other exception (programming errors) propagates to the caller.
 
         Invariants:
@@ -386,9 +429,15 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             ``use_run_strands_agent`` is True on this class (Review recipe).
 
         Postconditions:
-            Returns the stripped string from ``_invoke_llm``.
+            Returns the stripped string from ``_invoke_llm``. Routine Strands
+            provider/runtime failures listed in ``_STRANDS_LLM_CALL_ERRORS``
+            are re-raised as ``LLMError`` so per-issue callers can isolate them;
+            all other exceptions propagate unchanged.
         """
-        return self._invoke_llm(model, prompt)
+        try:
+            return self._invoke_llm(model, prompt)
+        except _STRANDS_LLM_CALL_ERRORS as e:
+            raise LLMError(str(e)) from e
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
         """Render ``current_files`` as ``--- path ---\\ncontent`` blocks, joined for the prompt."""
@@ -553,19 +602,13 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                 "review_prompt, review_via_engine=True, or build_runner when using the "
                 "default review() path."
             )
-        # Substitute only the two known placeholders.
-        #
-        # We must not treat braces from inserted values as format fields, and we
-        # also must not re-substitute placeholder-like tokens that appear inside
-        # inserted task text/code. Using sentinels ensures single-placeholder
-        # replacement without a second pass over inserted values.
-        task_sentinel = "__KHALA_TASK_DESCRIPTION__"
-        code_sentinel = "__KHALA_CODE__"
-        prompt = self.review_prompt.replace("{task_description}", task_sentinel).replace(
-            "{code}", code_sentinel
-        )
-        prompt = prompt.replace(task_sentinel, inp.task_description or "N/A").replace(
-            code_sentinel, code_text
+        # Single-pass substitution of the two known placeholders. Values are
+        # never re-scanned, so task text/code may contain braces or the
+        # placeholder tokens themselves without corruption or duplication.
+        prompt = fill_review_prompt(
+            self.review_prompt,
+            task_description=inp.task_description or "N/A",
+            code=code_text,
         )
         status, result = self._call_with_single_fallback(
             lambda: self._invoke_llm(model, prompt),
