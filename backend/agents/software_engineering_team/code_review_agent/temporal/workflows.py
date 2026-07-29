@@ -2,15 +2,18 @@
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
 resumable computation. It orchestrates the review as: prepare → map fan-out
-(chunk activities gathered with ``asyncio.gather(..., return_exceptions=True)``,
-then a fixed-order scan re-raises the earliest-index exception) → three tail
-passes run concurrently via the same idiom (false-positive verify,
-architecture-consistency / redundancy, side-effect / blast-radius; scan order
-is verify → architecture → side-effect) → deterministic gate → (conditional)
-narrative synthesis — so a worker restart mid-review re-runs only the unfinished
-activities instead of re-reviewing the whole submission. Both concurrent
-fan-outs await every sibling and re-raise in list order so completion-order
-races never pick the surfaced exception or abandon an activity.
+(under ``_ADAPTIVE_FANOUT_PATCH``: chunk activities gathered with
+``asyncio.gather(..., return_exceptions=True)``, then a fixed-order scan
+re-raises the earliest-index exception; pre-migration histories keep the
+original unconstrained ``asyncio.gather`` without ``return_exceptions``) →
+three tail passes run concurrently via the same return_exceptions idiom
+(false-positive verify, architecture-consistency / redundancy, side-effect /
+blast-radius; scan order is verify → architecture → side-effect) →
+deterministic gate → (conditional) narrative synthesis — so a worker restart
+mid-review re-runs only the unfinished activities instead of re-reviewing the
+whole submission. New concurrent fan-outs await every sibling and re-raise in
+list order so completion-order races never pick the surfaced exception or
+abandon an activity.
 
 The tail passes have no cross-pass data dependency (each reads only
 ``review_input`` and/or the map phase's aggregated ``issues``, never another
@@ -37,10 +40,10 @@ a field this workflow's return dict does not populate at all.
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
 no I/O, time, or randomness — only ``execute_activity`` calls,
-``asyncio.gather(..., return_exceptions=True)`` for deterministic concurrent
-fan-out of the map-phase chunks and the tail passes, a fixed-order scan over
-those gathered results to enforce deterministic error precedence, and pure list
-aggregation over JSON-native dicts.
+``asyncio.gather(..., return_exceptions=True)`` for the adaptive map fan-out
+and the concurrent tail passes (with a fixed-order scan over those gathered
+results), default ``asyncio.gather`` for pre-migration unconstrained map
+histories, and pure list aggregation over JSON-native dicts.
 """
 
 from __future__ import annotations
@@ -259,22 +262,20 @@ class CodeReviewWorkflow:
                 *[_review_one_bounded(chunk) for chunk in chunks],
                 return_exceptions=True,
             )
+            first_chunk_exception = next(
+                (r for r in outcomes if isinstance(r, BaseException)),
+                None,
+            )
+            if first_chunk_exception is not None:
+                raise first_chunk_exception
         else:
             # Pre-migration history: reproduce the original unconstrained
-            # fan-out exactly (see _ADAPTIVE_FANOUT_PATCH), still with the
-            # return_exceptions idiom so a mid-map failure does not orphan
-            # sibling chunk activities.
-            outcomes = await asyncio.gather(
-                *[_review_one(chunk) for chunk in chunks],
-                return_exceptions=True,
-            )
-
-        first_chunk_exception = next(
-            (r for r in outcomes if isinstance(r, BaseException)),
-            None,
-        )
-        if first_chunk_exception is not None:
-            raise first_chunk_exception
+            # fan-out exactly (see _ADAPTIVE_FANOUT_PATCH) — default
+            # ``asyncio.gather`` with no ``return_exceptions``, matching
+            # histories recorded before the adaptive-fanout / orphaning
+            # fix. Do not add ``return_exceptions=True`` here without its
+            # own ``workflow.patched`` gate.
+            outcomes = await asyncio.gather(*[_review_one(chunk) for chunk in chunks])
 
         issues: List[Dict[str, Any]] = []
         not_reviewed: List[Dict[str, Any]] = []
