@@ -27,7 +27,14 @@ def _open_question(question_text: str) -> OpenQuestion:
 
 
 def _answered_question(
-    question_text: str, selected_answer: str, rationale: str = "", other_text: str = ""
+    question_text: str,
+    selected_answer: str,
+    rationale: str = "",
+    other_text: str = "",
+    *,
+    was_auto_answered: bool = False,
+    was_default: bool = False,
+    confidence: float = 0.0,
 ) -> AnsweredQuestion:
     """Build a minimal AnsweredQuestion fixture with a fixed id, for feeding into record_answers."""
     return AnsweredQuestion(
@@ -36,6 +43,9 @@ def _answered_question(
         selected_answer=selected_answer,
         rationale=rationale,
         other_text=other_text,
+        was_auto_answered=was_auto_answered,
+        was_default=was_default,
+        confidence=confidence,
     )
 
 
@@ -586,3 +596,78 @@ def test_record_answers_does_not_prune_unrelated_question_with_shared_boilerplat
     questions = {question_text for _iteration, question_text, _answer, _full in blocks}
     assert "What authentication strategy should we use?" in questions
     assert "What strategy should we use for logging?" in questions
+
+def test_extract_answer_preserves_auto_answered_provenance(tmp_path: Path) -> None:
+    """Auto-answered status and confidence round-trip through record_answers and extract."""
+    question_text = "Which authentication strategy should the public API use?"
+    record_answers(
+        tmp_path,
+        [
+            _answered_question(
+                question_text,
+                "JWT access tokens with short TTL.",
+                rationale="Matches existing gateway defaults.",
+                was_auto_answered=True,
+                confidence=0.85,
+            )
+        ],
+        iteration=1,
+    )
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.was_auto_answered is True
+    assert result.was_default is False
+    assert result.confidence == 0.85
+    assert result.selected_answer == "JWT access tokens with short TTL."
+    assert result.rationale == "Matches existing gateway defaults."
+
+
+def test_extract_answer_preserves_default_applied_provenance(tmp_path: Path) -> None:
+    """Default-applied status round-trips so callers can label provenance in prompts."""
+    question_text = "Which logging destination should background workers use?"
+    record_answers(
+        tmp_path,
+        [
+            _answered_question(
+                question_text,
+                "Structured JSON to stdout.",
+                was_default=True,
+            )
+        ],
+        iteration=1,
+    )
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.was_default is True
+    assert result.was_auto_answered is False
+    assert result.confidence == 0.0
+    assert result.selected_answer == "Structured JSON to stdout."
+
+
+def test_extract_answer_preserves_other_text_from_history(tmp_path: Path) -> None:
+    """Custom other_text written into qa_history.md is restored on extract."""
+    question_text = "Which option should we pick for the custom deployment answer?"
+    other_text = "Deploy to staging first.\nThen promote after soak."
+    record_answers(
+        tmp_path,
+        [_answered_question(question_text, "Other", other_text=other_text)],
+        iteration=1,
+    )
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.other_text == other_text

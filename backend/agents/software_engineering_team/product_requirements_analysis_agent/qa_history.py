@@ -18,7 +18,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from .models import AnsweredQuestion, OpenQuestion
 
@@ -123,6 +123,23 @@ _FIELD_BOUNDARY_MARKERS = (
     _CUSTOM_TEXT_MARKER,
     _DEFAULT_APPLIED_MARKER,
 )
+
+# Persisted auto-answer line written by record_answers / format_answered_questions_for_prompt.
+_AUTO_CONFIDENCE_RE = re.compile(
+    r"^\*Auto-answered with (\d+(?:\.\d+)?)% confidence\*$"
+)
+
+
+class _ParsedBlockBody(NamedTuple):
+    """Parsed answer/rationale/provenance fields from one qa_history.md Q&A block body."""
+
+    answer: str
+    rationale: str
+    was_auto_answered: bool = False
+    was_default: bool = False
+    confidence: float = 0.0
+    other_text: str = ""
+
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -263,25 +280,30 @@ def _format_field_value(marker: str, value: str) -> str:
     return f"{marker} " + "\n".join(rendered) + "\n"
 
 
-def _consume_block_body(lines: List[str]) -> Tuple[str, str]:
-    """Buffer a Q&A block's answer/rationale continuation lines until the next boundary.
+def _consume_block_body(lines: List[str]) -> _ParsedBlockBody:
+    """Buffer a Q&A block's answer/rationale/provenance fields until the next boundary.
 
     Shared by :func:`extract_answer_from_qa_history` and :func:`parse_qa_history_blocks`
     so the two parsers can't drift on what counts as a continuation line versus a new
     field or section boundary. Continuation lines are unescaped via
     :func:`_unescape_continuation_line` as they're buffered, reversing the escaping
-    :func:`_format_field_value` applies on write.
+    :func:`_format_field_value` applies on write. Status markers
+    (``*Auto-answered ...*``, ``*(Default applied)*``) and ``*Custom text:*`` are
+    captured as provenance rather than discarded.
 
     Preconditions: ``lines`` are the lines of a qa_history.md block following its
         ``### question`` header (may be empty).
-    Postconditions: returns ``(answer, rationale)``; continuation lines for each field
-        are unescaped via :func:`_unescape_continuation_line`, joined with ``\\n``,
-        and the result is stripped. Either string is empty if its marker was never
-        seen; never raises.
+    Postconditions: returns a :class:`_ParsedBlockBody` whose answer/rationale/
+        other_text continuation lines are unescaped and stripped; provenance flags
+        and confidence reflect any status markers found; never raises.
     """
     answer_lines: List[str] = []
     rationale_lines: List[str] = []
+    other_text_lines: List[str] = []
     current_field: Optional[List[str]] = None
+    was_auto_answered = False
+    was_default = False
+    confidence = 0.0
 
     for line in lines:
         stripped = line.strip()
@@ -291,12 +313,33 @@ def _consume_block_body(lines: List[str]) -> Tuple[str, str]:
         elif stripped.startswith(_RATIONALE_MARKER):
             rationale_lines = [stripped.removeprefix(_RATIONALE_MARKER).strip()]
             current_field = rationale_lines
+        elif stripped.startswith(_CUSTOM_TEXT_MARKER):
+            other_text_lines = [stripped.removeprefix(_CUSTOM_TEXT_MARKER).strip()]
+            current_field = other_text_lines
+        elif stripped.startswith(_AUTO_ANSWERED_MARKER):
+            was_auto_answered = True
+            was_default = False
+            conf_match = _AUTO_CONFIDENCE_RE.match(stripped)
+            if conf_match:
+                confidence = float(conf_match.group(1)) / 100.0
+            current_field = None
+        elif stripped == _DEFAULT_APPLIED_MARKER:
+            was_default = True
+            was_auto_answered = False
+            current_field = None
         elif _is_boundary_line(stripped):
             current_field = None
         elif current_field is not None:
             current_field.append(_unescape_continuation_line(line))
 
-    return "\n".join(answer_lines).strip(), "\n".join(rationale_lines).strip()
+    return _ParsedBlockBody(
+        answer="\n".join(answer_lines).strip(),
+        rationale="\n".join(rationale_lines).strip(),
+        was_auto_answered=was_auto_answered,
+        was_default=was_default,
+        confidence=confidence,
+        other_text="\n".join(other_text_lines).strip(),
+    )
 
 
 def extract_answer_from_qa_history(
@@ -320,7 +363,9 @@ def extract_answer_from_qa_history(
     Preconditions: ``question`` is an :class:`OpenQuestion` (``question_text`` a
         string); ``qa_history`` is a string (possibly empty).
     Postconditions: returns the best-matching recorded answer as an
-        :class:`AnsweredQuestion`, or ``None`` when no block matches or the
+        :class:`AnsweredQuestion` (including ``was_auto_answered`` /
+        ``was_default`` / ``confidence`` / ``other_text`` parsed from the block's
+        status markers when present), or ``None`` when no block matches or the
         question has no keyword longer than 4 characters; never raises for input
         satisfying the preconditions above.
     """
@@ -342,7 +387,7 @@ def extract_answer_from_qa_history(
     # Split into Q&A blocks by "### " headers
     blocks = re.split(r"\n###\s+", qa_history)
 
-    best_match: Optional[tuple[float, str, str, str]] = None  # (score, question, answer, rationale)
+    best_match: Optional[tuple[float, str, _ParsedBlockBody]] = None  # (score, question, parsed)
 
     for block in blocks[1:]:  # Skip first block (header)
         lines = block.strip().split("\n")
@@ -359,27 +404,34 @@ def extract_answer_from_qa_history(
         if (
             match_ratio >= _QUESTION_MATCH_THRESHOLD
         ):  # Good enough match; matches is_same_decision's threshold
-            answer, rationale = _consume_block_body(lines[1:])
+            parsed = _consume_block_body(lines[1:])
 
-            if answer and (best_match is None or match_ratio > best_match[0]):
-                best_match = (match_ratio, recorded_question, answer, rationale)
+            if parsed.answer and (best_match is None or match_ratio > best_match[0]):
+                best_match = (match_ratio, recorded_question, parsed)
 
     if best_match:
-        _, matched_q, answer, rationale = best_match
+        _, matched_q, parsed = best_match
         logger.debug(
             "Extracted answer for duplicate question: '%s' -> '%s'",
             question.question_text,
-            answer,
+            parsed.answer,
         )
+        if parsed.was_auto_answered:
+            confidence = parsed.confidence
+        elif parsed.was_default:
+            confidence = 0.0
+        else:
+            confidence = 0.9  # High confidence for previously user-confirmed answers
         return AnsweredQuestion(
             question_id=question.id,
             question_text=question.question_text,
             selected_option_id="from_history",
-            selected_answer=answer,
-            was_auto_answered=False,
-            was_default=False,
-            rationale=rationale or f"Previously answered (matched: {matched_q})",
-            confidence=0.9,  # High confidence since it was user-answered before
+            selected_answer=parsed.answer,
+            was_auto_answered=parsed.was_auto_answered,
+            was_default=parsed.was_default,
+            rationale=parsed.rationale or f"Previously answered (matched: {matched_q})",
+            confidence=confidence,
+            other_text=parsed.other_text,
         )
 
     return None
@@ -428,7 +480,7 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
                     break
                 block_lines.append(next_line)
                 i += 1
-            answer, _rationale = _consume_block_body(block_lines[1:])
+            answer = _consume_block_body(block_lines[1:]).answer
             full_block_text = "\n".join(block_lines)
             if question_text or answer:
                 blocks_out.append((current_iteration, question_text, answer, full_block_text))
