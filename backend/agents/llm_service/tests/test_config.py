@@ -84,7 +84,7 @@ def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_resolve_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_TIMEOUT", raising=False)
-    assert config.resolve_timeout() == 1800.0
+    assert config.resolve_timeout() == 3600.0
 
 
 def test_resolve_max_tokens_unset_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
