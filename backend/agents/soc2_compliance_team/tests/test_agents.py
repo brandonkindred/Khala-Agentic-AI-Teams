@@ -146,14 +146,15 @@ def test_run_tsc_agent_formatting_prompt_is_transcribe_only() -> None:
     locations or flip ``compliant``.
 
     Note: ``FakeLLM.complete`` echoes its prompt, so those phrases can still
-    appear inside the ``--- ANALYSIS ---`` block. Assert against the
-    instructions prefix only.
+    appear inside the analysis-wrap block. Assert against the instructions
+    prefix only.
     """
     llm = _FakeLLM({"summary": "S", "findings": [], "compliant": True})
     _run_tsc_agent(llm, TSCCategory.SECURITY, "Security", "auth", _ctx())
 
     format_prompt = llm.calls[0]["prompt"]
-    instructions, sep, _analysis = format_prompt.partition("--- ANALYSIS ---")
+    # Per-call random boundary: ``--- ANALYSIS <hex> ---`` (not a fixed literal).
+    instructions, sep, _analysis = format_prompt.partition("--- ANALYSIS ")
     assert sep, "formatting prompt must wrap prose in ANALYSIS delimiters"
     assert "Transcribe the analysis below faithfully" in instructions
     assert "cite repo content" not in instructions.lower()
@@ -417,8 +418,9 @@ def test_report_writer_returns_compliance_report_when_findings_exist() -> None:
     assert llm.reasoning_calls[0]["temperature"] == 0.2
     assert llm.calls[0]["think"] is False
     assert llm.calls[0]["temperature"] == 0.0
-    # Formatting instructions (prefix before ANALYSIS) are transcription-only.
-    instructions, sep, _ = llm.calls[0]["prompt"].partition("--- ANALYSIS ---")
+    # Formatting instructions (prefix before the per-call ANALYSIS wrap) are
+    # transcription-only.
+    instructions, sep, _ = llm.calls[0]["prompt"].partition("--- ANALYSIS ")
     assert sep
     assert "Transcribe" in instructions
     assert "cite repo content" not in instructions.lower()
