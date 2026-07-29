@@ -1106,6 +1106,16 @@ def test_fill_named_placeholders_preserves_unrelated_braces():
     assert "{x}" in out
 
 
+def test_fill_named_placeholders_does_not_rescan_inserted_values():
+    """A value containing another placeholder token must not be expanded later."""
+    out = sh_ps._fill_named_placeholders(
+        "desc={description}|code={current_code}",
+        description="see {current_code} for context",
+        current_code="BODY",
+    )
+    assert out == "desc=see {current_code} for context|code=BODY"
+
+
 def test_attr_or_preserves_empty_string():
     issue = SimpleNamespace(source="", severity=None, description="d")
     assert sh_ps._attr_or(issue, "source", "review") == ""

@@ -18,6 +18,7 @@ phase-specific fix functions (which interlock with the out-of-scope backend
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
@@ -34,7 +35,11 @@ MAX_BATCH_FIX_CODE_CHARS = 60_000  # Cap context to avoid blowing up the LLM con
 
 
 def _fill_named_placeholders(template: str, **values: object) -> str:
-    """Replace exact ``{name}`` tokens; leave all other braces untouched.
+    """Replace exact ``{name}`` tokens in one pass; leave all other braces untouched.
+
+    Substitutions are taken from the original ``template`` only: text inserted
+    for one key is never rescanned for later keys, so a value that happens to
+    contain ``{other_key}`` is preserved literally.
 
     Preconditions:
         ``template`` is a str; each value is convertible via ``str(...)``.
@@ -43,10 +48,20 @@ def _fill_named_placeholders(template: str, **values: object) -> str:
         braces that are not exact provided keys remain; returns a new string.
     """
     assert isinstance(template, str), "template must be a str"
-    result = template
-    for key, value in values.items():
-        result = result.replace("{" + key + "}", str(value))
-    return result
+    if not values:
+        return template
+    mapping = {key: str(value) for key, value in values.items()}
+    # Longer keys first so a token like ``{foo_bar}`` is not partially claimed
+    # by a shorter ``{foo}`` if both were ever provided.
+    pattern = re.compile(
+        "|".join(re.escape("{" + key + "}") for key in sorted(mapping, key=len, reverse=True))
+    )
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return mapping[token[1:-1]]
+
+    return pattern.sub(_replace, template)
 
 
 def _attr_or(obj: Any, name: str, default: Any) -> Any:
