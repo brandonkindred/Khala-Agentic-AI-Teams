@@ -82,13 +82,37 @@ def filter_duplicate_questions(
         return re.sub(r"[^a-z0-9]", "", w.strip())
 
     def _stem(w: str) -> str:
-        """Normalize word for matching (e.g. tokens->token, stored->store)."""
+        """Normalize word for matching (plural/past-tense suffixes only).
+
+        Preconditions: ``w`` is a cleaned token (lowercase).
+        Postconditions: returns the stemmed token; never raises.
+        """
         w = w.strip()
-        if w.endswith("ed") and len(w) > 4:
-            return w[:-2]  # stored -> store
-        if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
-            return w[:-1]  # tokens -> token
+        if len(w) <= 4:
+            return w
+
+        # Past tense (stored -> store, needed -> need)
+        if w.endswith("ed") and len(w) > 5:
+            base = w[:-2]
+            if len(base) >= 4:
+                return base
+
+        # Plural (tokens -> token), but avoid over-stemming common singulars
+        # ending in "s" (e.g. analysis, consensus, focus).
+        if (
+            w.endswith("s")
+            and len(w) > 4
+            and not w.endswith(("ss", "us", "is"))
+        ):
+            return w[:-1]
+
         return w
+
+    qa_stems = {
+        _stem(tok)
+        for tok in re.findall(r"[a-z0-9]+", qa_history_lower)
+        if len(tok) > 3
+    }
 
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
@@ -98,14 +122,9 @@ def filter_duplicate_questions(
         if not key_stems:
             filtered.append(q)
             continue
-        # Count how many stems (or their plural) appear in qa_history
-        matches = sum(
-            1
-            for stem in key_stems
-            if stem in qa_history_lower
-            or (stem + "s") in qa_history_lower
-            or (stem + "ed") in qa_history_lower
-        )
+
+        # Token-level membership (no substring matches) to avoid false positives.
+        matches = sum(1 for stem in key_stems if stem in qa_stems)
         match_ratio = matches / len(key_stems)
         # Only treat as duplicate of an answered question when match >= 90%.
         # Below-90% coverage may be consolidated but should not be filtered out.
@@ -199,7 +218,7 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         for i, q in enumerate(raw_questions):
             try:
                 open_questions.append(parse_open_question(q, i))
-            except (ValueError, TypeError) as exc:
+            except Exception as exc:
                 logger.warning("Skipping malformed open question at index %d: %s", i, exc)
 
     return SpecReviewResult(
@@ -211,12 +230,13 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
 
 
 def _str_or_default(value: Any, default: str = "") -> str:
-    """Coerce an LLM-provided field to str, treating an explicit ``None`` as missing.
+    """Safely accept an LLM-provided string field.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns ``default`` when ``value`` is ``None``, else ``str(value)``.
+    Postconditions: returns ``default`` when ``value`` is ``None`` or not a ``str``;
+        returns ``value`` when it is already a ``str``.
     """
-    return default if value is None else str(value)
+    return default if value is None or not isinstance(value, str) else value
 
 
 def _safe_constraint_layer(value: Any) -> int:
@@ -227,23 +247,82 @@ def _safe_constraint_layer(value: Any) -> int:
         matching the "not a constraint question" default in :class:`OpenQuestion`.
     """
     try:
-        return int(value or 0)
-    except (ValueError, TypeError):
+        if value is None:
+            return 0
+        # bool is a subclass of int; treat it as malformed.
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float):
+            # NaN/inf -> malformed
+            if value != value or value in (float("inf"), float("-inf")):
+                return 0
+            return max(0, int(value))
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return 0
+            return max(0, int(float(s)))
+        return 0
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 
-def _coerce_list(value: Any) -> list:
+def _safe_bool(value: Any, default: bool) -> bool:
+    """Safely coerce LLM-provided boolean-ish values.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns ``default`` when ``value`` is ``None`` or unrecognized;
+        returns parsed boolean when ``value`` is already a bool, numeric 0/1,
+        or common boolean strings.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+
+    # Numeric booleans (0/1); reject other numbers as malformed.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return default
+
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == "":
+            return default
+        if v in {"true", "t", "yes", "y", "1"}:
+            return True
+        if v in {"false", "f", "no", "n", "0"}:
+            return False
+        return default
+
+    return default
+
+
+def _coerce_list(value: Any, *, allow_str: bool = False, allow_dict: bool = False) -> list:
     """Coerce LLM-provided list-valued output to a list.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns a list. None -> []; list/tuple -> list(value);
-        any other scalar (str, int, dict, ...) -> [value] (never iterated char-by-char).
+    Postconditions: returns a list.
+        - None -> []
+        - list/tuple -> list(value)
+        - string -> [value] when ``allow_str`` is True
+        - dict -> [value] when ``allow_dict`` is True
+        - any other scalar -> []
     """
     if value is None:
         return []
     if isinstance(value, (list, tuple)):
         return list(value)
-    return [value]
+    if allow_str and isinstance(value, str):
+        return [value]
+    if allow_dict and isinstance(value, dict):
+        return [value]
+    return []
 
 
 def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
@@ -252,8 +331,9 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     Preconditions: ``index`` is a non-negative int; ``q_data`` is the decoded item.
     Postconditions: returns a valid :class:`OpenQuestion`.
         - ``options``, ``section_impact``, and ``asked_via`` are coerced to lists
-          (``None`` becomes ``[]``, scalars become single-element lists).
-        - ``section_impact`` and ``asked_via`` elements are coerced to ``str``.
+          (``None`` becomes ``[]``; only well-typed scalars are kept).
+        - ``section_impact`` and ``asked_via`` elements are accepted only when they
+          are already ``str``.
         - Option ``confidence`` values are normalized to ``[0.0, 1.0]``,
           defaulting to ``0.5`` when missing or malformed.
         - When ``q_data`` is a dict with options but no default, the
@@ -266,7 +346,9 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
           run_context_constraints_discovery) wraps it accordingly.
     """
     if isinstance(q_data, dict):
-        raw_options = _coerce_list(q_data.get("options", []))
+        raw_options = _coerce_list(
+            q_data.get("options", []), allow_str=True, allow_dict=True
+        )
         options = []
         for i, opt in enumerate(raw_options):
             options.append(parse_question_option(opt, i))
@@ -283,14 +365,21 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
 
         raw_depends = q_data.get("depends_on")
         if isinstance(raw_depends, (list, tuple)):
-            depends_on = str(raw_depends[0]) if raw_depends else None
+            depends_on = (
+                raw_depends[0] if raw_depends and isinstance(raw_depends[0], str) else None
+            )
         elif isinstance(raw_depends, str):
             depends_on = raw_depends
         else:
             depends_on = None
 
-        section_impact = [str(v) for v in _coerce_list(q_data.get("section_impact", []))]
-        asked_via = [str(v) for v in _coerce_list(q_data.get("asked_via", []))]
+        raw_section_impact = _coerce_list(
+            q_data.get("section_impact", []), allow_str=True
+        )
+        section_impact = [v for v in raw_section_impact if isinstance(v, str)]
+
+        raw_asked_via = _coerce_list(q_data.get("asked_via", []), allow_str=True)
+        asked_via = [v for v in raw_asked_via if isinstance(v, str)]
 
         return OpenQuestion(
             id=_str_or_default(q_data.get("id"), f"q{index}"),
@@ -298,14 +387,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             context=_str_or_default(q_data.get("context")),
             recommendation=_str_or_default(q_data.get("recommendation")),
             options=options,
-            allow_multiple=bool(q_data.get("allow_multiple", False)),
+            allow_multiple=_safe_bool(q_data.get("allow_multiple", False), default=False),
             source=_str_or_default(q_data.get("source"), "spec_review"),
             category=_str_or_default(q_data.get("category"), "general"),
             priority=_str_or_default(q_data.get("priority"), "medium"),
             constraint_domain=_str_or_default(q_data.get("constraint_domain")),
             constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
-            blocking=bool(q_data.get("blocking", True)),
+            blocking=_safe_bool(q_data.get("blocking", True), default=True),
             owner=_str_or_default(q_data.get("owner"), "user"),
             section_impact=section_impact,
             due_date=_str_or_default(q_data.get("due_date")),
@@ -362,13 +451,15 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
         return QuestionOption(
             id=_str_or_default(opt_data.get("id"), f"opt{index}"),
             label=_str_or_default(opt_data.get("label")),
-            is_default=bool(opt_data.get("is_default", False)),
+            is_default=_safe_bool(opt_data.get("is_default", False), default=False),
             rationale=_str_or_default(opt_data.get("rationale")),
             confidence=_safe_confidence(opt_data.get("confidence", 0.5)),
         )
+
+    label = opt_data if isinstance(opt_data, str) else ""
     return QuestionOption(
         id=f"opt{index}",
-        label=str(opt_data),
+        label=label,
         is_default=index == 0,
         rationale="",
         confidence=0.5,
@@ -396,16 +487,21 @@ def dedupe_questions_by_answer_similarity(
     def norm(t: str) -> str:
         return " ".join((t or "").lower().split()).strip()
 
-    # Build set of existing answers (normalized) we already have
+    # Build set of existing answers (normalized) we already have.
+    # Keep a list for stable iteration order during SequenceMatcher checks.
     existing_answers: List[str] = []
+    existing_answers_set: set[str] = set()
     for aq in answered_questions:
         s = norm(aq.selected_answer)
         if s:
-            existing_answers.append(s)
+            if s not in existing_answers_set:
+                existing_answers.append(s)
+                existing_answers_set.add(s)
         if getattr(aq, "other_text", None) and aq.other_text.strip():
             o = norm(aq.other_text)
-            if o and o not in existing_answers:
+            if o and o not in existing_answers_set:
                 existing_answers.append(o)
+                existing_answers_set.add(o)
 
     if not existing_answers:
         return list(open_questions)
@@ -501,39 +597,45 @@ def consolidate_open_questions(
     if len(open_questions) <= 1:
         return list(open_questions)
 
-    questions_json = json.dumps(
-        [
-            {
-                "id": q.id,
-                "question_text": q.question_text,
-                "context": q.context,
-                "category": q.category,
-                "priority": q.priority,
-                "allow_multiple": q.allow_multiple,
-                "constraint_domain": q.constraint_domain,
-                "constraint_layer": q.constraint_layer,
-                "depends_on": q.depends_on,
-                "blocking": q.blocking,
-                "owner": q.owner,
-                "section_impact": q.section_impact,
-                "due_date": q.due_date,
-                "status": q.status,
-                "asked_via": q.asked_via,
-                "options": [
-                    {
-                        "id": o.id,
-                        "label": o.label,
-                        "is_default": o.is_default,
-                        "rationale": o.rationale,
-                        "confidence": o.confidence,
-                    }
-                    for o in q.options
-                ],
-            }
-            for q in open_questions
-        ],
-        indent=2,
-    )
+    try:
+        questions_json = json.dumps(
+            [
+                {
+                    "id": q.id,
+                    "question_text": q.question_text,
+                    "context": q.context,
+                    "category": q.category,
+                    "priority": q.priority,
+                    "allow_multiple": q.allow_multiple,
+                    "constraint_domain": q.constraint_domain,
+                    "constraint_layer": q.constraint_layer,
+                    "depends_on": q.depends_on,
+                    "blocking": q.blocking,
+                    "owner": q.owner,
+                    "section_impact": q.section_impact,
+                    "due_date": q.due_date,
+                    "status": q.status,
+                    "asked_via": q.asked_via,
+                    "options": [
+                        {
+                            "id": o.id,
+                            "label": o.label,
+                            "is_default": o.is_default,
+                            "rationale": o.rationale,
+                            "confidence": o.confidence,
+                        }
+                        for o in q.options
+                    ],
+                }
+                for q in open_questions
+            ],
+            indent=2,
+        )
+    except Exception as e:
+        logger.warning(
+            "Question consolidation payload serialization failed: %s", str(e)
+        )
+        return list(open_questions)
     prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
     consolidated = _fetch_llm_list(
         model, prompt, "consolidated_questions", "Question consolidation"
@@ -579,37 +681,44 @@ def review_question_answer_alignment(
     if len(open_questions) == 0:
         return []
     original_by_id = {q.id: q for q in open_questions}
-    questions_payload = [
-        {
-            "id": q.id,
-            "question_text": q.question_text,
-            "context": q.context,
-            "category": q.category,
-            "priority": q.priority,
-            "allow_multiple": q.allow_multiple,
-            "constraint_domain": q.constraint_domain,
-            "constraint_layer": q.constraint_layer,
-            "depends_on": q.depends_on,
-            "blocking": q.blocking,
-            "owner": q.owner,
-            "section_impact": q.section_impact,
-            "due_date": q.due_date,
-            "status": q.status,
-            "asked_via": q.asked_via,
-            "options": [
-                {
-                    "id": o.id,
-                    "label": o.label,
-                    "is_default": o.is_default,
-                    "rationale": o.rationale,
-                    "confidence": o.confidence,
-                }
-                for o in q.options
-            ],
-        }
-        for q in open_questions
-    ]
-    questions_json = json.dumps(questions_payload, indent=2)
+
+    try:
+        questions_payload = [
+            {
+                "id": q.id,
+                "question_text": q.question_text,
+                "context": q.context,
+                "category": q.category,
+                "priority": q.priority,
+                "allow_multiple": q.allow_multiple,
+                "constraint_domain": q.constraint_domain,
+                "constraint_layer": q.constraint_layer,
+                "depends_on": q.depends_on,
+                "blocking": q.blocking,
+                "owner": q.owner,
+                "section_impact": q.section_impact,
+                "due_date": q.due_date,
+                "status": q.status,
+                "asked_via": q.asked_via,
+                "options": [
+                    {
+                        "id": o.id,
+                        "label": o.label,
+                        "is_default": o.is_default,
+                        "rationale": o.rationale,
+                        "confidence": o.confidence,
+                    }
+                    for o in q.options
+                ],
+            }
+            for q in open_questions
+        ]
+        questions_json = json.dumps(questions_payload, indent=2)
+    except Exception as e:
+        logger.warning(
+            "Question alignment payload serialization failed: %s", str(e)
+        )
+        return list(open_questions)
     prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
     aligned = _fetch_llm_list(
         model, prompt, "aligned_questions", "Question-answer alignment review"
@@ -668,23 +777,31 @@ def add_recommendations(
     """
     if len(open_questions) == 0:
         return list(open_questions)
-    questions_payload = [
-        {
-            "id": q.id,
-            "question_text": q.question_text,
-            "context": q.context,
-            "options": [
-                {
-                    "id": o.id,
-                    "label": o.label,
-                    "rationale": o.rationale,
-                }
-                for o in q.options
-            ],
-        }
-        for q in open_questions
-    ]
-    questions_json = json.dumps(questions_payload, indent=2)
+
+    try:
+        questions_payload = [
+            {
+                "id": q.id,
+                "question_text": q.question_text,
+                "context": q.context,
+                "options": [
+                    {
+                        "id": o.id,
+                        "label": o.label,
+                        "rationale": o.rationale,
+                    }
+                    for o in q.options
+                ],
+            }
+            for q in open_questions
+        ]
+        questions_json = json.dumps(questions_payload, indent=2)
+    except Exception as e:
+        logger.warning(
+            "Recommendation payload serialization failed: %s", str(e)
+        )
+        return list(open_questions)
+
     spec_content_str = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
         spec_content=spec_content_str,
@@ -697,18 +814,20 @@ def add_recommendations(
         return list(open_questions)
     try:
         rec_by_id = {
-            r.get("id"): str(r["recommendation"])
+            r.get("id"): r.get("recommendation")
             for r in recs
             if (
                 isinstance(r, dict)
                 and isinstance(r.get("id"), str)
-                and r.get("recommendation") is not None
+                and isinstance(r.get("recommendation"), str)
             )
         }
         result = []
         for q in open_questions:
             rec = rec_by_id.get(q.id)
-            result.append(q.model_copy(update={"recommendation": rec}) if rec else q)
+            result.append(
+                q.model_copy(update={"recommendation": rec}) if rec is not None else q
+            )
         return result
     except Exception as e:
         logger.warning(

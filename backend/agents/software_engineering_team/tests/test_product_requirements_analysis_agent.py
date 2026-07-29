@@ -703,6 +703,86 @@ def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     assert parsed.constraint_layer == 0
 
 
+@pytest.mark.parametrize(
+    ("field", "raw_value", "expected"),
+    [
+        ("allow_multiple", "false", False),
+        ("allow_multiple", "true", True),
+        ("allow_multiple", "0", False),
+        ("allow_multiple", "1", True),
+        ("allow_multiple", 0, False),
+        ("allow_multiple", 1, True),
+        ("allow_multiple", "nope", False),  # unknown string -> default (False)
+        ("blocking", "false", False),
+        ("blocking", "true", True),
+        ("blocking", "0", False),
+        ("blocking", "1", True),
+        ("blocking", 0, False),
+        ("blocking", 1, True),
+        ("blocking", "nope", True),  # unknown string -> default (True)
+    ],
+)
+def test_parse_open_question_safe_bool_parses_booleanish_values(
+    field: str, raw_value: Any, expected: bool
+) -> None:
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-bool",
+            "question_text": "Which mode?",
+            field: raw_value,
+        },
+        index=0,
+    )
+
+    assert getattr(parsed, field) is expected
+
+
+def test_parse_question_option_safe_bool_parses_is_default_string() -> None:
+    parsed_false = parse_question_option(
+        {"id": "opt1", "label": "Yes", "is_default": "false", "confidence": 0.9},
+        index=1,
+    )
+    parsed_true = parse_question_option(
+        {"id": "opt1", "label": "Yes", "is_default": "true", "confidence": 0.9},
+        index=1,
+    )
+    assert parsed_false.is_default is False
+    assert parsed_true.is_default is True
+
+
+def test_parse_open_question_constraint_layer_handles_infinity() -> None:
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-inf",
+            "question_text": "What is the constraint layer?",
+            "constraint_layer": float("inf"),
+        },
+        index=0,
+    )
+    assert parsed.constraint_layer == 0
+
+
+def test_parse_open_question_treats_non_string_depends_on_as_missing() -> None:
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-dep",
+            "question_text": "Which follow-up depends on what?",
+            "depends_on": [123],
+        },
+        index=0,
+    )
+    assert parsed.depends_on is None
+
+
 def test_parse_open_question_preserves_option_order_when_marking_default() -> None:
     """_parse_open_question should keep the original option order, not sort by confidence."""
     llm = MagicMock()
@@ -825,10 +905,10 @@ def test_parse_question_option_clamps_or_defaults_confidence(
     ("field", "malformed_value", "expected"),
     [
         ("section_impact", None, []),
-        ("section_impact", 5, ["5"]),
+        ("section_impact", 5, []),
         ("section_impact", "Requirements", ["Requirements"]),
         ("asked_via", None, []),
-        ("asked_via", 5, ["5"]),
+        ("asked_via", 5, []),
         ("asked_via", "slack", ["slack"]),
     ],
 )
@@ -855,14 +935,14 @@ def test_parse_open_question_coerces_non_list_fields(
     ("malformed_value", "expected_count", "expected_label"),
     [
         (None, 0, None),
-        (5, 1, "5"),
+        (5, 0, None),
         ("us-east", 1, "us-east"),
     ],
 )
 def test_parse_open_question_coerces_non_list_options(
-    malformed_value: Any, expected_count: int, expected_label: str
+    malformed_value: Any, expected_count: int, expected_label: Optional[str]
 ) -> None:
-    """_parse_open_question should coerce a non-list 'options' field instead of raising."""
+    """_parse_open_question should keep only well-typed non-list 'options' fields."""
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
 
@@ -1008,6 +1088,27 @@ def test_add_recommendations_treats_null_recommendation_as_absent() -> None:
     result = agent._add_recommendations([q1, q2], "# Spec content")
 
     result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"].recommendation == ""
+    assert result_by_id["q2"].recommendation == "Use OAuth for the MVP."
+
+
+def test_add_recommendations_ignores_non_string_recommendations() -> None:
+    """Non-string LLM recommendations are treated as malformed and ignored (empty)."""
+    llm = _StubClient(
+        {
+            "recommendations": [
+                {"id": "q1", "recommendation": 123},
+                {"id": "q2", "recommendation": "Use OAuth for the MVP."},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Which auth?")
+    q2 = OpenQuestion(id="q2", question_text="Which storage?")
+
+    result = agent._add_recommendations([q1, q2], "# Spec content")
+    result_by_id = {q.id: q for q in result}
+
     assert result_by_id["q1"].recommendation == ""
     assert result_by_id["q2"].recommendation == "Use OAuth for the MVP."
 
