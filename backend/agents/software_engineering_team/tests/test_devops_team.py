@@ -1911,6 +1911,23 @@ class TestBackwardCompatibility:
         with pytest.raises(AssertionError, match="scope.included"):
             DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
 
+    def test_run_pipeline_raises_if_completion_not_assigned(self, monkeypatch) -> None:
+        agent = DevOpsTeamLeadAgent(MagicMock())
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="completion-guard",
+            task_description="deploy",
+            requirements="staging",
+        )
+        monkeypatch.setattr(agent, "_run_gated_phases", lambda phases: None)
+        with pytest.raises(RuntimeError, match="Phase 5 did not assign a completion package"):
+            agent._run_pipeline(
+                repo_path=Path("/tmp"),
+                task_spec=spec,
+                build_verifier=None,
+                write_changes=False,
+                subdir="",
+            )
+
 
 # ===========================================================================
 # MAIN ORCHESTRATOR INTEGRATION
