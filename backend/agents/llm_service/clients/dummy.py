@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable
 from typing import Any, Dict, Optional
 
 from strands.models.model import Model
@@ -22,91 +22,120 @@ from strands.types.tools import ToolChoice, ToolSpec
 
 from ..interface import LLMClient
 
-_STRIP_VERBS = {
-    "implement",
-    "create",
-    "build",
-    "add",
-    "setup",
-    "set",
-    "up",
-    "configure",
-    "make",
-    "define",
-    "develop",
-    "write",
-    "design",
-    "establish",
-    "generate",
-    "fetches",
-    "displays",
-    "handles",
-    "manages",
-    "processes",
-    "returns",
-    "provides",
-    "supports",
-    "includes",
-    "enables",
-    "renders",
-}
-_STRIP_FILLERS = {
-    "the",
-    "that",
-    "with",
-    "using",
-    "which",
-    "for",
-    "and",
-    "a",
-    "an",
-    "to",
-    "of",
-    "in",
-    "on",
-    "by",
-    "from",
-    "into",
-    "as",
-    "via",
-    "its",
-    "all",
-    "application",
-    "system",
-    "project",
-    "based",
-    "proper",
-    "production",
-    "quality",
-    "complete",
-    "full",
-    "new",
-    "existing",
-    "angular",
-    "react",
-    "vue",
-    "spring",
-    "fastapi",
-    "flask",
-    "django",
-}
-_STRIP_SUFFIXES = {
-    "component",
-    "service",
-    "module",
-    "endpoint",
-    "endpoints",
-    "middleware",
-    "guard",
-    "pipe",
-    "directive",
-    "interceptor",
-    "controller",
-    "repository",
-}
+# Prompts this long that still mention "approved" are treated as code-review
+# chunks (full review context) rather than short approval-only stubs.
+CODE_REVIEW_MIN_PROMPT_LENGTH = 200
+
+_STRIP_VERBS: frozenset[str] = frozenset(
+    {
+        "implement",
+        "create",
+        "build",
+        "add",
+        "setup",
+        "set",
+        "up",
+        "configure",
+        "make",
+        "define",
+        "develop",
+        "write",
+        "design",
+        "establish",
+        "generate",
+        "fetches",
+        "displays",
+        "handles",
+        "manages",
+        "processes",
+        "returns",
+        "provides",
+        "supports",
+        "includes",
+        "enables",
+        "renders",
+    }
+)
+_STRIP_FILLERS: frozenset[str] = frozenset(
+    {
+        "the",
+        "that",
+        "with",
+        "using",
+        "which",
+        "for",
+        "and",
+        "a",
+        "an",
+        "to",
+        "of",
+        "in",
+        "on",
+        "by",
+        "from",
+        "into",
+        "as",
+        "via",
+        "its",
+        "all",
+        "application",
+        "system",
+        "project",
+        "based",
+        "proper",
+        "production",
+        "quality",
+        "complete",
+        "full",
+        "new",
+        "existing",
+        "angular",
+        "react",
+        "vue",
+        "spring",
+        "fastapi",
+        "flask",
+        "django",
+    }
+)
+_STRIP_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "component",
+        "service",
+        "module",
+        "endpoint",
+        "endpoints",
+        "middleware",
+        "guard",
+        "pipe",
+        "directive",
+        "interceptor",
+        "controller",
+        "repository",
+    }
+)
 
 
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
+    """Derive a short, identifier-friendly name from a free-form hint.
+
+    Strips common verbs, filler words, and type suffixes, then joins the
+    remaining words with ``separator`` and truncates to ``max_length``.
+
+    Preconditions:
+        - ``hint`` is a string (may be empty; empty / all-stripped yields a placeholder).
+        - ``separator`` is a non-empty string safe for identifiers.
+        - ``max_length`` is a positive integer.
+
+    Postconditions:
+        - Returns a non-empty string of at most ``max_length`` characters.
+        - The result contains only lowercase alphanumerics and ``separator``
+          (or the placeholder ``item{separator}1`` when no usable words remain).
+    """
+    assert isinstance(hint, str)
+    assert isinstance(separator, str) and separator
+    assert isinstance(max_length, int) and max_length > 0
+
     expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", hint)
     words = re.sub(r"[^a-z0-9\s]+", " ", expanded.lower()).split()
     filtered = [
@@ -114,11 +143,62 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
         for w in words
         if w not in _STRIP_VERBS and w not in _STRIP_FILLERS and w not in _STRIP_SUFFIXES
     ]
-    name_words = filtered[:3] if filtered else words[:2]
-    result = separator.join(name_words)
+    if not filtered:
+        # Do not reintroduce verbs/fillers/suffixes; guarantee a usable identifier.
+        return f"item{separator}1"
+    result = separator.join(filtered[:3])
     if len(result) > max_length:
         result = result[:max_length].rstrip(separator)
     return result or f"item{separator}1"
+
+
+def _last_user_text(messages: list) -> str:
+    """Return concatenated text from the most recent user message.
+
+    Preconditions:
+        - ``messages`` is a list of Strands-style message dicts (role/content).
+
+    Postconditions:
+        - Returns a string (empty when no user text is present).
+    """
+    assert isinstance(messages, list)
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content", [])
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        for block in content:
+            if isinstance(block, dict) and "text" in block:
+                return str(block["text"])
+            if isinstance(block, str):
+                return block
+        return ""
+    return ""
+
+
+def _flatten_system_prompt_content(
+    system_prompt_content: list[SystemContentBlock] | None,
+) -> str:
+    """Flatten Strands system content blocks into a single prompt string.
+
+    Preconditions:
+        - ``system_prompt_content`` is ``None`` or a list of content blocks.
+
+    Postconditions:
+        - Returns concatenated text from blocks (empty when absent).
+    """
+    if not system_prompt_content:
+        return ""
+    parts: list[str] = []
+    for block in system_prompt_content:
+        if isinstance(block, dict):
+            parts.append(str(block.get("text", "") or ""))
+        else:
+            parts.append(str(block))
+    return "".join(parts)
 
 
 class DummyLLMClient(LLMClient, Model):
@@ -144,14 +224,34 @@ class DummyLLMClient(LLMClient, Model):
     def get_config(self) -> dict[str, Any]:
         return dict(self._model_config)
 
-    def structured_output(
+    async def structured_output(
         self,
         output_model: type,
         prompt: list,
         system_prompt: str | None = None,
         **kwargs: Any,
-    ) -> Any:
-        raise NotImplementedError("DummyLLMClient.structured_output is not implemented for tests")
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Yield Strands structured-output events from the dummy pattern matcher.
+
+        Preconditions:
+            - ``output_model`` is a Pydantic model type with ``model_validate``.
+            - ``prompt`` is a Strands-style message list.
+
+        Postconditions:
+            - Yields a single event ``{"output": validated}`` on success.
+            - Raises ``ValueError`` when the stub dict cannot validate.
+        """
+        assert hasattr(output_model, "model_validate")
+        user_text = _last_user_text(prompt)
+        data = self.complete_json(user_text, system_prompt=system_prompt)
+        try:
+            validated = output_model.model_validate(data)
+        except Exception as exc:
+            raise ValueError(
+                f"DummyLLMClient.structured_output: failed to parse into "
+                f"{getattr(output_model, '__name__', output_model)}: {exc}"
+            ) from exc
+        yield {"output": validated}
 
     async def stream(
         self,
@@ -170,19 +270,15 @@ class DummyLLMClient(LLMClient, Model):
         when ``structured_output_model=...`` is used), yields a tool-use event
         invoking that tool with data from the ``complete_json`` pattern matcher.
         Otherwise yields a plain text response.
+
+        When ``system_prompt`` is absent, flat text is taken from
+        ``system_prompt_content`` so branding Phase 1 branches that anchor on
+        system text still match.
         """
-        # Extract user text from the last user message
-        user_text = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                for block in msg.get("content", []):
-                    if isinstance(block, dict) and "text" in block:
-                        user_text = block["text"]
-                        break
-                    elif isinstance(block, str):
-                        user_text = block
-                        break
-                break
+        del tool_choice, invocation_state  # accepted for ABC compatibility
+        user_text = _last_user_text(messages)
+        if system_prompt is None and system_prompt_content:
+            system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
         # Route through the existing complete_json pattern matcher for rich responses
         response_data = self.complete_json(user_text, system_prompt=system_prompt)
@@ -289,10 +385,10 @@ class DummyLLMClient(LLMClient, Model):
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the
         # branches below look for in the user prompt they build. Scanning
-        # ``system_prompt`` here was tried and reverted in commit <<CI fix>>
-        # because loose single-word branches (``"pipeline"``, ``"security"``)
-        # cross-contaminated other teams' prompts that happened to mention
-        # those words in their persona text.
+        # ``system_prompt`` was tried and reverted because loose single-word
+        # branches (``"pipeline"``, ``"security"``) cross-contaminated other
+        # teams' prompts that happened to mention those words in their persona
+        # text.
         #
         # Exception: the branding Phase 1 branches further down DO anchor on
         # ``system_prompt`` (see ``system_lowered``) — every Phase 1 agent
@@ -573,8 +669,10 @@ class DummyLLMClient(LLMClient, Model):
             }
         elif (
             "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
-        ) and ("approved" not in lowered or len(lowered) > 200):
-            # Catch-all for code review / chunk review prompts routed through Strands
+        ) and ("approved" not in lowered or len(lowered) > CODE_REVIEW_MIN_PROMPT_LENGTH):
+            # Catch-all for code review / chunk review prompts routed through Strands.
+            # Long prompts that mention "approved" still match: they carry full review
+            # context, unlike short approval-only stubs below the length threshold.
             return {
                 "approved": True,
                 "issues": [],
@@ -590,7 +688,6 @@ class DummyLLMClient(LLMClient, Model):
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)
                 or f"module_{counter}"
             )
-            slug.title().replace("_", "")
             return {
                 "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
