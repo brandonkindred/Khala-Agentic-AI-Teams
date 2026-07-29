@@ -188,7 +188,10 @@ def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None
     from agents.blogging.temporal import worker
 
     fake_worker = MagicMock()
-    fake_worker.shutdown = MagicMock(return_value=None)
+    async def fake_shutdown():
+        return None
+
+    fake_worker.shutdown = MagicMock(side_effect=fake_shutdown)
 
     class _FakeFuture:
         def result(self, timeout=None):
@@ -216,6 +219,7 @@ def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None
     fake_worker.shutdown.assert_called_once()
     assert len(scheduled) == 1
     assert scheduled[0][1] is fake_loop
+    assert scheduled[0][0].cr_code is fake_shutdown.__code__
 
 
 def test_shutdown_blogging_temporal_components_force_stop(monkeypatch, caplog) -> None:
@@ -233,10 +237,17 @@ def test_shutdown_blogging_temporal_components_force_stop(monkeypatch, caplog) -
 
     class _FakeLoop:
         def __init__(self):
-            self.call_soon_threadsafe = MagicMock()
+            self.scheduled_callback = None
+            self.stopped = False
 
         def is_running(self):
             return True
+
+        def call_soon_threadsafe(self, fn):
+            self.scheduled_callback = fn
+
+        def stop(self):
+            self.stopped = True
 
     fake_loop = _FakeLoop()
     monkeypatch.setattr(worker.asyncio, "run_coroutine_threadsafe", lambda coro, loop: _Future())
@@ -248,7 +259,9 @@ def test_shutdown_blogging_temporal_components_force_stop(monkeypatch, caplog) -
     with caplog.at_level(logging.WARNING, logger="agents.blogging.temporal.worker"):
         worker.shutdown_blogging_temporal_components()
 
-    fake_loop.call_soon_threadsafe.assert_called_once()
+    assert fake_loop.scheduled_callback is not None
+    fake_loop.scheduled_callback()  # callback must stop the loop when executed
+    assert fake_loop.stopped is True
     assert any("forcing loop stop" in r.message for r in caplog.records)
 
 
@@ -742,7 +755,7 @@ def test_finalize_job_activity_reraises_before_last_attempt(monkeypatch, tmp_pat
         acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}})
 
 
-def test_finalize_job_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+def test_finalize_job_activity_malformed_dto_raises_loudly(monkeypatch) -> None:
     """A malformed finalize input DTO raises out of the activity (code/schema defect),
     bypassing the retry-then-mark funnel — matching the draft/gates contract."""
     import importlib
@@ -882,6 +895,7 @@ def test_run_copy_editor_agent_main_smoke(monkeypatch, capsys) -> None:
 
 
 def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None:
+    """`run_publication_agent.main` should run end-to-end with stubbed submit_draft."""
     import agents.blogging.agent_implementations.run_publication_agent as mod
     from agents.blogging.blog_publication_agent.models import PublicationSubmission
 
@@ -912,7 +926,7 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
 
     from llm_service import DummyLLMClient
 
-    from .conftest import _STUB_WRITER_DRAFT
+    stub_writer_draft = "# Draft\n\nBody."
 
     monkeypatch.setattr(mod, "get_strands_model", lambda key: DummyLLMClient())
     monkeypatch.setattr(mod, "load_style_file", lambda *a, **kw: "")
@@ -930,7 +944,7 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
 
         def run(self, inp):
             captured_input["inp"] = inp
-            return WriterOutput(draft=_STUB_WRITER_DRAFT)
+            return WriterOutput(draft=stub_writer_draft)
 
     monkeypatch.setattr(mod, "BlogWriterAgent", _Stub)
 
