@@ -1,3 +1,4 @@
+import sys
 import time
 from typing import Any, Dict
 from unittest.mock import patch
@@ -6,13 +7,29 @@ import pytest
 from fastapi.testclient import TestClient
 
 from branding_team.api.main import app, branding_store
+from branding_team.tests._memory_stores import install_memory_stores
 from branding_team.tests.conftest import make_mission
+from job_service_client_fake import FakeJobServiceClient
 
 # Hits the team API which calls the real job service.  Marked integration
 # pending follow-up.
 pytestmark = [pytest.mark.integration]
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _memory_stores(monkeypatch: pytest.MonkeyPatch):
+    bundle = install_memory_stores(monkeypatch)
+    # Rebind the module-level name imported as ``from ...main import branding_store``.
+    from branding_team.api import main as main_mod
+    from branding_team.shared import job_store
+
+    monkeypatch.setattr(sys.modules[__name__], "branding_store", main_mod.branding_store)
+    fake_jobs = FakeJobServiceClient(team="branding_team")
+    monkeypatch.setattr(job_store, "_client", lambda: fake_jobs)
+    monkeypatch.setattr(main_mod, "_job_manager", fake_jobs)
+    return bundle
 
 
 def _poll_brand_job(job_id: str, deadline_s: float = 10.0) -> Dict[str, Any]:
