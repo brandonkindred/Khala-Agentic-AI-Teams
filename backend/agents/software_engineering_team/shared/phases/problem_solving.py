@@ -77,6 +77,41 @@ def _attr_or(obj: Any, name: str, default: Any) -> Any:
     return default if value is None else value
 
 
+_ACTIONABLE_SEVERITIES = frozenset({"critical", "high", "medium"})
+_ADVISORY_FIX_MARKER = "recommendation"
+
+
+def _issue_severity(issue: Any) -> str:
+    """Severity used for actionability decisions.
+
+    Preconditions:
+        ``issue`` may expose a ``severity`` attribute.
+    Postconditions:
+        Returns the severity string; ``None`` or empty string becomes ``"medium"``
+        (matching the historical ``severity or "medium"`` filter semantics).
+    """
+    value = getattr(issue, "severity", None)
+    if value is None or value == "":
+        return "medium"
+    return value
+
+
+def _is_actionable_issue(issue: Any) -> bool:
+    """True when the issue's severity is critical/high/medium (empty → medium)."""
+    return _issue_severity(issue) in _ACTIONABLE_SEVERITIES
+
+
+def _applied_fix_count(fixes_applied: List[Dict[str, Any]]) -> int:
+    """Count entries that represent applied fixes, not advisory recommendations.
+
+    Preconditions:
+        ``fixes_applied`` is a list of dicts.
+    Postconditions:
+        Returns the number of entries whose ``fix`` is not the advisory marker.
+    """
+    return sum(1 for entry in fixes_applied if entry.get("fix") != _ADVISORY_FIX_MARKER)
+
+
 def _format_all_code(
     current_files: Dict[str, str], max_chars: int = MAX_BATCH_FIX_CODE_CHARS
 ) -> str:
@@ -187,9 +222,7 @@ def run_batch_coding_fixes_impl(
     problem_solving_result_cls = models.ProblemSolvingResult
 
     microtask_id = microtask.id
-    actionable = [
-        i for i in issues if _attr_or(i, "severity", "medium") in ("critical", "high", "medium")
-    ]
+    actionable = [i for i in issues if _is_actionable_issue(i)]
 
     if not actionable:
         logger.info("[%s] Batch fix for %s: no actionable issues.", task_id, phase_name)
@@ -548,7 +581,7 @@ def _apply_tool_agents_problem_solve(
         failing agent is logged and skipped. A ``.py`` file a tool agent
         returns that fails to parse is discarded before merging -- the prior
         version of that file in ``merged`` is left untouched. Summary parts are
-        appended when the agent returns files and/or recommendations.
+        appended when the agent returns files and/or recommendations. Recommendation entries are recorded with ``fix="recommendation"`` so they are excluded from applied-fix counts.
     """
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "problem_solve"):
@@ -578,7 +611,7 @@ def _apply_tool_agents_problem_solve(
                         "source": kind.value,
                         "issue": out.summary or f"Tool {kind.value} recommendation",
                         "recommendation": r,
-                        "fix": "suggestion applied",
+                        "fix": _ADVISORY_FIX_MARKER,
                         "root_cause": "",
                     }
                     if microtask_id:
@@ -630,11 +663,7 @@ def run_problem_solving_impl(
 
     task_id = task.id
     review_issues = getattr(review_result, "issues", None) or []
-    actionable = [
-        i
-        for i in review_issues
-        if _attr_or(i, "severity", "medium") in ("critical", "high", "medium")
-    ]
+    actionable = [i for i in review_issues if _is_actionable_issue(i)]
     if not actionable:
         logger.info("[%s] Problem-solving: no actionable issues.", task_id)
         return problem_solving_result_cls(
@@ -675,7 +704,9 @@ def run_problem_solving_impl(
         )
 
     resolved = len(unresolved_issues) == 0
-    base_summary = f"Applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    base_summary = (
+        f"Applied {_applied_fix_count(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    )
     summary = " ".join([base_summary] + summary_parts) if summary_parts else base_summary
     logger.info(
         "[%s] Problem-solving: %s — %s (%d unresolved)",
@@ -723,11 +754,7 @@ def run_problem_solving_for_microtask_impl(
 
     microtask_id = microtask.id
     review_issues = getattr(review_result, "issues", None) or []
-    actionable = [
-        i
-        for i in review_issues
-        if _attr_or(i, "severity", "medium") in ("critical", "high", "medium")
-    ]
+    actionable = [i for i in review_issues if _is_actionable_issue(i)]
     if not actionable:
         return problem_solving_result_cls(
             resolved=True, files=dict(current_files), summary="No actionable issues."
@@ -780,7 +807,7 @@ def run_problem_solving_for_microtask_impl(
 
     resolved = len(unresolved_issues) == 0
     base_summary = (
-        f"Microtask {microtask_id}: applied {len(fixes_applied)} fix(s); "
+        f"Microtask {microtask_id}: applied {_applied_fix_count(fixes_applied)} fix(s); "
         f"{len(unresolved_issues)} unresolved."
     )
     summary = " ".join([base_summary] + summary_parts) if summary_parts else base_summary

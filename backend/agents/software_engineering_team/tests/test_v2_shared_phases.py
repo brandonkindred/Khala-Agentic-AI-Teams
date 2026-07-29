@@ -1288,6 +1288,67 @@ def test_run_batch_coding_fixes_impl_no_actionable_returns_fresh_dict():
     assert result.files is not current
 
 
+def test_run_batch_coding_fixes_impl_treats_empty_severity_as_actionable():
+    """Empty severity must default to medium and enter the batch fix path."""
+    captured: list[str] = []
+    parsed = {
+        "files": {"a.py": "x = 1\n"},
+        "issues_addressed": [{"issue_index": 1}],
+        "summary": "ok",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue(severity="")],
+        current_files={"a.py": "orig"},
+        language="python",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=captured.append,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("x"),
+    )
+    assert result.resolved is True
+    assert any("Fixing all 1" in d for d in captured)
+
+
+def test_recommendation_only_tool_does_not_inflate_applied_fix_count():
+    class _Agent:
+        def problem_solve(self, _inp):
+            return SimpleNamespace(files={}, recommendations=["do X"], summary="advise")
+
+    parses = iter(
+        [
+            {
+                "files": {"a.py": "x = 1\n"},
+                "resolved": True,
+                "summary": "llm fix",
+                "root_cause": "",
+            }
+        ]
+    )
+    kind = be_models.ToolAgentKind.GENERAL
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=[_issue()]),
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="/tmp",
+        tool_agents={kind: _Agent()},
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{language_conventions}{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        runner=_runner("## FILE ##"),
+    )
+    assert result.summary.startswith("Applied 1 fix(s);")
+    assert any(e.get("fix") == "recommendation" for e in result.fixes_applied)
+
+
 def test_fix_issues_one_at_a_time_preserves_braces_and_empty_source():
     captured: list[str] = []
     issue = _issue(source="", description="use {placeholder} carefully")
@@ -1423,6 +1484,7 @@ def test_apply_tool_agents_recommendation_schema_includes_llm_keys():
         "root_cause",
         "microtask",
     }
+    assert fixes[0]["fix"] == "recommendation"
 
 
 # --- deliberate wrapper duplication drift guard ------------------------------
