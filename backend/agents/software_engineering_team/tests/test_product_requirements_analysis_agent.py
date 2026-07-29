@@ -805,15 +805,15 @@ def test_parse_open_question_preserves_option_order_when_marking_default() -> No
     assert [opt.is_default for opt in parsed.options] == [False, True, False]
 
 
-def test_parse_open_question_treats_explicit_null_fields_as_empty() -> None:
-    """_parse_open_question should not stringify explicit JSON null fields as the literal 'None'."""
+def test_parse_open_question_treats_explicit_null_optional_fields_as_empty() -> None:
+    """Optional string fields with explicit JSON null must not stringify as 'None'."""
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
 
     parsed = agent._parse_open_question(
         {
-            "id": None,
-            "question_text": None,
+            "id": "q7",
+            "question_text": "Which region?",
             "context": None,
             "recommendation": None,
             "source": None,
@@ -828,7 +828,7 @@ def test_parse_open_question_treats_explicit_null_fields_as_empty() -> None:
     )
 
     assert parsed.id == "q7"
-    assert parsed.question_text == ""
+    assert parsed.question_text == "Which region?"
     assert parsed.context == ""
     assert parsed.recommendation == ""
     assert parsed.source == "spec_review"
@@ -840,8 +840,38 @@ def test_parse_open_question_treats_explicit_null_fields_as_empty() -> None:
     assert parsed.status == "open"
 
 
-def test_parse_open_question_treats_explicit_null_option_fields_as_empty() -> None:
-    """Options with explicit null id/label/rationale should not become the literal 'None'."""
+def test_parse_open_question_rejects_explicit_null_id() -> None:
+    """Present id:null must raise so alignment cannot remap it onto q{index}."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    with pytest.raises(ValueError, match="expected string for 'id'"):
+        agent._parse_open_question(
+            {
+                "id": None,
+                "question_text": "Which region?",
+            },
+            index=0,
+        )
+
+
+def test_parse_open_question_rejects_explicit_null_question_text() -> None:
+    """Present question_text:null must raise instead of becoming blank text."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    with pytest.raises(ValueError, match="expected string for 'question_text'"):
+        agent._parse_open_question(
+            {
+                "id": "q1",
+                "question_text": None,
+            },
+            index=0,
+        )
+
+
+def test_parse_open_question_skips_options_with_explicit_null_id_or_label() -> None:
+    """Options with explicit null id/label are dropped as malformed entries."""
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
 
@@ -856,13 +886,20 @@ def test_parse_open_question_treats_explicit_null_option_fields_as_empty() -> No
                     "is_default": True,
                     "confidence": 0.9,
                 },
+                {
+                    "id": "opt1",
+                    "label": "Keep",
+                    "is_default": True,
+                    "confidence": 0.8,
+                },
             ],
         },
         index=0,
     )
 
-    assert parsed.options[0].id == "opt0"
-    assert parsed.options[0].label == ""
+    assert len(parsed.options) == 1
+    assert parsed.options[0].id == "opt1"
+    assert parsed.options[0].label == "Keep"
     assert parsed.options[0].rationale == ""
 
 
@@ -1182,6 +1219,31 @@ def test_add_recommendations_preserves_existing_when_llm_returns_empty_string() 
         {
             "recommendations": [
                 {"id": "q1", "recommendation": ""},
+                {"id": "q2", "recommendation": "Use OAuth for the MVP."},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(
+        id="q1",
+        question_text="Which auth?",
+        recommendation="Prefer SSO for enterprise tenants.",
+    )
+    q2 = OpenQuestion(id="q2", question_text="Which storage?")
+
+    result = agent._add_recommendations([q1, q2], "# Spec content")
+    result_by_id = {q.id: q for q in result}
+
+    assert result_by_id["q1"].recommendation == "Prefer SSO for enterprise tenants."
+    assert result_by_id["q2"].recommendation == "Use OAuth for the MVP."
+
+
+def test_add_recommendations_preserves_existing_when_llm_returns_whitespace() -> None:
+    """Whitespace-only recommendations must not wipe an existing recommendation."""
+    llm = _StubClient(
+        {
+            "recommendations": [
+                {"id": "q1", "recommendation": "   "},
                 {"id": "q2", "recommendation": "Use OAuth for the MVP."},
             ]
         }
@@ -3225,6 +3287,86 @@ def test_filter_duplicate_questions_matches_short_history_base_verbs() -> None:
     qa_history = (
         "Q: Which defects get a fix after map work?\n"
         "A: Critical defects get a fix after map work lands."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_ie_plurals_and_y_plurals() -> None:
+    """cookies→cookie and policies→policy via shared y/ie stub matching."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which cookie policy should browsers apply?")
+    ]
+    qa_history = (
+        "Q: Which cookies policies should browsers apply?\n"
+        "A: Apply the documented cookies policies in the browser agent."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_silent_e_ches_and_zes() -> None:
+    """caches→cache and sizes→size via silent-e restoration after -es strip."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which cache size should services expose?")
+    ]
+    qa_history = (
+        "Q: Which caches sizes should services expose?\n"
+        "A: Expose the documented caches sizes from the metrics endpoint."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_keeps_lexical_kick_compounds() -> None:
+    """sidekicked/dropkicked keep lexical -kick (not sidekic/dropkic)."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which bots sidekick dropkick routines?")
+    ]
+    qa_history = (
+        "Q: Which bots sidekicked dropkick routines during drills?\n"
+        "A: Swarm bots sidekicked dropkick routines before downtime."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_preserves_lexical_tt_doubles() -> None:
+    """boycotted/butted keep lexical tt while patted still undoubles to pat."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which vendors boycott butt extensions?")
+    ]
+    qa_history = (
+        "Q: Which vendors boycotted butt extensions after review?\n"
+        "A: Partner vendors boycotted butt extensions after the audit."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_ie_silent_e_past_tense() -> None:
+    """untied/belied keep ie bases (untie/belie), while carried still matches carry."""
+    questions = [
+        OpenQuestion(id="q1", question_text="When should we untie and belie flags?")
+    ]
+    qa_history = (
+        "Q: When should flags be untied after claims were belied?\n"
+        "A: Flags were untied after claims were belied and carried over."
     )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)

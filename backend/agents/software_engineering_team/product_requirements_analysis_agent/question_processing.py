@@ -81,26 +81,20 @@ def filter_duplicate_questions(
         """Strip punctuation so tokens like 'store?' match their bare form."""
         return re.sub(r"[^a-z0-9]", "", w.strip())
 
-    def _stem_info(w: str) -> tuple[str, bool]:
-        """Normalize word for matching; flag stems that may need silent-e restoration.
+    def _stem_info(w: str) -> tuple[str, bool, bool]:
+        """Normalize word for matching; flag silent-e and y/ie stub restoration.
 
         Preconditions: ``w`` is a cleaned token (lowercase).
-        Postconditions: returns ``(stem, silent_e_candidate)``. Never raises.
-            ``silent_e_candidate`` is True only when stripping ``ed``/``ing``/``es``
-            may have dropped a silent ``e`` (``stored`` -> ``stor``, ``making`` ->
-            ``mak``, ``houses`` -> ``hous``); it is False for ``ied``
-            (``carried`` -> ``carry``), inflectional consonant doubling
-            (``planned`` -> ``plan``, ``controlled`` -> ``control``,
-            ``signalled`` -> ``signal``), lexical doubles that must be preserved
-            (``installed`` -> ``install``, ``filled`` -> ``fill``,
-            ``sniffed`` -> ``sniff``), and spelling-only ``k`` insertion
-            (``mimicked`` -> ``mimic``; compounds like ``handpicked`` keep
-            lexical ``pick``).
-            Always strip ``ed`` (not just ``d``) so regular CVC pasts like
-            ``fixed`` -> ``fix`` while silent-e pasts like ``moved``/``freed``
-            still match via the silent-e flag.
-            Plurals: ``ies`` -> ``y``, ``-es`` after s/x/z/ch/sh/o (including
-            ``statuses`` and ``echoes``), ``uses`` -> ``use``, else trailing ``s``.
+        Postconditions: returns ``(stem, silent_e_candidate, y_or_ie_stub)``.
+            Never raises.
+            ``silent_e_candidate`` is True when stripping ``ed``/``ing``/``es`` may
+            have dropped a silent ``e`` (``stored`` -> ``stor``, ``caches`` ->
+            ``cach``). ``y_or_ie_stub`` is True for ``ies``/``ied`` stems whose
+            base may be either ``*y`` or ``*ie`` (``policies``/``cookies``,
+            ``carried``/``untied``) so exact membership can recover either form.
+            Lexical doubles (``install``/``sniff``/``boycott``) and compounds
+            (``handpick``/``sidekick``) are preserved.
+            Plurals: ``statuses``, ``echoes``, ``uses`` -> ``use``, else trailing ``s``.
         """
         w = w.strip()
         vowels = set("aeiou")
@@ -139,16 +133,20 @@ def filter_duplicate_questions(
                 "wall",
             }
         )
+        # Bases whose -tt is lexical (boycott/butt), not inflectional (patted→pat).
+        lexical_tt = frozenset(
+            {
+                "batt",
+                "boycott",
+                "butt",
+                "mitt",
+                "putt",
+                "watt",
+            }
+        )
 
         def _undouble_inflectional(base: str) -> str:
-            """Undouble only when -ed/-ing spelling doubled a final consonant.
-
-            Undouble trailing CC when the base is long enough that the double
-            is inflectional (``planned``/``running``), not lexical (``added``).
-            Never undouble ``f``/``s``/``z`` (``sniffed``/``staffed`` keep
-            ``ff``; ``addressed`` keeps ``ss``). Undouble ``l`` unless the
-            ``ll`` stem is a known lexical base (``install``/``fill``).
-            """
+            """Undouble only when -ed/-ing spelling doubled a final consonant."""
             if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
                 return base
             doubled = base[-1]
@@ -159,15 +157,19 @@ def filter_duplicate_questions(
                 if base in lexical_ll:
                     return base
                 return base[:-1]
+            if doubled == "t":
+                if base in lexical_tt or base.endswith("cott"):
+                    return base
+                return base[:-1]
             return base[:-1]
 
         def _strip_inserted_ck(base: str) -> str:
             """Remove spelling-only k after -c verbs (mimick→mimic).
 
-            Keep monosyllabic ``click``/``pick`` and compound ``-pick`` verbs
-            (``handpick``, ``nitpick``) whose ``k`` is lexical.
+            Keep monosyllabic ``click``/``pick`` and compound ``-pick``/
+            ``-kick`` verbs whose ``k`` is lexical.
             """
-            if base.endswith("pick"):
+            if base.endswith(("pick", "kick")):
                 return base
             if (
                 base.endswith("ick")
@@ -178,77 +180,83 @@ def filter_duplicate_questions(
 
         if w == "uses":
             # Third-person verb (len 4) must not fall through the short-token guard.
-            return "use", False
+            return "use", False, False
+
+        # tied/lied/died and longer ie+d forms share the y/ie stub with -ies plurals.
+        if w.endswith("ied") and len(w) >= 4:
+            stub = w[:-3]
+            if stub:
+                return stub, False, True
 
         if len(w) <= 4:
-            return w, False
+            return w, False, False
 
         if w.endswith("ed"):
-            # carry + ed written as carried → carry (no silent-e stub).
-            if w.endswith("ied") and len(w) > 4:
-                return w[:-3] + "y", False
-            # Strip full "ed" for all longer forms so fixed→fix (not fixe) while
-            # moved/freed/glued become mov/fre/glu and match via silent-e.
+            # Strip full "ed" so fixed→fix while moved/freed match via silent-e.
             if len(w) >= 5:
                 raw = w[:-2]
                 base = _strip_inserted_ck(_undouble_inflectional(raw))
                 if len(base) >= 3:
-                    # silent-e when neither undoubling nor ck-stripping rewrote
-                    # the stem (stored→stor, freed→fre; not mimicked→mimic).
                     silent_e = base == raw
-                    return base, silent_e
+                    return base, silent_e, False
 
         if w.endswith("ing") and len(w) > 5:
-            # carrying → carry (exact after stripping ing).
             raw = w[:-3]
             base = _strip_inserted_ck(_undouble_inflectional(raw))
             if len(base) >= 3:
-                # monitoring → monitor; running → run; making → mak;
-                # mimicking → mimic.
                 silent_e = base == raw
-                return base, silent_e
+                return base, silent_e, False
 
-        # Plurals / 3rd-person: policies→policy, processes→process,
-        # statuses→status, echoes→echo, tokens→token.
+        # Plurals: policies/cookies share a stub matching *y or *ie;
+        # processes→process; statuses→status; echoes→echo; caches/sizes need silent-e.
         if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
-            return w[:-3] + "y", False
-        if w.endswith(("sses", "xes", "zes", "ches", "shes")) and len(w) > 4:
-            return w[:-2], False
-        # Single-s bases take -es (statuses→status); also houses→hous (silent e).
+            return w[:-3], False, True
+        if w.endswith("sses") and len(w) > 4:
+            return w[:-2], False, False
+        if w.endswith(("xes", "zes", "ches", "shes")) and len(w) > 4:
+            # caches→cach, sizes→siz (silent e); matches→match still exact.
+            return w[:-2], True, False
         if w.endswith("ses") and len(w) > 4:
-            return w[:-2], True
-        # consonant + oes (echoes→echo, heroes→hero); shoes→sho + silent e.
+            return w[:-2], True, False
         if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
-            return w[:-2], True
+            return w[:-2], True, False
         if (
             w.endswith("s")
             and len(w) > 4
             and not w.endswith(("ss", "us", "is"))
         ):
-            return w[:-1], False
+            return w[:-1], False, False
 
-        return w, False
+        return w, False, False
 
     def _stems_match(
         stem: str,
         silent_e_candidate: bool,
+        y_or_ie_stub: bool,
         qa_stems: set[str],
         qa_silent_e_stubs: set[str],
+        qa_y_or_ie_stubs: set[str],
     ) -> bool:
         """Return True when ``stem`` matches a qa stem.
 
-        Preconditions: ``stem`` is a non-empty stemmed token; ``qa_stems`` /
-            ``qa_silent_e_stubs`` are sets of stemmed tokens from qa history.
+        Preconditions: ``stem`` is a non-empty stemmed token; qa stem sets are
+            collections of stemmed tokens from qa history.
         Postconditions: exact membership always matches. Silent-``e`` pairs
-            (``stor``/``store``, ``mak``/``make``, ``hous``/``house``) match only
-            when an ``ed``/``ing``/``es`` strip produced a silent-``e`` stub —
-            unrelated pairs like ``plan``/``plane`` do not. Never raises.
+            (``stor``/``store``, ``cach``/``cache``) and ``y``/``ie`` stub pairs
+            (``polic``↔``policy``/``cook``↔``cookie``, ``carr``↔``carry``/
+            ``unt``↔``untie``) match only via their respective stubs. Never raises.
         """
         if stem in qa_stems:
             return True
         if silent_e_candidate and (stem + "e") in qa_stems:
             return True
         if stem.endswith("e") and stem[:-1] in qa_silent_e_stubs:
+            return True
+        if y_or_ie_stub and ((stem + "y") in qa_stems or (stem + "ie") in qa_stems):
+            return True
+        if stem.endswith("y") and stem[:-1] in qa_y_or_ie_stubs:
+            return True
+        if stem.endswith("ie") and stem[:-2] in qa_y_or_ie_stubs:
             return True
         return False
 
@@ -259,29 +267,36 @@ def filter_duplicate_questions(
         for tok in re.findall(r"[a-z0-9]+", qa_history_lower)
         if len(tok) >= 3
     ]
-    qa_stems = {stem for stem, _ in qa_stem_infos}
-    qa_silent_e_stubs = {stem for stem, silent_e in qa_stem_infos if silent_e}
+    qa_stems = {stem for stem, _, _ in qa_stem_infos}
+    qa_silent_e_stubs = {stem for stem, silent_e, _ in qa_stem_infos if silent_e}
+    qa_y_or_ie_stubs = {stem for stem, _, y_or_ie in qa_stem_infos if y_or_ie}
 
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
         # Key words: length > 3, normalized to stems for plural/tense
         words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
         key_stem_infos = [_stem_info(_clean_token(w)) for w in words]
-        # Dedupe by stem while keeping silent-e flag if any occurrence set it.
-        key_by_stem: dict[str, bool] = {}
-        for stem, silent_e in key_stem_infos:
-            key_by_stem[stem] = key_by_stem.get(stem, False) or silent_e
+        # Dedupe by stem while keeping restoration flags if any occurrence set them.
+        key_by_stem: dict[str, tuple[bool, bool]] = {}
+        for stem, silent_e, y_or_ie in key_stem_infos:
+            prev_silent, prev_y = key_by_stem.get(stem, (False, False))
+            key_by_stem[stem] = (prev_silent or silent_e, prev_y or y_or_ie)
         if not key_by_stem:
             filtered.append(q)
             continue
 
         # Token-level membership (no substring matches) to avoid false positives.
-        # Silent-e variants keep store/stored and create/created aligned, but
-        # only when a past-tense strip produced a silent-e stub.
         matches = sum(
             1
-            for stem, silent_e in key_by_stem.items()
-            if _stems_match(stem, silent_e, qa_stems, qa_silent_e_stubs)
+            for stem, (silent_e, y_or_ie) in key_by_stem.items()
+            if _stems_match(
+                stem,
+                silent_e,
+                y_or_ie,
+                qa_stems,
+                qa_silent_e_stubs,
+                qa_y_or_ie_stubs,
+            )
         )
         match_ratio = matches / len(key_by_stem)
         # Only treat as duplicate of an answered question when match >= 90%.
@@ -295,6 +310,7 @@ def filter_duplicate_questions(
             duplicates.append(q)
             continue
         filtered.append(q)
+
 
     if duplicates:
         logger.info(
@@ -397,20 +413,21 @@ def _str_or_default(value: Any, default: str = "") -> str:
     return default if value is None or not isinstance(value, str) else value
 
 
-def _require_string_or_missing(value: Any, default: str) -> str:
-    """Accept a string field, treat missing as ``default``, reject malformed types.
+def _require_string_field(data: dict, key: str, default: str) -> str:
+    """Accept a string field; treat a missing key as ``default``; reject nulls/types.
 
-    Preconditions: ``default`` is the fallback used when the field is absent.
-    Postconditions: returns ``default`` when ``value`` is ``None``; returns ``value``
-        when it is a ``str``; raises ``ValueError`` for any other present type so
-        callers cannot silently remap numeric/object values onto empty defaults
-        (IDs like ``q0``, blank ``question_text`` / option ``label``).
+    Preconditions: ``data`` is a mapping; ``default`` is the fallback for an absent key.
+    Postconditions: returns ``default`` when ``key`` is absent; returns the value when
+        it is a ``str``; raises ``ValueError`` when the key is present with ``null`` or
+        any non-string type so callers cannot silently remap explicit null IDs/text
+        onto generated defaults (e.g. ``q0``) or blank content.
     """
-    if value is None:
+    if key not in data:
         return default
+    value = data[key]
     if isinstance(value, str):
         return value
-    raise ValueError(f"expected string, got {type(value).__name__}")
+    raise ValueError(f"expected string for {key!r}, got {type(value).__name__}")
 
 
 def _safe_constraint_layer(value: Any) -> int:
@@ -565,8 +582,8 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
         asked_via = [v for v in raw_asked_via if isinstance(v, str)]
 
         return OpenQuestion(
-            id=_require_string_or_missing(q_data.get("id"), f"q{index}"),
-            question_text=_require_string_or_missing(q_data.get("question_text"), ""),
+            id=_require_string_field(q_data, "id", f"q{index}"),
+            question_text=_require_string_field(q_data, "question_text", ""),
             context=_str_or_default(q_data.get("context")),
             recommendation=_str_or_default(q_data.get("recommendation")),
             options=options,
@@ -629,14 +646,14 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
         label; a non-numeric, ``None``, out-of-range, or overflowing
         ``confidence`` value defaults to 0.5 (or is clamped to ``[0.0, 1.0]``)
         instead of raising. Raises ``ValueError`` for unsupported non-dict,
-        non-string entries (``null``, numbers, …) and for present non-string
-        ``id``/``label`` values so callers can drop them rather than materializing
-        blank default options.
+        non-string entries (``null``, numbers, …) and for present ``null`` or
+        non-string ``id``/``label`` values so callers can drop them rather than
+        materializing blank default options.
     """
     if isinstance(opt_data, dict):
         return QuestionOption(
-            id=_require_string_or_missing(opt_data.get("id"), f"opt{index}"),
-            label=_require_string_or_missing(opt_data.get("label"), ""),
+            id=_require_string_field(opt_data, "id", f"opt{index}"),
+            label=_require_string_field(opt_data, "label", ""),
             is_default=_safe_bool(opt_data.get("is_default", False), default=False),
             rationale=_str_or_default(opt_data.get("rationale")),
             confidence=_safe_confidence(opt_data.get("confidence", 0.5)),
@@ -1010,7 +1027,7 @@ def add_recommendations(
                 isinstance(r, dict)
                 and isinstance(r.get("id"), str)
                 and isinstance(r.get("recommendation"), str)
-                and r.get("recommendation") != ""
+                and r.get("recommendation").strip() != ""
             )
         }
         result = []
