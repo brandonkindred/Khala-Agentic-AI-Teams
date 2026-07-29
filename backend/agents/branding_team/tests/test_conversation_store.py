@@ -164,25 +164,26 @@ def test_get_by_brand_id_ignores_stale_conversation_for_same_brand() -> None:
             )
         conn.commit()
 
-    store.append_message(fresh_cid, "user", "fresh one")
+    try:
+        store.append_message(fresh_cid, "user", "fresh one")
 
-    result = store.get_by_brand_id("brand_dup")
-    assert result is not None
-    rcid, messages, _, _ = result
-    assert rcid == fresh_cid
-    assert [m.content for m in messages] == ["fresh one"]
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE branding_conversations SET brand_id = NULL WHERE conversation_id = %s",
-                (stale_cid,),
-            )
-            cur.execute(
-                """CREATE UNIQUE INDEX IF NOT EXISTS idx_branding_conv_brand_unique
-                   ON branding_conversations(brand_id) WHERE brand_id IS NOT NULL"""
-            )
-        conn.commit()
+        result = store.get_by_brand_id("brand_dup")
+        assert result is not None
+        rcid, messages, _, _ = result
+        assert rcid == fresh_cid
+        assert [m.content for m in messages] == ["fresh one"]
+    finally:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE branding_conversations SET brand_id = NULL WHERE conversation_id = %s",
+                    (stale_cid,),
+                )
+                cur.execute(
+                    """CREATE UNIQUE INDEX IF NOT EXISTS idx_branding_conv_brand_unique
+                       ON branding_conversations(brand_id) WHERE brand_id IS NOT NULL"""
+                )
+            conn.commit()
 
 
 def test_get_by_brand_id_loads_non_none_latest_output() -> None:

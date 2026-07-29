@@ -288,7 +288,6 @@ class MemoryConversationStore:
 
     def __init__(self, bundle: MemoryStoreBundle) -> None:
         self._bundle = bundle
-        self._next_message_id = 1
 
     def _messages_for(self, conversation_id: str) -> List[_StoredMessage]:
         return self._bundle.messages.setdefault(conversation_id, [])
@@ -344,7 +343,6 @@ class MemoryConversationStore:
         self._messages_for(conversation_id).append(
             _StoredMessage(role=role, content=content, timestamp=ts.isoformat())
         )
-        self._next_message_id += 1
         return True
 
     def update_mission(self, conversation_id: str, mission: BrandingMission) -> bool:
@@ -449,7 +447,9 @@ def install_memory_stores(monkeypatch: pytest.MonkeyPatch) -> MemoryStoreBundle:
     Postconditions:
         ``main.branding_store``, ``main.conversation_store``, and
         ``routes.sessions.session_store`` are bound to memory doubles
-        sharing one ``MemoryStoreBundle``. Returns that bundle.
+        sharing one ``MemoryStoreBundle``. When ``branding_team.tests.test_api``
+        is already imported, ``test_api.branding_store`` is rebound to the
+        same memory double. Returns that bundle.
     """
     from branding_team.api import main as main_mod
     from branding_team.api.routes import sessions as sessions_mod
