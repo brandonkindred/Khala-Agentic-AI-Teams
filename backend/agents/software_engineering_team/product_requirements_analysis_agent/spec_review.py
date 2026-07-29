@@ -18,7 +18,6 @@ from .models import AnsweredQuestion, SpecReviewResult
 from .prompts import SPEC_REVIEW_PROMPT
 from .qa_history import format_answered_questions_for_prompt, read_qa_history
 from .question_processing import (
-    MAX_OPEN_QUESTIONS,
     filter_duplicate_questions,
     filter_organizational_questions,
     parse_spec_review_response,
@@ -190,15 +189,4 @@ Previously Answered Questions:
             )
 
     result.open_questions = filter_organizational_questions(result.open_questions)
-
-    # Cap after filters so organizational / already-answered entries do not
-    # crowd out retained material questions.
-    if len(result.open_questions) > MAX_OPEN_QUESTIONS:
-        logger.info(
-            "Truncated open questions after filters: %d->%d",
-            len(result.open_questions),
-            MAX_OPEN_QUESTIONS,
-        )
-        result.open_questions = result.open_questions[:MAX_OPEN_QUESTIONS]
-
     return result, updated_spec

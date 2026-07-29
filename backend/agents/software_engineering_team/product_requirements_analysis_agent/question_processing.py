@@ -35,6 +35,24 @@ MAX_ISSUES = 10
 MAX_GAPS = 10
 MAX_OPEN_QUESTIONS = 10
 
+
+def cap_open_questions(
+    questions: List[OpenQuestion],
+    *,
+    limit: int = MAX_OPEN_QUESTIONS,
+) -> List[OpenQuestion]:
+    """Return at most ``limit`` open questions, preserving order.
+
+    Preconditions: ``questions`` is a list of :class:`OpenQuestion`; ``limit`` >= 0.
+    Postconditions: returns ``questions`` unchanged when ``len(questions) <= limit``,
+        otherwise the first ``limit`` items; never raises.
+    """
+    assert limit >= 0, f"limit must be >= 0, got {limit}"
+    if len(questions) <= limit:
+        return list(questions)
+    logger.info("Truncated open questions: %d->%d", len(questions), limit)
+    return questions[:limit]
+
 ORGANIZATIONAL_PHRASES = [
     "decision process",
     "approval process",
@@ -168,9 +186,10 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     Preconditions: ``raw`` is the decoded LLM output (any type).
     Postconditions: returns a valid :class:`SpecReviewResult`; issues/gaps are
         deduped and capped at ``MAX_ISSUES``/``MAX_GAPS``; open questions are
-        parsed but not capped here (callers must apply ``MAX_OPEN_QUESTIONS``
-        after organizational/duplicate filters so retained questions are not
-        discarded); never raises.
+        parsed but not capped here (the agent workflow applies
+        ``MAX_OPEN_QUESTIONS`` after semantic consolidation and
+        answer-similarity deduplication so near-duplicates do not crowd out
+        distinct topics); never raises.
     """
     if not isinstance(raw, dict):
         return SpecReviewResult(summary="Spec review completed (no structured output)")

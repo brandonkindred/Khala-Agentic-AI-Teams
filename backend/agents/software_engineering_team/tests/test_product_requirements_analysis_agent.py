@@ -712,13 +712,14 @@ def test_parse_spec_review_response_does_not_cap_open_questions() -> None:
 
 
 def test_open_question_cap_applied_after_organizational_filter() -> None:
-    """MAX_OPEN_QUESTIONS is enforced after organizational filtering.
+    """Organizational filtering must run before any open-question cap.
 
     Ten prohibited process questions followed by a material deployment question
     must leave the deployment question retained (not truncated before the filter).
     """
     from product_requirements_analysis_agent.question_processing import (
         MAX_OPEN_QUESTIONS,
+        cap_open_questions,
         filter_organizational_questions,
     )
 
@@ -757,10 +758,27 @@ def test_open_question_cap_applied_after_organizational_filter() -> None:
     assert len(parsed.open_questions) == MAX_OPEN_QUESTIONS + 1
 
     filtered = filter_organizational_questions(parsed.open_questions)
-    if len(filtered) > MAX_OPEN_QUESTIONS:
-        filtered = filtered[:MAX_OPEN_QUESTIONS]
+    # Cap is applied only after later consolidation/dedupe in the agent; this
+    # asserts filter-before-cap ordering for retained material questions.
+    capped = cap_open_questions(filtered)
 
-    assert [q.id for q in filtered] == ["deploy_l1"]
+    assert [q.id for q in capped] == ["deploy_l1"]
+
+
+def test_cap_open_questions_preserves_order_and_limit() -> None:
+    """cap_open_questions keeps the first N questions in order."""
+    from product_requirements_analysis_agent.question_processing import (
+        MAX_OPEN_QUESTIONS,
+        cap_open_questions,
+    )
+
+    questions = [
+        OpenQuestion(id=f"q{i}", question_text=f"Question {i}?", options=[])
+        for i in range(MAX_OPEN_QUESTIONS + 3)
+    ]
+    capped = cap_open_questions(questions)
+    assert [q.id for q in capped] == [f"q{i}" for i in range(MAX_OPEN_QUESTIONS)]
+    assert cap_open_questions(questions[:3]) == questions[:3]
 
 
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
