@@ -960,6 +960,48 @@ def test_parse_open_question_coerces_non_list_options(
         assert parsed.options[0].label == expected_label
 
 
+def test_parse_open_question_drops_malformed_option_list_entries() -> None:
+    """Null/numeric entries inside options must be skipped, not blank defaults."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-014",
+            "question_text": "Pick a region",
+            "options": [None, 5, {"id": "opt_ok", "label": "us-east", "confidence": 0.8}],
+        },
+        index=0,
+    )
+
+    assert len(parsed.options) == 1
+    assert parsed.options[0].id == "opt_ok"
+    assert parsed.options[0].label == "us-east"
+
+
+def test_parse_open_question_rejects_present_non_string_id() -> None:
+    """A present non-string id must raise so alignment cannot remap it onto q{index}."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    with pytest.raises(ValueError, match="expected string id"):
+        agent._parse_open_question(
+            {
+                "id": 0,
+                "question_text": "Which region?",
+            },
+            index=0,
+        )
+
+
+def test_parse_question_option_rejects_non_string_non_dict() -> None:
+    """Unsupported option scalars must raise instead of becoming blank defaults."""
+    with pytest.raises(ValueError, match="unsupported option type"):
+        parse_question_option(None, index=0)
+    with pytest.raises(ValueError, match="unsupported option type"):
+        parse_question_option(5, index=0)
+
+
 @pytest.mark.parametrize("malformed_confidence", [None, "high", float("nan"), -3, 7, 10**400])
 def test_parse_open_question_coerces_scalar_option_with_malformed_confidence(
     malformed_confidence: Any,
@@ -1110,6 +1152,31 @@ def test_add_recommendations_ignores_non_string_recommendations() -> None:
     result_by_id = {q.id: q for q in result}
 
     assert result_by_id["q1"].recommendation == ""
+    assert result_by_id["q2"].recommendation == "Use OAuth for the MVP."
+
+
+def test_add_recommendations_preserves_existing_when_llm_returns_empty_string() -> None:
+    """An empty-string recommendation from the LLM must not wipe an existing value."""
+    llm = _StubClient(
+        {
+            "recommendations": [
+                {"id": "q1", "recommendation": ""},
+                {"id": "q2", "recommendation": "Use OAuth for the MVP."},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(
+        id="q1",
+        question_text="Which auth?",
+        recommendation="Prefer SSO for enterprise tenants.",
+    )
+    q2 = OpenQuestion(id="q2", question_text="Which storage?")
+
+    result = agent._add_recommendations([q1, q2], "# Spec content")
+    result_by_id = {q.id: q for q in result}
+
+    assert result_by_id["q1"].recommendation == "Prefer SSO for enterprise tenants."
     assert result_by_id["q2"].recommendation == "Use OAuth for the MVP."
 
 
@@ -2867,6 +2934,35 @@ def test_filter_duplicate_questions_matches_past_tense_silent_e() -> None:
 
     assert filtered == []
     assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_five_letter_silent_e_past_tense() -> None:
+    """Five-letter past forms like moved/saved keep their silent-e base (move/save)."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Where should we move data files?")
+    ]
+    qa_history = "Q: Where should data files be moved?\nA: Files were moved to cold storage."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_does_not_equate_unrelated_silent_e_pairs() -> None:
+    """Silent-e matching must not equate unrelated words like plan/plane."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which control plane should we use?")
+    ]
+    qa_history = (
+        "Q: Which control plan should we use for rollout?\n"
+        "A: Use the staged control plan documented in the runbook."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
 
 
 def test_filter_duplicate_questions_keeps_non_duplicate() -> None:

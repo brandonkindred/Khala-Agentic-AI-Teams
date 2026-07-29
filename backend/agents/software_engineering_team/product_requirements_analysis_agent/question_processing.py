@@ -81,25 +81,35 @@ def filter_duplicate_questions(
         """Strip punctuation so tokens like 'store?' match their bare form."""
         return re.sub(r"[^a-z0-9]", "", w.strip())
 
-    def _stem(w: str) -> str:
-        """Normalize word for matching (plural/past-tense suffixes only).
+    def _stem_info(w: str) -> tuple[str, bool]:
+        """Normalize word for matching; flag past-tense-derived stems.
 
         Preconditions: ``w`` is a cleaned token (lowercase).
-        Postconditions: returns the stemmed token; never raises.
-            Past-tense stripping alone may drop a silent ``e``
-            (``stored`` -> ``stor``); callers must compare via
-            :func:`_stems_match` so ``store``/``stored`` still align.
+        Postconditions: returns ``(stem, from_past_tense)``. Never raises.
+            - Five-letter silent-e past forms (``moved``, ``saved``, ``named``)
+              strip a single ``d`` so the base keeps its silent ``e``.
+            - Longer ``*ed`` forms strip ``ed`` (``stored`` -> ``stor``,
+              ``needed`` -> ``need``); silent-``e`` restoration for the former
+              is applied only when ``from_past_tense`` is True.
         """
         w = w.strip()
+        vowels = set("aeiou")
         if len(w) <= 4:
-            return w
+            return w, False
 
-        # Past tense (stored -> stor, needed -> need). Silent-e restoration
-        # is handled at match time so we do not guess verb morphology here.
-        if w.endswith("ed") and len(w) > 5:
-            base = w[:-2]
-            if len(base) >= 4:
-                return base
+        if w.endswith("ed"):
+            # move/save/name + d → moved/saved/named (len 5, CVCed).
+            if (
+                len(w) == 5
+                and w[0] not in vowels
+                and w[1] in vowels
+                and w[2] not in vowels
+            ):
+                return w[:-1], True
+            if len(w) > 5:
+                base = w[:-2]
+                if len(base) >= 4:
+                    return base, True
 
         # Plural (tokens -> token), but avoid over-stemming common singulars
         # ending in "s" (e.g. analysis, consensus, focus).
@@ -108,47 +118,64 @@ def filter_duplicate_questions(
             and len(w) > 4
             and not w.endswith(("ss", "us", "is"))
         ):
-            return w[:-1]
+            return w[:-1], False
 
-        return w
+        return w, False
 
-    def _stems_match(stem: str, qa_stems: set[str]) -> bool:
-        """Return True when ``stem`` matches a qa stem, including silent-e variants.
+    def _stems_match(
+        stem: str,
+        from_past: bool,
+        qa_stems: set[str],
+        qa_past_bases: set[str],
+    ) -> bool:
+        """Return True when ``stem`` matches a qa stem.
 
-        Preconditions: ``stem`` is a non-empty stemmed token; ``qa_stems`` is a set
-            of stemmed tokens from qa history.
-        Postconditions: returns True iff ``stem`` is in ``qa_stems``, or the
-            silent-e pair ``stem``/``stem + "e"`` (or ``stem[:-1]`` when ``stem``
-            already ends with ``e``) is present. Never raises.
+        Preconditions: ``stem`` is a non-empty stemmed token; ``qa_stems`` /
+            ``qa_past_bases`` are sets of stemmed tokens from qa history.
+        Postconditions: exact membership always matches. Silent-``e`` pairs
+            (``stor``/``store``) match only when at least one side was derived
+            by stripping a past-tense suffix — unrelated pairs like
+            ``plan``/``plane`` do not. Never raises.
         """
         if stem in qa_stems:
             return True
-        # stored->stor vs store: compare with/without trailing silent e.
-        if (stem + "e") in qa_stems:
+        # Restrict silent-e restoration to past-tense-derived stems only.
+        if from_past and (stem + "e") in qa_stems:
             return True
-        if stem.endswith("e") and stem[:-1] in qa_stems:
+        if stem.endswith("e") and stem[:-1] in qa_past_bases:
             return True
         return False
 
-    qa_stems = {
-        _stem(tok)
+    qa_stem_infos = [
+        _stem_info(tok)
         for tok in re.findall(r"[a-z0-9]+", qa_history_lower)
         if len(tok) > 3
-    }
+    ]
+    qa_stems = {stem for stem, _ in qa_stem_infos}
+    qa_past_bases = {stem for stem, from_past in qa_stem_infos if from_past}
 
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
         # Key words: length > 3, normalized to stems for plural/tense
         words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
-        key_stems = set(_stem(_clean_token(w)) for w in words)
-        if not key_stems:
+        key_stem_infos = [_stem_info(_clean_token(w)) for w in words]
+        # Dedupe by stem while keeping past-tense flag if any occurrence set it.
+        key_by_stem: dict[str, bool] = {}
+        for stem, from_past in key_stem_infos:
+            key_by_stem[stem] = key_by_stem.get(stem, False) or from_past
+        if not key_by_stem:
             filtered.append(q)
             continue
 
         # Token-level membership (no substring matches) to avoid false positives.
-        # Silent-e variants keep store/stored and create/created aligned.
-        matches = sum(1 for stem in key_stems if _stems_match(stem, qa_stems))
-        match_ratio = matches / len(key_stems)
+        # Silent-e variants keep store/stored and create/created aligned, but
+        # only when a past-tense derivation is involved.
+        matches = sum(
+            1
+            for stem, from_past in key_by_stem.items()
+            if _stems_match(stem, from_past, qa_stems, qa_past_bases)
+        )
+        match_ratio = matches / len(key_by_stem)
         # Only treat as duplicate of an answered question when match >= 90%.
         # Below-90% coverage may be consolidated but should not be filtered out.
         if match_ratio >= 0.90:
@@ -262,6 +289,22 @@ def _str_or_default(value: Any, default: str = "") -> str:
     return default if value is None or not isinstance(value, str) else value
 
 
+def _require_string_or_missing(value: Any, default: str) -> str:
+    """Accept a string ID, treat missing as ``default``, reject malformed types.
+
+    Preconditions: ``default`` is a non-empty string used when the field is absent.
+    Postconditions: returns ``default`` when ``value`` is ``None``; returns ``value``
+        when it is a ``str``; raises ``ValueError`` for any other present type so
+        callers (especially alignment) cannot silently remap numeric/object IDs
+        onto positional fallbacks like ``q0``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"expected string id, got {type(value).__name__}")
+
+
 def _safe_constraint_layer(value: Any) -> int:
     """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
 
@@ -361,6 +404,9 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
           defaulting to ``0.5`` when missing or malformed.
         - When ``q_data`` is a dict with options but no default, the
           highest-confidence option is marked default.
+        - Unsupported option list elements (non-dict / non-string) are skipped.
+        - A present non-string ``id`` raises ``ValueError`` (missing ``id`` still
+          falls back to ``q{index}``).
         - The coercions above cover every known malformed-input shape from an
           LLM response, but this function has no top-level try/except of its
           own: it does not guarantee never raising in the face of an
@@ -374,7 +420,12 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
         )
         options = []
         for i, opt in enumerate(raw_options):
-            options.append(parse_question_option(opt, i))
+            try:
+                options.append(parse_question_option(opt, i))
+            except ValueError as exc:
+                logger.warning(
+                    "Skipping malformed question option at index %d: %s", i, exc
+                )
 
         if options and not any(opt.is_default for opt in options):
             default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
@@ -405,7 +456,7 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
         asked_via = [v for v in raw_asked_via if isinstance(v, str)]
 
         return OpenQuestion(
-            id=_str_or_default(q_data.get("id"), f"q{index}"),
+            id=_require_string_or_missing(q_data.get("id"), f"q{index}"),
             question_text=_str_or_default(q_data.get("question_text")),
             context=_str_or_default(q_data.get("context")),
             recommendation=_str_or_default(q_data.get("recommendation")),
@@ -465,27 +516,33 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
     """Parse a single question option from LLM output.
 
     Preconditions: ``index`` is a non-negative int; ``opt_data`` is the decoded item.
-    Postconditions: returns a valid :class:`QuestionOption`; a non-dict becomes a
-        label-only option defaulting only at ``index == 0``; a non-numeric, ``None``,
-        out-of-range, or overflowing ``confidence`` value defaults to 0.5 (or is
-        clamped to ``[0.0, 1.0]``) instead of raising.
+    Postconditions: returns a valid :class:`QuestionOption` for a dict or a non-empty
+        string label; a non-numeric, ``None``, out-of-range, or overflowing
+        ``confidence`` value defaults to 0.5 (or is clamped to ``[0.0, 1.0]``)
+        instead of raising. Raises ``ValueError`` for unsupported non-dict,
+        non-string entries (``null``, numbers, …) so callers can drop them
+        rather than materializing blank default options.
     """
     if isinstance(opt_data, dict):
         return QuestionOption(
-            id=_str_or_default(opt_data.get("id"), f"opt{index}"),
+            id=_require_string_or_missing(opt_data.get("id"), f"opt{index}"),
             label=_str_or_default(opt_data.get("label")),
             is_default=_safe_bool(opt_data.get("is_default", False), default=False),
             rationale=_str_or_default(opt_data.get("rationale")),
             confidence=_safe_confidence(opt_data.get("confidence", 0.5)),
         )
 
-    label = opt_data if isinstance(opt_data, str) else ""
-    return QuestionOption(
-        id=f"opt{index}",
-        label=label,
-        is_default=index == 0,
-        rationale="",
-        confidence=0.5,
+    if isinstance(opt_data, str):
+        return QuestionOption(
+            id=f"opt{index}",
+            label=opt_data,
+            is_default=index == 0,
+            rationale="",
+            confidence=0.5,
+        )
+
+    raise ValueError(
+        f"unsupported option type {type(opt_data).__name__!r} at index {index}"
     )
 
 
@@ -843,13 +900,14 @@ def add_recommendations(
                 isinstance(r, dict)
                 and isinstance(r.get("id"), str)
                 and isinstance(r.get("recommendation"), str)
+                and r.get("recommendation") != ""
             )
         }
         result = []
         for q in open_questions:
             rec = rec_by_id.get(q.id)
             result.append(
-                q.model_copy(update={"recommendation": rec}) if rec is not None else q
+                q.model_copy(update={"recommendation": rec}) if rec else q
             )
         return result
     except Exception as e:
