@@ -30,8 +30,6 @@ import re
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
-from software_engineering_team.shared.deduplication import dedupe_strings
-
 from .false_positive_filter import CodebaseIndex
 from .function_boundaries import (
     enclosing_construct,
@@ -116,10 +114,11 @@ class _ConstructResolver:
               class-based TypeScript), and consolidating on it would merge
               independent findings. Prefer no consolidation over false merges.
             - Content carrying the PR-review path's ``"N: "``-prefixed hunk
-              annotations is normalized (prefixes stripped, ``line`` remapped
-              to its physical index) before resolution, exactly as
-              ``find_function_at_line`` does, so a pre-numbered excerpt
-              parses correctly instead of failing.
+              annotations is normalized (prefixes stripped, inter-hunk ``...``
+              markers dropped, ``line`` remapped to its physical index) before
+              resolution, exactly as ``find_function_at_line`` does, so a
+              multi-hunk annotated excerpt parses instead of failing with an
+              IndentationError on the gap marker.
         """
         if not file_path or not line or line < 1:
             return None
@@ -165,6 +164,24 @@ def _severity_rank(severity: str) -> int:
     return _SEVERITY_RANK.get((severity or "").strip().lower(), len(_SEVERITY_RANK))
 
 
+def _dedupe_exact(items: List[str]) -> List[str]:
+    """Drop exact duplicate strings while preserving first-seen order.
+
+    Unlike the fuzzy ``dedupe_strings`` helper (0.85 SequenceMatcher threshold),
+    this keeps descriptions that differ only in a cited ``path:line`` — those
+    caller-specific details are the blast-radius evidence the consolidated
+    finding must surface.
+    """
+    seen: set[str] = set()
+    unique: List[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
 def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
     """Merge two or more side-effect findings into one consolidated issue.
 
@@ -185,12 +202,14 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
         - ``severity`` is the highest-ranked severity in the group
           (``critical`` > ``high`` > ``medium`` > ``low`` > ``info``).
         - ``category`` is always ``"side-effects"``.
-        - ``description`` is the group's non-blank values deduped via
-          ``dedupe_strings``. A single surviving value is used verbatim;
+        - ``description`` is the group's non-blank values with exact duplicates
+          removed (order-preserving). A single surviving value is used verbatim;
           multiple values are prefixed with "Consolidated N related
-          side-effect findings:" and joined as a bulleted list.
-        - ``suggestion`` is the group's non-blank values deduped via
-          ``dedupe_strings``. A single surviving value is used verbatim;
+          side-effect findings:" and joined as a bulleted list. Exact (not
+          fuzzy) dedupe is intentional: near-identical wording that cites
+          different callers must all survive.
+        - ``suggestion`` is the group's non-blank values with exact duplicates
+          removed. A single surviving value is used verbatim;
           multiple values are joined as a plain bulleted list (no preamble).
         - ``pre_existing`` is True only when every issue in the group is.
         - Every other ``CodeReviewIssue`` field (including ``title``) is
@@ -223,7 +242,7 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
 
     best = min(group, key=lambda i: _severity_rank(i.severity))
 
-    descriptions = dedupe_strings([i.description for i in group if i.description])
+    descriptions = _dedupe_exact([i.description for i in group if i.description])
     if len(descriptions) <= 1:
         description = descriptions[0] if descriptions else ""
     else:
@@ -232,7 +251,7 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
             + "\n".join(f"- {d}" for d in descriptions)
         )
 
-    suggestions = dedupe_strings([i.suggestion for i in group if i.suggestion])
+    suggestions = _dedupe_exact([i.suggestion for i in group if i.suggestion])
     if len(suggestions) <= 1:
         suggestion = suggestions[0] if suggestions else ""
     else:

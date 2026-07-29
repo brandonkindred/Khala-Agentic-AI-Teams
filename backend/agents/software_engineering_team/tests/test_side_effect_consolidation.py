@@ -388,6 +388,47 @@ def test_construct_resolution_normalizes_pre_numbered_hunks() -> None:
     assert len(result) == 1
 
 
+def test_multi_hunk_separator_does_not_disable_construct_grouping() -> None:
+    """Inter-hunk ``...`` markers from render_annotated_hunks must not break AST grouping."""
+    content = "\n".join(
+        [
+            "10: def foo():",
+            "11:     x = 1",
+            "...",
+            "50:     return x",
+        ]
+    )
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(line=11, description="foo mutates at the start"),
+        _issue(line=50, description="foo return shape changed"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert "foo mutates at the start" in result[0].description
+    assert "foo return shape changed" in result[0].description
+
+
+def test_merge_keeps_distinct_caller_citations() -> None:
+    """Near-identical descriptions that cite different callers all survive consolidation."""
+    content = "def foo():\n    return 1\n"
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(
+            line=2,
+            description="caller at app/a.py:10 assumes the old return shape and will break",
+        ),
+        _issue(
+            line=2,
+            description="caller at app/b.py:20 assumes the old return shape and will break",
+        ),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert "app/a.py:10" in result[0].description
+    assert "app/b.py:20" in result[0].description
+
+
 def test_majority_file_wins_for_multi_file_group() -> None:
     """When a merged group spans files, the published finding's path is the majority-file path."""
     foo_content = "def foo():\n    return 1\n"

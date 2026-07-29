@@ -73,8 +73,11 @@ def strip_numbered_prefixes(
         - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
           where:
           - ``stripped_content`` is the content with all ``N: `` prefixes
-            removed (non-numbered lines, e.g. ``...`` hunk separators, are
-            kept as-is).
+            removed. Bare ``...`` hunk-gap markers inserted by
+            ``render_annotated_hunks`` between non-contiguous hunks are
+            dropped so the joined remnant stays AST-parseable (feeding
+            those markers through leaves mid-function continuations as
+            ``IndentationError`` and disables construct lookup).
           - ``physical_index`` is the 1-based line index in
             ``stripped_content`` whose original prefix equals ``line_number``.
             When no line matches exactly (the target line was a removed ``-``
@@ -82,7 +85,7 @@ def strip_numbered_prefixes(
             ``line_number`` is used; falls back to 1 when nothing precedes.
           - ``line_mapper(physical)`` maps a physical line index back to its
             original file line number (or to ``physical`` if the line had no
-            numbered prefix, e.g. a separator).
+            numbered prefix).
         - Raises ``TypeError`` / ``ValueError`` when preconditions are violated;
           otherwise never raises.
     """
@@ -103,19 +106,26 @@ def strip_numbered_prefixes(
     physical_index = 1
     exact_match = False
     last_before: Optional[int] = None
+    stripped_i = 0
 
-    for i, line in enumerate(lines, start=1):
+    for line in lines:
         m = _LINE_NUMBER_PREFIX_RE.match(line)
         if m:
             orig = int(m.group(1))
-            phys_to_orig[i] = orig
+            stripped_i += 1
+            phys_to_orig[stripped_i] = orig
             stripped.append(line[m.end() :])
             if orig == line_number and not exact_match:
-                physical_index = i
+                physical_index = stripped_i
                 exact_match = True
             elif orig < line_number:
-                last_before = i
+                last_before = stripped_i
         else:
+            # Drop the inter-hunk gap marker; keep any other non-numbered line
+            # (should be rare in this rendering path).
+            if line.strip() == "...":
+                continue
+            stripped_i += 1
             stripped.append(line)
 
     if not exact_match and last_before is not None:

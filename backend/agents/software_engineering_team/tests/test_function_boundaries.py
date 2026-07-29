@@ -204,6 +204,27 @@ def test_strip_numbered_prefixes_detects_and_strips() -> None:
     assert mapper(3) == 4242
 
 
+def test_strip_numbered_prefixes_drops_inter_hunk_separators() -> None:
+    """Bare ``...`` gap markers are dropped so joined hunks remain AST-parseable."""
+    content = "\n".join(
+        [
+            "10: def foo():",
+            "11:     x = 1",
+            "...",
+            "50:     return x",
+        ]
+    )
+    stripped, physical, mapper = strip_numbered_prefixes(content, line_number=50)
+    assert "..." not in stripped.splitlines()
+    assert stripped == "def foo():\n    x = 1\n    return x"
+    assert physical == 3
+    assert mapper is not None
+    assert mapper(3) == 50
+    construct = enclosing_construct(stripped, physical)
+    assert construct is not None
+    assert construct.name == "foo"
+
+
 def test_strip_numbered_prefixes_empty_content() -> None:
     """Empty content strips to empty with the original line number and no mapper."""
     stripped, physical, mapper = strip_numbered_prefixes("", line_number=1)
