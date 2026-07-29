@@ -1900,10 +1900,14 @@ async def test_workflow_tail_pass_partial_failure_semantics(
         description="tail-pass side-effect (partial failure)",
     )
 
+    architecture_calls = 0
+
     def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
         return [filter_issue]
 
     def _architecture(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+        nonlocal architecture_calls
+        architecture_calls += 1
         raise RuntimeError("forced architecture pass failure")
 
     def _side_effect(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
@@ -1935,6 +1939,11 @@ async def test_workflow_tail_pass_partial_failure_semantics(
                     task_queue=TASK_QUEUE,
                 )
 
+    # Distinguish fail-safe handling of an *invoked* failing pass from a
+    # regression that silently skips scheduling the architecture activity.
+    assert architecture_calls == 1, (
+        f"expected architecture pass to be invoked once; got {architecture_calls}"
+    )
     wf_tail_descriptions = {i["description"] for i in workflow_out["issues"]}
     assert filter_issue.description in wf_tail_descriptions
     assert side_effect_issue.description in wf_tail_descriptions
