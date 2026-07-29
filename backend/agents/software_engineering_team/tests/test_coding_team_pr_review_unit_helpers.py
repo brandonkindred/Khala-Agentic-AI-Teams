@@ -102,6 +102,25 @@ class TestRunningReviewForPrUnit:
         )
         assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
 
+    def test_overflow_pr_number_in_store_is_skipped(self, monkeypatch) -> None:
+        """JSON-decoded ``1e309`` becomes ``float('inf')``; ``int()`` raises
+        ``OverflowError``, which must skip the row rather than abort admission."""
+        monkeypatch.setattr(
+            main, "list_jobs", lambda active_only=True: [_job(pr_number=float("inf"))]
+        )
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
+
+    def test_overflow_pr_number_does_not_abort_scan(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            main,
+            "list_jobs",
+            lambda active_only=True: [
+                _job(pr_number=float("inf"), job_id="bad"),
+                _job(),
+            ],
+        )
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) == "job-1"
+
     def test_owner_repo_match_is_case_insensitive(self, monkeypatch) -> None:
         monkeypatch.setattr(
             main, "list_jobs", lambda active_only=True: [_job(owner="Acme", repo="Widgets")]

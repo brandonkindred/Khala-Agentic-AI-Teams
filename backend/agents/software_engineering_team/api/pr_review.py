@@ -120,7 +120,7 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
         ctx = (j or {}).get("github_context") or {}
         try:
             stored_pr = int(ctx.get("pr_number"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if stored_pr != pr_number:
             continue
@@ -835,7 +835,6 @@ def _run_reviewer(
             try:
                 output = provider.run_pr_code_review(**common, **mode_kwargs)
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
-                logger.exception("PR review agent failed: %s", e)
                 # A reviewer-side failure (LLM outage, unrecoverable exhaustion,
                 # etc.) is not a code defect: record the detail in the job
                 # store but never post the raw exception on the PR — degrade
@@ -844,8 +843,14 @@ def _run_reviewer(
                 # timing out with no attached detail); recording just "code
                 # review failed: " is useless for later triage, so fall back
                 # to naming the exception type when it carries no message of
-                # its own.
-                detail = str(e) if e.args else f"{type(e).__name__} (no error message)"
+                # its own. Scrub once for log + outage so a token that leaked
+                # into the exception text never reaches either sink.
+                detail = (
+                    scrub_token_from_text(str(e))
+                    if e.args
+                    else f"{type(e).__name__} (no error message)"
+                )
+                logger.exception("PR review agent failed: %s", detail)
                 _main._record_review_outage(
                     client, owner, repo, pr_number, job_id, f"code review failed: {detail}"
                 )
@@ -1386,9 +1391,10 @@ def _post_review_comments(
     Postconditions:
         - The review body is built via ``build_review_body`` from
           ``output.summary``/``output.spec_compliance_notes``, forced to
-          ``""`` when ``partition.preexisting_issues`` is non-empty (the
-          reviewer's narrative can otherwise leak a pre-existing finding's
-          theme/location even though its own comment is suppressed). The
+          ``""`` when ``partition.proposals`` is non-empty (the reviewer's
+          narrative can otherwise leak a pre-existing finding's theme/location
+          even though its own comment is suppressed; ``proposals`` is the
+          signal a human will still see something withheld from this PR). The
           returned ``event`` is ``choose_event(partition.pr_issues,
           author=pr.author, reviewer=reviewer_login)``.
         - ``partition.line_comments`` are submitted via :func:`_submit_review`,
@@ -1748,7 +1754,8 @@ def _safe_comment(
 ) -> bool:
     """Best-effort issue comment; never blocks the job on a failed comment.
 
-    Body is scrubbed to redact tokens that might have leaked from git stderr.
+    Body is scrubbed to redact tokens that might have leaked from any source
+    (e.g., git stderr, engine output).
 
     Postconditions:
         - Returns True when the comment was posted, False on any failure (GitHub
