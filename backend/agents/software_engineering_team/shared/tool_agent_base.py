@@ -40,9 +40,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from llm_service.interface import LLMError
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 from software_engineering_team.shared.v2_models import (
@@ -50,6 +52,48 @@ from software_engineering_team.shared.v2_models import (
     ToolAgentOutput,
     ToolAgentPhaseOutput,
 )
+
+
+def _strands_llm_call_errors() -> Tuple[type, ...]:
+    """Collect Strands provider/runtime exception types available in this install.
+
+    Preconditions: none (import of ``strands.types.exceptions`` may fail).
+    Postconditions: returns a (possibly empty) tuple of exception classes that
+    exist on the installed ``strands-agents`` package. Newer symbols such as
+    ``ConcurrencyException`` are included only when present, so this module
+    still imports under the declared floor (``strands-agents>=1.35``).
+    """
+    try:
+        from strands.types import exceptions as strands_exc
+    except ImportError:  # pragma: no cover - strands is a required dependency
+        return ()
+    names = (
+        "ModelThrottledException",
+        "ContextWindowOverflowException",
+        "MaxTokensReachedException",
+        "ConcurrencyException",
+        "EventLoopException",
+        "ProviderTokenCountError",
+    )
+    found: List[type] = []
+    for name in names:
+        cls = getattr(strands_exc, name, None)
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            found.append(cls)
+    return tuple(found)
+
+
+# Strands provider/runtime failures that are not subclasses of ``LLMError`` but
+# are still routine model-call failures. ``_run_agent`` normalizes these to
+# ``LLMError`` so per-issue handlers (e.g. ``problem_solve``) can isolate them
+# without catching programming bugs. Built defensively so older SDK installs
+# missing newer symbols still load this module.
+_STRANDS_LLM_CALL_ERRORS = _strands_llm_call_errors()
+
+# Only these named placeholders are substituted on the one-shot review path.
+# Values are never re-scanned, so task text/code may safely contain the
+# placeholder tokens or arbitrary braces.
+_REVIEW_PLACEHOLDER_RE = re.compile(r"\{(task_description|code)\}")
 
 # Default per-issue context budget for the single-issue fix prompt (subclasses
 # may override via class attr). Deliberately generous (on the same scale as
@@ -59,23 +103,45 @@ from software_engineering_team.shared.v2_models import (
 # file, not to restrict normal usage.
 DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
 
+# Placeholders filled explicitly in ``SingleIssueProblemSolveMixin.problem_solve``.
+# ``_problem_solving_kwargs`` must not return these keys (they are dropped with a
+# warning if it does), so ``str.format`` cannot raise
+# ``TypeError: got multiple values for keyword argument``.
+_PROBLEM_SOLVE_RESERVED_KEYS = frozenset(
+    {"source", "severity", "description", "file_path", "recommendation", "current_code"}
+)
+
+
+def fill_review_prompt(template: str, *, task_description: str, code: str) -> str:
+    """Substitute ``{task_description}`` and ``{code}`` without rescanning values.
+
+    Preconditions:
+        ``template``, ``task_description``, and ``code`` are strings.
+    Postconditions:
+        Each known placeholder is replaced once with the corresponding value.
+        Inserted values are never re-scanned for placeholders or braces; other
+        ``{...}`` sequences in ``template`` are left unchanged.
+    """
+    values = {"task_description": task_description, "code": code}
+    return _REVIEW_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template)
+
 
 def relevant_code_for_issue(
     issue: ReviewIssue,
-    current_files: Dict[str, str],
+    current_files: Optional[Dict[str, str]],
     max_chars: int = DEFAULT_MAX_RELEVANT_CODE_CHARS,
 ) -> str:
     """Return code context for a single issue: prefer issue's file, else all files.
 
-    Preconditions: ``current_files`` maps path -> content.
+    Preconditions: ``current_files`` is ``None`` or maps path -> content.
     Postconditions: returns a non-empty string; when ``max_chars`` is positive
         and content is available, the returned string is bounded by
-        ``max_chars``; falls back to ``"(no code)"`` when ``max_chars`` is
-        non-positive or no content can be included. Truncated context carries
-        an explicit marker so the fix agent does not mistake a prefix for the
-        complete file or submission.
+        ``max_chars``; falls back to ``"(no code)"`` when ``current_files`` is
+        empty/``None``, ``max_chars`` is non-positive, or no content can be
+        included. Truncated context carries an explicit marker so the fix agent
+        does not mistake a prefix for the complete file or submission.
     """
-    if max_chars <= 0:
+    if max_chars <= 0 or not current_files:
         return "(no code)"
     if issue.file_path and issue.file_path in current_files:
         candidates = [(issue.file_path, current_files[issue.file_path])]
@@ -116,16 +182,19 @@ def lenient_json_object(
     warning and return ``{}``.
 
     Preconditions: ``raw`` is a str; ``logger``/``context``/``on_fail_msg`` set.
-    Postconditions: returns a dict (``{}`` when no JSON object can be parsed).
+    Postconditions: returns a dict (``{}`` when no JSON object can be parsed,
+        or when the parsed JSON value is not a mapping).
     """
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         start = raw.find("{")
         end = raw.rfind("}") + 1
         if start >= 0 and end > start:
             try:
-                return json.loads(raw[start:end])
+                parsed = json.loads(raw[start:end])
+                return parsed if isinstance(parsed, dict) else {}
             except json.JSONDecodeError:
                 logger.warning(
                     "%s: model output did not parse as JSON: %r; %s",
@@ -165,7 +234,9 @@ class SingleIssueProblemSolveMixin:
         ``self._parse_single_issue``, ``self.default_severity``,
         ``self.default_recommendation``, ``self.issue_source``, ``self.name``,
         ``self.empty_label`` — i.e. exactly what :class:`BaseReviewToolAgent`
-        supplies.
+        supplies.  Subclasses must override :attr:`problem_solve_sources` (a
+        tuple of source strings) to select which review issues this agent will
+        fix; the default empty tuple means no issues are selected.
     """
 
     problem_solve_sources: Tuple[str, ...] = ()
@@ -173,14 +244,32 @@ class SingleIssueProblemSolveMixin:
     def problem_solve(self, inp) -> ToolAgentPhaseOutput:
         """Fix issues one at a time whose source is in :attr:`problem_solve_sources`.
 
-        Preconditions: ``inp`` exposes ``review_issues`` (each with ``source``)
-        and ``current_files``; the attributes listed in this mixin's
-        class-level Preconditions are supplied by the combining class.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput`. When there is
-        no LLM or no matching issues, ``files`` is empty (the default) and
-        ``current_files`` is left untouched; otherwise ``files`` is the merged
-        file set after applying each successful single-issue fix. A single
-        issue's fix failure is logged and does not abort the remaining issues.
+        Preconditions:
+            - ``inp`` exposes ``review_issues`` (each with ``source``,
+              ``severity``, ``description``, ``file_path``, ``recommendation``)
+              and ``current_files`` (a mapping or ``None``; ``None`` is treated
+              as an empty file map).
+            - The attributes listed in this mixin's class-level Preconditions
+              are supplied by the combining class.
+            - ``_problem_solving_kwargs(inp)`` must not return keys in
+              ``_PROBLEM_SOLVE_RESERVED_KEYS`` (overlapping keys are dropped
+              with a warning rather than raising). ``None`` is treated as ``{}``.
+
+        Postconditions:
+            - Returns a :class:`ToolAgentPhaseOutput`. When there is no LLM or
+              no matching issues, ``files`` is empty (the default) and
+              ``current_files`` is left untouched; otherwise ``files`` is the
+              merged file set after applying each successful single-issue fix.
+            - An ``LLMError`` / ``TimeoutError`` from the LLM call (including
+              routine Strands provider failures normalized to ``LLMError`` by
+              :meth:`BaseReviewToolAgent._run_agent`), or a ``ValueError`` /
+              ``json.JSONDecodeError`` from ``_parse_single_issue``, is logged
+              and skips that issue without aborting the loop. Non-mapping parse
+              results are likewise skipped.
+            - Any other exception (programming errors) propagates to the caller.
+
+        Invariants:
+            - ``inp`` is never modified; changes apply to a local ``merged`` copy.
         """
         if not self._model:
             return ToolAgentPhaseOutput(summary=f"{self.name} problem_solve skipped (no LLM).")
@@ -189,35 +278,66 @@ class SingleIssueProblemSolveMixin:
         ]
         if not issues:
             return ToolAgentPhaseOutput(summary=f"No {self.empty_label} to fix.")
-        extra = self._problem_solving_kwargs(inp)
-        merged = dict(inp.current_files)
+        extra = dict(self._problem_solving_kwargs(inp) or {})
+        overlapping = _PROBLEM_SOLVE_RESERVED_KEYS.intersection(extra)
+        if overlapping:
+            self._logger.warning(
+                "%s _problem_solving_kwargs reserved keys dropped: %s",
+                self.name,
+                overlapping,
+            )
+            for key in overlapping:
+                del extra[key]
+        merged = dict(inp.current_files or {})
         fixed_count = 0
         for issue in issues:
             relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
+            # Keyword ``str.format`` does not re-parse braces inside values, so
+            # issue fields and code are passed through unescaped. Escaping here
+            # would corrupt the prompt the model edits.
+            prompt = self.problem_solving_prompt.format(
+                source=issue.source or self.issue_source,
+                severity=issue.severity or self.default_severity,
+                description=issue.description or "",
+                file_path=issue.file_path or "N/A",
+                recommendation=issue.recommendation or self.default_recommendation,
+                current_code=relevant_code,
+                **extra,
+            )
             try:
-                prompt = self.problem_solving_prompt.format(
-                    source=issue.source or self.issue_source,
-                    severity=issue.severity or self.default_severity,
-                    description=issue.description or "",
-                    file_path=issue.file_path or "N/A",
-                    recommendation=issue.recommendation or self.default_recommendation,
-                    current_code=relevant_code.replace("{", "{{").replace("}", "}}"),
-                    **extra,
-                )
                 raw = self._run_agent(self._model, prompt)
-                parsed = self._parse_single_issue(raw)
-                fixed_files = parsed.get("files") or {}
-                if fixed_files:
-                    merged.update(fixed_files)
-                    fixed_count += 1
-            except Exception as e:
+            except (LLMError, TimeoutError) as e:
                 self._logger.warning(
                     "%s fix for issue %s failed: %s",
                     self.name,
                     (issue.description or "")[:50],
                     e,
+                    exc_info=True,
                 )
                 continue
+            try:
+                parsed = self._parse_single_issue(raw)
+            except (ValueError, json.JSONDecodeError) as e:
+                self._logger.warning(
+                    "%s parse for issue %s failed: %s",
+                    self.name,
+                    (issue.description or "")[:50],
+                    e,
+                    exc_info=True,
+                )
+                continue
+            if not isinstance(parsed, Mapping):
+                self._logger.warning(
+                    "%s parse for issue %s returned non-mapping %s; skipping",
+                    self.name,
+                    (issue.description or "")[:50],
+                    type(parsed).__name__,
+                )
+                continue
+            fixed_files = parsed.get("files") or {}
+            if fixed_files:
+                merged.update(fixed_files)
+                fixed_count += 1
         return ToolAgentPhaseOutput(
             files=merged,
             summary=f"{self.name}: fixed {fixed_count} of {len(issues)} issue(s) (one at a time).",
@@ -325,9 +445,15 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             ``use_run_strands_agent`` is True on this class (Review recipe).
 
         Postconditions:
-            Returns the stripped string from ``_invoke_llm``.
+            Returns the stripped string from ``_invoke_llm``. Routine Strands
+            provider/runtime failures listed in ``_STRANDS_LLM_CALL_ERRORS``
+            are re-raised as ``LLMError`` so per-issue callers can isolate them;
+            all other exceptions propagate unchanged.
         """
-        return self._invoke_llm(model, prompt)
+        try:
+            return self._invoke_llm(model, prompt)
+        except _STRANDS_LLM_CALL_ERRORS as e:
+            raise LLMError(str(e)) from e
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
         """Render ``current_files`` as ``--- path ---\\ncontent`` blocks, joined for the prompt."""
@@ -344,6 +470,9 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         Preconditions: when set, ``conventions_by_language`` maps lowercased
         language names (plus optional ``"_default"``) to convention strings.
         Postconditions: returns ``{}`` or ``{"language_conventions": <str>}``.
+            Never returns keys in ``_PROBLEM_SOLVE_RESERVED_KEYS`` (``source``,
+            ``severity``, ``description``, ``file_path``, ``recommendation``,
+            ``current_code``); callers also filter overlaps defensively.
         """
         conv = self.conventions_by_language or {}
         if not conv:
@@ -376,7 +505,9 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         Postconditions: returns a :class:`ToolAgentPhaseOutput`; when ``repo_path``
         is unset/missing the issue list is empty and the summary says "skipped".
         :attr:`build_runner` is called uncaught — any exception it raises is a
-        defect and propagates to the caller.
+        defect and propagates to the caller.  ``build_runner`` implementations
+        are responsible for setting each returned ``ReviewIssue.source`` to the
+        appropriate value (typically the owning agent's :attr:`issue_source`).
         """
         from pathlib import Path
 
@@ -451,8 +582,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             :attr:`review_prompt` must be a non-``None`` template string — the
             base class declares it as ``Optional[str] = None`` for subclasses
             that take one of those other two paths, so a subclass using the
-            default one-shot LLM path must set it (a subclass that misconfigures
-            this raises ``ValueError``).
+            default one-shot LLM path must set it.
         Postconditions: takes the first configured path -- :attr:`build_runner`
             (a static analysis/build tool), :attr:`review_via_engine` (the
             shared code-review engine), or the LLM one-shot ``review_prompt`` --
@@ -460,7 +590,10 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             any) all carry :attr:`issue_source`. Only the default one-shot LLM
             path (neither :attr:`build_runner` nor :attr:`review_via_engine`
             set) degrades a missing model, empty code, or LLM failure to a
-            skipped/failed summary with no issues rather than raising. When
+            skipped/failed summary with no issues rather than raising.
+            ``ValueError`` is raised only when that default path is reached with
+            a usable model and non-empty code but ``review_prompt`` is still
+            ``None`` (no ``build_runner`` / ``review_via_engine`` either). When
             :attr:`build_runner` or :attr:`review_via_engine` is set, an
             unexpected exception from the runner/engine is a defect and
             propagates uncaught; see :meth:`_build_review` and
@@ -471,8 +604,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         if self.review_via_engine:
             return self._engine_review(inp)
         review_label = f"{self.name} review"
-        if self._fallback_no_model(self._model) is not None:
+        model = getattr(self, self.review_model_attr, None)
+        if self._fallback_no_model(model) is not None:
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no LLM).")
+        if not getattr(inp, "current_files", None):
+            return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no code).")
         code_text = self._build_code_text(inp.current_files)
         if not code_text.strip():
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no code).")
@@ -482,11 +618,14 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                 "review_prompt, review_via_engine=True, or build_runner when using the "
                 "default review() path."
             )
-        prompt = self.review_prompt.format(
+        # Single-pass substitution of the two known placeholders. Values are
+        # never re-scanned, so task text/code may contain braces or the
+        # placeholder tokens themselves without corruption or duplication.
+        prompt = fill_review_prompt(
+            self.review_prompt,
             task_description=inp.task_description or "N/A",
             code=code_text,
         )
-        model = getattr(self, self.review_model_attr)
         status, result = self._call_with_single_fallback(
             lambda: self._invoke_llm(model, prompt),
             log_label=review_label,
