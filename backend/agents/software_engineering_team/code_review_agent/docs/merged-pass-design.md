@@ -78,6 +78,12 @@ When both env flags are off, or profile/files disqualify the run: return `([], [
 - System prompt: `MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`.
 - User prompt: changed files under the map-chunk char budget; architecture doc/context when present, else the explicit “no formal document” note.
 - Parse into `MergedArchitectureSideEffectResponse` (or equivalent JSON + schema validation).
+- **Disabled-half filtering:** after parsing, return an empty list for any half whose
+  env flag is disabled (or, for the side-effect half, when `pre_numbered` forces that
+  half off). The merged prompt still contains both Part 1 and Part 2 instructions, so
+  the model may emit findings for a disabled half; those must be discarded before
+  findings reach dedupe/gate/synthesis so the existing feature-toggle contract is
+  preserved.
 - Coerce/validate each array by reusing the existing per-pass validators (`architecture_consistency_pass` / `side_effect_impact_pass`) — do not fork validation logic.
 - Fail-safe: never raise to the coordinator; on failure log a warning and return `([], [])`.
 

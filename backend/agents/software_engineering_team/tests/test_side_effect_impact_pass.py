@@ -65,7 +65,20 @@ class _FakeReader:
 # --------------------------------------------------------------------------- helpers
 
 
+def _tool_by_name(tools, name: str):
+    """Return the tool whose ``tool_name`` matches ``name``.
+
+    Raises:
+        ValueError: when no tool with that name is present.
+    """
+    for tool in tools:
+        if getattr(tool, "tool_name", None) == name:
+            return tool
+    raise ValueError(f"Tool {name!r} not found")
+
+
 def test_build_prompt_includes_changed_files() -> None:
+    """User prompt inlines submission file paths and bodies."""
     index = CodebaseIndex.from_input(_input())
     prompt = _build_prompt(index, max_inline_chars=100_000)
     assert "app/main.py" in prompt
@@ -99,6 +112,7 @@ def test_build_prompt_mentions_search_repository_tool() -> None:
 
 
 def test_search_repository_returns_empty_with_no_reader() -> None:
+    """Without a repo reader, search returns no matches and is not truncated."""
     index = CodebaseIndex(files={"app/main.py": "code"})
     assert _search_repository(index, "bar") == ([], False)
 
@@ -112,6 +126,7 @@ def test_search_repository_returns_empty_for_blank_query() -> None:
 
 
 def test_search_repository_finds_matches_in_repo_reader_files() -> None:
+    """_search_repository returns line-numbered matches from repo_reader files outside the submission."""
     index = CodebaseIndex(
         files={"app/main.py": "def bar():\n    return 1\n"},
         repo_reader=_FakeReader({"app/caller.py": "from app.main import bar\n\nresult = bar()\n"}),
@@ -278,8 +293,9 @@ def test_build_side_effect_tools_includes_search_repository() -> None:
 
 
 def test_search_repository_tool_reports_no_reader() -> None:
+    """search_repository tool reports that no repository access is available."""
     index = CodebaseIndex(files={"app/main.py": "code"})
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     assert "No repository access" in search_repository("bar")
 
 
@@ -287,16 +303,17 @@ def test_search_repository_tool_reports_no_matches() -> None:
     index = CodebaseIndex(
         files={"app/main.py": "code"}, repo_reader=_FakeReader({"app/caller.py": "unrelated"})
     )
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     assert "No matches" in search_repository("bar(")
 
 
 def test_search_repository_tool_finds_matches() -> None:
+    """search_repository tool returns path:line matches from the rest of the repository."""
     index = CodebaseIndex(
         files={"app/main.py": "def bar(): pass\n"},
         repo_reader=_FakeReader({"app/caller.py": "result = bar()\n"}),
     )
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     assert "app/caller.py:1: result = bar()" in search_repository("bar(")
 
 
@@ -305,7 +322,7 @@ def test_search_repository_tool_flags_truncated_scan_with_no_matches() -> None:
     the model needs to know the repository was larger than what got scanned."""
     files = {f"f{i}.py": "no match" for i in range(45)}
     index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     result = search_repository("needle")
     assert "No matches for" in result
     assert "truncated" in result.lower()
@@ -315,7 +332,7 @@ def test_search_repository_tool_flags_truncated_scan_with_matches() -> None:
     """A truncated scan that DID find matches still warns there may be more."""
     files = {f"f{i}.py": "needle\n" for i in range(45)}
     index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     result = search_repository("needle")
     assert "f0.py:1: needle" in result
     assert "truncated" in result.lower()
@@ -325,6 +342,7 @@ def test_search_repository_tool_flags_truncated_scan_with_matches() -> None:
 
 
 def test_validate_finding_line_keeps_in_range_line() -> None:
+    """In-range line citations survive validation unchanged."""
     index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
     assert _validate_finding_line(index, "a.py", 2) == 2
 
@@ -683,6 +701,7 @@ def test_finds_caller_impact_across_the_repository() -> None:
 
 
 def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
+    """Merged pass runs once per submission; standalone arch/side-effect passes do not."""
     calls = {"merged_pass": 0, "arch_pass": 0, "side_effect_pass": 0, "chunk_review": 0}
 
     class _CountingClient(DummyLLMClient):
@@ -714,6 +733,12 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
 
     class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, (
+                "standalone side-effect pass should not run when merged pass is enabled"
+            )
+            assert _ARCH_PASS_ANCHOR not in prompt, (
+                "standalone architecture pass should not run when merged pass is enabled"
+            )
             if _MERGED_PASS_ANCHOR in prompt:
                 return {
                     "architecture_findings": [],

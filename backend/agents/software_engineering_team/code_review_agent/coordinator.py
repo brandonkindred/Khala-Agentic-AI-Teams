@@ -543,7 +543,10 @@ def run_coordinator(
           so, falling back to the sequential order (false-positive filter,
           then the merged architecture/side-effect pass) otherwise; either way the
           merged ``issues`` order and content are identical (see
-          ``_run_tail_passes``).
+          ``_run_tail_passes``). The merged pass's response is partitioned into
+          architecture-consistency and side-effect-impact finding lists before
+          deduplication and approval, preserving the downstream behavior of the
+          former separate passes.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
@@ -711,26 +714,26 @@ def run_coordinator(
         f"verifying {len(genuine_issues)} findings against the full codebase",
         _PROGRESS_VERIFYING,
     )
-    # Built once and shared with the architecture-consistency pass below: both read the
-    # same submission/repo_reader, so a single index avoids parsing the submission twice.
+    # Built once and shared with the false-positive filter and the merged
+    # architecture/side-effect pass below: both read the same submission/repo_reader,
+    # so a single index avoids parsing the submission twice.
     # CodebaseIndex is read-only after construction (see its own docstring's Invariants),
     # so this one instance is safe to hand to the tail passes when they run
     # concurrently in worker threads (see ``_run_tail_passes``).
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
-    # False-positive verification (skipped when the calling gate opted out via
-    # ``skip_false_positive_filter`` -- e.g. a gate whose findings must never be
-    # silently dropped; skipping only removes the drop-false-positives step, so
-    # it can only ever keep more findings), and the merged architecture/side-effect
-    # pass (architecture contradictions + cross-codebase redundancy, plus
-    # caller-impact / documentation mismatches) are two separate, additive,
-    # once-per-submission checks
-    # the per-chunk map phase structurally cannot see. None reads another's
-    # output, so they run concurrently when safe (see ``_run_tail_passes``) and
-    # fold straight into the same dedupe/severity-gate/merge machinery below.
-    # (The latter two are restricted internally to the default CODE_REVIEW
-    # profile -- see their own docstrings for why the other profiles must never
-    # receive these findings.)
+    # False-positive verification remains its own once-per-submission pass
+    # (skipped when the calling gate opted out via ``skip_false_positive_filter``
+    # -- e.g. a gate whose findings must never be silently dropped; skipping
+    # only removes the drop-false-positives step, so it can only ever keep more
+    # findings). Architecture-consistency and side-effect-impact are produced by
+    # a single merged LLM call (architecture contradictions + cross-codebase
+    # redundancy, plus caller-impact / documentation mismatches) and then split
+    # back into the two finding lists for downstream dedupe/gate/synthesis.
+    # Neither reads the other's output, so they run concurrently when safe (see
+    # ``_run_tail_passes``). The merged halves are restricted internally to the
+    # default CODE_REVIEW profile -- see their own docstrings for why the other
+    # profiles must never receive these findings.
     tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,

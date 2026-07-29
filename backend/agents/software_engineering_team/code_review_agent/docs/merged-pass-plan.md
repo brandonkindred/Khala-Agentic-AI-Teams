@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, strands `Agent`, Pydantic models in `code_review_agent.models`, pytest + `DummyLLMClient`, existing `CodebaseIndex` / pass validators.
 
-**Spec:** `backend/agents/software_engineering_team/code_review_agent/docs/MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_DESIGN.md`
+**Spec:** `backend/agents/software_engineering_team/code_review_agent/docs/merged-pass-design.md`
 
 ## Global Constraints
 
@@ -294,7 +294,7 @@ Expected: FAIL (module missing).
 Key behaviors:
 
 - Eligibility: `CODE_REVIEW` profile, readable files, at least one of `CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS` / `CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS` enabled. No architecture-doc requirement. Do not skip solely for `pre_numbered`.
-- Tools: `side_pass._build_side_effect_tools(index)`.
+- Tools: `side_effect_impact_pass.build_side_effect_tools(index)` (or `import side_effect_impact_pass as side_pass` then `side_pass.build_side_effect_tools(index)`).
 - System prompt: `MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`.
 - Parse: `json.loads` then `MergedArchitectureSideEffectResponse.model_validate`.
 - Convert each half via the corresponding pass's `_parse_findings({"findings": [f.model_dump() for f in ...]})` then `_validate_findings(...)`.
@@ -429,7 +429,7 @@ EOF
 
 ```bash
 cd backend
-backend/.venv/bin/python -m pytest \
+.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_code_review_coordinator.py \
   agents/software_engineering_team/tests/test_architecture_consistency_pass.py \
   agents/software_engineering_team/tests/test_side_effect_impact_pass.py \
@@ -447,18 +447,30 @@ Expected: all PASS.
 - [ ] **Step 2: Lint touched Python files**
 
 ```bash
-backend/.venv/bin/ruff check \
+.venv/bin/ruff check \
   agents/software_engineering_team/code_review_agent/merged_architecture_side_effect_pass.py \
   agents/software_engineering_team/code_review_agent/architecture_consistency_pass.py \
+  agents/software_engineering_team/code_review_agent/side_effect_impact_pass.py \
   agents/software_engineering_team/code_review_agent/coordinator.py \
   agents/software_engineering_team/code_review_agent/prompts.py \
-  agents/software_engineering_team/tests/test_merged_architecture_side_effect_pass.py
-backend/.venv/bin/ruff format --check \
+  agents/software_engineering_team/code_review_agent/__init__.py \
+  agents/software_engineering_team/code_review_agent/models.py \
+  agents/software_engineering_team/tests/test_merged_architecture_side_effect_pass.py \
+  agents/software_engineering_team/tests/test_code_review_coordinator.py \
+  agents/software_engineering_team/tests/test_architecture_consistency_pass.py \
+  agents/software_engineering_team/tests/test_side_effect_impact_pass.py
+.venv/bin/ruff format --check \
   agents/software_engineering_team/code_review_agent/merged_architecture_side_effect_pass.py \
   agents/software_engineering_team/code_review_agent/architecture_consistency_pass.py \
+  agents/software_engineering_team/code_review_agent/side_effect_impact_pass.py \
   agents/software_engineering_team/code_review_agent/coordinator.py \
   agents/software_engineering_team/code_review_agent/prompts.py \
-  agents/software_engineering_team/tests/test_merged_architecture_side_effect_pass.py
+  agents/software_engineering_team/code_review_agent/__init__.py \
+  agents/software_engineering_team/code_review_agent/models.py \
+  agents/software_engineering_team/tests/test_merged_architecture_side_effect_pass.py \
+  agents/software_engineering_team/tests/test_code_review_coordinator.py \
+  agents/software_engineering_team/tests/test_architecture_consistency_pass.py \
+  agents/software_engineering_team/tests/test_side_effect_impact_pass.py
 ```
 
 - [ ] **Step 3: Commit any leftover lint/doc fixes only if needed**

@@ -1260,7 +1260,7 @@ def test_partial_terminal_failure_degrades_gracefully_without_blocking(monkeypat
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000  # forces the two files into separate chunks
+    filler_size = max(0, cap - 2_000)  # forces the two files into separate chunks
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1427,7 +1427,7 @@ def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = max(0, cap - 2_000)
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1455,7 +1455,7 @@ def test_truncated_chunk_review_degrades_not_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = max(0, cap - 2_000)
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1482,7 +1482,7 @@ def test_not_reviewed_ranges_populated_and_not_in_issues(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = max(0, cap - 2_000)
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1503,7 +1503,7 @@ def test_block_on_unreviewed_env_restores_fail_closed(monkeypatch) -> None:
     monkeypatch.setenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", "true")
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = max(0, cap - 2_000)
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1529,7 +1529,7 @@ def test_total_failure_still_raises_even_with_graceful_default(monkeypatch) -> N
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = max(0, cap - 2_000)
     # Two separate chunks, BOTH carrying the failure marker → nothing reviewed.
     files = {
         "bad1.py": "FAILME = True\n" + ("x = 1\n" * 20),
@@ -1852,9 +1852,9 @@ def test_parallel_map_failure_cancels_and_raises() -> None:
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     files = {
-        "a.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "b.py": "FAILME = 2\n".ljust(cap - 2_000, "#"),
-        "c.py": "FAILME = 3\n".ljust(cap - 2_000, "#"),
+        "a.py": "FAILME = 1\n".ljust(max(0, cap - 2_000), "#"),
+        "b.py": "FAILME = 2\n".ljust(max(0, cap - 2_000), "#"),
+        "c.py": "FAILME = 3\n".ljust(max(0, cap - 2_000), "#"),
     }
     client = _SelectiveRaiser("FAILME", exc=LLMRateLimitError("429"))
     with pytest.raises(CodeReviewUnavailableError):
@@ -1888,8 +1888,8 @@ def test_parallel_map_failure_does_not_wait_for_inflight_reviews(fail_first: boo
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     contents = {
-        "fast_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "slow.py": "ok = 1\n".ljust(cap - 2_000, "#"),
+        "fast_fail.py": "FAILME = 1\n".ljust(max(0, cap - 2_000), "#"),
+        "slow.py": "ok = 1\n".ljust(max(0, cap - 2_000), "#"),
     }
     order = ["fast_fail.py", "slow.py"] if fail_first else ["slow.py", "fast_fail.py"]
     files = {name: contents[name] for name in order}
@@ -1930,8 +1930,8 @@ def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
     cap = compute_code_review_map_chunk_chars(llm_probe)
     # One ~full chunk per file, in insertion order, so the failing chunk is first.
     files = {
-        "a_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "b_second.py": "SECONDCHUNK = 1\n".ljust(cap - 2_000, "#"),
+        "a_fail.py": "FAILME = 1\n".ljust(max(0, cap - 2_000), "#"),
+        "b_second.py": "SECONDCHUNK = 1\n".ljust(max(0, cap - 2_000), "#"),
     }
     client = _FailFirstRecordLater()
     with pytest.raises(CodeReviewUnavailableError):
@@ -1989,7 +1989,7 @@ def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) 
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(5)}
+    files = {f"f{i}.py": f"x = {i}\n".ljust(max(0, cap - 2_000), "#") for i in range(5)}
     client = _ConcurrencyProbe()
     threading.Thread(target=_release_soon, daemon=True).start()
     try:
@@ -2022,7 +2022,7 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(3)}
+    files = {f"f{i}.py": f"x = {i}\n".ljust(max(0, cap - 2_000), "#") for i in range(3)}
     client = _ConcurrencyProbe()
     run_coordinator(client, CodeReviewInput(files=files, task_description="t", language="python"))
     assert 2 <= state["peak"] <= 3
@@ -2362,8 +2362,8 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
             }
 
     files = {
-        "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
-        "b.py": "b = 2\n".ljust(cap - 2_000, "#"),
+        "a.py": "a = 1\n".ljust(max(0, cap - 2_000), "#"),
+        "b.py": "b = 2\n".ljust(max(0, cap - 2_000), "#"),
         "empty.py": "",  # contributes the non-blocking info finding
     }
     result = run_coordinator(
@@ -2409,8 +2409,8 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
             }
 
     files = {
-        "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
-        "b.py": "b = 2\n".ljust(cap - 2_000, "#"),
+        "a.py": "a = 1\n".ljust(max(0, cap - 2_000), "#"),
+        "b.py": "b = 2\n".ljust(max(0, cap - 2_000), "#"),
     }
     result = run_coordinator(
         _SilentRejectB(),
@@ -2459,8 +2459,8 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     files = {
-        "fast_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "slow.py": "ok = 1\n".ljust(cap - 2_000, "#"),
+        "fast_fail.py": "FAILME = 1\n".ljust(max(0, cap - 2_000), "#"),
+        "slow.py": "ok = 1\n".ljust(max(0, cap - 2_000), "#"),
     }
     client = _OneFailsOneBlocks()
     try:
@@ -2506,8 +2506,8 @@ def test_coordinator_multi_chunk_synthesizes_notes() -> None:
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     files = {
-        "a.py": "a = 1\n".ljust(cap - 1_000, "#"),
-        "b.py": "b = 2\n".ljust(cap - 1_000, "#"),
+        "a.py": "a = 1\n".ljust(max(0, cap - 1_000), "#"),
+        "b.py": "b = 2\n".ljust(max(0, cap - 1_000), "#"),
     }
     # The scripted client answers both chunk reviews and the synthesis pass with
     # the same canned payload, so the synthesized notes are "chunk notes" (one

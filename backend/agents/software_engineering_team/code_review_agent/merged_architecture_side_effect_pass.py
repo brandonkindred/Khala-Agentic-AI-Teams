@@ -179,7 +179,7 @@ def _issues_from_half(
 
     Preconditions:
         - ``parse`` / ``validate`` are the corresponding standalone pass helpers
-          (``_parse_findings`` / ``_validate_findings``).
+          (``parse_findings`` / ``validate_findings``).
 
     Postconditions:
         - Returns ``[]`` when ``raw_list`` is missing or not a list (that half

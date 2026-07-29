@@ -12,6 +12,7 @@ from code_review_agent.models import CodeReviewInput
 from code_review_agent.profiles import ReviewProfile
 
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.models import SystemArchitecture
 
 _MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
 
@@ -19,7 +20,7 @@ _MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
 def _input(
     files: Optional[Dict[str, str]] = None,
     *,
-    architecture=None,
+    architecture: Optional[SystemArchitecture] = None,
     profile: ReviewProfile = ReviewProfile.CODE_REVIEW,
 ) -> CodeReviewInput:
     return CodeReviewInput(

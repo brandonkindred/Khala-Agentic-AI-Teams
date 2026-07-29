@@ -890,14 +890,17 @@ and splits `side_effect_findings` back into this category. In Temporal
 execution mode (standalone activities), enabling this toggle controls the
 side-effect-impact activity independently (one additional LLM call).
 
-This pass makes exactly one additional LLM call (never once per chunk) with
-read access to the rest of the repository (the same `read_file`/`list_files`/
-`search_codebase`/`find_function_at_line` tools the false-positive filter and
-architecture pass use, plus a new `search_repository` tool that searches the
-REST of the repository — beyond the submission — for a substring, capped well
-below the GitHub PR-review path's shared per-review fetch budget since the
-in-process coordinator's tail passes share a single prompt budget across
-`filter_false_positives` and the merged tail pass).
+In Temporal mode this pass makes exactly one additional LLM call (never once
+per chunk). In the in-process coordinator it shares a single merged LLM call
+with the architecture-consistency pass, with `side_effect_findings` split back
+out after the call. Either way it has read access to the rest of the repository
+(the same `read_file`/`list_files`/`search_codebase`/`find_function_at_line`
+tools the false-positive filter and architecture pass use, plus a new
+`search_repository` tool that searches the REST of the repository — beyond the
+submission — for a substring, capped well below the GitHub PR-review path's
+shared per-review fetch budget since the in-process coordinator's tail passes
+share a single prompt budget across `filter_false_positives` and the merged
+tail pass).
 
 It can only ADD findings, in two
 categories: `side-effects` — a genuine side effect with an unintended logical
