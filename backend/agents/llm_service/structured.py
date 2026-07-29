@@ -1,18 +1,18 @@
-"""Structured-output helper: ``complete_validated``.
+"""Structured-output helpers for LLM calls.
 
-Layers Pydantic schema validation + one self-correction retry on top of the
-already-parsed ``dict`` returned by :meth:`LLMClient.complete_json`. Designed
-to prevent single-shot ``LLMJsonParseError`` / ``pydantic.ValidationError``
-failures from wasting an entire run.
+This module currently exports one helper:
 
-Contract:
+- ``complete_validated``: single-shot JSON → Pydantic validation with one
+  self-correction retry.
+
+Contract (applies to ``complete_validated``):
 
 - Does **not** call ``llm_service.util.extract_json_from_response``.
   Provider clients handle JSON parsing internally and raise
   :class:`LLMJsonParseError` on failure.
 - JSON mode is already enforced unconditionally inside ``complete_json``
   (e.g. the Ollama client sets ``response_format={"type":"json_object"}``),
-  so this helper does not need to configure it.
+  so this module does not need to configure it.
 - On success after a correction, logs a single INFO line.
   On terminal failure, logs a single WARNING and re-raises the last error
   with ``correction_attempts_used`` populated.
@@ -210,7 +210,8 @@ def complete_validated(
         last_parse_error.correction_attempts_used = attempts_used
         raise last_parse_error
 
-    assert last_validation_error is not None  # one of the two paths must be set
+    if last_validation_error is None:
+        raise RuntimeError("complete_validated reached terminal state with no recorded error")
     try:
         preview = json.dumps(last_validation_data, default=str)
     except (TypeError, ValueError):

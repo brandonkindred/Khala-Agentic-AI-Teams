@@ -809,6 +809,8 @@ services:
       retries: 5
 
   # ── Unified API (router/proxy) ──────────────────────────────────────────────
+  # Inherits image CMD (run_unified_api.py --workers 1). Do not override to N>1
+  # without raising mem_limit; each worker re-imports the ~200 MB agent graph.
 
   khala:
     build:

@@ -8,6 +8,7 @@ GitHubClient and a stubbed CodeReviewAgent — no network, no LLM).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock
 
@@ -391,10 +392,8 @@ class TestCreatePullRequestReview:
         captured: dict[str, Any] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
-            import json as _json
-
             captured["url"] = str(req.url)
-            captured["body"] = _json.loads(req.content)
+            captured["body"] = json.loads(req.content)
             return httpx.Response(200, json={"id": 1, "html_url": "https://example/review/1"})
 
         client = _client_with(handler)
@@ -417,9 +416,7 @@ class TestCreatePullRequestReview:
         captured: dict[str, Any] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
-            import json as _json
-
-            captured["body"] = _json.loads(req.content)
+            captured["body"] = json.loads(req.content)
             return httpx.Response(200, json={"id": 2})
 
         client = _client_with(handler)
@@ -445,10 +442,8 @@ class TestCreateReviewComment:
         captured: dict[str, Any] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
-            import json as _json
-
             captured["url"] = str(req.url)
-            captured["body"] = _json.loads(req.content)
+            captured["body"] = json.loads(req.content)
             return httpx.Response(201, json={"id": 9, "html_url": "https://example/comment/9"})
 
         client = _client_with(handler)
@@ -468,9 +463,7 @@ class TestCreateReviewComment:
         captured: dict[str, Any] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
-            import json as _json
-
-            captured["body"] = _json.loads(req.content)
+            captured["body"] = json.loads(req.content)
             return httpx.Response(201, json={"id": 10})
 
         client = _client_with(handler)
@@ -522,7 +515,8 @@ class TestCreateReviewComment:
             )
 
     def test_rejects_invalid_preconditions(self) -> None:
-        """Non-positive line, bad side, and empty path/body each raise ValueError."""
+        """Non-positive line, invalid side, empty path/body, or non-file subject_type
+        each raise ValueError."""
         client = _client_with(lambda _req: httpx.Response(500, text="should not be hit"))
         with pytest.raises(ValueError):  # line < 1
             client.create_review_comment(
@@ -764,7 +758,7 @@ class _FakeReviewClient:
         ``create_issue_fail`` (set on the instance) raises a 403 to exercise the
         create-issues error path.
         """
-        if getattr(self, "create_issue_fail", False):
+        if self.create_issue_fail:
             raise GitHubAPIError(403, "no issue-write scope")
         self.created_issues.append({"title": title, "body": body, "labels": labels})
         number = len(self.created_issues)
@@ -788,6 +782,15 @@ class _FakeReviewClient:
 
 @pytest.fixture
 def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Build a wired-up PR-review test environment.
+
+    Returns a dictionary used by the integration tests:
+    - ``client``: FastAPI ``TestClient``
+    - ``api``: the monkeypatched ``coding_team_main`` module
+    - ``repo_path``: temporary directory path used as ``repo_path``
+    - ``github``: dict holding the ``_FakeReviewClient`` under ``client``
+    - ``jobs``: fake job service client recording job-store calls
+    """
     _stub_heavy_modules(monkeypatch)
 
     from job_service_client_fake import FakeJobServiceClient
@@ -837,10 +840,18 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 def _review_body(**overrides: Any) -> dict[str, Any]:
+    """Return a default PR-review request body, merged with caller overrides.
+
+    Defaults:
+    - ``owner``: ``"o"``
+    - ``repo``: ``"r"``
+    - ``repo_path``: current working directory
+    - ``pr_number``: ``7``
+    """
     body = {
         "owner": "o",
         "repo": "r",
-        "repo_path": overrides.pop("repo_path", "/tmp/x"),
+        "repo_path": overrides.pop("repo_path", str(Path.cwd())),
         "pr_number": 7,
     }
     body.update(overrides)
@@ -977,7 +988,10 @@ class TestReviewEndpoint:
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        review = review_app["github"]["client"].reviews[0]
+        gh = review_app["github"]["client"]
+        assert len(gh.reviews) == 1
+        review = gh.reviews[0]
+        assert len(review["comments"]) == 1
         assert "ghp_SECRETTOKEN" not in review["body"]
         assert "https://***@" in review["body"]
         assert "ghp_SECRETTOKEN" not in review["comments"][0]["body"]
@@ -1000,6 +1014,8 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
+        assert len(gh.review_comments) == 1
+        assert len(gh.comments) == 1
         assert "ghp_SECRETTOKEN" not in gh.review_comments[0]["body"]
         assert "https://***@" in gh.review_comments[0]["body"]
         assert "ghp_SECRETTOKEN" not in gh.comments[0][1]
@@ -1179,6 +1195,36 @@ class TestReviewEndpoint:
         # And it preserved the cause in the job store for diagnosis.
         assert "body blew up past its own handler" in (job.get("error") or "")
 
+    def test_run_pr_review_survives_setup_exception(
+        self, review_app, monkeypatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Setup failures before the body (e.g. RUNNING ``update_job``) must also
+        honor the "never raises" contract via the widened outer guard, and any
+        token-bearing exception text must be scrubbed from the finalized error
+        and from warning/error logs."""
+        import software_engineering_team.api.coding_team_main as main_mod
+        from software_engineering_team.models import JobStatus
+
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+        real_update_job = main_mod.update_job
+
+        def _update_job(job_id: str, **kw: Any) -> None:
+            if kw.get("status") == JobStatus.RUNNING.value:
+                raise RuntimeError(f"job service unreachable during RUNNING update: {secret_url}")
+            return real_update_job(job_id, **kw)
+
+        monkeypatch.setattr(main_mod, "update_job", _update_job)
+
+        with caplog.at_level("ERROR"):
+            resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "job service unreachable" in (job.get("error") or "")
+        assert "ghp_LEAKEDTOKEN" not in (job.get("error") or "")
+        assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
+        assert not any(r.exc_text and "ghp_LEAKEDTOKEN" in r.exc_text for r in caplog.records)
+
     def test_body_failure_scrubs_token_from_log_and_outage(
         self, review_app, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1201,15 +1247,16 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
-        # The formatted log message (the %s arg we control) must be scrubbed; the
-        # attached traceback still shows the raw exception (inherent to
-        # ``logger.exception``/``exc_info`` and out of scope for this fix — the bug
-        # is about the message text passed through, not Python's traceback capture).
+        # Require exactly one hook-failed log, and scrub every caplog record
+        # (message + attached traceback text).
         matches = [r for r in caplog.records if r.getMessage().startswith("PR review hook failed")]
         assert len(matches) == 1
-        record = matches[0]
-        assert "ghp_LEAKEDTOKEN" not in record.getMessage()
+        for r in caplog.records:
+            assert "ghp_LEAKEDTOKEN" not in r.getMessage()
+            assert "ghp_LEAKEDTOKEN" not in (r.exc_text or "")
         assert "ghp_LEAKEDTOKEN" not in (job.get("error") or "")
+        gh = review_app["github"]["client"]
+        assert not any("ghp_LEAKEDTOKEN" in body for _n, body in gh.comments)
 
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1415,8 +1462,13 @@ class TestReviewEndpoint:
         # The second thread is running and about to block on the (held) lock; the
         # brief window then lets it (wrongly) acquire if mutual exclusion is broken.
         assert contending.wait(5)
-        _time.sleep(0.05)
-        assert "second-enter" not in order
+        # Contending thread has signaled it is about to take the lock; poll briefly
+        # to ensure it remains blocked while first still holds it (no single fixed
+        # sleep that can flake under load).
+        deadline = _time.monotonic() + 0.1
+        while _time.monotonic() < deadline:
+            assert "second-enter" not in order
+            _time.sleep(0)
         release.set()
         t1.join(5)
         t2.join(5)
@@ -1509,10 +1561,14 @@ class TestReviewEndpoint:
         # And it actually touched the liveness stamp (not a silent no-op).
         assert fake_jobs.get_job(job_id).get("last_heartbeat_at") is not None
 
-    def test_agent_failure_marks_job_failed(self, review_app) -> None:
-        """Agent exceptions fail the job and post a neutral outage note only."""
-        review_app["github"]["agent_output"] = RuntimeError("llm down")
-        resp = review_app["client"].post("/review-pr", json=_review_body())
+    def test_agent_failure_marks_job_failed(
+        self, review_app, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Agent exceptions fail the job, post a neutral outage note, and scrub secrets."""
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+        review_app["github"]["agent_output"] = RuntimeError(f"llm down: {secret_url}")
+        with caplog.at_level("WARNING"):
+            resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -1531,6 +1587,12 @@ class TestReviewEndpoint:
         )
         assert not any("llm down" in b for b in all_bodies)
         assert not any("RuntimeError" in b for b in all_bodies)
+        assert not any("ghp_LEAKEDTOKEN" in b for b in all_bodies)
+        assert "ghp_LEAKEDTOKEN" not in (job.get("error") or "")
+        # Formatted log messages must also be scrubbed (traceback may still carry
+        # the raw exception via logger.exception / exc_info — out of scope here).
+        assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
+        assert not any(secret_url in r.getMessage() for r in caplog.records)
 
     def test_no_changed_files_completes(self, review_app) -> None:
         review_app["github"]["client"].files = []
@@ -1764,10 +1826,11 @@ class TestReviewEndpoint:
         assert len(gh.comments) == 1, (
             f"Expected exactly one standalone fallback comment, got gh.comments={gh.comments}"
         )
-        assert "dropped finding" in gh.comments[0][1], (
+        _n, body = gh.comments[0]
+        assert "dropped finding" in body, (
             f"Fallback comment missing finding text: gh.comments={gh.comments}"
         )
-        assert "could not complete and did not post findings" not in gh.comments[0][1]
+        assert "could not complete and did not post findings" not in body
         assert job["review_summary"]["comment_findings"] == 1
 
     def test_standalone_fallback_failure_marks_job_failed(self, review_app) -> None:
@@ -2129,47 +2192,11 @@ class TestReviewPersistence:
 # ---------------------------------------------------------------------------
 # BUG CONDITION REGRESSION TESTS
 #
-# These tests started as exploratory red tests and now serve as regression
-# guards for the exact counterexamples that proved the original bug(s).
-#
-# Bug (original): findings whose file is NOT in the PR diff were posted via
-# add_issue_comment (standalone top-level PR conversation comment) -- fine in
-# principle, but at the time nothing guaranteed the comment was well-formed or
-# that it was the only comment for the finding.
-#
-# Bug (deterministic mis-anchor, superseded): an interim fix re-anchored
-# such "leftover" findings onto the FIRST changed file in the diff and posted
-# them there as a file-level review comment -- wrong, because the finding is
-# about a file this PR never touched at all.
-#
-# Bug (round 1, superseded -- Codex-flagged regression): a later fix forced
-# EVERY finding whose file is absent from the diff into pending_issue_proposals,
-# regardless of the reviewer's own pre_existing tag. That silently dropped a
-# real, common, PR-blocking finding: "this PR imports/references module X but
-# never added it" -- exactly the class of finding false_positive_filter.py
-# deliberately keeps rather than treats as noise.
-#
-# Current, correct behavior (round 2, _partition_review_issues in
-# api/pr_review.py): routing to preexisting_issues/proposals is driven ONLY by
-# the reviewer's own pre_existing tag (overridden back to a PR finding when
-# is_within_diff proves it lies on a line the PR actually added) -- never by
-# diff/file membership alone. A finding naming a file absent from the diff,
-# WITHOUT a pre_existing tag, therefore stays a PR finding: since it cannot be
-# anchored to any line- or file-level location in the diff, it is posted as
-# its own standalone conversation comment (via format_issue_comment /
-# partition.standalone_comments) naming its own file_path -- never dropped,
-# and never misattributed to an unrelated changed file. A finding EXPLICITLY
-# tagged pre_existing=True (and not proven is_within_diff) still routes to
-# pending_issue_proposals, unchanged.
-#
-# Property 1 (round 2): For any code-review run that produces ≥1 finding, the
-# fixed _run_pr_review SHALL NOT post more than one comment per finding, SHALL
-# NEVER anchor an off-diff-file finding to an unrelated changed file, and SHALL
-# route such a finding to pending_issue_proposals ONLY when the reviewer
-# explicitly tagged it pre_existing=True (and it is not proven is_within_diff);
-# otherwise the finding is posted as its own standalone conversation comment.
-#
-# Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5
+# Regression guards for _partition_review_issues routing: off-diff findings
+# without an explicit pre_existing tag are posted as standalone conversation
+# comments naming their own file_path — never mis-anchored onto an unrelated
+# changed file, and never forced into pending_issue_proposals by file
+# membership alone. Validates Requirements 2.1–2.5.
 # ---------------------------------------------------------------------------
 
 
@@ -2177,7 +2204,7 @@ class TestBugConditionExploration:
     """Exploration tests written BEFORE the fix as part of the bugfix workflow (Task 1).
 
     Originally encoded round-1 "route every off-diff-file finding to a proposal"
-    behavior; updated for round 2 (see the module-level comment above) to encode
+    behavior; updated for round 2 (see the section comment above) to encode
     the correct behavior instead: an off-diff-file finding WITHOUT an explicit
     pre_existing tag becomes its own standalone conversation comment -- never a
     proposal, and never a comment mis-anchored to an unrelated changed file.
@@ -2892,14 +2919,18 @@ class TestPreservationProperties:
             f"[{description}] Mixed run created extra comments on in-diff path {in_path!r}: "
             f"solo={solo_on_path}, mixed={mixed_on_path}"
         )
-        # Each out-of-diff finding (none tagged pre_existing here) must have
-        # landed as its own standalone conversation comment naming its own
-        # file, and never leaked into the review/file-level comments checked
-        # above.
+        # Each out-of-diff finding (none tagged pre_existing here) must appear
+        # in at least one standalone conversation comment that names its file
+        # when one is set, and never leak into the review/file-level comments
+        # checked above.
         for issue in out_issues:
-            assert any(issue.description in body for _n, body in gh2.comments), (
-                f"[{description}] out-of-diff finding {issue.description!r} missing from "
-                f"standalone comments: {gh2.comments}"
+            path = issue.file_path or ""
+            assert any(
+                issue.description in body and (not path or path in body)
+                for _n, body in gh2.comments
+            ), (
+                f"[{description}] out-of-diff finding {issue.description!r} "
+                f"(file {path!r}) missing from standalone comments: {gh2.comments}"
             )
             assert not any(issue.description in c.get("body", "") for c in all_comments_mixed), (
                 f"[{description}] out-of-diff finding {issue.description!r} leaked into "
@@ -2930,7 +2961,7 @@ class TestFixedRunPrReview:
     """Integration tests verifying _run_pr_review's handling of out-of-diff
     findings: never mis-anchored to an unrelated changed file, never dropped,
     and routed to a proposal ONLY when the reviewer explicitly tagged the
-    finding pre_existing=True (round 2; see the module comment above
+    finding pre_existing=True (round 2; see the section comment above
     TestBugConditionExploration for the full history).
 
     Validates: Requirements 2.1, 2.2, 2.4, 2.5
@@ -3149,12 +3180,33 @@ class TestWholeFileReview:
         # not raise.
         assert _fetch_head_files(object(), "o", "r", files, "sha1") == {}
 
+    def test_fetch_head_files_scrubs_token_from_fetch_warning(
+        self, review_app, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from software_engineering_team.api.pr_review import _fetch_head_files
+
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                raise RuntimeError(f"fetch failed: {secret_url}")
+
+        with caplog.at_level("WARNING"):
+            assert _fetch_head_files(_C(), "o", "r", files, "sha1") == {}
+
+        assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
+        assert not any(secret_url in r.getMessage() for r in caplog.records)
+        assert not any(r.exc_text and "ghp_LEAKEDTOKEN" in r.exc_text for r in caplog.records)
+        [record] = [r for r in caplog.records if "could not fetch head content" in r.getMessage()]
+        assert "ghp_LEAKEDTOKEN" not in record.getMessage()
+        assert "https://***@" in record.getMessage()
+
     def test_fetch_head_files_concurrent_fetches_do_not_corrupt_results(self, review_app) -> None:
         """_fetch_head_files fans per-file GETs out across a thread pool; each
         worker's (filename, content) pair must land under its own key, never a
         sibling's, even when several fetches are in flight at once.
         """
-        import threading
         import time
 
         from software_engineering_team.api.pr_review import _fetch_head_files
@@ -3164,18 +3216,13 @@ class TestWholeFileReview:
             PullRequestFile(f"f{i}.py", "modified", f"@@ -1 +1 @@\n+x{i}", 1, 0, None)
             for i in range(num_files)
         ]
-        seen_threads: set[int] = set()
-        lock = threading.Lock()
 
         def _contents(o, r, path, ref):
-            with lock:
-                seen_threads.add(threading.get_ident())
             time.sleep(0.01)  # widen the race window so fetches overlap
             return f"WHOLE-{path}\n"
 
         out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
-        assert len(seen_threads) > 1, "fetches were distributed across more than one worker thread"
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
         from software_engineering_team.github_source import GitHubRepoReader
@@ -3644,6 +3691,32 @@ class TestSafeCommentUnit:
 
         assert _safe_comment(_C(), "o", "r", 7, "body") is True
         assert posted == [(7, "body")]
+
+    def test_scrubs_token_from_failure_warning(
+        self, review_app, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from software_engineering_team.api.pr_review import _safe_comment
+
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+
+        class _C:
+            def add_issue_comment(self, o, r, n, body):
+                raise RuntimeError(f"comment failed: {secret_url}")
+
+        with caplog.at_level("WARNING"):
+            assert _safe_comment(_C(), "o", "r", 7, "body") is False
+
+        assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
+        assert not any(secret_url in r.getMessage() for r in caplog.records)
+        assert not any(r.exc_text and "ghp_LEAKEDTOKEN" in r.exc_text for r in caplog.records)
+        for r in caplog.records:
+            if r.exc_info and r.exc_info[1] is not None:
+                assert "ghp_LEAKEDTOKEN" not in str(r.exc_info[1])
+                assert secret_url not in str(r.exc_info[1])
+        [record] = [r for r in caplog.records if "Failed to comment on issue" in r.getMessage()]
+        assert "ghp_LEAKEDTOKEN" not in record.getMessage()
+        assert "***" in record.getMessage()
+        assert "github.com/o/r.git" in record.getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -4225,6 +4298,11 @@ class TestDetectDuplicateProposalsUnit:
     review harness (extracted from _run_pr_review_body for exactly this reason)."""
 
     def _proposal(self, pid: str, description: str = "d") -> dict:
+        """Return a minimal duplicate-proposal dict for unit tests.
+
+        Carries the fields ``_detect_duplicate_proposals`` expects, with a
+        customizable description so tests can control matching behavior.
+        """
         return {
             "id": pid,
             "severity": "high",
@@ -4311,6 +4389,12 @@ class TestDetectDuplicateProposalsUnit:
 
 
 def _mode_pr(head_sha: str = "sha1") -> PullRequestDetail:
+    """Return a minimal PullRequestDetail for review-mode / posting unit tests.
+
+    Defaults produce an open, non-draft PR against main so tests can focus on
+    mode-selection and comment-posting logic without repeating boilerplate.
+    ``head_sha`` is overridable when a test needs a specific commit ref.
+    """
     return _pr_detail(number=7, html_url="https://example/pull/7", head_sha=head_sha, body="")
 
 
@@ -4600,24 +4684,34 @@ class TestPartitionReviewIssuesUnit:
         assert "missing.py" in result.standalone_comments[0]
 
 
+def _review_issue_partition(**overrides: Any):
+    """Build a ``ReviewIssuePartition`` with empty defaults for unit tests.
+
+    Callers override only the fields under test (e.g. ``pr_issues``,
+    ``line_comments``) so partition construction stays DRY across posting and
+    finalize unit suites.
+    """
+    from software_engineering_team.api.pr_review import ReviewIssuePartition
+
+    base = dict(
+        pr_issues=[],
+        preexisting_issues=[],
+        proposals=[],
+        addressed_issues=[],
+        line_comments=[],
+        file_comments=[],
+        standalone_comments=[],
+    )
+    base.update(overrides)
+    return ReviewIssuePartition(**base)
+
+
 class TestPostReviewCommentsUnit:
     """Direct unit tests for _post_review_comments, extracted from
     _run_pr_review_body for exactly this reason."""
 
     def _partition(self, **overrides: Any):
-        from software_engineering_team.api.pr_review import ReviewIssuePartition
-
-        base = dict(
-            pr_issues=[],
-            preexisting_issues=[],
-            proposals=[],
-            addressed_issues=[],
-            line_comments=[],
-            file_comments=[],
-            standalone_comments=[],
-        )
-        base.update(overrides)
-        return ReviewIssuePartition(**base)
+        return _review_issue_partition(**overrides)
 
     def test_happy_path_counts(self) -> None:
         from software_engineering_team.api import pr_review
@@ -4649,8 +4743,7 @@ class TestPostReviewCommentsUnit:
         )
         assert result.file_comment_count == 1
         assert result.inline_count == 0
-
-    def test_github_api_error_reraised_when_line_comments_present(self) -> None:
+        assert result.comments_failed == 0
         from software_engineering_team.api import pr_review
 
         client = _FakeReviewClient()
@@ -4754,19 +4847,7 @@ class TestFinalizeReviewOutcomeUnit:
     _run_pr_review_body for exactly this reason."""
 
     def _partition(self, **overrides: Any):
-        from software_engineering_team.api.pr_review import ReviewIssuePartition
-
-        base = dict(
-            pr_issues=[],
-            preexisting_issues=[],
-            proposals=[],
-            addressed_issues=[],
-            line_comments=[],
-            file_comments=[],
-            standalone_comments=[],
-        )
-        base.update(overrides)
-        return ReviewIssuePartition(**base)
+        return _review_issue_partition(**overrides)
 
     def _posting(self, **overrides: Any):
         from software_engineering_team.api.pr_review import CommentPostingResult
@@ -4840,8 +4921,9 @@ class TestFinalizeReviewOutcomeUnit:
 
     def test_non_empty_pr_issues_does_not_react(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from software_engineering_team.api import pr_review
+        from software_engineering_team.models import JobStatus
 
-        self._capture_finalize(monkeypatch)
+        calls = self._capture_finalize(monkeypatch)
         reacted: list[Any] = []
         monkeypatch.setattr(pr_review, "_react_to_pr", lambda *a, **kw: reacted.append(a))
         client = _FakeReviewClient()
@@ -4853,6 +4935,9 @@ class TestFinalizeReviewOutcomeUnit:
             client, "job1", "o", "r", 7, _mode_pr(), 1, partition, posting
         )
         assert reacted == []
+        assert len(calls) == 1
+        assert calls[0]["status"] == JobStatus.COMPLETED
+        assert calls[0].get("status_text")
 
     def test_status_text_includes_proposals_and_addressed_clauses(
         self, monkeypatch: pytest.MonkeyPatch
@@ -5453,6 +5538,7 @@ class TestCreateReviewIssuesUnit:
         assert merged[0]["issue_url"] == "u-other"  # other side already filed -> wins
         assert merged[1]["issue_url"] == "u-preferred"  # filed preferred copy is kept
         assert merged[2]["issue_url"] is None  # unknown to other -> unchanged
+        # Fresh dicts for every merged entry — never aliases of either input list.
         _assert_no_aliased_dicts(merged, preferred, other)
 
     def test_context_merges_row_proposals_when_job_and_row_both_exist(

@@ -56,8 +56,8 @@ python run_unified_api.py --port 9000
 # Development mode (auto-reload)
 python run_unified_api.py --reload
 
-# Production with multiple workers
-python run_unified_api.py --workers 4 --log-level warning
+# Production (single worker — keeps idle RSS ~one process; scale with replicas if needed)
+python run_unified_api.py --workers 1 --log-level warning
 ```
 
 ## API Endpoints
@@ -284,10 +284,15 @@ Modify the `prefix` field in team configurations to change URL paths:
 
 ```bash
 gunicorn unified_api.main:app \
-  --workers 4 \
+  --workers 1 \
   --worker-class uvicorn.workers.UvicornWorker \
   --bind 0.0.0.0:8080
 ```
+
+Default deploy paths (`make deploy`, `backend/Dockerfile`) use a single uvicorn
+worker so idle RSS stays ~one process footprint under the compose `khala`
+2G mem_limit. Raise concurrency later via container replicas, not more workers
+in one container.
 
 ### With Docker
 
@@ -301,7 +306,7 @@ WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 EXPOSE 8080
-CMD ["python", "run_unified_api.py", "--workers", "4"]
+CMD ["python", "run_unified_api.py", "--workers", "1"]
 ```
 
 ### Reverse Proxy (Nginx)
