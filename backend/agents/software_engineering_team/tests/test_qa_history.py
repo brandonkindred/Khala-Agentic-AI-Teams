@@ -371,7 +371,11 @@ def test_parse_qa_history_blocks_preserves_multiline_rationale_in_full_block() -
     blocks = parse_qa_history_blocks(qa_history)
 
     assert len(blocks) == 1
-    _iteration, _question_text, _answer, full_block = blocks[0]
+    _iteration, _question_text, answer, full_block = blocks[0]
+    # The rationale continuation must not be accidentally buffered into the
+    # parsed answer field; only full_block_text preserves rationale verbatim.
+    assert answer == "Exponential backoff."
+    assert "First line of rationale.\nSecond line of rationale." not in answer
     assert "First line of rationale.\nSecond line of rationale." in full_block
 
 
@@ -518,7 +522,7 @@ def test_format_answered_questions_for_prompt_escapes_multiline_answer_and_ratio
 
 
 def test_extract_answer_retrieves_answer_at_exactly_the_match_threshold() -> None:
-    """A question at exactly the 0.5 match ratio is retrievable, matching is_same_decision's `>=`.
+    """A question at exactly the 0.5 match ratio is retrievable.
 
     Two key words ("aaaaa", "bbbbb") in the incoming question; the recorded
     question only contains one of them, so match_ratio is exactly 0.5 —

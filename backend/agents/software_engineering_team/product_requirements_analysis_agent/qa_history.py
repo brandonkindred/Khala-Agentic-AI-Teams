@@ -403,7 +403,7 @@ def extract_answer_from_qa_history(
 
         if (
             match_ratio >= _QUESTION_MATCH_THRESHOLD
-        ):  # Good enough match; matches is_same_decision's threshold
+        ):  # Good enough match based on extract_answer keyword coverage
             parsed = _consume_block_body(lines[1:])
 
             if parsed.answer and (best_match is None or match_ratio > best_match[0]):
