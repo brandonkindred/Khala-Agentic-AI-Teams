@@ -114,11 +114,11 @@ class _ConstructResolver:
               class-based TypeScript), and consolidating on it would merge
               independent findings. Prefer no consolidation over false merges.
             - Content carrying the PR-review path's ``"N: "``-prefixed hunk
-              annotations is normalized (prefixes stripped, inter-hunk ``...``
-              markers dropped, ``line`` remapped to its physical index) before
-              resolution, exactly as ``find_function_at_line`` does, so a
-              multi-hunk annotated excerpt parses instead of failing with an
-              IndentationError on the gap marker.
+              annotations is normalized (prefixes stripped, ``line`` remapped
+              to its physical index) before resolution. Bare ``...`` gap
+              markers are preserved; ``enclosing_construct`` resolves each
+              hunk independently so a later indented continuation is not
+              attached to the preceding open construct.
         """
         if not file_path or not line or line < 1:
             return None

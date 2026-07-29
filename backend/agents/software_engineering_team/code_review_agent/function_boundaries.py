@@ -30,6 +30,11 @@ _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 # code and a physical (1-based) line index.
 _LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
 
+# Bare inter-hunk gap marker emitted by ``render_annotated_hunks`` between
+# non-contiguous hunks. Joining across it would attach a later hunk's indented
+# lines to the preceding hunk's open construct — prefer per-hunk resolution.
+_HUNK_SEPARATOR = "..."
+
 
 @dataclass(frozen=True)
 class EnclosingConstruct:
@@ -73,11 +78,11 @@ def strip_numbered_prefixes(
         - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
           where:
           - ``stripped_content`` is the content with all ``N: `` prefixes
-            removed. Bare ``...`` hunk-gap markers inserted by
-            ``render_annotated_hunks`` between non-contiguous hunks are
-            dropped so the joined remnant stays AST-parseable (feeding
-            those markers through leaves mid-function continuations as
-            ``IndentationError`` and disables construct lookup).
+            removed. Bare ``...`` hunk-gap markers from
+            ``render_annotated_hunks`` are kept as-is so
+            :func:`enclosing_construct` can resolve each hunk independently
+            without joining them into one AST (joining would attach a later
+            hunk's indented lines to the preceding open construct).
           - ``physical_index`` is the 1-based line index in
             ``stripped_content`` whose original prefix equals ``line_number``.
             When no line matches exactly (the target line was a removed ``-``
@@ -85,7 +90,7 @@ def strip_numbered_prefixes(
             ``line_number`` is used; falls back to 1 when nothing precedes.
           - ``line_mapper(physical)`` maps a physical line index back to its
             original file line number (or to ``physical`` if the line had no
-            numbered prefix).
+            numbered prefix, e.g. a separator).
         - Raises ``TypeError`` / ``ValueError`` when preconditions are violated;
           otherwise never raises.
     """
@@ -106,26 +111,19 @@ def strip_numbered_prefixes(
     physical_index = 1
     exact_match = False
     last_before: Optional[int] = None
-    stripped_i = 0
 
-    for line in lines:
+    for i, line in enumerate(lines, start=1):
         m = _LINE_NUMBER_PREFIX_RE.match(line)
         if m:
             orig = int(m.group(1))
-            stripped_i += 1
-            phys_to_orig[stripped_i] = orig
+            phys_to_orig[i] = orig
             stripped.append(line[m.end() :])
             if orig == line_number and not exact_match:
-                physical_index = stripped_i
+                physical_index = i
                 exact_match = True
             elif orig < line_number:
-                last_before = stripped_i
+                last_before = i
         else:
-            # Drop the inter-hunk gap marker; keep any other non-numbered line
-            # (should be rare in this rendering path).
-            if line.strip() == "...":
-                continue
-            stripped_i += 1
             stripped.append(line)
 
     if not exact_match and last_before is not None:
@@ -137,23 +135,34 @@ def strip_numbered_prefixes(
     return "\n".join(stripped), physical_index, _lookup
 
 
-def enclosing_construct(content: str, line_number: int) -> Optional[EnclosingConstruct]:
-    """Find the innermost Python function/method/class enclosing ``line_number``.
-
-    Preconditions:
-        - ``content`` is a string (may be empty).
-        - ``line_number`` >= 1.
+def _hunk_segments(lines: List[str]) -> List[Tuple[int, int, List[str]]]:
+    """Split ``lines`` on bare ``...`` separators into contiguous hunks.
 
     Postconditions:
-        - Returns ``None`` when ``content`` fails to parse as Python, or no
-          ``FunctionDef``/``AsyncFunctionDef``/``ClassDef`` node brackets
-          ``line_number`` (module level). Never raises.
-        - Otherwise returns the smallest-span (innermost) enclosing node,
-          matching the selection rule ``false_positive_filter``'s
-          ``find_function_at_line`` tool exposes to the LLM: start/end lines
-          come from the shared ``node_start_line``/``node_end_line`` helpers,
-          so both agree on construct ranges.
+        - Returns ``(global_start, global_end, segment_lines)`` triples with
+          1-based inclusive endpoints in the parent ``lines`` list.
+        - Separator lines themselves are not included in any segment.
+        - Empty when ``lines`` is empty or contains only separators.
     """
+    segments: List[Tuple[int, int, List[str]]] = []
+    current: List[str] = []
+    start = 1
+    for i, line in enumerate(lines, start=1):
+        if line.strip() == _HUNK_SEPARATOR:
+            if current:
+                segments.append((start, i - 1, current))
+                current = []
+            continue
+        if not current:
+            start = i
+        current.append(line)
+    if current:
+        segments.append((start, start + len(current) - 1, current))
+    return segments
+
+
+def _enclosing_construct_ast(content: str, line_number: int) -> Optional[EnclosingConstruct]:
+    """AST-based enclosing-construct lookup over a single contiguous snippet."""
     try:
         tree = ast.parse(content)
     except Exception:
@@ -189,6 +198,51 @@ def enclosing_construct(content: str, line_number: int) -> Optional[EnclosingCon
     return EnclosingConstruct(
         start_line=func_start, end_line=func_end, name=qualified_name, kind=kind
     )
+
+
+def enclosing_construct(content: str, line_number: int) -> Optional[EnclosingConstruct]:
+    """Find the innermost Python function/method/class enclosing ``line_number``.
+
+    When ``content`` contains bare ``...`` hunk-gap markers (from
+    ``render_annotated_hunks``), each gap-bounded hunk is resolved
+    independently. Joining across the gap would attach a later hunk's
+    indented lines to the preceding open construct and invent a false
+    enclosing function; an unparseable continuation hunk (declaration
+    outside the shown context) returns ``None`` rather than guessing.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+        - ``line_number`` >= 1.
+
+    Postconditions:
+        - Returns ``None`` when ``content`` fails to parse as Python, the
+          target line falls in an unparseable hunk, or no
+          ``FunctionDef``/``AsyncFunctionDef``/``ClassDef`` node brackets
+          ``line_number`` (module level). Never raises.
+        - Otherwise returns the smallest-span (innermost) enclosing node,
+          with ``start_line``/``end_line`` expressed in the parent
+          ``content``'s 1-based coordinates.
+        - Start/end lines come from the shared ``node_start_line``/
+          ``node_end_line`` helpers so AST consumers agree on ranges.
+    """
+    lines = content.splitlines()
+    if any(line.strip() == _HUNK_SEPARATOR for line in lines):
+        for seg_start, seg_end, seg_lines in _hunk_segments(lines):
+            if not (seg_start <= line_number <= seg_end):
+                continue
+            local_line = line_number - seg_start + 1
+            local = _enclosing_construct_ast("\n".join(seg_lines), local_line)
+            if local is None:
+                return None
+            return EnclosingConstruct(
+                start_line=local.start_line + seg_start - 1,
+                end_line=local.end_line + seg_start - 1,
+                name=local.name,
+                kind=local.kind,
+            )
+        return None
+
+    return _enclosing_construct_ast(content, line_number)
 
 
 def enclosing_construct_start_heuristic(content: str, line_number: int) -> Optional[int]:

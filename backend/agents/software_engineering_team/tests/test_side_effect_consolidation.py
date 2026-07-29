@@ -388,25 +388,25 @@ def test_construct_resolution_normalizes_pre_numbered_hunks() -> None:
     assert len(result) == 1
 
 
-def test_multi_hunk_separator_does_not_disable_construct_grouping() -> None:
-    """Inter-hunk ``...`` markers from render_annotated_hunks must not break AST grouping."""
+def test_cross_hunk_indented_continuation_does_not_false_merge() -> None:
+    """Findings across a ``...`` gap must not share a construct key invented by joining hunks."""
     content = "\n".join(
         [
-            "10: def foo():",
-            "11:     x = 1",
+            "10: def first():",
+            "11:     return 1",
             "...",
-            "50:     return x",
+            "100:     changed()",
         ]
     )
     index = _index({"app/foo.py": content})
     issues = [
-        _issue(line=11, description="foo mutates at the start"),
-        _issue(line=50, description="foo return shape changed"),
+        _issue(line=11, description="first return changed"),
+        _issue(line=100, description="unrelated mid-function change"),
     ]
     result = consolidate_side_effect_issues(issues, index)
-    assert len(result) == 1
-    assert "foo mutates at the start" in result[0].description
-    assert "foo return shape changed" in result[0].description
+    assert len(result) == 2
+    assert result[0].description == "first return changed"
+    assert result[1].description == "unrelated mid-function change"
 
 
 def test_merge_keeps_distinct_caller_citations() -> None:

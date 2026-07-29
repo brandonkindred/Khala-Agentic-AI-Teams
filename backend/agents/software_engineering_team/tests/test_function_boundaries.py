@@ -204,25 +204,42 @@ def test_strip_numbered_prefixes_detects_and_strips() -> None:
     assert mapper(3) == 4242
 
 
-def test_strip_numbered_prefixes_drops_inter_hunk_separators() -> None:
-    """Bare ``...`` gap markers are dropped so joined hunks remain AST-parseable."""
+def test_strip_numbered_prefixes_preserves_inter_hunk_separators() -> None:
+    """Bare ``...`` gap markers are kept so :func:`enclosing_construct` can resolve hunks independently."""
     content = "\n".join(
         [
-            "10: def foo():",
-            "11:     x = 1",
+            "10: def first():",
+            "11:     return 1",
             "...",
-            "50:     return x",
+            "100:     changed()",
         ]
     )
-    stripped, physical, mapper = strip_numbered_prefixes(content, line_number=50)
-    assert "..." not in stripped.splitlines()
-    assert stripped == "def foo():\n    x = 1\n    return x"
-    assert physical == 3
+    stripped, physical, mapper = strip_numbered_prefixes(content, line_number=100)
+    assert "..." in stripped.splitlines()
+    assert physical == 4
     assert mapper is not None
-    assert mapper(3) == 50
-    construct = enclosing_construct(stripped, physical)
-    assert construct is not None
-    assert construct.name == "foo"
+    assert mapper(4) == 100
+    # Later hunk starts mid-function without its declaration — do not invent
+    # an enclosing construct by joining across the gap.
+    assert enclosing_construct(stripped, physical) is None
+    assert enclosing_construct(stripped, 2) is not None
+    assert enclosing_construct(stripped, 2).name == "first"
+
+
+def test_enclosing_construct_does_not_join_across_hunk_gap() -> None:
+    """Indented continuation after ``...`` is not attached to the prior hunk's function."""
+    content = "\n".join(
+        [
+            "def first():",
+            "    return 1",
+            "...",
+            "    changed()",
+        ]
+    )
+    first = enclosing_construct(content, 2)
+    assert first is not None
+    assert first.name == "first"
+    assert enclosing_construct(content, 4) is None
 
 
 def test_strip_numbered_prefixes_empty_content() -> None:
