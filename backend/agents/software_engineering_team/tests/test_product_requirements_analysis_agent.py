@@ -3123,6 +3123,22 @@ def test_filter_duplicate_questions_preserves_lexical_ff_doubles() -> None:
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_preserves_short_lexical_ll() -> None:
+    """billed/drilled/chilled keep lexical ll without relying on a short denylist."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which teams bill drill chill pipelines?")
+    ]
+    qa_history = (
+        "Q: Which teams billed drilled chilled pipelines last quarter?\n"
+        "A: Platform teams billed drilled chilled pipelines before freeze."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_matches_inflectional_doubled_l() -> None:
     """controlled/signalled/equalled collapse while install/fill stay lexical."""
     questions = [
@@ -3179,6 +3195,22 @@ def test_filter_duplicate_questions_keeps_lexical_pick_compounds() -> None:
     qa_history = (
         "Q: Which reviewers handpicked nitpick findings during triage?\n"
         "A: Senior reviewers handpicked nitpick findings before merge."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_keeps_lexical_click_compounds() -> None:
+    """misclicked/doubleclicked keep lexical -click (not misclic/doubleclic)."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which users misclick doubleclick targets?")
+    ]
+    qa_history = (
+        "Q: Which users misclicked doubleclick targets during onboarding?\n"
+        "A: New users misclicked doubleclick targets before the tooltip shipped."
     )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
@@ -3309,6 +3341,22 @@ def test_filter_duplicate_questions_matches_ie_plurals_and_y_plurals() -> None:
 
     assert filtered == []
     assert duplicates == questions
+
+
+def test_filter_duplicate_questions_does_not_exact_match_restoration_stubs() -> None:
+    """species/cases stubs must not exact-match raw spec/cas tokens."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which species should the model classify?")
+    ]
+    qa_history = (
+        "Q: Which spec should the model classify for CAS labels?\n"
+        "A: Use the documented spec for CAS labels in the model card."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
 
 
 def test_filter_duplicate_questions_matches_silent_e_ches_and_zes() -> None:

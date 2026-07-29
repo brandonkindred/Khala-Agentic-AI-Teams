@@ -81,59 +81,42 @@ def filter_duplicate_questions(
         """Strip punctuation so tokens like 'store?' match their bare form."""
         return re.sub(r"[^a-z0-9]", "", w.strip())
 
-    def _stem_info(w: str) -> tuple[str, bool, bool]:
-        """Normalize word for matching; flag silent-e and y/ie stub restoration.
+    def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
+        """Normalize word for matching; flag silent-e / y-ie stubs / exact eligibility.
 
         Preconditions: ``w`` is a cleaned token (lowercase).
-        Postconditions: returns ``(stem, silent_e_candidate, y_or_ie_stub)``.
-            Never raises.
-            ``silent_e_candidate`` is True when stripping ``ed``/``ing``/``es`` may
-            have dropped a silent ``e`` (``stored`` -> ``stor``, ``caches`` ->
-            ``cach``). ``y_or_ie_stub`` is True for ``ies``/``ied`` stems whose
-            base may be either ``*y`` or ``*ie`` (``policies``/``cookies``,
-            ``carried``/``untied``) so exact membership can recover either form.
-            Lexical doubles (``install``/``sniff``/``boycott``) and compounds
-            (``handpick``/``sidekick``) are preserved.
-            Plurals: ``statuses``, ``echoes``, ``uses`` -> ``use``, else trailing ``s``.
+        Postconditions: returns
+            ``(stem, silent_e_candidate, y_or_ie_stub, exact_ok)``. Never raises.
+            ``exact_ok`` is False for restoration-only stubs (``ies``/``ied`` and
+            silent-e plural ``-es`` forms) so they cannot exact-match unrelated
+            raw tokens like ``spec``/``cas``. Lexical doubles and ``-pick``/
+            ``-kick``/``-click`` compounds are preserved. Short lexical ``ll``
+            bases (``bill``/``drill``/``chill``) are kept by length; longer
+            lexical ``ll`` stays on the denylist while inflectional
+            ``signalled``/``controlled`` still undouble.
         """
         w = w.strip()
         vowels = set("aeiou")
-        # Bases whose -ll is lexical (keep after -ed/-ing), not inflectional.
+        # Longer lexical -ll bases (len >= 6) that must not undouble.
         lexical_ll = frozenset(
             {
                 "appall",
-                "ball",
-                "call",
                 "distill",
                 "enrol",
                 "enroll",
-                "fall",
-                "fill",
                 "forestall",
                 "fulfil",
                 "fulfill",
                 "install",
                 "instill",
-                "kill",
                 "misspell",
-                "pull",
                 "quell",
                 "recall",
                 "reinstall",
-                "roll",
-                "sell",
-                "shell",
-                "small",
-                "spell",
-                "spill",
-                "stall",
-                "tell",
                 "thrill",
                 "uninstall",
-                "wall",
             }
         )
-        # Bases whose -tt is lexical (boycott/butt), not inflectional (patted→pat).
         lexical_tt = frozenset(
             {
                 "batt",
@@ -150,10 +133,12 @@ def filter_duplicate_questions(
             if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
                 return base
             doubled = base[-1]
-            # Lexical doubles that English does not form by suffix doubling.
             if doubled in "fsz":
                 return base
             if doubled == "l":
+                # Short ll bases are almost always lexical (bill/drill/chill/fill).
+                if len(base) < 6:
+                    return base
                 if base in lexical_ll:
                     return base
                 return base[:-1]
@@ -166,10 +151,10 @@ def filter_duplicate_questions(
         def _strip_inserted_ck(base: str) -> str:
             """Remove spelling-only k after -c verbs (mimick→mimic).
 
-            Keep monosyllabic ``click``/``pick`` and compound ``-pick``/
-            ``-kick`` verbs whose ``k`` is lexical.
+            Keep lexical ``-pick``/``-kick``/``-click`` compounds
+            (``handpick``, ``sidekick``, ``misclick``).
             """
-            if base.endswith(("pick", "kick")):
+            if base.endswith(("pick", "kick", "click")):
                 return base
             if (
                 base.endswith("ick")
@@ -179,80 +164,100 @@ def filter_duplicate_questions(
             return base
 
         if w == "uses":
-            # Third-person verb (len 4) must not fall through the short-token guard.
-            return "use", False, False
+            return "use", False, False, True
 
-        # tied/lied/died and longer ie+d forms share the y/ie stub with -ies plurals.
         if w.endswith("ied") and len(w) >= 4:
             stub = w[:-3]
             if stub:
-                return stub, False, True
+                # Restoration-only: match via +y/+ie or stub-to-stub, not raw exact.
+                return stub, False, True, False
 
         if len(w) <= 4:
-            return w, False, False
+            return w, False, False, True
 
         if w.endswith("ed"):
-            # Strip full "ed" so fixed→fix while moved/freed match via silent-e.
             if len(w) >= 5:
                 raw = w[:-2]
                 base = _strip_inserted_ck(_undouble_inflectional(raw))
                 if len(base) >= 3:
                     silent_e = base == raw
-                    return base, silent_e, False
+                    return base, silent_e, False, True
 
         if w.endswith("ing") and len(w) > 5:
             raw = w[:-3]
             base = _strip_inserted_ck(_undouble_inflectional(raw))
             if len(base) >= 3:
                 silent_e = base == raw
-                return base, silent_e, False
+                return base, silent_e, False, True
 
-        # Plurals: policies/cookies share a stub matching *y or *ie;
-        # processes→process; statuses→status; echoes→echo; caches/sizes need silent-e.
         if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
-            return w[:-3], False, True
+            return w[:-3], False, True, False
         if w.endswith("sses") and len(w) > 4:
-            return w[:-2], False, False
-        if w.endswith(("xes", "zes", "ches", "shes")) and len(w) > 4:
-            # caches→cach, sizes→siz (silent e); matches→match still exact.
-            return w[:-2], True, False
+            return w[:-2], False, False, True
+        if w.endswith("xes") and len(w) > 4:
+            return w[:-2], False, False, True
+        if w.endswith("zes") and len(w) > 4:
+            base = w[:-2]
+            if base.endswith("zz"):
+                return base, False, False, True
+            # sizes→siz (silent e); keep quizzes→quizz above.
+            return base, True, False, False
+        if w.endswith("ches") and len(w) > 4:
+            base = w[:-2]
+            if base.endswith("tch") or len(base) >= 5:
+                return base, False, False, True  # matches/beaches
+            return base, True, False, False  # caches→cach
+        if w.endswith("shes") and len(w) > 4:
+            return w[:-2], False, False, True
         if w.endswith("ses") and len(w) > 4:
-            return w[:-2], True, False
+            base = w[:-2]
+            # statuses→status, buses→bus are complete; houses→hous needs silent e.
+            if base.endswith(("us", "is", "os")) or len(base) <= 3:
+                return base, False, False, True
+            return base, True, False, False
         if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
-            return w[:-2], True, False
+            base = w[:-2]
+            if base[-1] in vowels:
+                return base, False, False, True  # echoes/heroes
+            return base, True, False, False  # shoes→sho
         if (
             w.endswith("s")
             and len(w) > 4
             and not w.endswith(("ss", "us", "is"))
         ):
-            return w[:-1], False, False
+            return w[:-1], False, False, True
 
-        return w, False, False
+        return w, False, False, True
 
     def _stems_match(
         stem: str,
         silent_e_candidate: bool,
         y_or_ie_stub: bool,
-        qa_stems: set[str],
+        exact_ok: bool,
+        qa_exact_stems: set[str],
         qa_silent_e_stubs: set[str],
         qa_y_or_ie_stubs: set[str],
     ) -> bool:
         """Return True when ``stem`` matches a qa stem.
 
-        Preconditions: ``stem`` is a non-empty stemmed token; qa stem sets are
-            collections of stemmed tokens from qa history.
-        Postconditions: exact membership always matches. Silent-``e`` pairs
-            (``stor``/``store``, ``cach``/``cache``) and ``y``/``ie`` stub pairs
-            (``polic``↔``policy``/``cook``↔``cookie``, ``carr``↔``carry``/
-            ``unt``↔``untie``) match only via their respective stubs. Never raises.
+        Preconditions: ``stem`` is a non-empty stemmed token; qa sets come from
+            history stemming.
+        Postconditions: exact membership applies only when ``exact_ok``.
+            Restoration stubs match via ``+e`` / ``+y`` / ``+ie`` or stub-to-stub,
+            never against unrelated raw tokens. Never raises.
         """
-        if stem in qa_stems:
+        if exact_ok and stem in qa_exact_stems:
             return True
-        if silent_e_candidate and (stem + "e") in qa_stems:
+        # Stub-to-stub so species↔species and caches↔caches still match.
+        if y_or_ie_stub and stem in qa_y_or_ie_stubs:
+            return True
+        if silent_e_candidate and stem in qa_silent_e_stubs:
+            return True
+        if silent_e_candidate and (stem + "e") in qa_exact_stems:
             return True
         if stem.endswith("e") and stem[:-1] in qa_silent_e_stubs:
             return True
-        if y_or_ie_stub and ((stem + "y") in qa_stems or (stem + "ie") in qa_stems):
+        if y_or_ie_stub and ((stem + "y") in qa_exact_stems or (stem + "ie") in qa_exact_stems):
             return True
         if stem.endswith("y") and stem[:-1] in qa_y_or_ie_stubs:
             return True
@@ -260,47 +265,54 @@ def filter_duplicate_questions(
             return True
         return False
 
-    # Include length-3 history tokens so short bases (fix/add/map/use) remain
-    # matchable against past-tense/3rd-person question stems (fixed/uses).
     qa_stem_infos = [
         _stem_info(tok)
         for tok in re.findall(r"[a-z0-9]+", qa_history_lower)
         if len(tok) >= 3
     ]
-    qa_stems = {stem for stem, _, _ in qa_stem_infos}
-    qa_silent_e_stubs = {stem for stem, silent_e, _ in qa_stem_infos if silent_e}
-    qa_y_or_ie_stubs = {stem for stem, _, y_or_ie in qa_stem_infos if y_or_ie}
+    # Exact set excludes restoration-only stubs so species/cases cannot hit spec/cas.
+    qa_exact_stems = {
+        stem for stem, _, _, exact_ok in qa_stem_infos if exact_ok
+    }
+    qa_silent_e_stubs = {
+        stem for stem, silent_e, _, exact_ok in qa_stem_infos if silent_e and not exact_ok
+    }
+    # Also keep ed/ing silent-e stubs (moved→mov) for store↔stored matching.
+    qa_silent_e_stubs |= {
+        stem for stem, silent_e, _, exact_ok in qa_stem_infos if silent_e and exact_ok
+    }
+    qa_y_or_ie_stubs = {stem for stem, _, y_or_ie, _ in qa_stem_infos if y_or_ie}
 
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
-        # Key words: length > 3, normalized to stems for plural/tense
         words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
         key_stem_infos = [_stem_info(_clean_token(w)) for w in words]
-        # Dedupe by stem while keeping restoration flags if any occurrence set them.
-        key_by_stem: dict[str, tuple[bool, bool]] = {}
-        for stem, silent_e, y_or_ie in key_stem_infos:
-            prev_silent, prev_y = key_by_stem.get(stem, (False, False))
-            key_by_stem[stem] = (prev_silent or silent_e, prev_y or y_or_ie)
+        key_by_stem: dict[str, tuple[bool, bool, bool]] = {}
+        for stem, silent_e, y_or_ie, exact_ok in key_stem_infos:
+            prev_s, prev_y, prev_x = key_by_stem.get(stem, (False, False, False))
+            key_by_stem[stem] = (
+                prev_s or silent_e,
+                prev_y or y_or_ie,
+                prev_x or exact_ok,
+            )
         if not key_by_stem:
             filtered.append(q)
             continue
 
-        # Token-level membership (no substring matches) to avoid false positives.
         matches = sum(
             1
-            for stem, (silent_e, y_or_ie) in key_by_stem.items()
+            for stem, (silent_e, y_or_ie, exact_ok) in key_by_stem.items()
             if _stems_match(
                 stem,
                 silent_e,
                 y_or_ie,
-                qa_stems,
+                exact_ok,
+                qa_exact_stems,
                 qa_silent_e_stubs,
                 qa_y_or_ie_stubs,
             )
         )
         match_ratio = matches / len(key_by_stem)
-        # Only treat as duplicate of an answered question when match >= 90%.
-        # Below-90% coverage may be consolidated but should not be filtered out.
         if match_ratio >= 0.90:
             logger.info(
                 "Filtering duplicate question (%.0f%% match): %s",
