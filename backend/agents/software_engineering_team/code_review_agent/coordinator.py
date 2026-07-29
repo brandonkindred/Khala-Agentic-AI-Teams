@@ -504,7 +504,8 @@ def run_coordinator(
           and, unless it is (or wraps) a ``DummyLLMClient``, must tolerate
           concurrent calls from worker threads: the map phase already fans
           chunk reviews out (see ``_map_chunks``), and the false-positive /
-          architecture-consistency / side-effect tail passes fan out the same
+          merged architecture/side-effect tail pass fan out
+          the same
           way (see ``_run_tail_passes``) unless ``_tail_passes_run_sequentially(llm)``
           returns True or the ``CODE_REVIEW_MAP_PARALLELISM`` budget resolves to
           <= 1, either of which forces the sequential fallback instead. The
@@ -537,10 +538,10 @@ def run_coordinator(
           approves (a chunk-local false positive never blocks the merge). The
           check is fail-safe — any verifier failure keeps the findings — and
           never touches the not-reviewed coverage findings. This pass and the
-          architecture-consistency / side-effect passes below it run
+          merged architecture/side-effect pass below it run
           concurrently via ``shared.concurrency.parallel_map`` when safe to do
           so, falling back to the sequential order (false-positive filter,
-          then architecture, then side-effect) otherwise; either way the
+          then the merged architecture/side-effect pass) otherwise; either way the
           merged ``issues`` order and content are identical (see
           ``_run_tail_passes``).
         - The code under review is never compacted or truncated; only the
@@ -713,20 +714,17 @@ def run_coordinator(
     # Built once and shared with the architecture-consistency pass below: both read the
     # same submission/repo_reader, so a single index avoids parsing the submission twice.
     # CodebaseIndex is read-only after construction (see its own docstring's Invariants),
-    # so this one instance is safe to hand to all three tail passes when they run
+    # so this one instance is safe to hand to the tail passes when they run
     # concurrently in worker threads (see ``_run_tail_passes``).
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
     # False-positive verification (skipped when the calling gate opted out via
     # ``skip_false_positive_filter`` -- e.g. a gate whose findings must never be
     # silently dropped; skipping only removes the drop-false-positives step, so
-    # it can only ever keep more findings), the architecture-consistency /
-    # cross-codebase-redundancy pass (whether the change contradicts the
-    # architecture document, or duplicates a capability that already exists
-    # elsewhere in the repository), and the side-effect / blast-radius pass
-    # (whether a changed function/method breaks a caller elsewhere in the
-    # codebase, or leaves a docstring/comment that no longer matches the
-    # implementation) are three separate, additive, once-per-submission checks
+    # it can only ever keep more findings), and the merged architecture/side-effect
+    # pass (architecture contradictions + cross-codebase redundancy, plus
+    # caller-impact / documentation mismatches) are two separate, additive,
+    # once-per-submission checks
     # the per-chunk map phase structurally cannot see. None reads another's
     # output, so they run concurrently when safe (see ``_run_tail_passes``) and
     # fold straight into the same dedupe/severity-gate/merge machinery below.

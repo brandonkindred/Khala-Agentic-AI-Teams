@@ -225,6 +225,16 @@ def _parse_findings(data: object) -> List[CodeReviewIssue]:
     return [parsed for item in raw if (parsed := _coerce_finding(item)) is not None]
 
 
+def parse_findings(data: object) -> List[CodeReviewIssue]:
+    """Public wrapper for :func:`_parse_findings`.
+
+    Exposed so other passes (e.g. the merged architecture/side-effect pass)
+    can reuse the same parsing contract without depending on private helper
+    names.
+    """
+    return _parse_findings(data)
+
+
 def _validate_finding_line(
     index: CodebaseIndex, file_path: str, line: Optional[int], pre_numbered: bool = False
 ) -> Optional[int]:
@@ -331,6 +341,18 @@ def _validate_findings(
             finding = finding.model_copy(update={"line": checked_line})
         validated.append(finding)
     return validated
+
+
+def validate_findings(
+    index: CodebaseIndex, findings: List[CodeReviewIssue], *, pre_numbered: bool = False
+) -> List[CodeReviewIssue]:
+    """Public wrapper for :func:`_validate_findings`.
+
+    Exposed so other passes (e.g. the merged architecture/side-effect pass)
+    can reuse the same validation contract without depending on private
+    helper names.
+    """
+    return _validate_findings(index, findings, pre_numbered=pre_numbered)
 
 
 def find_architecture_and_redundancy_issues(

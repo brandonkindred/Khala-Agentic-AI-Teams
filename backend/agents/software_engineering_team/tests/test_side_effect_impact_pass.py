@@ -39,6 +39,7 @@ from llm_service.clients.dummy import DummyLLMClient
 # can route between the two passes' calls without collision.
 _SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
 _MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_ARCH_PASS_ANCHOR = '"findings" array as instructed'
 
 
 def _input(files: Optional[Dict[str, str]] = None) -> CodeReviewInput:
@@ -682,13 +683,19 @@ def test_finds_caller_impact_across_the_repository() -> None:
 
 
 def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
-    calls = {"merged_pass": 0, "chunk_review": 0}
+    calls = {"merged_pass": 0, "arch_pass": 0, "side_effect_pass": 0, "chunk_review": 0}
 
     class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
                 calls["merged_pass"] += 1
                 return {"architecture_findings": [], "side_effect_findings": []}
+            if _ARCH_PASS_ANCHOR in prompt:
+                calls["arch_pass"] += 1
+                return {"findings": []}
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                calls["side_effect_pass"] += 1
+                return {"findings": []}
             calls["chunk_review"] += 1
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -696,6 +703,8 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
     run_coordinator(_CountingClient(), CodeReviewInput(files=files))
 
     assert calls["merged_pass"] == 1
+    assert calls["arch_pass"] == 0
+    assert calls["side_effect_pass"] == 0
 
 
 def test_coordinator_merges_side_effect_findings_into_final_output() -> None:

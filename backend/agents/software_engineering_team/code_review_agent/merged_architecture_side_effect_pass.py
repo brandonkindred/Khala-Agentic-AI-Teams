@@ -1,9 +1,8 @@
 """Merged architecture-consistency + side-effect-impact pass (one LLM call).
 
 Runs both additive whole-submission checks that the in-process coordinator
-previously scheduled as two independent Agent calls, using
-``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`` and
-:class:`MergedArchitectureSideEffectResponse`. Findings are split back into
+previously scheduled as two independent Agent calls, in a single pass with
+``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``. Findings are split back into
 the two lists downstream merge/gate logic already expects.
 
 Invariants:
@@ -33,7 +32,7 @@ from software_engineering_team.shared.models import SystemArchitecture
 from . import architecture_consistency_pass as arch_pass
 from . import side_effect_impact_pass as side_pass
 from .architecture_context import render_architecture_context
-from .false_positive_filter import CodebaseIndex, _code_fence_for
+from .false_positive_filter import CodebaseIndex, code_fence_for
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .profiles import ReviewProfile
@@ -129,7 +128,7 @@ def _run_pass(
     agent = Agent(
         model=model,
         system_prompt=MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT,
-        tools=side_pass._build_side_effect_tools(index),
+        tools=side_pass.build_side_effect_tools(index),
     )
     raw = str(agent(prompt)).strip()
     data = json.loads(raw)
@@ -146,16 +145,16 @@ def _run_pass(
     if arch_on:
         architecture_findings = _issues_from_half(
             data.get("architecture_findings"),
-            parse=arch_pass._parse_findings,
-            validate=arch_pass._validate_findings,
+            parse=arch_pass.parse_findings,
+            validate=arch_pass.validate_findings,
             index=index,
             pre_numbered=input_data.pre_numbered,
         )
     if side_on:
         side_effect_findings = _issues_from_half(
             data.get("side_effect_findings"),
-            parse=side_pass._parse_findings,
-            validate=side_pass._validate_findings,
+            parse=side_pass.parse_findings,
+            validate=side_pass.validate_findings,
             index=index,
             pre_numbered=input_data.pre_numbered,
         )
@@ -224,7 +223,7 @@ def _build_prompt(
             if p
         )
     if arch_doc:
-        doc_fence = _code_fence_for(arch_doc)
+        doc_fence = code_fence_for(arch_doc)
         parts.append("**Architecture document:**")
         parts.append(doc_fence)
         parts.append(arch_doc)
@@ -253,7 +252,7 @@ def _build_prompt(
             omitted = len(changed_files) - i
             break
         body = content[:remaining]
-        body_fence = _code_fence_for(body)
+        body_fence = code_fence_for(body)
         parts.append(f"### {path} ###")
         parts.append(body_fence)
         parts.append(body)

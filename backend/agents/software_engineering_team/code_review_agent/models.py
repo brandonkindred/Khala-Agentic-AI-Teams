@@ -584,10 +584,11 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
     omits ``start_line`` and ``pre_existing``: that pass's own
     ``_coerce_finding`` never populates either (its prompt's output format
     has no multi-line-anchor field, and only the side-effect pass emits
-    ``pre_existing``). Design-only: not yet consumed by
-    ``generate_structured``, ``coordinator.py``, or ``temporal/workflows.py`` —
-    wiring the merged pass into those call sites is tracked separately from
-    this schema design.
+    ``pre_existing``). This is the intended shape for the merged prompt's
+    Part 1 output contract. The in-process merged pass currently reuses the
+    standalone architecture pass's parsing/validation helpers to coerce and
+    validate per-half findings, rather than model-validating this class
+    directly.
     """
 
     severity: _ChunkReviewIssueSeverity = Field(
@@ -634,8 +635,10 @@ class SideEffectImpactFindingLLM(BaseModel):
     being silently coerced to ``False`` (or a truthy string to ``True``) as
     ``_coerce_bool`` does today. Intentionally omits ``start_line``: that
     pass's own ``_coerce_finding`` never populates it either (its prompt's
-    output format has no multi-line-anchor field). Design-only: not yet
-    consumed anywhere — see :class:`ArchitectureConsistencyFindingLLM`.
+    output format has no multi-line-anchor field). This is the intended shape for the
+    merged prompt's Part 2 output contract. The in-process merged pass currently
+    reuses the standalone side-effect pass's parsing/validation helpers to coerce
+    and validate per-half findings, rather than model-validating this class directly.
     """
 
     severity: _ChunkReviewIssueSeverity = Field(
@@ -689,8 +692,11 @@ class MergedArchitectureSideEffectResponse(BaseModel):
     same way each pass's own ``_coerce_finding`` does today) without having
     to re-derive which pass a given category value came from.
 
-    Consumed by ``merged_architecture_side_effect_pass`` for the in-process
-    coordinator path. Temporal workflow/activity wire-up remains separate.
+    This is the target reply schema for the merged prompt contract. The
+    current in-process merged pass implementation parses the raw JSON and then
+    validates/coerces each half independently via the standalone passes'
+    parsing/validation helpers; it does not model-validate this response object
+    as a whole.
 
     Both fields are required, not defaulted — mirroring
     :class:`ChunkReviewLLMResponse`'s identical rationale. The merged

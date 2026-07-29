@@ -1010,7 +1010,7 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
     )
     # combined fail + two single-file successes + 1 reduce-phase synthesis pass
     # (two recovered sub-reviews → one findings-only synthesis call) + 1
-    # side-effect/blast-radius pass call (its single prompt also inlines both
+    # merged architecture/side-effect pass call (its single prompt also inlines both
     # files together, so it hits the same synthetic failure and fails safe).
     assert client.calls == 5
     assert result.approved is True
@@ -1030,7 +1030,7 @@ def test_transient_failure_recovers_via_same_input_retry() -> None:
         ),
     )
     assert result.approved is True
-    # initial failure + successful retry + 1 side-effect/blast-radius pass call
+    # initial failure + successful retry + 1 merged architecture/side-effect pass call
     # (additive, runs once per submission after the map phase completes).
     assert len(client.prompts) == 3
 
@@ -1067,7 +1067,7 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
     assert result.approved is True
     # combined fail + a fail + a retry success + b success
     # + 1 reduce-phase synthesis pass (two recovered sub-reviews)
-    # + 1 side-effect/blast-radius pass call (its single prompt also inlines
+    # + 1 merged architecture/side-effect pass call (its single prompt also inlines
     # both files together, so it hits the same combined-fail branch and fails
     # safe).
     assert client.calls == 6
@@ -1190,7 +1190,7 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
     )
     assert result.approved is True
     # initial no-ladder exhaustion + successful same-input retry + 1
-    # side-effect/blast-radius pass call (additive, runs once per submission).
+    # merged architecture/side-effect pass call (additive, runs once per submission).
     assert client.calls == 3
 
 
@@ -2045,6 +2045,8 @@ def test_headerless_code_reviews_as_single_unnamed_block() -> None:
 
 
 def test_normalize_issue_path_blank_and_suffix_cases() -> None:
+    """_normalize_issue_path maps blank inputs and (lines X-Y of Z) labels
+    back to the underlying file path."""
     from code_review_agent.coordinator import _normalize_issue_path
 
     seg = FileSegment(path="a.py", content="x = 1", start_line=501, total_lines=900)
@@ -2053,7 +2055,14 @@ def test_normalize_issue_path_blank_and_suffix_cases() -> None:
     assert _normalize_issue_path("a.py (lines 501-505 of 900)", chunk) == "a.py"
     two = ReviewChunk(segments=[seg, FileSegment(path="b.py", content="y = 2", total_lines=1)])
     assert _normalize_issue_path("", two) == ""
-    # Non-dict issue entries are skipped defensively.
+
+
+def test_issues_from_chunk_output_skips_non_dict_entries() -> None:
+    """_issues_from_chunk_output defensively ignores non-dict LLM items."""
+    from code_review_agent.coordinator import _issues_from_chunk_output
+
+    seg = FileSegment(path="a.py", content="x = 1", start_line=501, total_lines=900)
+    chunk = ReviewChunk(segments=[seg])
     assert _issues_from_chunk_output(chunk, ["not-a-dict"]) == []
 
 
@@ -2152,28 +2161,33 @@ def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     assert [i.pre_existing for i in issues] == [True, True, False, False]
 
 
+_NO_OP_SUGGESTIONS = [
+    "No changes needed.",
+    "no changes needed",
+    "No change required",
+    "no change is required",
+    "No code changes needed.",
+    "No action needed.",
+    "no action is required",
+    "No fix needed",
+    "no fixes required",
+    "Nothing to change.",
+    "nothing to fix",
+    "Nothing to do",
+]
+
+
 @pytest.mark.parametrize(
     "suggestion",
-    [
-        "No changes needed.",
-        "no changes needed",
-        "No change required",
-        "no change is required",
-        "No code changes needed.",
-        "No action needed.",
-        "no action is required",
-        "No fix needed",
-        "no fixes required",
-        "Nothing to change.",
-        "nothing to fix",
-        "Nothing to do",
-    ],
+    _NO_OP_SUGGESTIONS,
 )
 def test_is_no_op_suggestion_matches_known_phrasings(suggestion: str) -> None:
+    """Known no-op phrasings are classified as no-ops."""
     assert is_no_op_suggestion(suggestion) is True
 
 
 def test_is_no_op_suggestion_spares_blank_and_substantive_text() -> None:
+    """Blank and substantive strings are not treated as no-ops."""
     assert is_no_op_suggestion("") is False
     assert is_no_op_suggestion(None) is False
     assert is_no_op_suggestion("   ") is False
@@ -2187,20 +2201,7 @@ def test_is_no_op_suggestion_spares_blank_and_substantive_text() -> None:
 
 @pytest.mark.parametrize(
     "suggestion",
-    [
-        "No changes needed.",
-        "no changes needed",
-        "No change required",
-        "no change is required",
-        "No code changes needed.",
-        "No action needed.",
-        "no action is required",
-        "No fix needed",
-        "no fixes required",
-        "Nothing to change.",
-        "nothing to fix",
-        "Nothing to do",
-    ],
+    _NO_OP_SUGGESTIONS,
 )
 def test_issue_with_no_op_suggestion_is_dropped(suggestion: str) -> None:
     """A finding whose suggested fix says, in full, that nothing needs to
@@ -2876,7 +2877,7 @@ def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> Non
 def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None:
     """Regression test: the same gap as
     ``test_single_chunk_summary_reflects_architecture_findings``, but for the
-    side-effect/blast-radius pass -- ``_merge_narrative`` was only ever told
+    merged architecture/side-effect pass -- ``_merge_narrative`` was only ever told
     about ``architecture_findings``, so a single-chunk review whose only new
     findings come from the side-effect pass silently dropped them from the
     narrative (returning the map phase's chunk summary verbatim, which never

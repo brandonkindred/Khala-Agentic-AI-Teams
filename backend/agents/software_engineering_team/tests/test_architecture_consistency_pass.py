@@ -38,6 +38,8 @@ from software_engineering_team.shared.models import ArchitectureComponent, Syste
 _ARCH_PASS_ANCHOR = '"findings" array as instructed'
 _MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
 
+_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
+
 
 def _arch(
     *,
@@ -450,9 +452,7 @@ def test_runs_when_no_architecture_document_or_overview() -> None:
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
-    result = find_architecture_and_redundancy_issues(
-        _EmptyFindings(), _input(architecture=arch)
-    )
+    result = find_architecture_and_redundancy_issues(_EmptyFindings(), _input(architecture=arch))
     assert result == []
     assert len(prompts) == 1
     assert "no formal" in prompts[0].lower() or "not provided" in prompts[0].lower()
@@ -492,9 +492,7 @@ def test_runs_when_no_architecture_at_all() -> None:
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
-    result = find_architecture_and_redundancy_issues(
-        _EmptyFindings(), _input(architecture=None)
-    )
+    result = find_architecture_and_redundancy_issues(_EmptyFindings(), _input(architecture=None))
     assert result == []
     assert len(prompts) == 1
 
@@ -621,23 +619,31 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
 
 
 def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
-    """The pass fires exactly once per submission, regardless of chunk count."""
-    calls = {"merged_pass": 0, "chunk_review": 0}
+    """The merged pass runs once per submission; standalone tail passes are not invoked."""
+    calls = {"merged_pass": 0, "arch_pass": 0, "side_effect_pass": 0, "chunk_review": 0}
 
     class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
                 calls["merged_pass"] += 1
                 return {"architecture_findings": [], "side_effect_findings": []}
+            if _ARCH_PASS_ANCHOR in prompt:
+                calls["arch_pass"] += 1
+                return {"findings": []}
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                calls["side_effect_pass"] += 1
+                return {"findings": []}
             calls["chunk_review"] += 1
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     # Two files -> at least the map phase runs more than once; the false-positive
-    # filter is disabled by default (its own env toggle) so this isolates the count.
+    # filter is disabled by default (its own env toggle) so this isolates tail-call count.
     files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
     run_coordinator(_CountingClient(), CodeReviewInput(files=files, architecture=_arch()))
 
     assert calls["merged_pass"] == 1
+    assert calls["arch_pass"] == 0
+    assert calls["side_effect_pass"] == 0
 
 
 def test_coordinator_merges_architecture_findings_into_final_output() -> None:
@@ -670,6 +676,36 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
     assert any(
         i.category == "refactor" and "HttpClient wrapper" in i.description for i in result.issues
     )
+
+
+def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
+    """A side-effect finding emitted by the merged pass is split into
+    the coordinator's final issues list."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [],
+                    "side_effect_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "mutates shared cache without notifying callers",
+                            "suggestion": "emit a cache-invalidation event after mutation",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = run_coordinator(
+        _FindingsClient(),
+        CodeReviewInput(files={"app/main.py": "def bar():\n    return 1\n"}, architecture=_arch()),
+    )
+    assert result.approved  # medium findings never block approval alone
+    assert any(i.category == "side-effects" and "cache" in i.description for i in result.issues)
 
 
 def test_coordinator_runs_pass_with_no_architecture() -> None:

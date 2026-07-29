@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work only in the git worktree at `.worktrees/issue-3654-merged-arch-side-effect` on branch `issue-3654-merged-arch-side-effect`.
+- Work only in the git worktree for this change.
 - Do not reference GitHub issue numbers in code, comments, or docs.
 - Design-by-Contract docstrings (`Preconditions` / `Postconditions` / `Invariants` where relevant) on every new public function.
 - Fail-safe: merged and architecture passes never raise to the coordinator; failures yield empty findings.
@@ -70,13 +70,13 @@ def test_architecture_body_allows_review_without_formal_document():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd .worktrees/issue-3654-merged-arch-side-effect/backend
+cd backend
 ../../backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_merged_review_prompt.py::test_architecture_body_allows_review_without_formal_document -v
 ```
 
 Use the absolute venv path if needed:
-`/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python`
+`backend/.venv/bin/python`
 
 Expected: FAIL (phrase absent from current body).
 
@@ -118,7 +118,7 @@ _ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running 
 - [ ] **Step 4: Run prompt tests**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_merged_review_prompt.py -v
 ```
 
@@ -198,7 +198,7 @@ def test_runs_when_no_architecture_at_all() -> None:
 - [ ] **Step 2: Run rewritten tests — expect FAIL**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_architecture_consistency_pass.py::test_runs_when_no_architecture_document_or_overview \
   agents/software_engineering_team/tests/test_architecture_consistency_pass.py::test_runs_when_no_architecture_at_all \
   -v
@@ -217,7 +217,7 @@ Update public docstring postconditions. Update `docs/ENV_VARS.md` so `CODE_REVIE
 - [ ] **Step 4: Run architecture pass suite**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_architecture_consistency_pass.py -v
 ```
 
@@ -283,7 +283,7 @@ Required cases:
 - [ ] **Step 2: Run tests — expect FAIL**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_merged_architecture_side_effect_pass.py -v
 ```
 
@@ -307,7 +307,7 @@ Lazy-export `find_architecture_and_side_effect_issues` from `__init__.py`. Updat
 - [ ] **Step 4: Run merged unit tests — expect PASS**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_merged_architecture_side_effect_pass.py -v
 ```
 
@@ -356,7 +356,7 @@ Update concurrent arrivals to `["filter", "merged"]` and barrier parties from 3 
 - [ ] **Step 2: Run retargeted tests — expect FAIL until wiring**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_code_review_coordinator.py -k "tail_pass or architecture_finding or side_effect" -v
 ```
 
@@ -396,7 +396,7 @@ Once-per-submission counters must count the merged call once.
 - [ ] **Step 5: Run focused suites — expect PASS**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_code_review_coordinator.py \
   agents/software_engineering_team/tests/test_architecture_consistency_pass.py \
   agents/software_engineering_team/tests/test_side_effect_impact_pass.py \
@@ -428,8 +428,8 @@ EOF
 - [ ] **Step 1: Broader code-review test surface**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3654-merged-arch-side-effect/backend
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend
+backend/.venv/bin/python -m pytest \
   agents/software_engineering_team/tests/test_code_review_coordinator.py \
   agents/software_engineering_team/tests/test_architecture_consistency_pass.py \
   agents/software_engineering_team/tests/test_side_effect_impact_pass.py \
@@ -447,13 +447,13 @@ Expected: all PASS.
 - [ ] **Step 2: Lint touched Python files**
 
 ```bash
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/ruff check \
+backend/.venv/bin/ruff check \
   agents/software_engineering_team/code_review_agent/merged_architecture_side_effect_pass.py \
   agents/software_engineering_team/code_review_agent/architecture_consistency_pass.py \
   agents/software_engineering_team/code_review_agent/coordinator.py \
   agents/software_engineering_team/code_review_agent/prompts.py \
   agents/software_engineering_team/tests/test_merged_architecture_side_effect_pass.py
-/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/ruff format --check \
+backend/.venv/bin/ruff format --check \
   agents/software_engineering_team/code_review_agent/merged_architecture_side_effect_pass.py \
   agents/software_engineering_team/code_review_agent/architecture_consistency_pass.py \
   agents/software_engineering_team/code_review_agent/coordinator.py \

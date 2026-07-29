@@ -832,6 +832,16 @@ def _code_fence_for(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def code_fence_for(content: str) -> str:
+    """Public wrapper for :func:`_code_fence_for`.
+
+    This is intentionally exposed for reuse by other prompt-building passes
+    (e.g. the merged architecture/side-effect pass) without reaching into
+    private helper names.
+    """
+    return _code_fence_for(content)
+
+
 def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     """Render one indexed finding block (anchor line + metadata) for the prompt.
 
@@ -878,7 +888,7 @@ def _build_group_prompt(
         - The returned text contains one indexed block per finding (index 0..n-1
           matching ``issues`` order) and never exceeds the inline budget for the
           primary file body. The task description and each acceptance criterion
-          are not capped so an oversized task field can never dominate the prompt 
+          are not capped so an oversized task field can never dominate the prompt
           or overflow the context.
     """
     _ = max_inline_chars  # retained for call-site compatibility
