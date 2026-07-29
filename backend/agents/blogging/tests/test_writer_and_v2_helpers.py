@@ -152,6 +152,129 @@ def test_writer_agent_deterministic_self_check_clean_draft() -> None:
     assert isinstance(out, list)
 
 
+def test_writer_agent_deterministic_self_check_rejects_non_string() -> None:
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    with pytest.raises(TypeError, match="draft must be a string"):
+        a._deterministic_self_check(None)  # type: ignore[arg-type]
+
+
+def test_writer_agent_deterministic_self_check_crlf_paragraphs() -> None:
+    """Windows-style blank lines still split into paragraphs for dash detection."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    draft = "First paragraph with an em—dash.\r\n\r\nSecond paragraph without dashes.\r\n"
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Em/en dash found in paragraph 1" in joined
+
+
+def test_writer_agent_deterministic_self_check_yourselves_counts() -> None:
+    """Plural reflexive 'yourselves' counts toward the reader-address minimum."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    draft = (
+        "Ask yourselves what matters. Challenge yourselves to ship. "
+        "Remind yourselves why the work counts for real teams every day.\n"
+    )
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Reader address" not in joined
+
+
+def test_writer_agent_deterministic_self_check_abbrev_not_staccato() -> None:
+    """Mid-sentence abbreviation periods must not create a false staccato streak."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    # Long sentences with mid-sentence abbrevs (lowercase continuation). Without
+    # case-sensitive lookahead protection these would split on internal periods.
+    draft = (
+        "You should evaluate observability tools, e.g. tracers and profilers, "
+        "before committing your team to a vendor. "
+        "You can also prefer clearer wording, i.e. deeper probes over slogans. "
+        "You will see U.S. teams succeed with careful measurement across releases.\n"
+    )
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Staccato" not in joined
+
+
+def test_writer_agent_deterministic_self_check_abbrev_lookahead_case_sensitive() -> None:
+    """``re.IGNORECASE`` must not make the ``[A-Z]`` sentence-boundary test ignore case."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    # If ``[A-Z]`` were case-insensitive, ``e.g. tracing`` would not be protected and
+    # the following short sentences would form a false staccato streak.
+    draft = (
+        "Please carefully review the available options, e.g. tracing platforms. Go now. Ship it.\n"
+    )
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Staccato" not in joined
+
+
+def test_writer_agent_deterministic_self_check_terminal_abbrev_preserves_boundary() -> None:
+    """A sentence-ending abbreviation period must still count as a sentence boundary."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    # Three short sentences; the first ends with ``etc.`` — that period is real.
+    draft = "Use standards, etc. Test carefully. Ship confidently.\n"
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Staccato" in joined
+
+
+def test_writer_agent_deterministic_self_check_terminal_us_preserves_boundary() -> None:
+    """Sentence-ending ``U.S.`` must keep its terminal period for staccato detection."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    draft = "We moved to the U.S. Act now. Go fast.\n"
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Staccato" in joined
+
+
+def test_writer_agent_call_agent_rejects_empty_prompt() -> None:
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="s", brand_spec_content="b")
+    with pytest.raises(ValueError, match="prompt must be a non-empty string"):
+        a._call_agent(a._model, "   ")
+
+
+def test_writer_agent_fallback_draft_rejects_empty_prompt() -> None:
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="s", brand_spec_content="b")
+    with pytest.raises(ValueError, match="prompt must be a non-empty string"):
+        a._fallback_draft_via_json("")
+
+
+def test_writer_agent_format_feedback_item_rejects_non_positive_index() -> None:
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="s", brand_spec_content="b")
+    item = FeedbackItem(category="x", severity="minor", issue="i")
+    with pytest.raises(ValueError, match="index must be a positive int"):
+        a._format_feedback_item_line(item, 0)
+
+
+def test_write_draft_to_path_rejects_parent_traversal(tmp_path) -> None:
+    from agents.blogging.blog_writer_agent.agent import _write_draft_to_path
+
+    with pytest.raises(ValueError, match="must not contain '\\.\\.'"):
+        _write_draft_to_path("draft", tmp_path / ".." / "escape.md")
+
+
 # ---------------------------------------------------------------------------
 # blog_writing_process_v2 module-level helpers
 # ---------------------------------------------------------------------------

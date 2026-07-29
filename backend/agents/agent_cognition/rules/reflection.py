@@ -170,11 +170,13 @@ class _CallCountingClient:
 
     ``compact_text`` may call the model one or more times before the proposal
     call, and ``complete_validated`` may retry on a schema miss; counting all of
-    them keeps ``ReflectionReport.llm_calls`` honest. Only ``complete`` and
-    ``complete_json`` are intercepted; every other attribute delegates unchanged.
+    them keeps ``ReflectionReport.llm_calls`` honest. This wrapper increments
+    ``calls`` when one of the model-entry methods is invoked directly on the
+    wrapper: ``complete``, ``complete_json``, ``complete_text`` (alias), and
+    ``chat``. Every other attribute delegates unchanged.
 
-    Invariant: ``calls`` equals the number of ``complete`` + ``complete_json``
-    invocations made through this wrapper.
+    Invariant: ``calls`` equals the number of counted entry-point invocations
+    made through this wrapper.
     """
 
     def __init__(self, inner: Any) -> None:
@@ -188,6 +190,15 @@ class _CallCountingClient:
     def complete_json(self, *args: Any, **kwargs: Any) -> Any:
         self.calls += 1
         return self._inner.complete_json(*args, **kwargs)
+
+    def complete_text(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        # Alias on the interface, but can be overridden by some clients.
+        return self._inner.complete_text(*args, **kwargs)
+
+    def chat(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self._inner.chat(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         # Reached only for attributes not defined on the wrapper (e.g.
@@ -487,7 +498,9 @@ def _materialize(
         return None
 
     if action == ProposalAction.RETIRE:
-        if not _is_active_target(item.target_rule_id, active_by_id):
+        if not isinstance(item.target_rule_id, str) or not _is_active_target(
+            item.target_rule_id, active_by_id
+        ):
             logger.warning(
                 "reflection: retire targets non-active rule %r; dropping", item.target_rule_id
             )
@@ -504,10 +517,12 @@ def _materialize(
         return None
 
     # ADD or AMEND require rule text; AMEND additionally needs an active target.
-    if not item.text or not item.text.strip():
+    if not isinstance(item.text, str) or not item.text.strip():
         logger.warning("reflection: %s proposal missing rule text; dropping", action.value)
         return None
-    if action == ProposalAction.AMEND and not _is_active_target(item.target_rule_id, active_by_id):
+    if action == ProposalAction.AMEND and (
+        not isinstance(item.target_rule_id, str) or not _is_active_target(item.target_rule_id, active_by_id)
+    ):
         logger.warning(
             "reflection: amend targets non-active rule %r; dropping", item.target_rule_id
         )
@@ -560,12 +575,16 @@ def _build_proposed_rule(
     except ValueError:
         logger.warning("reflection: unknown rule mode %r; dropping", raw_mode)
         return None
-    priority = (
+    raw_priority = (
         item.priority if item.priority is not None else (target_rule.priority if target_rule else 0)
     )
+    if isinstance(raw_priority, bool) or not isinstance(raw_priority, int):
+        logger.warning("reflection: priority %r is not an int; dropping", raw_priority)
+        return None
+    priority = raw_priority
     if not (_PG_INT32_MIN <= priority <= _PG_INT32_MAX):
         logger.warning(
-            "reflection: priority %d is outside the INT32 rule-column range; dropping",
+            "reflection: priority %r is outside the INT32 rule-column range; dropping",
             priority,
         )
         return None
