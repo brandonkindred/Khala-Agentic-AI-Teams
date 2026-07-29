@@ -2850,6 +2850,25 @@ def test_filter_duplicate_questions_strips_punctuation_before_stemming() -> None
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_matches_past_tense_silent_e() -> None:
+    """Past-tense stems that drop a silent e (stored->stor) must still match the
+    base form (store) so already-answered questions are not re-asked."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Where do we store and create data files?")
+    ]
+    # History uses past-tense "stored"/"created"; question uses base forms.
+    # Without silent-e normalization these would not meet the 90% threshold.
+    qa_history = (
+        "Q: Where was data stored and how were files created?\n"
+        "A: Data was stored in Postgres; files were created by the importer."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_keeps_non_duplicate() -> None:
     """A question with no overlapping stems in qa_history is not filtered out."""
     questions = [OpenQuestion(id="q1", question_text="Which cloud provider should we use?")]

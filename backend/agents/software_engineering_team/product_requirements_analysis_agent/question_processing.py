@@ -86,12 +86,16 @@ def filter_duplicate_questions(
 
         Preconditions: ``w`` is a cleaned token (lowercase).
         Postconditions: returns the stemmed token; never raises.
+            Past-tense stripping alone may drop a silent ``e``
+            (``stored`` -> ``stor``); callers must compare via
+            :func:`_stems_match` so ``store``/``stored`` still align.
         """
         w = w.strip()
         if len(w) <= 4:
             return w
 
-        # Past tense (stored -> store, needed -> need)
+        # Past tense (stored -> stor, needed -> need). Silent-e restoration
+        # is handled at match time so we do not guess verb morphology here.
         if w.endswith("ed") and len(w) > 5:
             base = w[:-2]
             if len(base) >= 4:
@@ -107,6 +111,24 @@ def filter_duplicate_questions(
             return w[:-1]
 
         return w
+
+    def _stems_match(stem: str, qa_stems: set[str]) -> bool:
+        """Return True when ``stem`` matches a qa stem, including silent-e variants.
+
+        Preconditions: ``stem`` is a non-empty stemmed token; ``qa_stems`` is a set
+            of stemmed tokens from qa history.
+        Postconditions: returns True iff ``stem`` is in ``qa_stems``, or the
+            silent-e pair ``stem``/``stem + "e"`` (or ``stem[:-1]`` when ``stem``
+            already ends with ``e``) is present. Never raises.
+        """
+        if stem in qa_stems:
+            return True
+        # stored->stor vs store: compare with/without trailing silent e.
+        if (stem + "e") in qa_stems:
+            return True
+        if stem.endswith("e") and stem[:-1] in qa_stems:
+            return True
+        return False
 
     qa_stems = {
         _stem(tok)
@@ -124,7 +146,8 @@ def filter_duplicate_questions(
             continue
 
         # Token-level membership (no substring matches) to avoid false positives.
-        matches = sum(1 for stem in key_stems if stem in qa_stems)
+        # Silent-e variants keep store/stored and create/created aligned.
+        matches = sum(1 for stem in key_stems if _stems_match(stem, qa_stems))
         match_ratio = matches / len(key_stems)
         # Only treat as duplicate of an answered question when match >= 90%.
         # Below-90% coverage may be consolidated but should not be filtered out.
