@@ -317,7 +317,9 @@ def finalize_branding_activity(
             appended = branding_store.append_brand_version(client_id, brand_id, output)
             if appended is None:
                 # Brand could have been deleted between checkpoint read and write.
-                raise RuntimeError(
+                from branding_team.store import BrandVersionAppendConflict
+
+                raise BrandVersionAppendConflict(
                     "Brand row disappeared while appending brand version "
                     f"(client_id={client_id}, brand_id={brand_id})"
                 )

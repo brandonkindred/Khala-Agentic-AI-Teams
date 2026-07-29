@@ -47,6 +47,16 @@ logger = logging.getLogger(__name__)
 _STORE = "branding"
 
 
+class BrandVersionAppendConflict(RuntimeError):
+    """Raised when a brand-version append cannot persist because the brand row is gone.
+
+    Subclasses ``RuntimeError`` so broad ``except Exception`` / job-failure paths
+    still catch it, while the sync ``POST /run`` handler can single it out for
+    HTTP 409 without mapping unrelated runtime failures (e.g. LLM/provider errors)
+    to a client conflict.
+    """
+
+
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 

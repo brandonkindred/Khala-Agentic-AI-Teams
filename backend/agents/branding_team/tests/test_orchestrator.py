@@ -48,6 +48,7 @@ from branding_team.models import (
     WritingGuidelines,
 )
 from branding_team.shared.coro_runner import run_coroutine
+from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests._fake_postgres import install_fake_postgres
 from branding_team.tests.conftest import make_mission
 
@@ -429,7 +430,8 @@ def test_run_with_store_append_brand_version_none_raises() -> None:
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         with pytest.raises(
-            RuntimeError, match="Brand row disappeared while appending brand version"
+            BrandVersionAppendConflict,
+            match="Brand row disappeared while appending brand version",
         ):
             orchestrator.run(
                 mission=mission,
@@ -440,14 +442,42 @@ def test_run_with_store_append_brand_version_none_raises() -> None:
             )
 
 
-def test_run_branding_team_route_maps_append_runtime_error_to_409() -> None:
-    """Sync ``POST /run`` must map append-failure RuntimeError to HTTP 409.
+def test_run_branding_team_route_maps_append_conflict_to_409() -> None:
+    """Sync ``POST /run`` must map ``BrandVersionAppendConflict`` to HTTP 409.
 
     Matches the background path's failed-job handling rather than leaking an
-    unhandled 500 when the brand row disappears mid-run.
+    unhandled 500 when the brand row disappears mid-run. Unrelated
+    ``RuntimeError`` values must not be remapped to 409.
     """
     from fastapi import HTTPException
 
+    from branding_team.api.models import RunBrandingTeamRequest
+    from branding_team.api.routes import sessions as sessions_mod
+    from branding_team.store import BrandVersionAppendConflict
+
+    payload = RunBrandingTeamRequest(
+        company_name="Northstar Labs",
+        company_description="A strategic studio helping product teams ship cohesive digital experiences",
+        target_audience="enterprise product leaders",
+        human_approved=True,
+        client_id="c1",
+        brand_id="b1",
+    )
+    with patch(
+        "branding_team.api.main.orchestrator.run",
+        side_effect=BrandVersionAppendConflict(
+            "Brand row disappeared while appending brand version (client_id=c1, brand_id=b1)"
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            sessions_mod.run_branding_team(payload)
+
+    assert exc_info.value.status_code == 409
+    assert "Brand row disappeared" in str(exc_info.value.detail)
+
+
+def test_run_branding_team_route_does_not_remap_unrelated_runtime_error() -> None:
+    """LLM/provider ``RuntimeError`` must not become HTTP 409."""
     from branding_team.api.models import RunBrandingTeamRequest
     from branding_team.api.routes import sessions as sessions_mod
 
@@ -461,15 +491,10 @@ def test_run_branding_team_route_maps_append_runtime_error_to_409() -> None:
     )
     with patch(
         "branding_team.api.main.orchestrator.run",
-        side_effect=RuntimeError(
-            "Brand row disappeared while appending brand version (client_id=c1, brand_id=b1)"
-        ),
+        side_effect=RuntimeError("LLM provider unavailable"),
     ):
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(RuntimeError, match="LLM provider unavailable"):
             sessions_mod.run_branding_team(payload)
-
-    assert exc_info.value.status_code == 409
-    assert "Brand row disappeared" in str(exc_info.value.detail)
 
 
 def test_run_phase_stops_at_strategic_core() -> None:

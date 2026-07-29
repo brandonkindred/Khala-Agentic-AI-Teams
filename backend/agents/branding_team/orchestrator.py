@@ -7,8 +7,8 @@ integrations (market research + design assets) concurrently, runs brand-
 compliance checks separately, assembles the final ``TeamOutput``, and appends
 a brand version when a store is attached. If that append returns ``None``
 (brand row deleted between resolve and finalize), ``run`` raises
-``RuntimeError`` so callers can mark the run failed instead of reporting
-success without persistence.
+``BrandVersionAppendConflict`` so callers can mark the run failed instead of
+reporting success without persistence.
 
 Phase gate logic:
   Phase 1 → 2: Strategy is validated with stakeholders
@@ -179,10 +179,10 @@ class BrandingTeamOrchestrator:
         the graph because their inputs come from the API request.
 
         Raises:
-            RuntimeError: If ``append_brand_version`` returns ``None``
-                (brand row deleted between resolve and finalize), so the
-                caller can mark the run as failed instead of reporting
-                success without persistence.
+            BrandVersionAppendConflict: If ``append_brand_version`` returns
+                ``None`` (brand row deleted between resolve and finalize), so the
+                caller can mark the run as failed instead of reporting success
+                without persistence.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
@@ -242,7 +242,9 @@ class BrandingTeamOrchestrator:
             if appended is None:
                 # Brand could have been deleted between resolve and finalize.
                 # Surface a failure instead of returning an output that wasn't persisted.
-                raise RuntimeError(
+                from .store import BrandVersionAppendConflict
+
+                raise BrandVersionAppendConflict(
                     "Brand row disappeared while appending brand version "
                     f"(client_id={resolved_client_id}, brand_id={brand_id})"
                 )

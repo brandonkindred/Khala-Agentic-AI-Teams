@@ -467,8 +467,10 @@ def test_finalize_activity_raises_when_append_brand_version_returns_none(monkeyp
         ) as mock_update,
         patch.object(main_mod.branding_store, "append_brand_version", return_value=None),
     ):
+        from branding_team.store import BrandVersionAppendConflict
+
         with pytest.raises(
-            RuntimeError,
+            BrandVersionAppendConflict,
             match="Brand row disappeared while appending brand version",
         ):
             activities.finalize_branding_activity(

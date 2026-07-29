@@ -41,11 +41,13 @@ def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
     Postconditions:
         Returns the assembled ``TeamOutput`` on success.
         When persistence fails because the brand row disappeared mid-run
-        (``orchestrator.run`` raises ``RuntimeError``), maps that to HTTP 409
-        instead of an unhandled 500 — matching the background path's failed-job
-        handling rather than reporting success without a persisted version.
+        (``orchestrator.run`` raises ``BrandVersionAppendConflict``), maps
+        that to HTTP 409 instead of an unhandled 500. Other ``RuntimeError``
+        values (e.g. LLM/provider failures) are not remapped — they keep the
+        server's default 500 handling rather than being treated as conflicts.
     """
     from branding_team.api import main as _main
+    from branding_team.store import BrandVersionAppendConflict
 
     mission = _mission_from_payload(payload)
     human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
@@ -61,7 +63,7 @@ def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
             brand_id=payload.brand_id,
             target_phase=target_phase,
         )
-    except RuntimeError as exc:
+    except BrandVersionAppendConflict as exc:
         # Brand deleted between resolve and append_brand_version — controlled
         # conflict response rather than an unhandled 500.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
