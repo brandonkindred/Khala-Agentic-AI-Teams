@@ -1584,10 +1584,9 @@ async def test_workflow_tail_passes_in_flight_concurrently(
 
     import code_review_agent.architecture_consistency_pass as acp
     import code_review_agent.false_positive_filter as fpf
-    from code_review_agent.models import CodeReviewIssue
     import code_review_agent.side_effect_impact_pass as sep
+    from code_review_agent.models import CodeReviewIssue
     from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
-
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Worker
 
@@ -1703,10 +1702,9 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
 
     import code_review_agent.architecture_consistency_pass as acp
     import code_review_agent.false_positive_filter as fpf
-    from code_review_agent.models import CodeReviewIssue
     import code_review_agent.side_effect_impact_pass as sep
+    from code_review_agent.models import CodeReviewIssue
     from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
-
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Worker
 
@@ -1863,10 +1861,9 @@ async def test_workflow_tail_pass_partial_failure_semantics(
 
     import code_review_agent.architecture_consistency_pass as acp
     import code_review_agent.false_positive_filter as fpf
-    from code_review_agent.models import CodeReviewIssue
     import code_review_agent.side_effect_impact_pass as sep
+    from code_review_agent.models import CodeReviewIssue
     from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
-
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Worker
 
