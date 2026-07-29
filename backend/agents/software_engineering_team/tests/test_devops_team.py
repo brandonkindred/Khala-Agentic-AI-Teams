@@ -1883,6 +1883,30 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "staging"
 
+    def test_build_legacy_spec_recognizes_parenthesized_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-wrap-1",
+            task_description="Deploy to (production)",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_recognizes_quoted_prod(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-wrap-2",
+            task_description='Target "prod"',
+            requirements="Rollback plan",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_recognizes_backtick_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-wrap-3",
+            task_description="Deploy to `production`",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
     def test_build_legacy_spec_always_has_rollback(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-3",
