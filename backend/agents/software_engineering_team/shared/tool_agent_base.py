@@ -44,15 +44,6 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from strands.types.exceptions import (
-    ConcurrencyException,
-    ContextWindowOverflowException,
-    EventLoopException,
-    MaxTokensReachedException,
-    ModelThrottledException,
-    ProviderTokenCountError,
-)
-
 from llm_service.interface import LLMError
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
@@ -62,18 +53,42 @@ from software_engineering_team.shared.v2_models import (
     ToolAgentPhaseOutput,
 )
 
+
+def _strands_llm_call_errors() -> Tuple[type, ...]:
+    """Collect Strands provider/runtime exception types available in this install.
+
+    Preconditions: none (import of ``strands.types.exceptions`` may fail).
+    Postconditions: returns a (possibly empty) tuple of exception classes that
+    exist on the installed ``strands-agents`` package. Newer symbols such as
+    ``ConcurrencyException`` are included only when present, so this module
+    still imports under the declared floor (``strands-agents>=1.35``).
+    """
+    try:
+        from strands.types import exceptions as strands_exc
+    except ImportError:  # pragma: no cover - strands is a required dependency
+        return ()
+    names = (
+        "ModelThrottledException",
+        "ContextWindowOverflowException",
+        "MaxTokensReachedException",
+        "ConcurrencyException",
+        "EventLoopException",
+        "ProviderTokenCountError",
+    )
+    found: List[type] = []
+    for name in names:
+        cls = getattr(strands_exc, name, None)
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            found.append(cls)
+    return tuple(found)
+
+
 # Strands provider/runtime failures that are not subclasses of ``LLMError`` but
 # are still routine model-call failures. ``_run_agent`` normalizes these to
 # ``LLMError`` so per-issue handlers (e.g. ``problem_solve``) can isolate them
-# without catching programming bugs.
-_STRANDS_LLM_CALL_ERRORS = (
-    ModelThrottledException,
-    ContextWindowOverflowException,
-    MaxTokensReachedException,
-    ConcurrencyException,
-    EventLoopException,
-    ProviderTokenCountError,
-)
+# without catching programming bugs. Built defensively so older SDK installs
+# missing newer symbols still load this module.
+_STRANDS_LLM_CALL_ERRORS = _strands_llm_call_errors()
 
 # Only these named placeholders are substituted on the one-shot review path.
 # Values are never re-scanned, so task text/code may safely contain the

@@ -16,6 +16,7 @@ from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     ReviewToolAgent,
     SingleIssueProblemSolveMixin,
+    _strands_llm_call_errors,
     fill_review_prompt,
     lenient_json_object,
     relevant_code_for_issue,
@@ -808,6 +809,31 @@ def test_problem_solve_strands_throttle_isolates_per_issue(monkeypatch):
     assert calls["n"] == 2
     assert "fixed 1 of 2" in out.summary
     assert out.files.get("x.ts") == "new"
+
+
+def test_strands_llm_call_errors_skips_missing_symbols(monkeypatch):
+    """Newer Strands exception names must be optional so the floor SDK still loads.
+
+    Simulates an older ``strands.types.exceptions`` module that lacks
+    ``ConcurrencyException`` and asserts collection succeeds without ImportError.
+    """
+    import sys
+    import types
+
+    fake = types.ModuleType("strands.types.exceptions")
+
+    class _Throttle(Exception):
+        pass
+
+    fake.ModelThrottledException = _Throttle
+    # Intentionally omit ConcurrencyException and other newer symbols.
+    monkeypatch.setitem(sys.modules, "strands.types.exceptions", fake)
+    # Parent packages may already be imported; patch getattr path via module.
+    monkeypatch.setitem(sys.modules, "strands.types", types.ModuleType("strands.types"))
+    sys.modules["strands.types"].exceptions = fake  # type: ignore[attr-defined]
+
+    found = _strands_llm_call_errors()
+    assert found == (_Throttle,)
 
 
 def test_problem_solve_unexpected_error_propagates(monkeypatch):
