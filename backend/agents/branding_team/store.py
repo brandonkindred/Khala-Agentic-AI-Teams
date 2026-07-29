@@ -117,6 +117,13 @@ class BrandingStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="get_client")
     def get_client(self, client_id: str) -> Optional[Client]:
+        """Retrieve a client by id.
+
+        Preconditions:
+            ``client_id`` is a non-empty string.
+        Postconditions:
+            Returns the validated ``Client`` when a row exists, else ``None``.
+        """
         row = self._fetch_one("SELECT data FROM branding_clients WHERE id = %s", (client_id,))
         if row is None:
             return None
@@ -151,6 +158,16 @@ class BrandingStore(PostgresHelperMixin):
         contact_info: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> Client:
+        """Insert a new client row and return the created model.
+
+        Preconditions:
+            ``name`` is a non-empty string; ``contact_info`` / ``notes`` are
+            optional free-form strings when provided.
+        Postconditions:
+            Returns a ``Client`` whose ``id`` is freshly minted
+            (``client_<hex>``) and whose timestamps are set. A matching row
+            exists in ``branding_clients``.
+        """
         client_id = f"client_{uuid4().hex[:12]}"
         now = _now_iso()
         client = Client(
@@ -173,6 +190,15 @@ class BrandingStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="get_brand")
     def get_brand(self, client_id: str, brand_id: str) -> Optional[Brand]:
+        """Retrieve a brand scoped to its owning client.
+
+        Preconditions:
+            ``client_id`` and ``brand_id`` are non-empty strings.
+        Postconditions:
+            Returns the validated ``Brand`` when a row exists for that
+            ``(id, client_id)`` pair, else ``None`` (including when the brand
+            exists under a different client).
+        """
         row = self._fetch_one(
             "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
             (brand_id, client_id),
@@ -274,6 +300,20 @@ class BrandingStore(PostgresHelperMixin):
         mission: BrandingMission,
         name: Optional[str] = None,
     ) -> Optional[Brand]:
+        """Insert a draft brand for an existing client.
+
+        Preconditions:
+            ``client_id`` is a non-empty string; ``mission`` is a validated
+            ``BrandingMission``; ``name`` is optional (defaults to
+            ``mission.company_name``).
+        Postconditions:
+            Returns ``None`` when no client row exists for ``client_id``
+            (no brand row is written). Otherwise returns a ``Brand`` with a
+            freshly minted ``brand_<hex>`` id, ``status=draft``,
+            ``version=0``, empty history, and a matching
+            ``branding_brands`` row. Best-effort profile association is
+            attempted after commit and never raises.
+        """
         with self._transaction() as cur:
             cur.execute("SELECT 1 FROM branding_clients WHERE id = %s", (client_id,))
             if cur.fetchone() is None:

@@ -187,11 +187,11 @@ no fragile regex parsing of the DDL.
 
 `shared.postgres.testing.real_postgres_schema(schema, *, scope="module")`
 builds a ready-to-use **autouse** pytest fixture for a team's `TeamSchema`:
-it skips the test when `POSTGRES_HOST` is unset, registers the schema, yields,
-then truncates the schema's tables on teardown **when run without pytest-xdist**.
-The returned fixture always has `autouse=True`, so assigning it is enough —
-tests in scope do not need to request it by name. It wraps the same
-`register_team_schemas` / `truncate_team_tables` calls every hand-rolled
+it skips the test when `POSTGRES_HOST` is unset, registers the schema,
+truncates before yielding and again on teardown **when run without
+pytest-xdist**. The returned fixture always has `autouse=True`, so assigning
+it is enough — tests in scope do not need to request it by name. It wraps the
+same `register_team_schemas` / `truncate_team_tables` calls every hand-rolled
 real-Postgres test fixture in this repo already makes (see
 `branding_team/tests/test_store.py`'s `_branding_schema`), so a
 team can opt a test module into real Postgres with one line instead of
@@ -203,7 +203,9 @@ from shared.postgres.testing import real_postgres_schema
 
 pytestmark = pytest.mark.integration
 
-_branding_schema = real_postgres_schema(BRANDING_SCHEMA)  # module-scoped, always autouse
+# Default module scope; use scope="function" when tests assert global row counts
+# (as branding_team/tests/test_store.py does).
+_branding_schema = real_postgres_schema(BRANDING_SCHEMA)
 ```
 
 Like every other real-Postgres test in this repo, it assumes Postgres is
@@ -211,13 +213,13 @@ already reachable via `POSTGRES_HOST` — a CI `services:` container or a local
 `docker compose -f docker/docker-compose.yml up -d postgres` — it does not
 spin up a Postgres server itself (no `testcontainers` dependency).
 
-**Under pytest-xdist (`-n`, any count) teardown truncation is skipped
-entirely**, not attempted per-worker: xdist instantiates a module/session-scoped
-fixture independently per worker process, and its default scheduling doesn't
-guarantee every test from one module lands on the same worker, so an
-uncoordinated `TRUNCATE` from one worker's teardown could wipe rows a sibling
-worker is still exercising. Coordinating a single truncate after every worker
-finishes needs a real `pytest_sessionfinish` hook registered from a
+**Under pytest-xdist (`-n`, any count) setup and teardown truncation are
+skipped entirely**, not attempted per-worker: xdist instantiates a
+module/session-scoped fixture independently per worker process, and its
+default scheduling doesn't guarantee every test from one module lands on the
+same worker, so an uncoordinated `TRUNCATE` from one worker could wipe rows a
+sibling worker is still exercising. Coordinating a single truncate after every
+worker finishes needs a real `pytest_sessionfinish` hook registered from a
 `conftest.py` (that hook fires once in the xdist controller, which a bare
 fixture can never reach) — until a team needs that guarantee, tests sharing a
 schema under `-n` should isolate via unique row identifiers instead (the
