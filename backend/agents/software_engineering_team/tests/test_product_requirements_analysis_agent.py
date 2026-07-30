@@ -686,6 +686,101 @@ def test_parse_spec_review_response_coerces_malformed_question_without_raising()
     assert result.open_questions[0].options == []
 
 
+def test_parse_spec_review_response_does_not_cap_open_questions() -> None:
+    """parse_spec_review_response keeps all parsed open questions uncapped.
+
+    Cap is applied after organizational/duplicate filters so later material
+    questions are not discarded when earlier entries are filtered out.
+    """
+    from product_requirements_analysis_agent.question_processing import MAX_OPEN_QUESTIONS
+
+    questions = [
+        {"id": f"q{i}", "question_text": f"Question {i}?", "options": []}
+        for i in range(MAX_OPEN_QUESTIONS + 5)
+    ]
+    result = parse_spec_review_response(
+        {
+            "issues": [],
+            "gaps": [],
+            "open_questions": questions,
+            "summary": "Reviewed",
+        }
+    )
+
+    assert len(result.open_questions) == MAX_OPEN_QUESTIONS + 5
+    assert result.open_questions[-1].id == f"q{MAX_OPEN_QUESTIONS + 4}"
+
+
+def test_open_question_cap_applied_after_organizational_filter() -> None:
+    """Organizational filtering must run before any open-question cap.
+
+    Ten prohibited process questions followed by a material deployment question
+    must leave the deployment question retained (not truncated before the filter).
+    """
+    from product_requirements_analysis_agent.question_processing import (
+        MAX_OPEN_QUESTIONS,
+        cap_open_questions,
+        filter_organizational_questions,
+    )
+
+    org_questions = [
+        OpenQuestion(
+            id=f"org_{i}",
+            question_text="Who has final decision / sign-off on this feature?",
+            options=[],
+        )
+        for i in range(MAX_OPEN_QUESTIONS)
+    ]
+    material = OpenQuestion(
+        id="deploy_l1",
+        question_text="Where should the application be deployed?",
+        options=[],
+        category="infrastructure",
+        priority="high",
+    )
+    parsed = parse_spec_review_response(
+        {
+            "issues": [],
+            "gaps": [],
+            "open_questions": [
+                {
+                    "id": q.id,
+                    "question_text": q.question_text,
+                    "options": [],
+                    "category": q.category,
+                    "priority": q.priority,
+                }
+                for q in [*org_questions, material]
+            ],
+            "summary": "Reviewed",
+        }
+    )
+    assert len(parsed.open_questions) == MAX_OPEN_QUESTIONS + 1
+
+    filtered = filter_organizational_questions(parsed.open_questions)
+    # Cap is applied only after later consolidation/dedupe in the agent; this
+    # asserts filter-before-cap ordering for retained material questions.
+    capped = cap_open_questions(filtered)
+
+    assert [q.id for q in capped] == ["deploy_l1"]
+
+
+def test_cap_open_questions_preserves_order_and_limit() -> None:
+    """cap_open_questions keeps the first N questions in order."""
+    from product_requirements_analysis_agent.question_processing import (
+        MAX_OPEN_QUESTIONS,
+        cap_open_questions,
+    )
+
+    questions = [
+        OpenQuestion(id=f"q{i}", question_text=f"Question {i}?", options=[])
+        for i in range(MAX_OPEN_QUESTIONS + 3)
+    ]
+    capped = cap_open_questions(questions)
+    assert [q.id for q in capped] == [f"q{i}" for i in range(MAX_OPEN_QUESTIONS)]
+    assert cap_open_questions(questions[:3]) == questions[:3]
+
+
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
     llm = MagicMock()
@@ -2715,6 +2810,65 @@ def test_assess_sub_phase_gaps_passes_existing_ids_to_prompt() -> None:
     prompt = llm.last_prompt
     assert "P1.deploy.a" in prompt
     assert "P1.deploy.b" in prompt
+
+
+def test_assess_sub_phase_gaps_survives_brace_bearing_spec() -> None:
+    """Gap analysis must not raise when the spec contains curly braces.
+
+    Preconditions: spec_content includes brace tokens that would break str.format,
+        including a literal later template slot name such as ``{all_decisions}``.
+    Postconditions: assess returns; the substituted prompt includes those tokens
+        literally in the spec excerpt (one-pass substitution, no rescanning).
+    """
+    llm = _TrackingStubClient(
+        {"is_complete": True, "completeness_rationale": "Done.", "follow_up_questions": []}
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    brace_spec = (
+        "Use template {curly} and also }unbalanced{ braces; document {all_decisions}."
+    )
+    is_complete, follow_ups = agent._assess_sub_phase_gaps(
+        SOPSubPhase.DEPLOYMENT,
+        brace_spec,
+        [],
+        {},
+    )
+    assert is_complete is True
+    assert follow_ups == []
+    assert llm.last_prompt is not None
+    assert "{curly}" in llm.last_prompt
+    assert "}unbalanced{" in llm.last_prompt
+    # Spec excerpt must keep the literal token; it must not be overwritten by the
+    # later decisions payload.
+    assert "document {all_decisions}." in llm.last_prompt
+
+
+def test_gap_analysis_and_context_prompt_invariants() -> None:
+    """Prompt catalog invariants for the consolidated prompts cleanup.
+
+    Preconditions: prompts module is importable.
+    Postconditions: gap-analysis schema uses concrete booleans, a generic follow-up
+        example (not AWS regions), and context-discovery schema includes source;
+        unused architecture-approval prompt is absent.
+    """
+    from product_requirements_analysis_agent import prompts as pra_prompts
+
+    gap = pra_prompts.SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT
+    assert '"is_complete": true/false' not in gap
+    assert '"is_complete": false' in gap
+    assert "Which AWS regions should the application be deployed in?" not in gap
+    assert "us-east-1 (Virginia)" not in gap
+    assert "What remaining detail is needed to close this gap for the sub-phase?" in gap
+
+    ctx = pra_prompts.CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT
+    assert '"source": "context_discovery"' in ctx
+
+    consolidate = pra_prompts.CONSOLIDATE_QUESTIONS_PROMPT
+    assert "source," in consolidate or "source, constraint_domain" in consolidate
+
+    assert not hasattr(pra_prompts, "SOP_ARCHITECTURE_APPROVAL_PROMPT")
+    arch = pra_prompts.SOP_ARCHITECTURE_ANALYSIS_PROMPT
+    assert "Mermaid is allowed only inside diagrams" in arch
 
 
 def test_max_gap_rounds_constant() -> None:
