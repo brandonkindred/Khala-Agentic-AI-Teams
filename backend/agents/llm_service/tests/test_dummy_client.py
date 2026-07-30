@@ -13,6 +13,7 @@ from llm_service.clients.dummy import (
     _STRIP_VERBS,
     CODE_REVIEW_MIN_PROMPT_LENGTH,
     _aggregated_user_tool_text,
+    _content_to_text,
     _extract_name_from_hint,
     _last_user_text,
 )
@@ -61,6 +62,65 @@ def test_dummy_complete_json_accepts_schema_kwarg_as_noop() -> None:
     assert c.supports_structured_output() is False
     j = c.complete_json("hello", temperature=0.1, schema={"type": "object"})
     assert isinstance(j, dict)
+
+
+def test_content_to_text_serializes_json_tool_result_blocks() -> None:
+    content = [
+        {"json": {"request": "architecture_document with components and overview"}},
+    ]
+    text = _content_to_text(content)
+    assert "architecture_document" in text
+    assert "components" in text
+    assert "overview" in text
+
+
+@pytest.mark.asyncio
+async def test_structured_output_routes_on_json_tool_result_content() -> None:
+    class _ArchStub(BaseModel):
+        overview: str
+        architecture_document: str
+        components: list
+        diagrams: dict
+        decisions: list
+
+    c = DummyLLMClient()
+    prompt = [
+        {
+            "role": "tool",
+            "content": [
+                {"json": {"request": "architecture_document with components and overview"}},
+            ],
+        }
+    ]
+    events = []
+    async for event in c.structured_output(_ArchStub, prompt):
+        events.append(event)
+    assert isinstance(events[0]["output"], _ArchStub)
+    assert "Dummy architecture" in events[0]["output"].overview
+
+
+@pytest.mark.asyncio
+async def test_dummy_stream_empty_system_prompt_content_clears_stale_string() -> None:
+    """An explicit empty content list must override a stale branding system_prompt."""
+    c = DummyLLMClient()
+    messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
+    chunks: list[str] = []
+    async for event in c.stream(
+        messages,  # type: ignore[arg-type]
+        system_prompt=(
+            "You must return brand_purpose, mission_statement, and vision_statement "
+            "for the brand strategy agent."
+        ),
+        system_prompt_content=[],
+    ):
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        text = delta.get("text")
+        if text:
+            chunks.append(text)
+    assert chunks, "expected a text content delta"
+    data = json.loads(chunks[0])
+    assert "brand_purpose" not in data
+    assert data.get("status") == "ok" or "output" in data
 
 
 def test_last_user_text_concatenates_all_text_blocks() -> None:

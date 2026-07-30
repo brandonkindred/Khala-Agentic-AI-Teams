@@ -177,6 +177,9 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
 def _content_to_text(content: Any) -> str:
     """Flatten a message ``content`` field into newline-joined text.
 
+    Recognizes ``text``, bare strings, nested ``toolResult``, and ``json``
+    blocks (serialized like ``_tool_result_content_to_text`` in the adapter).
+
     Preconditions:
         - ``content`` is a string, a list of Strands content blocks, or other.
 
@@ -193,6 +196,8 @@ def _content_to_text(content: Any) -> str:
             parts.append(str(block["text"]))
         elif isinstance(block, str):
             parts.append(block)
+        elif isinstance(block, dict) and "json" in block:
+            parts.append(json.dumps(block["json"]))
         elif isinstance(block, dict) and "toolResult" in block:
             tr = block.get("toolResult") or {}
             nested = _content_to_text(tr.get("content", []))
@@ -347,14 +352,15 @@ class DummyLLMClient(LLMClient, Model):
         invoking that tool with data from the ``complete_json`` pattern matcher.
         Otherwise yields a plain text response.
 
-        When ``system_prompt_content`` is supplied, it is treated as
-        authoritative over the legacy ``system_prompt`` string so branding
-        Phase 1 branches that anchor on system text still match even if a
-        stale string is also present.
+        When ``system_prompt_content`` is supplied (including an empty list), it
+        is treated as authoritative over the legacy ``system_prompt`` string so
+        branding Phase 1 branches that anchor on system text still match even
+        if a stale string is also present, and an explicit empty override clears
+        that stale string.
         """
         del tool_choice, invocation_state  # accepted for ABC compatibility
         user_text = _last_user_text(messages)
-        if system_prompt_content:
+        if system_prompt_content is not None:
             system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
         # Route through the existing complete_json pattern matcher for rich responses
