@@ -463,3 +463,29 @@ def test_majority_file_wins_for_multi_file_group() -> None:
     result = consolidate_side_effect_issues(issues, index)
     assert len(result) == 1
     assert result[0].file_path == "app/foo.py"
+
+
+def test_unanchored_citation_merge_keeps_known_file_anchor() -> None:
+    """Blank-path members that citation-group with an anchored finding must not wipe the path."""
+    content = "def foo():\n    return 1\n"
+    index = _index({"app/foo.py": content})
+    # Unanchored map-phase-style finding listed first (tie/earliest would
+    # otherwise let "" win majority), citing the anchored construct.
+    issues = [
+        _issue(
+            file_path="",
+            line=None,
+            description="blast radius via caller of app/foo.py:2",
+        ),
+        _issue(
+            file_path="app/foo.py",
+            line=2,
+            description="foo's contract changed",
+        ),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert result[0].file_path == "app/foo.py"
+    assert result[0].line == 2
+    assert "foo's contract changed" in result[0].description
+    assert "blast radius" in result[0].description

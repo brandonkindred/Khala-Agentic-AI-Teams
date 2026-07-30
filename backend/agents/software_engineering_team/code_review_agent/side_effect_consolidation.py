@@ -199,10 +199,15 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
         - ``len(group) >= 2``; every issue's ``category`` is ``"side-effects"``.
 
     Postconditions:
-        - ``file_path`` is the group's majority file (ties broken by earliest
-          occurrence); ``line``/``start_line`` span that file's cited lines
-          within the group (``start_line`` is None when only one distinct
-          line is cited, matching a single-line issue's shape).
+        - ``file_path`` is the group's majority **non-blank** file (ties broken
+          by earliest occurrence among non-blank paths). Blank/`None` paths do
+          not vote, so an unanchored finding that citation-groups with an
+          anchored one cannot wipe the known anchor and turn the merge into a
+          standalone comment. Falls back to ``""`` only when every member is
+          unanchored.
+        - ``line``/``start_line`` span that file's cited lines within the group
+          (``start_line`` is None when only one distinct line is cited,
+          matching a single-line issue's shape).
         - ``severity`` is the highest-ranked severity in the group
           (``critical`` > ``high`` > ``medium`` > ``low`` > ``info``).
         - ``category`` is always ``"side-effects"``.
@@ -221,9 +226,13 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
     """
     file_counts: "OrderedDict[str, int]" = OrderedDict()
     for issue in group:
-        fp = issue.file_path or ""
+        fp = (issue.file_path or "").strip()
+        if not fp:
+            # Unanchored members still merge via citations, but must not win
+            # the location vote over a known path:file anchor.
+            continue
         file_counts[fp] = file_counts.get(fp, 0) + 1
-    majority_file = max(file_counts, key=lambda fp: file_counts[fp])
+    majority_file = max(file_counts, key=lambda fp: file_counts[fp]) if file_counts else ""
 
     # A member issue may already carry its own multi-line range
     # (start_line..line); use each member's effective start (its own
@@ -233,12 +242,12 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
     starts = [
         issue.start_line if issue.start_line is not None else issue.line
         for issue in group
-        if (issue.file_path or "") == majority_file and issue.line is not None
+        if (issue.file_path or "").strip() == majority_file and issue.line is not None
     ]
     ends = [
         issue.line
         for issue in group
-        if (issue.file_path or "") == majority_file and issue.line is not None
+        if (issue.file_path or "").strip() == majority_file and issue.line is not None
     ]
     line = max(ends) if ends else None
     earliest_start = min(starts) if starts else None

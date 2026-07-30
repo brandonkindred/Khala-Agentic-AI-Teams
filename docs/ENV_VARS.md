@@ -917,6 +917,11 @@ remaining gap is a Temporal review with no reader and no reachable
 own files via `search_codebase` — the same conservative (keep-more) behavior
 the other two passes already have in that case.
 
+Any setup or LLM failure is fail-safe: it is logged and yields no additional
+findings, so a broken pass never blocks or changes the rest of the review. Set
+to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
+enabled).
+
 ### CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION
 Default-on toggle for consolidating related `side-effects` findings from the
 pass above. Two (or more) `side-effects` issues are merged into one when they
