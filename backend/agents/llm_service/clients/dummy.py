@@ -300,13 +300,14 @@ class DummyLLMClient(LLMClient, Model):
         invoking that tool with data from the ``complete_json`` pattern matcher.
         Otherwise yields a plain text response.
 
-        When ``system_prompt`` is absent, flat text is taken from
-        ``system_prompt_content`` so branding Phase 1 branches that anchor on
-        system text still match.
+        When ``system_prompt_content`` is supplied, it is treated as
+        authoritative over the legacy ``system_prompt`` string so branding
+        Phase 1 branches that anchor on system text still match even if a
+        stale string is also present.
         """
         del tool_choice, invocation_state  # accepted for ABC compatibility
         user_text = _last_user_text(messages)
-        if system_prompt is None and system_prompt_content:
+        if system_prompt_content:
             system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
         # Route through the existing complete_json pattern matcher for rich responses

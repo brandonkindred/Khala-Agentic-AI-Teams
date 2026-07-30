@@ -178,6 +178,35 @@ async def test_dummy_stream_uses_system_prompt_content_when_system_prompt_absent
     assert "vision_statement" in data
 
 
+@pytest.mark.asyncio
+async def test_dummy_stream_prefers_system_prompt_content_over_stale_string() -> None:
+    """Structured content blocks win when a non-matching system_prompt string is also set."""
+    c = DummyLLMClient()
+    messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
+    system_prompt_content = [
+        {
+            "text": (
+                "You must return brand_purpose, mission_statement, and vision_statement "
+                "for the brand strategy agent."
+            )
+        }
+    ]
+    chunks: list[str] = []
+    async for event in c.stream(
+        messages,  # type: ignore[arg-type]
+        system_prompt="You are a generic assistant with no branding output fields.",
+        system_prompt_content=system_prompt_content,  # type: ignore[arg-type]
+    ):
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        text = delta.get("text")
+        if text:
+            chunks.append(text)
+    assert chunks, "expected a text content delta"
+    data = json.loads(chunks[0])
+    assert "brand_purpose" in data
+    assert "vision_statement" in data
+
+
 def test_code_review_catch_all_matches_long_prompt_with_approved() -> None:
     c = DummyLLMClient()
     # Build a prompt that mentions both "code to review" and "approved", longer
