@@ -13,8 +13,8 @@ def test_sanitize_prompt_var_none_returns_empty_string() -> None:
     assert sanitize_prompt_var(None) == ""
 
 
-def test_sanitize_prompt_var_replaces_disallowed_characters_with_underscore() -> None:
-    assert sanitize_prompt_var("a<b>c") == "a_b_c"
+def test_sanitize_prompt_var_strips_disallowed_characters() -> None:
+    assert sanitize_prompt_var("a<b>c") == "abc"
 
 
 def test_sanitize_prompt_var_coerces_non_string_input() -> None:
