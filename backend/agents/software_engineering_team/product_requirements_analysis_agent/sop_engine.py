@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -42,6 +43,36 @@ logger = logging.getLogger(__name__)
 
 MAX_SOP_ROUNDS = 5  # Safety limit for multi-round SOP Phase 1 (hardcoded questions)
 MAX_GAP_ROUNDS = 3  # Safety limit for LLM gap-analysis follow-up rounds per sub-phase
+
+# One-pass slot matcher for gap-analysis prompt fill. Values must never be
+# rescanned (spec/decision text may literally contain later placeholder names).
+_GAP_ANALYSIS_SLOT_RE = re.compile(
+    r"\{("
+    r"sub_phase_name|sub_phase_objective|spec_excerpt|"
+    r"sub_phase_decisions|all_decisions|existing_question_ids"
+    r")\}"
+)
+
+
+def _fill_gap_analysis_prompt(values: Dict[str, str]) -> str:
+    """Substitute gap-analysis placeholders in a single non-rescanning pass.
+
+    Preconditions: ``values`` contains every named slot in
+        ``_GAP_ANALYSIS_SLOT_RE``; values are strings (may contain braces or
+        literal ``{slot}`` tokens).
+    Postconditions: returns the filled prompt; only placeholders present in the
+        original template are replaced; replacement text is never re-matched.
+    """
+    required = {
+        "sub_phase_name",
+        "sub_phase_objective",
+        "spec_excerpt",
+        "sub_phase_decisions",
+        "all_decisions",
+        "existing_question_ids",
+    }
+    assert required <= set(values), f"missing gap-analysis slots: {required - set(values)}"
+    return _GAP_ANALYSIS_SLOT_RE.sub(lambda m: values[m.group(1)], SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT)
 
 
 def evaluate_sop_conditionals(
@@ -364,13 +395,17 @@ def assess_sub_phase_gaps(
     # Build list of existing question IDs so the LLM avoids regenerating them
     existing_ids_str = ", ".join(sorted(decisions_map.keys())) if decisions_map else "(none)"
 
-    prompt = SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT.format(
-        sub_phase_name=sub_phase.value,
-        sub_phase_objective=objective,
-        spec_excerpt=spec_content,
-        sub_phase_decisions=json.dumps(sub_phase_decisions, indent=2),
-        all_decisions=json.dumps(all_decisions_summary, indent=2),
-        existing_question_ids=existing_ids_str,
+    # One-pass substitution: values may contain braces or literal ``{slot}``
+    # tokens that must not be re-matched after insertion.
+    prompt = _fill_gap_analysis_prompt(
+        {
+            "sub_phase_name": sub_phase.value,
+            "sub_phase_objective": objective,
+            "spec_excerpt": spec_content,
+            "sub_phase_decisions": json.dumps(sub_phase_decisions, indent=2),
+            "all_decisions": json.dumps(all_decisions_summary, indent=2),
+            "existing_question_ids": existing_ids_str,
+        }
     )
 
     try:
