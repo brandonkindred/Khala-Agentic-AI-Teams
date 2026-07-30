@@ -32,7 +32,7 @@ from branding_team.shared.json_recovery import recover_json_object
 
 from .agents import BrandComplianceAgent
 from .graphs.phase1_strategic_core import build_phase1_graph
-from .graphs.phase2_narrative import build_phase2_swarm
+from .graphs.phase2_narrative import build_phase2_graph
 from .graphs.phase3_visual import build_phase3_graph
 from .graphs.phase4_channel import build_phase4_graph
 from .graphs.phase5_governance import build_phase5_graph
@@ -81,7 +81,7 @@ _PHASE_EXTRACTION = (
 _PHASE_SPEC: dict[BrandPhase, tuple[Callable[[], Any], str, type[BaseModel]]] = {
     BrandPhase.STRATEGIC_CORE: (build_phase1_graph, "phase1_strategic_core", StrategicCoreOutput),
     BrandPhase.NARRATIVE_MESSAGING: (
-        build_phase2_swarm,
+        build_phase2_graph,
         "phase2_narrative",
         NarrativeMessagingOutput,
     ),
@@ -96,7 +96,7 @@ async def _gather_integrations(
     strategic_core: Optional[StrategicCoreOutput],
     include_market_research: bool,
     include_design_assets: bool,
-):
+) -> tuple[Optional[Any], Optional[Any]]:
     """Run the optional market-research and design-asset integrations concurrently.
 
     The two integrations are independent — market research is a multi-minute
@@ -256,7 +256,7 @@ class BrandingTeamOrchestrator:
         mission: BrandingMission,
         phase: BrandPhase,
         prior_outputs: Optional[dict[str, dict]] = None,
-    ) -> "tuple[BaseModel, bool]":
+    ) -> tuple[BaseModel, bool]:
         """Run a single pipeline phase in isolation and return its output model.
 
         The monolithic ``build_branding_graph`` wires phases as sequential nodes,
@@ -527,14 +527,19 @@ class BrandingTeamOrchestrator:
         method first tries ``_merge_phase1_fragments``, which merges every
         fan-out specialist's ``structured_output`` (not just the
         synthesizer's) into one ``model_class`` instance; if that succeeds,
-        its result is returned directly. For every other phase (different
-        node ids), ``_merge_phase1_fragments`` returns ``None`` and this
-        method falls through to the per-node extraction logic below: when
-        the node's agent was built with ``structured_output=``, Strands
-        forces a tool call to produce the payload and populates
-        ``AgentResult.structured_output`` instead of the message's text
-        blocks — so that's checked next. Agents without structured output
-        fall back to parsing the last text block.
+        its result is returned directly. Phase 2's sequential Graph is the same
+        shape (six named agents under one top-level node), so
+        ``_merge_phase2_fragments`` is tried next — including nesting
+        VoicePrinciplesDrafter under ``writing_guidelines``. A lone Phase 2
+        specialist fragment is never accepted as a complete phase output
+        (subset validation against ``NarrativeMessagingOutput`` would
+        succeed via defaults). For every other phase (different node ids),
+        both merge helpers return ``None`` and this method falls through to
+        the per-node extraction logic below: when the node's agent was built
+        with ``structured_output=``, Strands forces a tool call to produce
+        the payload and populates ``AgentResult.structured_output`` instead
+        of the message's text blocks — so that's checked next. Agents without
+        structured output fall back to parsing the last text block.
 
         Preconditions:
             - ``result`` is the Strands graph invocation result (or a test
@@ -562,19 +567,37 @@ class BrandingTeamOrchestrator:
                     merged = _merge_phase1_fragments(node_result, model_class)
                     if merged is not None:
                         return merged, False
-                    agent_results = node_result.get_agent_results()
-                    if agent_results:
-                        last = agent_results[-1]
-                        structured = getattr(last, "structured_output", None)
-                        if isinstance(structured, BaseModel):
-                            parsed = _merge_structured_output(structured, model_class)
-                            if parsed is not None:
-                                return parsed, False
-                        if hasattr(last, "message") and last.message:
-                            text = _collect_message_text(last.message)
-                            parsed = _parse_model_from_text(text, model_class)
-                            if parsed is not None:
-                                return parsed, False
+                    merged = _merge_phase2_fragments(node_result, model_class)
+                    if merged is not None:
+                        return merged, False
+                    # Phase 2 specialists each emit a fragment schema. Accepting
+                    # any one of those via subset ``model_validate`` would report
+                    # a non-degraded NarrativeMessagingOutput with every other
+                    # field defaulted empty — the failure mode structured_output
+                    # + Swarm previously hit when only Storyteller ran.
+                    if node_id == "phase2_narrative":
+                        agent_results = node_result.get_agent_results()
+                        if agent_results:
+                            last = agent_results[-1]
+                            if hasattr(last, "message") and last.message:
+                                text = _collect_message_text(last.message)
+                                parsed = _parse_model_from_text(text, model_class)
+                                if parsed is not None:
+                                    return parsed, False
+                    else:
+                        agent_results = node_result.get_agent_results()
+                        if agent_results:
+                            last = agent_results[-1]
+                            structured = getattr(last, "structured_output", None)
+                            if isinstance(structured, BaseModel):
+                                parsed = _merge_structured_output(structured, model_class)
+                                if parsed is not None:
+                                    return parsed, False
+                            if hasattr(last, "message") and last.message:
+                                text = _collect_message_text(last.message)
+                                parsed = _parse_model_from_text(text, model_class)
+                                if parsed is not None:
+                                    return parsed, False
         except Exception:
             # Malformed JSON / schema mismatch already returns None from
             # _parse_model_from_text; reaching here means an unexpected error
@@ -657,6 +680,93 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
+# Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
+# or None to merge fields in flat. Each specialist's structured_output is a
+# cumulative carry-forward model (see models.py). Merge uses prefer_first so
+# upstream-owned keys are not overwritten by later re-emissions; require_all
+# still insists every specialist actually ran. VoicePrinciplesDrafter already
+# nests writing_guidelines in its own schema — no remap needed.
+_PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
+    "Storyteller": None,
+    "ArchetypeAnalyst": None,
+    "TaglineWriter": None,
+    "MessageMapper": None,
+    "PersonaBuilder": None,
+    "VoicePrinciplesDrafter": None,
+}
+
+
+def _merge_named_fragments(
+    node_result: Any,
+    model_class: type[BaseModel],
+    node_merge: dict[str, Optional[str]],
+    *,
+    require_all: bool = False,
+    prefer_first: bool = False,
+) -> Optional[BaseModel]:
+    """Merge every recognized child's ``structured_output`` into one phase output.
+
+    Shared by Phase 1 (graph fan-out) and Phase 2 (sequential graph): both wrap
+    several named agents as a single top-level node whose nested
+    ``MultiAgentResult.results`` is keyed by node/agent id.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result); ``node_merge`` maps
+        child ids to an optional nest-under key on ``model_class``.
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every recognized
+        child's ``structured_output`` when at least one was found (or, when
+        ``require_all`` is True, when every id in ``node_merge`` was found);
+        returns None when ``node_result`` doesn't wrap a nested multi-agent
+        result, none of ``node_merge``'s ids are present, ``require_all`` is
+        True and at least one id is missing, or the merged data fails
+        validation — in every None case the caller falls back to its existing
+        single-agent-result logic unchanged.
+
+        When ``prefer_first`` is True, the first child that sets a flat key
+        wins (later dumps do not overwrite). Phase 2 needs this because each
+        specialist's cumulative ``structured_output`` re-emits upstream fields
+        that a real LLM may rewrite.
+    """
+    nested_results = getattr(getattr(node_result, "result", None), "results", None)
+    if not isinstance(nested_results, dict):
+        return None
+
+    merged: dict[str, Any] = {}
+    found_ids: set[str] = set()
+    for child_node_id, nest_under in node_merge.items():
+        child = nested_results.get(child_node_id)
+        if child is None or not hasattr(child, "get_agent_results"):
+            continue
+        child_agent_results = child.get_agent_results()
+        if not child_agent_results:
+            continue
+        structured = getattr(child_agent_results[-1], "structured_output", None)
+        if not isinstance(structured, BaseModel):
+            continue
+        found_ids.add(child_node_id)
+        data = structured.model_dump()
+        if nest_under:
+            if prefer_first and nest_under in merged:
+                continue
+            merged[nest_under] = data
+        elif prefer_first:
+            for key, value in data.items():
+                merged.setdefault(key, value)
+        else:
+            merged.update(data)
+
+    if not found_ids:
+        return None
+    if require_all and found_ids != set(node_merge):
+        return None
+    try:
+        return model_class.model_validate(merged)
+    except ValidationError:
+        return None
+
+
 def _merge_phase1_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
     """Merge every Phase 1 fan-out node's ``structured_output`` into one phase output.
 
@@ -680,35 +790,37 @@ def _merge_phase1_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         data fails validation — in every None case the caller falls back to
         its existing single-agent-result logic unchanged.
     """
-    nested_results = getattr(getattr(node_result, "result", None), "results", None)
-    if not isinstance(nested_results, dict):
-        return None
+    return _merge_named_fragments(node_result, model_class, _PHASE1_NODE_MERGE)
 
-    merged: dict[str, Any] = {}
-    found_any = False
-    for child_node_id, nest_under in _PHASE1_NODE_MERGE.items():
-        child = nested_results.get(child_node_id)
-        if child is None or not hasattr(child, "get_agent_results"):
-            continue
-        child_agent_results = child.get_agent_results()
-        if not child_agent_results:
-            continue
-        structured = getattr(child_agent_results[-1], "structured_output", None)
-        if not isinstance(structured, BaseModel):
-            continue
-        found_any = True
-        data = structured.model_dump()
-        if nest_under:
-            merged[nest_under] = data
-        else:
-            merged.update(data)
 
-    if not found_any:
-        return None
-    try:
-        return model_class.model_validate(merged)
-    except ValidationError:
-        return None
+def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 2 specialist's ``structured_output`` into one phase output.
+
+    Phase 2 wraps six sequential Graph agents as a single top-level
+    ``"phase2_narrative"`` node (see ``graphs/top_level.py`` /
+    ``graphs/phase2_narrative.py``); a flat ``get_agent_results()[-1]`` only
+    ever sees VoicePrinciplesDrafter. This recovers each agent's typed
+    fragment the same way Phase 1 does. All six specialists must be present
+    — a partial run (e.g. entry agent only) must not validate as a complete
+    ``NarrativeMessagingOutput`` via field defaults.
+
+    Cumulative carry-forward models re-emit upstream fields; merge keeps the
+    first value for each key so a later specialist cannot overwrite the
+    authoritative upstream fragment (e.g. Voice rewriting ``brand_story``).
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every Phase 2
+        agent's ``structured_output`` when all of ``_PHASE2_NODE_MERGE``'s
+        node ids were found; returns None when any specialist is missing or
+        the merged data fails validation — same None contract as
+        ``_merge_phase1_fragments``.
+    """
+    return _merge_named_fragments(
+        node_result, model_class, _PHASE2_NODE_MERGE, require_all=True, prefer_first=True
+    )
 
 
 def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
