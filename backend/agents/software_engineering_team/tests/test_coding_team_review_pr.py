@@ -1675,8 +1675,10 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_bad_line_is_bisected_out_keeping_other_lines_inline(self, review_app) -> None:
-        # A single off-diff line must not collapse the whole review: the good lines
-        # stay inline and only the bad one is demoted to a file-level comment.
+        # A single line rejected by GitHub (bad_lines) must not collapse the whole
+        # review: the good lines stay inline and only the bad one is demoted to a
+        # file-level comment. (Diff valid lines for a.py are {1, 2, 3}; line 3 is
+        # in-diff but still rejected by the fake client.)
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="good line"),
@@ -1705,10 +1707,11 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_multiple_bad_lines_are_bisected_out(self, review_app) -> None:
-        # Bisection must isolate more than one off-diff line: with two bad lines
-        # among three in-diff findings, only the good line stays inline and both
-        # bad lines are demoted to file-level comments (none lost to standalone).
-        # (Diff valid lines for a.py are {1, 2, 3}, so all three are line-anchored.)
+        # Bisection must isolate more than one GitHub-rejected line (bad_lines):
+        # with two rejected lines among three in-diff findings, only the good line
+        # stays inline and both bad lines are demoted to file-level comments (none
+        # lost to standalone). Diff valid lines for a.py are {1, 2, 3}, so all
+        # three are line-anchored; lines 1 and 3 are rejected by the fake client.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=1, description="bad alpha"),
@@ -1717,7 +1720,7 @@ class TestReviewEndpoint:
             ]
         )
         gh = review_app["github"]["client"]
-        gh.bad_lines = {1, 3}  # two off-diff lines rejected inline by GitHub
+        gh.bad_lines = {1, 3}  # two in-diff lines rejected inline by GitHub
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
