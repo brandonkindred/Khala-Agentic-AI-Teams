@@ -51,6 +51,190 @@ ORGANIZATIONAL_PHRASES = [
 ]
 
 
+def _clean_token(w: str) -> str:
+    """Strip punctuation so tokens like 'store?' match their bare form."""
+    return re.sub(r"[^a-z0-9]", "", w.strip())
+
+
+def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
+    """Normalize word for matching; flag silent-e / y-ie stubs / exact eligibility.
+
+    Preconditions: ``w`` is a cleaned token (lowercase).
+    Postconditions: returns
+        ``(stem, silent_e_candidate, y_or_ie_stub, exact_ok)``. Never raises.
+        ``exact_ok`` is False for restoration-only stubs (``ies``/``ied`` and
+        silent-e plural ``-es`` forms) so they cannot exact-match unrelated
+        raw tokens like ``spec``/``cas``. Lexical doubles and ``-pick``/
+        ``-kick``/``-click`` compounds are preserved. Short lexical ``ll``
+        bases (``bill``/``drill``/``chill``) are kept by length; longer
+        lexical ``ll`` stays on the denylist while inflectional
+        ``signalled``/``controlled`` still undouble.
+    """
+    w = w.strip()
+    vowels = set("aeiou")
+    # Longer lexical -ll bases (len >= 6) that must not undouble.
+    lexical_ll = frozenset(
+        {
+            "appall",
+            "distill",
+            "enrol",
+            "enroll",
+            "forestall",
+            "fulfil",
+            "fulfill",
+            "install",
+            "instill",
+            "misspell",
+            "quell",
+            "recall",
+            "reinstall",
+            "thrill",
+            "uninstall",
+        }
+    )
+    lexical_tt = frozenset(
+        {
+            "batt",
+            "boycott",
+            "butt",
+            "mitt",
+            "putt",
+            "watt",
+        }
+    )
+
+    def _undouble_inflectional(base: str) -> str:
+        """Undouble only when -ed/-ing spelling doubled a final consonant."""
+        if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
+            return base
+        doubled = base[-1]
+        if doubled in "fsz":
+            return base
+        if doubled == "l":
+            # Short ll bases are almost always lexical (bill/drill/chill/fill).
+            if len(base) < 6:
+                return base
+            if base in lexical_ll:
+                return base
+            return base[:-1]
+        if doubled == "t":
+            if base in lexical_tt or base.endswith("cott"):
+                return base
+            return base[:-1]
+        return base[:-1]
+
+    def _strip_inserted_ck(base: str) -> str:
+        """Remove spelling-only k after -c verbs (mimick→mimic).
+
+        Keep lexical ``-pick``/``-kick``/``-click`` compounds
+        (``handpick``, ``sidekick``, ``misclick``).
+        """
+        if base.endswith(("pick", "kick", "click")):
+            return base
+        if base.endswith("ick") and sum(1 for c in base if c in vowels) >= 2:
+            return base[:-1]
+        return base
+
+    if w == "uses":
+        return "use", False, False, True
+
+    if w.endswith("ied") and len(w) >= 4:
+        stub = w[:-3]
+        if stub:
+            # Restoration-only: match via +y/+ie or stub-to-stub, not raw exact.
+            return stub, False, True, False
+
+    if len(w) <= 4:
+        return w, False, False, True
+
+    if w.endswith("ed"):
+        if len(w) >= 5:
+            raw = w[:-2]
+            base = _strip_inserted_ck(_undouble_inflectional(raw))
+            if len(base) >= 3:
+                silent_e = base == raw
+                return base, silent_e, False, True
+
+    if w.endswith("ing") and len(w) > 5:
+        raw = w[:-3]
+        base = _strip_inserted_ck(_undouble_inflectional(raw))
+        if len(base) >= 3:
+            silent_e = base == raw
+            return base, silent_e, False, True
+
+    if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
+        return w[:-3], False, True, False
+    if w.endswith("sses") and len(w) > 4:
+        return w[:-2], False, False, True
+    if w.endswith("xes") and len(w) > 4:
+        return w[:-2], False, False, True
+    if w.endswith("zes") and len(w) > 4:
+        base = w[:-2]
+        if base.endswith("zz"):
+            return base, False, False, True
+        # sizes→siz (silent e); keep quizzes→quizz above.
+        return base, True, False, False
+    if w.endswith("ches") and len(w) > 4:
+        base = w[:-2]
+        if base.endswith("tch") or len(base) >= 5:
+            return base, False, False, True  # matches/beaches
+        return base, True, False, False  # caches→cach
+    if w.endswith("shes") and len(w) > 4:
+        return w[:-2], False, False, True
+    if w.endswith("ses") and len(w) > 4:
+        base = w[:-2]
+        # statuses→status, buses→bus are complete; houses→hous needs silent e.
+        if base.endswith(("us", "is", "os")) or len(base) <= 3:
+            return base, False, False, True
+        return base, True, False, False
+    if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
+        base = w[:-2]
+        if base[-1] in vowels:
+            return base, False, False, True  # echoes/heroes
+        return base, True, False, False  # shoes→sho
+    if w.endswith("s") and len(w) > 4 and not w.endswith(("ss", "us", "is")):
+        return w[:-1], False, False, True
+
+    return w, False, False, True
+
+
+def _stems_match(
+    stem: str,
+    silent_e_candidate: bool,
+    y_or_ie_stub: bool,
+    exact_ok: bool,
+    qa_exact_stems: set[str],
+    qa_silent_e_stubs: set[str],
+    qa_y_or_ie_stubs: set[str],
+) -> bool:
+    """Return True when ``stem`` matches a qa stem.
+
+    Preconditions: ``stem`` is a non-empty stemmed token; qa sets come from
+        history stemming.
+    Postconditions: exact membership applies only when ``exact_ok``.
+        Restoration stubs match via ``+e`` / ``+y`` / ``+ie`` or stub-to-stub,
+        never against unrelated raw tokens. Never raises.
+    """
+    if exact_ok and stem in qa_exact_stems:
+        return True
+    # Stub-to-stub so species↔species and caches↔caches still match.
+    if y_or_ie_stub and stem in qa_y_or_ie_stubs:
+        return True
+    if silent_e_candidate and stem in qa_silent_e_stubs:
+        return True
+    if silent_e_candidate and (stem + "e") in qa_exact_stems:
+        return True
+    if stem.endswith("e") and stem[:-1] in qa_silent_e_stubs:
+        return True
+    if y_or_ie_stub and ((stem + "y") in qa_exact_stems or (stem + "ie") in qa_exact_stems):
+        return True
+    if stem.endswith("y") and stem[:-1] in qa_y_or_ie_stubs:
+        return True
+    if stem.endswith("ie") and stem[:-2] in qa_y_or_ie_stubs:
+        return True
+    return False
+
+
 def filter_duplicate_questions(
     new_questions: List[OpenQuestion],
     qa_history: str,
@@ -77,203 +261,11 @@ def filter_duplicate_questions(
     filtered = []
     duplicates = []
 
-    def _clean_token(w: str) -> str:
-        """Strip punctuation so tokens like 'store?' match their bare form."""
-        return re.sub(r"[^a-z0-9]", "", w.strip())
-
-    def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
-        """Normalize word for matching; flag silent-e / y-ie stubs / exact eligibility.
-
-        Preconditions: ``w`` is a cleaned token (lowercase).
-        Postconditions: returns
-            ``(stem, silent_e_candidate, y_or_ie_stub, exact_ok)``. Never raises.
-            ``exact_ok`` is False for restoration-only stubs (``ies``/``ied`` and
-            silent-e plural ``-es`` forms) so they cannot exact-match unrelated
-            raw tokens like ``spec``/``cas``. Lexical doubles and ``-pick``/
-            ``-kick``/``-click`` compounds are preserved. Short lexical ``ll``
-            bases (``bill``/``drill``/``chill``) are kept by length; longer
-            lexical ``ll`` stays on the denylist while inflectional
-            ``signalled``/``controlled`` still undouble.
-        """
-        w = w.strip()
-        vowels = set("aeiou")
-        # Longer lexical -ll bases (len >= 6) that must not undouble.
-        lexical_ll = frozenset(
-            {
-                "appall",
-                "distill",
-                "enrol",
-                "enroll",
-                "forestall",
-                "fulfil",
-                "fulfill",
-                "install",
-                "instill",
-                "misspell",
-                "quell",
-                "recall",
-                "reinstall",
-                "thrill",
-                "uninstall",
-            }
-        )
-        lexical_tt = frozenset(
-            {
-                "batt",
-                "boycott",
-                "butt",
-                "mitt",
-                "putt",
-                "watt",
-            }
-        )
-
-        def _undouble_inflectional(base: str) -> str:
-            """Undouble only when -ed/-ing spelling doubled a final consonant."""
-            if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
-                return base
-            doubled = base[-1]
-            if doubled in "fsz":
-                return base
-            if doubled == "l":
-                # Short ll bases are almost always lexical (bill/drill/chill/fill).
-                if len(base) < 6:
-                    return base
-                if base in lexical_ll:
-                    return base
-                return base[:-1]
-            if doubled == "t":
-                if base in lexical_tt or base.endswith("cott"):
-                    return base
-                return base[:-1]
-            return base[:-1]
-
-        def _strip_inserted_ck(base: str) -> str:
-            """Remove spelling-only k after -c verbs (mimick→mimic).
-
-            Keep lexical ``-pick``/``-kick``/``-click`` compounds
-            (``handpick``, ``sidekick``, ``misclick``).
-            """
-            if base.endswith(("pick", "kick", "click")):
-                return base
-            if (
-                base.endswith("ick")
-                and sum(1 for c in base if c in vowels) >= 2
-            ):
-                return base[:-1]
-            return base
-
-        if w == "uses":
-            return "use", False, False, True
-
-        if w.endswith("ied") and len(w) >= 4:
-            stub = w[:-3]
-            if stub:
-                # Restoration-only: match via +y/+ie or stub-to-stub, not raw exact.
-                return stub, False, True, False
-
-        if len(w) <= 4:
-            return w, False, False, True
-
-        if w.endswith("ed"):
-            if len(w) >= 5:
-                raw = w[:-2]
-                base = _strip_inserted_ck(_undouble_inflectional(raw))
-                if len(base) >= 3:
-                    silent_e = base == raw
-                    return base, silent_e, False, True
-
-        if w.endswith("ing") and len(w) > 5:
-            raw = w[:-3]
-            base = _strip_inserted_ck(_undouble_inflectional(raw))
-            if len(base) >= 3:
-                silent_e = base == raw
-                return base, silent_e, False, True
-
-        if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
-            return w[:-3], False, True, False
-        if w.endswith("sses") and len(w) > 4:
-            return w[:-2], False, False, True
-        if w.endswith("xes") and len(w) > 4:
-            return w[:-2], False, False, True
-        if w.endswith("zes") and len(w) > 4:
-            base = w[:-2]
-            if base.endswith("zz"):
-                return base, False, False, True
-            # sizes→siz (silent e); keep quizzes→quizz above.
-            return base, True, False, False
-        if w.endswith("ches") and len(w) > 4:
-            base = w[:-2]
-            if base.endswith("tch") or len(base) >= 5:
-                return base, False, False, True  # matches/beaches
-            return base, True, False, False  # caches→cach
-        if w.endswith("shes") and len(w) > 4:
-            return w[:-2], False, False, True
-        if w.endswith("ses") and len(w) > 4:
-            base = w[:-2]
-            # statuses→status, buses→bus are complete; houses→hous needs silent e.
-            if base.endswith(("us", "is", "os")) or len(base) <= 3:
-                return base, False, False, True
-            return base, True, False, False
-        if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
-            base = w[:-2]
-            if base[-1] in vowels:
-                return base, False, False, True  # echoes/heroes
-            return base, True, False, False  # shoes→sho
-        if (
-            w.endswith("s")
-            and len(w) > 4
-            and not w.endswith(("ss", "us", "is"))
-        ):
-            return w[:-1], False, False, True
-
-        return w, False, False, True
-
-    def _stems_match(
-        stem: str,
-        silent_e_candidate: bool,
-        y_or_ie_stub: bool,
-        exact_ok: bool,
-        qa_exact_stems: set[str],
-        qa_silent_e_stubs: set[str],
-        qa_y_or_ie_stubs: set[str],
-    ) -> bool:
-        """Return True when ``stem`` matches a qa stem.
-
-        Preconditions: ``stem`` is a non-empty stemmed token; qa sets come from
-            history stemming.
-        Postconditions: exact membership applies only when ``exact_ok``.
-            Restoration stubs match via ``+e`` / ``+y`` / ``+ie`` or stub-to-stub,
-            never against unrelated raw tokens. Never raises.
-        """
-        if exact_ok and stem in qa_exact_stems:
-            return True
-        # Stub-to-stub so species↔species and caches↔caches still match.
-        if y_or_ie_stub and stem in qa_y_or_ie_stubs:
-            return True
-        if silent_e_candidate and stem in qa_silent_e_stubs:
-            return True
-        if silent_e_candidate and (stem + "e") in qa_exact_stems:
-            return True
-        if stem.endswith("e") and stem[:-1] in qa_silent_e_stubs:
-            return True
-        if y_or_ie_stub and ((stem + "y") in qa_exact_stems or (stem + "ie") in qa_exact_stems):
-            return True
-        if stem.endswith("y") and stem[:-1] in qa_y_or_ie_stubs:
-            return True
-        if stem.endswith("ie") and stem[:-2] in qa_y_or_ie_stubs:
-            return True
-        return False
-
     qa_stem_infos = [
-        _stem_info(tok)
-        for tok in re.findall(r"[a-z0-9]+", qa_history_lower)
-        if len(tok) >= 3
+        _stem_info(tok) for tok in re.findall(r"[a-z0-9]+", qa_history_lower) if len(tok) >= 3
     ]
     # Exact set excludes restoration-only stubs so species/cases cannot hit spec/cas.
-    qa_exact_stems = {
-        stem for stem, _, _, exact_ok in qa_stem_infos if exact_ok
-    }
+    qa_exact_stems = {stem for stem, _, _, exact_ok in qa_stem_infos if exact_ok}
     qa_silent_e_stubs = {
         stem for stem, silent_e, _, exact_ok in qa_stem_infos if silent_e and not exact_ok
     }
@@ -322,7 +314,6 @@ def filter_duplicate_questions(
             duplicates.append(q)
             continue
         filtered.append(q)
-
 
     if duplicates:
         logger.info(
@@ -553,17 +544,13 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
           run_context_constraints_discovery) wraps it accordingly.
     """
     if isinstance(q_data, dict):
-        raw_options = _coerce_list(
-            q_data.get("options", []), allow_str=True, allow_dict=True
-        )
+        raw_options = _coerce_list(q_data.get("options", []), allow_str=True, allow_dict=True)
         options = []
         for i, opt in enumerate(raw_options):
             try:
                 options.append(parse_question_option(opt, i))
             except ValueError as exc:
-                logger.warning(
-                    "Skipping malformed question option at index %d: %s", i, exc
-                )
+                logger.warning("Skipping malformed question option at index %d: %s", i, exc)
 
         if options and not any(opt.is_default for opt in options):
             default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
@@ -577,17 +564,13 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
 
         raw_depends = q_data.get("depends_on")
         if isinstance(raw_depends, (list, tuple)):
-            depends_on = (
-                raw_depends[0] if raw_depends and isinstance(raw_depends[0], str) else None
-            )
+            depends_on = raw_depends[0] if raw_depends and isinstance(raw_depends[0], str) else None
         elif isinstance(raw_depends, str):
             depends_on = raw_depends
         else:
             depends_on = None
 
-        raw_section_impact = _coerce_list(
-            q_data.get("section_impact", []), allow_str=True
-        )
+        raw_section_impact = _coerce_list(q_data.get("section_impact", []), allow_str=True)
         section_impact = [v for v in raw_section_impact if isinstance(v, str)]
 
         raw_asked_via = _coerce_list(q_data.get("asked_via", []), allow_str=True)
@@ -680,9 +663,7 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
             confidence=0.5,
         )
 
-    raise ValueError(
-        f"unsupported option type {type(opt_data).__name__!r} at index {index}"
-    )
+    raise ValueError(f"unsupported option type {type(opt_data).__name__!r} at index {index}")
 
 
 def dedupe_questions_by_answer_similarity(
@@ -851,9 +832,7 @@ def consolidate_open_questions(
             indent=2,
         )
     except Exception as e:
-        logger.warning(
-            "Question consolidation payload serialization failed: %s", str(e)
-        )
+        logger.warning("Question consolidation payload serialization failed: %s", str(e))
         return list(open_questions)
     prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
     consolidated = _fetch_llm_list(
@@ -934,9 +913,7 @@ def review_question_answer_alignment(
         ]
         questions_json = json.dumps(questions_payload, indent=2)
     except Exception as e:
-        logger.warning(
-            "Question alignment payload serialization failed: %s", str(e)
-        )
+        logger.warning("Question alignment payload serialization failed: %s", str(e))
         return list(open_questions)
     prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
     aligned = _fetch_llm_list(
@@ -1016,9 +993,7 @@ def add_recommendations(
         ]
         questions_json = json.dumps(questions_payload, indent=2)
     except Exception as e:
-        logger.warning(
-            "Recommendation payload serialization failed: %s", str(e)
-        )
+        logger.warning("Recommendation payload serialization failed: %s", str(e))
         return list(open_questions)
 
     spec_content_str = spec_content or ""
@@ -1045,9 +1020,7 @@ def add_recommendations(
         result = []
         for q in open_questions:
             rec = rec_by_id.get(q.id)
-            result.append(
-                q.model_copy(update={"recommendation": rec}) if rec else q
-            )
+            result.append(q.model_copy(update={"recommendation": rec}) if rec else q)
         return result
     except Exception as e:
         logger.warning(
