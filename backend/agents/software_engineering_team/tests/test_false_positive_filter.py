@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
+    DEFAULT_VERIFY_TIMEOUT_SECONDS,
     CodebaseIndex,
     _build_group_prompt,
     _build_tools,
@@ -32,6 +33,7 @@ from code_review_agent.false_positive_filter import (
     _parse_verdicts,
     _render_finding_block,
     _strip_numbered_prefixes,
+    _verify_timeout_seconds,
     filter_false_positives,
 )
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
@@ -1124,6 +1126,25 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
     inp = _input(files={"a.py": "x=1\n", "b.py": "y=2\n"})
     out = filter_false_positives(PerFileStub(), inp, [a, b])
     assert out == [b]
+
+
+def test_verify_timeout_seconds_default_and_env_override(monkeypatch) -> None:
+    """Per-group verify timeout defaults to 60 minutes and honors the env override.
+
+    Preconditions:
+        - ``CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`` is unset for the default assertion,
+          then set for the override assertion (via ``monkeypatch``).
+
+    Postconditions:
+        - Unset env → ``DEFAULT_VERIFY_TIMEOUT_SECONDS`` (3600).
+        - Env ``90`` → ``90``.
+    """
+    monkeypatch.delenv("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", raising=False)
+    assert DEFAULT_VERIFY_TIMEOUT_SECONDS == 3600
+    assert _verify_timeout_seconds() == 3600
+
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", "90")
+    assert _verify_timeout_seconds() == 90
 
 
 def test_filter_timeout_keeps_group_findings_without_hanging(monkeypatch) -> None:
