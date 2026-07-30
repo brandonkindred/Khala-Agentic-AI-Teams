@@ -17,7 +17,8 @@ def _subprocess_pythonpath() -> str:
     """Build PYTHONPATH matching pytest.ini (``agents`` + backend root).
 
     Preconditions: ``_BACKEND_ROOT`` and ``_AGENTS_ROOT`` exist.
-    Postconditions: returned string puts ``shared`` and ``llm_service`` on sys.path.
+    Postconditions: returned string puts the ``agents`` and ``backend`` roots on
+        ``sys.path`` (so ``llm_service`` and ``shared`` resolve).
     """
     assert _BACKEND_ROOT.is_dir()
     assert _AGENTS_ROOT.is_dir()
@@ -114,6 +115,40 @@ ensure_strands_model_registration()
 assert Model in DummyLLMClient.__mro__
 assert isinstance(client, Model) is True, "negative ABC cache survived __bases__ mutation"
 assert issubclass(DummyLLMClient, Model) is True
+print("ok")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": _subprocess_pythonpath()},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"subprocess failed (rc={result.returncode})\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "ok" in result.stdout
+
+
+def test_resolve_strands_model_returns_cold_dummy_unchanged() -> None:
+    """Cold-constructed DummyLLMClient must short-circuit in ``resolve_strands_model``.
+
+    Preconditions: a fresh interpreter that constructs Dummy before importing
+        ``resolve_strands_model`` (which loads Strands).
+    Postconditions: resolver returns the same instance (Model short-circuit), not
+        an ``LLMClientModel`` wrapper.
+    """
+    script = """
+from llm_service.clients.dummy import DummyLLMClient
+
+client = DummyLLMClient()
+from llm_service.strands_model import resolve_strands_model
+from strands.models.model import Model
+
+resolved = resolve_strands_model(client, response_format="text")
+assert resolved is client, f"expected Dummy short-circuit, got {type(resolved)!r}"
+assert isinstance(client, Model) is True
 print("ok")
 """
     result = subprocess.run(

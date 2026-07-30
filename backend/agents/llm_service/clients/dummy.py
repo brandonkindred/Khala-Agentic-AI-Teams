@@ -38,7 +38,10 @@ def _strands_already_imported() -> bool:
     Preconditions: none.
     Postconditions: returns True iff ``strands`` or a ``strands.*`` module is loaded.
     """
-    return "strands" in sys.modules or any(name.startswith("strands.") for name in sys.modules)
+    # Snapshot keys: concurrent imports can mutate ``sys.modules`` mid-iteration.
+    return "strands" in sys.modules or any(
+        name.startswith("strands.") for name in tuple(sys.modules)
+    )
 
 
 def ensure_strands_model_registration() -> None:
@@ -383,7 +386,7 @@ class DummyLLMClient(LLMClient):
     @property
     def request_count(self) -> int:
         """Total number of LLM requests (for compatibility with blog tests)."""
-        return getattr(self, "_request_count", 0)
+        return self._request_count
 
     @staticmethod
     def _extract_task_hint(prompt: str) -> str:
@@ -433,18 +436,18 @@ class DummyLLMClient(LLMClient):
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the
         # branches below look for in the user prompt they build. Scanning
-        # ``system_prompt`` here was tried and reverted in commit <<CI fix>>
-        # because loose single-word branches (``"pipeline"``, ``"security"``)
+        # ``system_prompt`` here was tried and reverted because loose
+        # single-word branches (``"pipeline"``, ``"security"``)
         # cross-contaminated other teams' prompts that happened to mention
         # those words in their persona text.
         #
         # Exception: the branding Phase 1 branches further down DO anchor on
-        # ``system_prompt`` (see ``system_lowered``) — every Phase 1 agent
-        # receives the same serialized ``BrandingMission`` as its user
-        # message, so only each agent's own system_prompt (its required
-        # output field names) can distinguish which one is asking. Those
-        # anchors are multi-token combinations unique to one agent's prompt,
-        # not the loose single words that caused the earlier revert.
+        # ``system_prompt`` (via ``system_lowered`` later in this method) —
+        # every Phase 1 agent receives the same serialized ``BrandingMission``
+        # as its user message, so only each agent's own system_prompt (its
+        # required output field names) can distinguish which one is asking.
+        # Those anchors are multi-token combinations unique to one agent's
+        # prompt, not the loose single words that caused the earlier revert.
         lowered = prompt.lower()
         DummyLLMClient._call_counter += 1
         self._request_count += 1
@@ -734,7 +737,6 @@ class DummyLLMClient(LLMClient):
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)
                 or f"module_{counter}"
             )
-            slug.title().replace("_", "")
             return {
                 "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
@@ -1014,13 +1016,13 @@ class DummyLLMClient(LLMClient):
 
     def chat(
         self,
-        messages: list,
+        messages: list[dict],
         *,
         objective: str = "dummy",
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
-        think: "bool | str | None" = None,
+        think: bool | str | None = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
@@ -1044,12 +1046,16 @@ class DummyLLMClient(LLMClient):
         system_prompt = None
         user_prompt = ""
         for m in messages:
+            if not isinstance(m, dict):
+                continue
             if m.get("role") == "system":
                 system_prompt = m.get("content")
             elif m.get("role") == "user":
                 user_prompt = m.get("content") or ""
 
-        has_tool_result = any(m.get("role") == "tool" for m in messages)
+        has_tool_result = any(
+            isinstance(m, dict) and m.get("role") == "tool" for m in messages
+        )
 
         if tools and not has_tool_result:
             structured_tool = None
