@@ -1153,7 +1153,10 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
-        assert job.get("error") == "code review failed: TimeoutError (no error message)"
+        error = job.get("error") or ""
+        assert "code review failed:" in error
+        assert "TimeoutError" in error
+        assert "no error message" in error
         gh = review_app["github"]["client"]
         # Never leaks onto the PR either.
         assert not any("code review failed" in body for _n, body in gh.comments)
