@@ -3201,12 +3201,12 @@ class TestWholeFileReview:
         secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
         files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
 
-        class _C:
+        class _FakeGitHubClient:
             def get_file_contents(self, o, r, path, ref):
                 raise RuntimeError(f"fetch failed: {secret_url}")
 
         with caplog.at_level("WARNING"):
-            assert _fetch_head_files(_C(), "o", "r", files, "sha1") == {}
+            assert _fetch_head_files(_FakeGitHubClient(), "o", "r", files, "sha1") == {}
 
         assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
         assert not any(secret_url in r.getMessage() for r in caplog.records)
@@ -3585,7 +3585,7 @@ class TestParallelReviewReads:
             id=1, path="a.py", line=2, body="desc", html_url="https://example/comment/1"
         )
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 barrier.wait(timeout=5)
                 return [review_comment]
@@ -3599,7 +3599,7 @@ class TestParallelReviewReads:
                 return []
 
         try:
-            out = _fetch_existing_comments(_C(), "o", "r", 7)
+            out = _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7)
         except threading.BrokenBarrierError:
             pytest.fail("fetches did not run concurrently: barrier timed out waiting for 3 parties")
         assert barrier.n_waiting == 0  # confirms the fetches actually ran concurrently
@@ -3619,7 +3619,7 @@ class TestParallelReviewReads:
         partial result from the two calls that succeeded."""
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 if failing_method == "list_review_comments":
                     raise GitHubAPIError(500, "boom")
@@ -3635,7 +3635,7 @@ class TestParallelReviewReads:
                     raise GitHubAPIError(500, "boom")
                 return []
 
-        assert _fetch_existing_comments(_C(), "o", "r", 7) == []
+        assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
 
     @pytest.mark.parametrize(
         "failing_method",
@@ -3650,7 +3650,7 @@ class TestParallelReviewReads:
         just a GitHubAPIError."""
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 if failing_method == "list_review_comments":
                     raise RuntimeError("unexpected")
@@ -3666,7 +3666,7 @@ class TestParallelReviewReads:
                     raise RuntimeError("unexpected")
                 return []
 
-        assert _fetch_existing_comments(_C(), "o", "r", 7) == []
+        assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
 
 
 class TestSafeCommentUnit:
@@ -3676,33 +3676,33 @@ class TestSafeCommentUnit:
     def test_returns_false_on_github_api_error(self, review_app) -> None:
         from software_engineering_team.api.pr_review import _safe_comment
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 raise GitHubAPIError(403, "rate limited")
 
-        assert _safe_comment(_C(), "o", "r", 7, "body") is False
+        assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is False
 
     def test_returns_false_on_non_api_error(self, review_app) -> None:
         """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) must
         ALSO degrade to False rather than propagate."""
         from software_engineering_team.api.pr_review import _safe_comment
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 raise RuntimeError("unexpected")
 
-        assert _safe_comment(_C(), "o", "r", 7, "body") is False
+        assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is False
 
     def test_returns_true_on_success(self, review_app) -> None:
         from software_engineering_team.api.pr_review import _safe_comment
 
         posted: list[tuple[int, str]] = []
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 posted.append((n, body))
 
-        assert _safe_comment(_C(), "o", "r", 7, "body") is True
+        assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is True
         assert posted == [(7, "body")]
 
     def test_scrubs_token_from_failure_warning(
@@ -3712,12 +3712,12 @@ class TestSafeCommentUnit:
 
         secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 raise RuntimeError(f"comment failed: {secret_url}")
 
         with caplog.at_level("WARNING"):
-            assert _safe_comment(_C(), "o", "r", 7, "body") is False
+            assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is False
 
         assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
         assert not any(secret_url in r.getMessage() for r in caplog.records)
@@ -4571,7 +4571,7 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1, 2, 99]}
         changed_by_path = {"a.py": [1]}  # line 99 was NOT added by this PR
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return []
 
@@ -4585,7 +4585,7 @@ class TestPartitionReviewIssuesUnit:
                 return iter(())
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
@@ -4599,7 +4599,7 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1]}
         changed_by_path = {"a.py": [1]}  # line 1 WAS added by this PR
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return []
 
@@ -4610,7 +4610,7 @@ class TestPartitionReviewIssuesUnit:
                 return set()
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
@@ -4621,11 +4621,11 @@ class TestPartitionReviewIssuesUnit:
 
         output = _FakeOutput(issues=[])
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 raise AssertionError("should not be called when pr_issues is empty")
 
-        result = pr_review._partition_review_issues(output, _C(), "o", "r", 7, {}, {})
+        result = pr_review._partition_review_issues(output, _FakeGitHubClient(), "o", "r", 7, {}, {})
         assert result.pr_issues == []
         assert result.addressed_issues == []
 
@@ -4641,7 +4641,7 @@ class TestPartitionReviewIssuesUnit:
             id=1, path="a.py", line=2, body="dup finding", html_url="https://example/comment/1"
         )
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return [existing]
 
@@ -4652,7 +4652,7 @@ class TestPartitionReviewIssuesUnit:
                 return {1}  # resolved
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == []
         assert result.addressed_issues == [issue]
@@ -4672,7 +4672,7 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1, 2]}
         changed_by_path = {"a.py": [1, 2]}
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return []
 
@@ -4686,7 +4686,7 @@ class TestPartitionReviewIssuesUnit:
                 return iter(())
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
@@ -5096,7 +5096,7 @@ def _file_contents_client(get_contents: Callable[..., Any]) -> Any:
         - ``get_contents`` matches ``(owner, repo, path, ref) -> Optional[str]``.
     Postconditions:
         - Returns an instance whose ``get_file_contents`` delegates to
-          ``get_contents``. Consistent stand-in for the scattered ``_C`` /
+          ``get_contents``. Consistent stand-in for the scattered ``_FakeGitHubClient`` /
           ``_Client`` stubs used by whole-file / decide-mode unit tests.
     """
 
