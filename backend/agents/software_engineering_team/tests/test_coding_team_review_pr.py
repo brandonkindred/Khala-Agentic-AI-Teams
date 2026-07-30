@@ -3220,21 +3220,32 @@ class TestWholeFileReview:
         worker's (filename, content) pair must land under its own key, never a
         sibling's, even when several fetches are in flight at once.
         """
-        import time
+        import threading
 
-        from software_engineering_team.api.pr_review import _fetch_head_files
+        from software_engineering_team.api.pr_review import (
+            _HEAD_FETCH_PARALLELISM,
+            _fetch_head_files,
+        )
 
         num_files = 16
+        parties = min(_HEAD_FETCH_PARALLELISM, num_files)
+        assert parties > 1, "test requires the parallel fetch path"
+        barrier = threading.Barrier(parties)
         files = [
             PullRequestFile(f"f{i}.py", "modified", f"@@ -1 +1 @@\n+x{i}", 1, 0, None)
             for i in range(num_files)
         ]
 
         def _contents(o, r, path, ref):
-            time.sleep(0.01)  # widen the race window so fetches overlap
+            barrier.wait(timeout=5)
             return f"WHOLE-{path}\n"
 
-        out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
+        try:
+            out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
+        except threading.BrokenBarrierError:
+            pytest.fail(
+                f"fetches did not run concurrently: barrier timed out waiting for {parties} parties"
+            )
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
