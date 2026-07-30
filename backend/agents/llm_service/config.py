@@ -708,15 +708,15 @@ def resolve_base_url() -> str:
 
 
 def resolve_timeout(agent_key: Optional[str] = None) -> float:
-    """Return timeout in seconds (default 3600 — 60 min).
+    """Return timeout in seconds (default 7200 — 120 min).
 
     All LLM calls use streaming, so the timeout covers the full streamed response.
     Override with LLM_TIMEOUT if needed.
     """
     # A non-positive timeout would make every streamed call fail instantly;
     # fall back to the default rather than honor a degenerate override.
-    value = _parse_float(ENV_LLM_TIMEOUT, 3600.0)
-    return value if value > 0 else 3600.0
+    value = _parse_float(ENV_LLM_TIMEOUT, 7200.0)
+    return value if value > 0 else 7200.0
 
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:

@@ -41,7 +41,7 @@ The LLM client provides a unified interface for text and JSON generation with su
 | `LLM_PROVIDER` | `ollama` or `dummy` | `dummy` |
 | `LLM_MODEL` | Model name | `qwen3.5:397b-cloud` |
 | `LLM_BASE_URL` | Ollama API URL | `http://127.0.0.1:11434` |
-| `LLM_TIMEOUT` | Request timeout (seconds) | 3600 |
+| `LLM_TIMEOUT` | Request timeout (seconds) | 7200 |
 | `LLM_MAX_RETRIES` | Retry attempts | 4 |
 | `LLM_MAX_CONCURRENCY` | Concurrent calls | 2 |
 | `LLM_MAX_TOKENS` | Max output tokens | min(context, 32768) |

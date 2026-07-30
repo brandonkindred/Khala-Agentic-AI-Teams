@@ -201,7 +201,7 @@ class ClaudeLLMClient(LLMClient):
         model: str = llm_config.DEFAULT_CLAUDE_MODEL,
         *,
         api_key: str = "",
-        timeout: float = 3600.0,
+        timeout: float = 7200.0,
         max_retries: int = 2,
         on_reasoning: Optional[Callable[[str], None]] = None,
         rate_limit_max_retries: Optional[int] = None,
