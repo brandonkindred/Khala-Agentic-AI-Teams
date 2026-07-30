@@ -266,7 +266,7 @@ class PostMortemWriter:
                 )
 
         suggestions.append(
-            "- **Review token limits**: Check `LLM_MAX_TOKENS` and model context size."
+            "- **Review token limits**: Check `LLM_MAX_OUTPUT_TOKENS` and model context size."
         )
         suggestions.append(
             "- **Reduce prompt complexity**: Simplify the original prompt or provide "

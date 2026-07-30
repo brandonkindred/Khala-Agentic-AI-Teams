@@ -51,6 +51,19 @@ transient `/api/show` outage can no longer poison the process into silently trun
 for its whole lifetime. A successfully-resolved (or known/env) context size is still cached
 permanently. Negative floors to `0` (retry on next call).
 
+### LLM_CONTEXT_SIZE
+Optional global override for the model context window (tokens). When set to a valid integer,
+clamped to a floor of `2048` and used for both Ollama (`num_ctx`) and Claude input-window
+resolution ahead of the known-model tables / `/api/show`. Invalid values are ignored (fall
+through to known-model / provider discovery). Distinct from `LLM_MAX_OUTPUT_TOKENS`.
+
+### LLM_MAX_OUTPUT_TOKENS
+Optional cap on **output** tokens per completion (generation), for both Ollama and Claude.
+When unset, malformed, or non-positive, clients fall through to their provider defaults
+(typically `min(context, 32768)` for Ollama; Claude's default max-output constant). This is
+**not** the context window — use `LLM_CONTEXT_SIZE` for that. Formerly named `LLM_MAX_TOKENS`
+(hard rename; the old name is ignored).
+
 ### LLM_MAX_RETRIES / LLM_BACKOFF_BASE / LLM_BACKOFF_MAX
 **Transient** (5xx / connection / timeout) retry schedule for the central Ollama client — defaults
 `10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row),
