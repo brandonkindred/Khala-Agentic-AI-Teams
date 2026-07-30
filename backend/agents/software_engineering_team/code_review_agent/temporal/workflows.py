@@ -77,6 +77,10 @@ _LLM_RETRY = RetryPolicy(
     maximum_interval=timedelta(minutes=2),
     backoff_coefficient=2.0,
 )
+# Per-chunk map activity ceiling. Must exceed the platform ``LLM_TIMEOUT``
+# default (120 min) so Temporal does not cancel a still-streaming client call;
+# leave headroom for chunk recovery / post-processing inside the activity.
+_CHUNK_REVIEW_TIMEOUT = timedelta(hours=4)
 
 # Marker type carried on the ``ApplicationError`` the total-failure guard raises,
 # so the sync dispatcher can translate it back into ``CodeReviewUnavailableError``.
@@ -234,7 +238,7 @@ class CodeReviewWorkflow:
                 A.review_chunk_activity,
                 args=[chunk, base_input, context_fp, surface_by_path],
                 task_queue=TASK_QUEUE,
-                start_to_close_timeout=timedelta(hours=1),
+                start_to_close_timeout=_CHUNK_REVIEW_TIMEOUT,
                 heartbeat_timeout=timedelta(minutes=5),
                 retry_policy=_LLM_RETRY,
             )

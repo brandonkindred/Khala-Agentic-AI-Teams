@@ -90,9 +90,13 @@ _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=8)
 # as an errored cycle, exactly as a raising ``_run_one_strategy_lab_cycle`` does
 # in thread mode.
 _CHILD_RETRY = RetryPolicy(maximum_attempts=1)
-# A whole cycle (design re-entries × phase pipeline) can run for hours; bound it
-# to cover ``MAX_DESIGN_REENTRIES + 1`` attempts at ``_DESIGN_ATTEMPT_TIMEOUT``.
-_CHILD_EXECUTION_TIMEOUT = timedelta(hours=24)
+# A whole cycle (design re-entries × phase pipeline) can run for hours. Budget =
+# ``(MAX_DESIGN_REENTRIES + 1) × _DESIGN_ATTEMPT_TIMEOUT`` for the happy path,
+# plus another full attempt-budget for Temporal activity retries
+# (``_ACTIVITY_RETRY.maximum_attempts == 2``) and headroom for config/regime
+# activities, scheduling, and short-circuit assembly — so a late attempt still
+# gets its advertised eight-hour window.
+_CHILD_EXECUTION_TIMEOUT = timedelta(hours=48)
 
 
 async def _exec(
