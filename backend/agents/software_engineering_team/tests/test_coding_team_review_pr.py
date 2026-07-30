@@ -569,7 +569,7 @@ class TestAuthenticatedLogin:
 
 
 class _FakeOutput:
-    """Stand-in for the code-review agent's output: issues, summary, and spec-compliance notes."""
+    """Stand-in for the code-review agent's output: issues, summary, spec-compliance notes, and suggested commit message."""
 
     def __init__(self, issues: list[Any], summary: str = "S", spec: str = "SC") -> None:
         self.issues = issues
