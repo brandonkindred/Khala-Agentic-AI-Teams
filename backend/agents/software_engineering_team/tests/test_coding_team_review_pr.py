@@ -5558,6 +5558,8 @@ class TestCreateReviewIssuesUnit:
         Postconditions:
             - The loaded context's pending_issue_proposals carry the row's
               filed issue_url for the shared proposal id.
+            - Those proposal dicts are fresh copies (not aliases of the job or
+              row dicts), so later mutation cannot touch persisted review state.
         """
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
@@ -5577,6 +5579,12 @@ class TestCreateReviewIssuesUnit:
         ctx = pr_review_issues._load_review_issue_context("job1")
         assert ctx is not None
         assert ctx.summary["pending_issue_proposals"][0]["issue_url"] == "u0"
+        # Fresh dicts — never aliases of either store's proposal list.
+        _assert_no_aliased_dicts(
+            ctx.summary["pending_issue_proposals"],
+            job["review_summary"]["pending_issue_proposals"],
+            row["review_summary"]["pending_issue_proposals"],
+        )
 
 
 def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
