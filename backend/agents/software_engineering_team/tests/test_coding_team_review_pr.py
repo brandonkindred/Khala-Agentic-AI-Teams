@@ -1140,10 +1140,14 @@ class TestReviewEndpoint:
     def test_reviewer_bare_timeout_error_records_type_name_not_empty_string(
         self, review_app
     ) -> None:
-        # A bare TimeoutError() (e.g. the durable-review client-side wait timing
-        # out with no attached detail) has an empty str() — recording
-        # "code review failed: " would be useless for triage. The except block
-        # must fall back to naming the exception type when it carries no message.
+        """Bare TimeoutError() has empty str(); job error must name the type.
+
+        A durable-review client-side wait that times out with no attached detail
+        would otherwise record ``code review failed: `` (useless for triage). The
+        except block must fall back to the exception type name, keep that detail
+        in the job store, and still post exactly one neutral outage note — never
+        leak ``code review failed`` onto the PR.
+        """
         review_app["github"]["agent_output"] = TimeoutError()
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1162,8 +1166,11 @@ class TestReviewEndpoint:
         assert gh.reviews == []
 
     def test_outage_notice_suppressed_when_disabled(self, review_app, monkeypatch) -> None:
-        # With PR_REVIEW_POST_OUTAGE_NOTICE off, a reviewer outage posts NOTHING on
-        # the PR but still marks the job failed (detail preserved in the store).
+        """With PR_REVIEW_POST_OUTAGE_NOTICE off, outages post nothing on the PR.
+
+        The job must still be marked failed with the error detail preserved in
+        the store, and neither comments nor a pull request review may be created.
+        """
         monkeypatch.setenv("PR_REVIEW_POST_OUTAGE_NOTICE", "false")
         review_app["github"]["agent_output"] = RuntimeError("llm down")
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1259,6 +1266,7 @@ class TestReviewEndpoint:
         assert not any("ghp_LEAKEDTOKEN" in body for _n, body in gh.comments)
 
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
+        """POST /review-pr with github_token=None must return 400 because a GitHub token is required."""
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         resp = review_app["client"].post(
             "/review-pr", json={**_review_body(), "github_token": None}
@@ -1266,6 +1274,7 @@ class TestReviewEndpoint:
         assert resp.status_code == 400
 
     def test_pr_not_found_returns_502(self, review_app) -> None:
+        """POST /review-pr must return 502 when GitHub cannot resolve the pull request."""
         review_app["github"]["client"].fail_get_pr = True
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 502
