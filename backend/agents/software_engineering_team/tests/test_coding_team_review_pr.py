@@ -1707,11 +1707,11 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_multiple_bad_lines_are_bisected_out(self, review_app) -> None:
-        # Bisection must isolate more than one GitHub-rejected line (bad_lines):
-        # with two rejected lines among three in-diff findings, only the good line
-        # stays inline and both bad lines are demoted to file-level comments (none
-        # lost to standalone). Diff valid lines for a.py are {1, 2, 3}, so all
-        # three are line-anchored; lines 1 and 3 are rejected by the fake client.
+        # Bisection must isolate more than one line rejected by GitHub (bad_lines):
+        # with two bad lines among three in-diff findings, only the good line stays
+        # inline and both bad lines are demoted to file-level comments (none lost
+        # to standalone).
+        # (Diff valid lines for a.py are {1, 2, 3}, so all three are line-anchored.)
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=1, description="bad alpha"),
@@ -1720,7 +1720,7 @@ class TestReviewEndpoint:
             ]
         )
         gh = review_app["github"]["client"]
-        gh.bad_lines = {1, 3}  # two in-diff lines rejected inline by GitHub
+        gh.bad_lines = {1, 3}  # two lines rejected inline by GitHub (bad_lines)
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
