@@ -5205,12 +5205,18 @@ class TestCreateReviewIssuesUnit:
         assert out["proposals"][0]["issue_url"] == "u11"
 
     def test_raises_review_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Neither store knowing the job id raises ReviewNotFoundError."""
+        """Neither store knowing the job id raises ReviewNotFoundError before any
+        GitHub client is constructed."""
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
 
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: None)
+
+        def _fail_client(**_k):
+            raise AssertionError("client should not be constructed when review is not found")
+
+        monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
         with pytest.raises(pr_review_issues.ReviewNotFoundError):
             pr_review_issues.create_review_issues("missing", ["p0"], token="t")
 
