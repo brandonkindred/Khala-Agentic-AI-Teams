@@ -142,7 +142,7 @@ for the design rationale and migration notes.
 | `LLM_PROVIDER_RESET_SWEEP_INTERVAL_S` | Interval (seconds, default 5) for the background sweep that resets an expired provider entry's limit-state off the failover hot path — see [ENV_VARS.md](../../../docs/ENV_VARS.md) |
 | `LLM_TIMEOUT` | Request timeout in seconds (default 7200 / 120 min; all calls use streaming) |
 | `LLM_CONTEXT_SIZE` | Override context size |
-| `LLM_MAX_TOKENS` | Max output tokens |
+| `LLM_MAX_OUTPUT_TOKENS` | Max output tokens |
 | `LLM_MAX_RETRIES` | Retries for **transient** (5xx / network) errors only — not 429 (default 10) |
 | `LLM_BACKOFF_BASE` | Transient backoff base in seconds (default 2) |
 | `LLM_BACKOFF_MAX` | Transient max backoff in seconds (default 120) |

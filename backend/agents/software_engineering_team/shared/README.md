@@ -44,7 +44,7 @@ The LLM client provides a unified interface for text and JSON generation with su
 | `LLM_TIMEOUT` | Request timeout (seconds) | 7200 |
 | `LLM_MAX_RETRIES` | Retry attempts | 4 |
 | `LLM_MAX_CONCURRENCY` | Concurrent calls | 2 |
-| `LLM_MAX_TOKENS` | Max output tokens | min(context, 32768) |
+| `LLM_MAX_OUTPUT_TOKENS` | Max output tokens | min(context, 32768) |
 | `LLM_CONTEXT_SIZE` | Context window | Model-specific |
 | `LLM_MODEL_<AGENT>` | Per-agent model override | — |
 

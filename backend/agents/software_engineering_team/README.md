@@ -211,7 +211,7 @@ This starts the team's HTTP API on `http://127.0.0.1:8000`; see [API](#api) belo
 | `LLM_BACKOFF_BASE` | Base seconds for exponential backoff | `2` |
 | `LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
 | `LLM_MAX_CONCURRENCY` | Max concurrent LLM calls (default 4; set 4–6 for faster runs with parallel planning and backend+frontend workers; lower to 2 if GPU/memory limited) | `4` |
-| `LLM_MAX_TOKENS` | Max tokens to generate; if unset, uses min(context size, 32768) so APIs that cap output (e.g. 32K) work | 32768 (capped) |
+| `LLM_MAX_OUTPUT_TOKENS` | Max tokens to generate; if unset, uses min(context size, 32768) so APIs that cap output (e.g. 32K) work | 32768 (capped) |
 | `LLM_CONTEXT_SIZE` | Context window in tokens; if unset, uses known model table or Ollama /api/show. Effective context = max minus largest agent reservation. qwen3.5:397b-cloud: 256K max (242K effective). | (model-dependent) |
 | `LLM_ENABLE_THINKING` | Enable thinking mode for qwen3.5 models; improves reasoning quality but increases latency and token usage. Set to `false` to disable. | `true` (for qwen3.5) |
 | `SW_ENABLE_PLANNING_CACHE` | Reuse cached TaskAssignment when spec and architecture unchanged; set to `0` or `false` to disable | `1` (enabled) |

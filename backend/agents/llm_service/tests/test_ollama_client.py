@@ -38,13 +38,13 @@ def test_ollama_get_max_context_tokens_env_override(monkeypatch: pytest.MonkeyPa
 
 
 def test_ollama_resolve_max_tokens_explicit_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit arg wins (capped); otherwise LLM_MAX_TOKENS is read via the
-    centralized ``llm_config.resolve_max_tokens`` (also capped). Neither path
-    touches the model context, so no /api/show call is needed."""
+    """An explicit arg wins (capped); otherwise LLM_MAX_OUTPUT_TOKENS is read via the
+    centralized ``llm_config.resolve_max_output_tokens`` (also capped). Neither path
+    coerces a non-positive value into a 1-token cap."""
     client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
     assert client._resolve_max_tokens(100) == 100
     assert client._resolve_max_tokens(999_999_999) == DEFAULT_MAX_OUTPUT_TOKENS
-    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "4096")
     assert client._resolve_max_tokens(None) == 4096
 
 
