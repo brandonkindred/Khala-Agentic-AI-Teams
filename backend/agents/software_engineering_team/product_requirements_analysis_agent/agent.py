@@ -49,6 +49,7 @@ from .qa_history import (
 )
 from .question_processing import (
     add_recommendations,
+    cap_open_questions,
     consolidate_open_questions,
     dedupe_questions_by_answer_similarity,
     filter_duplicate_questions,
@@ -382,6 +383,21 @@ class ProductRequirementsAnalysisAgent:
                 update_job=_update_job,
                 on_chunk_progress=_on_spec_review_progress,
             )
+
+            # Cap only after consolidation + answer-similarity dedupe (and any
+            # consistency re-runs) so near-duplicates do not crowd out distinct topics.
+            capped_questions = cap_open_questions(spec_review_result.open_questions)
+            if len(capped_questions) < len(spec_review_result.open_questions):
+                _update_job(
+                    status_text=(
+                        f"Limited to {len(capped_questions)} open questions "
+                        f"(from {len(spec_review_result.open_questions)})"
+                    ),
+                )
+                spec_review_result = spec_review_result.model_copy(
+                    update={"open_questions": capped_questions}
+                )
+                open_count = len(capped_questions)
 
             _update_job(
                 status_text="Checking question and answer alignment...",
