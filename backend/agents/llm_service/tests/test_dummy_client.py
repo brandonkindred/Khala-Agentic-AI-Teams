@@ -12,6 +12,7 @@ from llm_service.clients.dummy import (
     _STRIP_SUFFIXES,
     _STRIP_VERBS,
     CODE_REVIEW_MIN_PROMPT_LENGTH,
+    _aggregated_user_tool_text,
     _extract_name_from_hint,
     _last_user_text,
 )
@@ -97,6 +98,48 @@ async def test_structured_output_uses_later_user_text_blocks_for_routing() -> No
                 {"text": "Need architecture_document with components and overview."},
             ],
         }
+    ]
+    events = []
+    async for event in c.structured_output(_ArchStub, prompt):
+        events.append(event)
+    assert isinstance(events[0]["output"], _ArchStub)
+    assert "Dummy architecture" in events[0]["output"].overview
+
+
+def test_aggregated_user_tool_text_preserves_earlier_turns() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [{"text": "Need architecture_document with components and overview."}],
+        },
+        {"role": "assistant", "content": [{"text": "Sure."}]},
+        {"role": "user", "content": [{"text": "return that as structured output"}]},
+    ]
+    assert "architecture_document" in _aggregated_user_tool_text(messages)
+    assert "return that as structured output" in _aggregated_user_tool_text(messages)
+    # stream path stays latest-turn-only
+    assert _last_user_text(messages) == "return that as structured output"
+
+
+@pytest.mark.asyncio
+async def test_structured_output_uses_earlier_user_turn_for_routing() -> None:
+    """Follow-up structured_output requests must still see original routing anchors."""
+
+    class _ArchStub(BaseModel):
+        overview: str
+        architecture_document: str
+        components: list
+        diagrams: dict
+        decisions: list
+
+    c = DummyLLMClient()
+    prompt = [
+        {
+            "role": "user",
+            "content": [{"text": "Need architecture_document with components and overview."}],
+        },
+        {"role": "assistant", "content": [{"text": "Generated architecture."}]},
+        {"role": "user", "content": [{"text": "return that as structured output"}]},
     ]
     events = []
     async for event in c.structured_output(_ArchStub, prompt):

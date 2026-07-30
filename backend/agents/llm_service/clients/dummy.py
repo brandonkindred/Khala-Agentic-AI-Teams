@@ -174,12 +174,38 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
     return result or _placeholder_slug(hint, separator, max_length)
 
 
+def _content_to_text(content: Any) -> str:
+    """Flatten a message ``content`` field into newline-joined text.
+
+    Preconditions:
+        - ``content`` is a string, a list of Strands content blocks, or other.
+
+    Postconditions:
+        - Returns a string (empty when no text can be extracted).
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and "text" in block:
+            parts.append(str(block["text"]))
+        elif isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and "toolResult" in block:
+            tr = block.get("toolResult") or {}
+            nested = _content_to_text(tr.get("content", []))
+            if nested:
+                parts.append(nested)
+    return "\n".join(parts)
+
+
 def _last_user_text(messages: list) -> str:
     """Return concatenated text from the most recent user message.
 
-    Mirrors ``_strands_messages_to_openai``: every text (or bare-string) block
-    in that message is collected and joined with newlines so later blocks that
-    carry routing anchors are not dropped.
+    Used by ``stream()``. Multi-block text within that single turn is
+    newline-joined so routing anchors in later blocks are not dropped.
 
     Preconditions:
         - ``messages`` is a list of Strands-style message dicts (role/content).
@@ -193,19 +219,36 @@ def _last_user_text(messages: list) -> str:
     for msg in reversed(messages):
         if not isinstance(msg, dict) or msg.get("role") != "user":
             continue
-        content = msg.get("content", [])
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            return ""
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and "text" in block:
-                parts.append(str(block["text"]))
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts)
+        return _content_to_text(msg.get("content", []))
     return ""
+
+
+def _aggregated_user_tool_text(messages: list) -> str:
+    """Join all user/tool turn texts for structured-output routing.
+
+    Mirrors ``LLMClientModel.structured_output``, which aggregates converted
+    user and tool message contents so follow-up turns like "return that as
+    structured output" still see routing anchors from earlier requests.
+    ``stream()`` continues to use ``_last_user_text`` (latest turn only).
+
+    Preconditions:
+        - ``messages`` is a list of Strands-style message dicts (role/content).
+
+    Postconditions:
+        - Returns a string (empty when no user/tool text is present).
+        - Non-empty user/tool turns appear in order, separated by blank lines.
+    """
+    assert isinstance(messages, list)
+    parts: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") not in ("user", "tool"):
+            continue
+        text = _content_to_text(msg.get("content", []))
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
 
 
 def _flatten_system_prompt_content(
@@ -262,6 +305,10 @@ class DummyLLMClient(LLMClient, Model):
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Yield Strands structured-output events from the dummy pattern matcher.
 
+        Aggregates all user/tool turns (not just the latest) so a follow-up
+        like "return that as structured output" still routes on anchors from
+        the original request — matching ``LLMClientModel.structured_output``.
+
         Preconditions:
             - ``output_model`` is a Pydantic model type with ``model_validate``.
             - ``prompt`` is a Strands-style message list.
@@ -271,8 +318,8 @@ class DummyLLMClient(LLMClient, Model):
             - Raises ``ValueError`` when the stub dict cannot validate.
         """
         assert hasattr(output_model, "model_validate")
-        user_text = _last_user_text(prompt)
-        data = self.complete_json(user_text, system_prompt=system_prompt)
+        prompt_text = _aggregated_user_tool_text(prompt)
+        data = self.complete_json(prompt_text, system_prompt=system_prompt)
         try:
             validated = output_model.model_validate(data)
         except Exception as exc:
