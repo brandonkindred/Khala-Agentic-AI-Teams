@@ -163,6 +163,8 @@ def test_merged_pass_budgets_cap_architecture_when_it_cannot_fit() -> None:
         llm,
         architecture_chars=100_000,
         system_prompt_chars=14_000,
+        tool_schema_chars=0,
+        tool_transcript_chars=0,
     )
     assert budgets is not None
     assert budgets.max_architecture_chars < 100_000
@@ -174,19 +176,21 @@ def test_merged_pass_budgets_return_none_when_fixed_reserves_exceed_context() ->
     """When system prompt + scaffolding leave no usable response room, skip
     rather than inventing a positive inline allowance."""
     llm = _StubLLM(8_192)
-    # ~14K-char system prompt alone is already ~4K tokens; with the dual-array
-    # response floor the old clamp still forced 512 content tokens.
+    # Isolate prompt/response math from tool schema/transcript reserves.
     budgets = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=0,
         system_prompt_chars=14_000,
+        tool_schema_chars=0,
+        tool_transcript_chars=0,
+        finding_array_count=2,
     )
-    # 8192 context: prompt (~4K+tok) + response can still fit with shrunk
-    # response and 0 content — that is OK. Force an impossible prompt:
     impossible = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=0,
         system_prompt_chars=50_000,
+        tool_schema_chars=0,
+        tool_transcript_chars=0,
     )
     assert impossible is None
     assert budgets is not None
@@ -194,6 +198,17 @@ def test_merged_pass_budgets_return_none_when_fixed_reserves_exceed_context() ->
     assert budgets.max_inline_code_chars == 0
     assert budgets.reserved_response_tokens < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
     assert budgets.reserved_response_tokens >= 1024
+    # Default tool schema + transcript reserves make this 8K window unusable
+    # for a ~14K-char system prompt (no room for response + tool evidence).
+    assert (
+        compute_code_review_merged_pass_budgets(
+            llm,
+            architecture_chars=0,
+            system_prompt_chars=14_000,
+            finding_array_count=2,
+        )
+        is None
+    )
 
 
 def test_merged_pass_budgets_bound_manifest_within_content_room() -> None:
@@ -226,6 +241,8 @@ def test_merged_pass_budgets_prefer_architecture_over_recoverable_manifest() -> 
         system_prompt_chars=5_000,
         manifest_chars=200_000,
         finding_array_count=2,
+        tool_schema_chars=0,
+        tool_transcript_chars=0,
     )
     assert budgets is not None
     assert budgets.max_architecture_chars == 8_000
@@ -241,12 +258,16 @@ def test_merged_pass_budgets_single_half_uses_smaller_response_reserve() -> None
         architecture_chars=0,
         system_prompt_chars=5_000,
         finding_array_count=2,
+        tool_schema_chars=0,
+        tool_transcript_chars=0,
     )
     one = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=0,
         system_prompt_chars=5_000,
         finding_array_count=1,
+        tool_schema_chars=0,
+        tool_transcript_chars=0,
     )
     assert both is not None and one is not None
     assert both.reserved_response_tokens == CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
@@ -268,12 +289,14 @@ def test_merged_pass_budgets_reserve_tool_schemas() -> None:
         architecture_chars=0,
         system_prompt_chars=14_000,
         tool_schema_chars=0,
+        tool_transcript_chars=0,
         finding_array_count=2,
     )
     with_tools = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=0,
         system_prompt_chars=14_000,
+        tool_transcript_chars=0,
         finding_array_count=2,
     )
     assert without_tools is not None
@@ -285,6 +308,45 @@ def test_merged_pass_budgets_reserve_tool_schemas() -> None:
         architecture_chars=0,
         system_prompt_chars=14_000,
         tool_schema_chars=50_000,
+        tool_transcript_chars=0,
         finding_array_count=2,
     )
     assert impossible is None
+
+
+def test_merged_pass_budgets_reserve_tool_transcript() -> None:
+    """Tool-call results append mid-turn; without transcript headroom the
+    initial content can consume every token between prompt and response."""
+    # Context tight enough that the map-chunk absolute cap does not hide the
+    # transcript room difference.
+    llm = _StubLLM(25_000)
+    without = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=5_000,
+        tool_schema_chars=0,
+        tool_transcript_chars=0,
+        finding_array_count=2,
+    )
+    with_transcript = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=5_000,
+        tool_schema_chars=0,
+        finding_array_count=2,
+    )
+    assert without is not None and with_transcript is not None
+    assert (
+        with_transcript.max_inline_code_chars + with_transcript.max_manifest_chars
+        < without.max_inline_code_chars + without.max_manifest_chars
+    )
+    # Transcript + min response that cannot fit → skip.
+    tiny = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=5_000,
+        tool_schema_chars=0,
+        tool_transcript_chars=200_000,
+        finding_array_count=2,
+    )
+    assert tiny is None

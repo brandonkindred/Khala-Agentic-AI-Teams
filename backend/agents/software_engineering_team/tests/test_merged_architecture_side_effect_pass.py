@@ -445,10 +445,9 @@ def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) 
 
     class _Client(DummyLLMClient):
         def get_max_context_tokens(self) -> int:
-            # Tight enough that after the merged system prompt + dual-array
-            # response reserve, the path list must be truncated (content room
-            # collapses to ~0 on this context).
-            return 8_192
+            # Fits fixed prompt + tool transcript + a usable (shrunk) response,
+            # but leaves essentially no content room so the path list truncates.
+            return 18_000
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
@@ -461,7 +460,7 @@ def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) 
     assert prompts
     manifest_section = prompts[0].split("**Full content of the changed files:**", 1)[0]
     assert "more changed path(s) not listed" in manifest_section
-    assert "list_changed_files()" in manifest_section
+    assert "list_changed_files" in manifest_section
     assert manifest_section.count("pkg/module_") < 400
 
 
@@ -482,6 +481,11 @@ def test_raises_tight_output_cap_for_dual_finding_arrays(
     clones: list = []
 
     class _Empty(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            # Dummy default is 16K; with tool-transcript headroom that shrinks
+            # the dual-array reserve. Use a window that still holds the full floor.
+            return 40_000
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
                 return {"architecture_findings": [], "side_effect_findings": []}
@@ -516,6 +520,9 @@ def test_model_pin_takes_precedence_over_env_max_tokens(
     clones: list = []
 
     class _Empty(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 40_000
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
                 return {"architecture_findings": [], "side_effect_findings": []}
@@ -548,7 +555,9 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
 
     class _SmallCtx(DummyLLMClient):
         def get_max_context_tokens(self) -> int:
-            return 8_192
+            # Large enough to run (fixed prompt + transcript + min response),
+            # small enough that the dual-array floor cannot fit in full.
+            return 18_000
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
@@ -586,6 +595,9 @@ def test_clamps_oversized_cap_to_full_dual_array_reserve(
     clones: list = []
 
     class _Empty(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 40_000
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _MERGED_PASS_ANCHOR in prompt:
                 return {"architecture_findings": [], "side_effect_findings": []}
@@ -648,3 +660,34 @@ def test_list_changed_files_tool_returns_submission_paths_only() -> None:
     fn = getattr(changed, "fn", None) or getattr(changed, "_fn", None) or changed
     result = fn() if callable(fn) else changed()
     assert "a.py" in result and "b.py" in result
+
+
+def test_format_changed_files_page_paginates_and_hints_next_offset() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import format_changed_files_page
+
+    paths = [f"f{i:03d}.py" for i in range(25)]
+    page1 = format_changed_files_page(paths, offset=0, limit=10)
+    assert "f000.py" in page1 and "f009.py" in page1
+    assert "f010.py" not in page1
+    assert "offset=10" in page1
+    assert "of 25" in page1
+
+    page2 = format_changed_files_page(paths, offset=10, limit=10)
+    assert "f010.py" in page2 and "f019.py" in page2
+    assert "offset=20" in page2
+
+    page3 = format_changed_files_page(paths, offset=20, limit=10)
+    assert "f020.py" in page3 and "f024.py" in page3
+    assert "offset=" not in page3  # last page — no next hint
+    assert "showing paths 21-25 of 25" in page3
+
+
+def test_format_changed_files_page_bounds_by_char_budget() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import format_changed_files_page
+
+    paths = [f"dir/very_long_path_name_{i}.py" for i in range(50)]
+    page = format_changed_files_page(paths, offset=0, limit=500, max_chars=120)
+    # Must not dump the whole list when the char budget is tight.
+    assert page.count("\n") < 50
+    assert "offset=" in page
+    assert "of 50" in page

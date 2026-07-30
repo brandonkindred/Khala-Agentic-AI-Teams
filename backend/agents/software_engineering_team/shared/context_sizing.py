@@ -153,6 +153,11 @@ CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS = 1_500
 # list_changed_files, and optionally search_repository). These are outside the
 # system/user prompt bodies but still consume context on every merged call.
 CODE_REVIEW_MERGED_PASS_TOOL_SCHEMA_CHARS = 8_000
+# Headroom for assistant tool-call messages and tool results that append mid-
+# turn (both halves need repository tools). Without this, a large architecture /
+# manifest / code payload can consume every token between the fixed prompt and
+# the response reserve, leaving no room for tool evidence.
+CODE_REVIEW_MERGED_PASS_TOOL_TRANSCRIPT_CHARS = 16_000
 
 
 @dataclass(frozen=True)
@@ -173,6 +178,7 @@ def compute_code_review_merged_pass_budgets(
     manifest_chars: int = 0,
     base_scaffolding_chars: int = CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
     tool_schema_chars: int = CODE_REVIEW_MERGED_PASS_TOOL_SCHEMA_CHARS,
+    tool_transcript_chars: int = CODE_REVIEW_MERGED_PASS_TOOL_TRANSCRIPT_CHARS,
     finding_array_count: int = 2,
 ) -> MergedPassBudgets | None:
     """Budget architecture, changed-file manifest, and code for the merged pass.
@@ -183,7 +189,8 @@ def compute_code_review_merged_pass_budgets(
     overflow smaller-context models. This helper:
 
     1. Reserves the (possibly half-filtered) system prompt, fixed scaffolding,
-       and a conservative allowance for serialized tool schemas.
+       a conservative allowance for serialized tool schemas, and mid-turn tool
+       transcript/result headroom.
     2. Takes up to a dual-array (``8192``) or single-array (``4096``) response
        reserve based on ``finding_array_count``, shrinking that reserve when the
        context cannot hold the full floor — never inventing a positive content
@@ -201,7 +208,8 @@ def compute_code_review_merged_pass_budgets(
 
     Postconditions:
         - Returns ``None`` when even an empty payload cannot leave a usable
-          response reserve (caller should skip the LLM call).
+          response reserve plus tool-transcript headroom (caller should skip
+          the LLM call).
         - Otherwise returns a :class:`MergedPassBudgets` with all fields ``>= 0``.
           ``max_inline_code_chars`` never exceeds the map-chunk absolute cap.
         - Never raises.
@@ -217,11 +225,14 @@ def compute_code_review_merged_pass_budgets(
         )
         / CHARS_PER_TOKEN
     )
+    transcript_tokens = int(max(0, tool_transcript_chars) / CHARS_PER_TOKEN)
     if fixed_prompt_tokens >= ctx:
         return None
 
     room_after_prompt = ctx - fixed_prompt_tokens
-    if room_after_prompt < _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS:
+    # Need response room *and* tool-transcript headroom; otherwise tool results
+    # from arch/side-effect checks have nowhere to land.
+    if room_after_prompt < _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS + transcript_tokens:
         return None
 
     response_floor = (
@@ -229,8 +240,9 @@ def compute_code_review_merged_pass_budgets(
         if finding_array_count == 2
         else CODE_REVIEW_MERGED_PASS_SINGLE_RESPONSE_TOKENS
     )
-    reserved_response = min(response_floor, room_after_prompt)
-    content_tokens = room_after_prompt - reserved_response  # may be 0
+    response_room = room_after_prompt - transcript_tokens
+    reserved_response = min(response_floor, response_room)
+    content_tokens = response_room - reserved_response  # may be 0
     content_chars = int(content_tokens * CHARS_PER_TOKEN)
 
     # Architecture has no recovery tool; allocate it before the recoverable

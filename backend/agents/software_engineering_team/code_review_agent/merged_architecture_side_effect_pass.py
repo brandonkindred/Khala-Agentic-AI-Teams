@@ -227,6 +227,77 @@ def _manifest_chars(paths: List[str]) -> int:
     return len(header) + sum(len(p) + 1 for p in paths)
 
 
+# Default / hard caps for ``list_changed_files`` pagination so a truncated
+# manifest cannot re-enter the context as one unbounded tool result.
+_LIST_CHANGED_FILES_DEFAULT_LIMIT = 100
+_LIST_CHANGED_FILES_MAX_LIMIT = 500
+_LIST_CHANGED_FILES_PAGE_MAX_CHARS = 8_000
+
+
+def format_changed_files_page(
+    paths: List[str],
+    *,
+    offset: int = 0,
+    limit: int = _LIST_CHANGED_FILES_DEFAULT_LIMIT,
+    max_chars: int = _LIST_CHANGED_FILES_PAGE_MAX_CHARS,
+) -> str:
+    """Format a bounded page of submission paths for ``list_changed_files``.
+
+    Preconditions:
+        - ``paths`` is an ordered list of submission path strings (may be empty).
+        - ``max_chars`` is ``>= 1``.
+
+    Postconditions:
+        - Returns a non-empty string. Empty ``paths`` yields
+          ``"(no changed files)"``.
+        - At most ``limit`` paths (clamped to
+          ``[1, _LIST_CHANGED_FILES_MAX_LIMIT]``) starting at ``offset``
+          (clamped to ``>= 0``), stopping early when joining the next path
+          would exceed ``max_chars`` (a single oversized path is still
+          returned whole so ``read_file`` remains usable).
+        - When more paths remain after this page, appends a next-``offset``
+          hint so every path stays reachable via further calls.
+        - Never raises.
+    """
+    assert max_chars >= 1, "max_chars must be >= 1"
+    total = len(paths)
+    if total == 0:
+        return "(no changed files)"
+    start = max(0, int(offset))
+    page_limit = max(1, min(int(limit), _LIST_CHANGED_FILES_MAX_LIMIT))
+    if start >= total:
+        return (
+            f"(no paths in this page; total={total}. "
+            f"call list_changed_files(offset=0, limit={page_limit}) from the start)"
+        )
+    end_cap = min(total, start + page_limit)
+    page: List[str] = []
+    used = 0
+    end = start
+    for i in range(start, end_cap):
+        path = paths[i]
+        add = len(path) + (1 if page else 0)
+        if page and used + add > max_chars:
+            break
+        if not page and len(path) > max_chars:
+            page.append(path)
+            end = i + 1
+            break
+        page.append(path)
+        used += add
+        end = i + 1
+    body = "\n".join(page) if page else "(no paths in this page)"
+    if end < total:
+        return (
+            f"{body}\n"
+            f"(showing paths {start + 1}-{end} of {total}; "
+            f"call list_changed_files(offset={end}, limit={page_limit}) for more)"
+        )
+    if start > 0:
+        return f"{body}\n(showing paths {start + 1}-{end} of {total})"
+    return body
+
+
 def _build_merged_pass_tools(index: CodebaseIndex, *, side_on: bool) -> list:
     """Tools for the merged pass, including a changed-files-only listing.
 
@@ -239,19 +310,28 @@ def _build_merged_pass_tools(index: CodebaseIndex, *, side_on: bool) -> list:
     base = side_pass.build_side_effect_tools(index) if side_on else _build_tools(index)
 
     @tool
-    def list_changed_files() -> str:
-        """List every changed file path in this submission only.
+    def list_changed_files(
+        offset: int = 0,
+        limit: int = _LIST_CHANGED_FILES_DEFAULT_LIMIT,
+    ) -> str:
+        """List changed file paths in this submission only (paginated).
 
         Unlike ``list_files()``, this never includes repository paths outside
         the submission. Use it when the changed-file manifest in the prompt was
-        truncated, then ``read_file(path)`` for any omitted path.
+        truncated, then ``read_file(path)`` for any omitted path. Pass
+        ``offset``/``limit`` to page through large submissions — do not expect
+        one call to return every path when the list is long.
 
         Returns:
-            One submission path per line, or a message when none are available.
+            One submission path per line for this page, plus a next-offset hint
+            when more remain, or a message when none are available.
         """
         try:
-            paths = list(index.files.keys())
-            return "\n".join(paths) if paths else "(no changed files)"
+            return format_changed_files_page(
+                list(index.files.keys()),
+                offset=offset,
+                limit=limit,
+            )
         except Exception as exc:  # noqa: BLE001 - tool errors become tool messages
             return f"Error: could not list changed files: {type(exc).__name__}: {exc}"
 
@@ -457,7 +537,8 @@ def _build_prompt(
     if omitted:
         parts.append(
             f"... and {omitted} more changed file(s) not shown above; call "
-            "list_changed_files()/read_file(path) to see them."
+            "list_changed_files(offset=0)/read_file(path) to see them "
+            "(page with offset/limit when the list is long)."
         )
     parts.append("")
 
@@ -466,20 +547,21 @@ def _build_prompt(
             "Use list_changed_files()/list_files()/read_file()/search_codebase()/"
             "search_repository()/find_function_at_line() as each part's instructions "
             "require. Address Part 1 and Part 2 independently. Prefer "
-            "list_changed_files() when recovering omitted submission paths."
+            "list_changed_files(offset, limit) when recovering omitted submission paths."
         )
     elif arch_on:
         parts.append(
             "Use list_changed_files()/list_files()/read_file()/search_codebase()/"
-            "find_function_at_line() as Part 1 requires. Prefer list_changed_files() "
-            "when recovering omitted submission paths. Do not run side-effect analysis."
+            "find_function_at_line() as Part 1 requires. Prefer "
+            "list_changed_files(offset, limit) when recovering omitted submission "
+            "paths. Do not run side-effect analysis."
         )
     else:
         parts.append(
             "Use list_changed_files()/list_files()/read_file()/search_codebase()/"
             "search_repository()/find_function_at_line() as Part 2 requires. Prefer "
-            "list_changed_files() when recovering omitted submission paths. Do not run "
-            "architecture analysis."
+            "list_changed_files(offset, limit) when recovering omitted submission "
+            "paths. Do not run architecture analysis."
         )
     parts.append(
         'Return a single JSON object with "architecture_findings"/"side_effect_findings" '
@@ -505,7 +587,8 @@ def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
         line_cost = len(path) + 1
         overflow_note = (
             f"... and {len(paths) - shown} more changed path(s) not listed; "
-            "call list_changed_files() then read_file(path) to reach them."
+            "call list_changed_files(offset=0) then read_file(path) to reach them "
+            "(page with offset/limit when the list is long)."
         )
         # Leave room for an overflow note if this isn't the last path.
         need_note_room = shown + 1 < len(paths)
@@ -513,14 +596,16 @@ def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
         if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
             lines.append(
                 f"... and {len(paths) - shown} more changed path(s) not listed; "
-                "call list_changed_files() then read_file(path) to reach them."
+                "call list_changed_files(offset=0) then read_file(path) to reach them "
+                "(page with offset/limit when the list is long)."
             )
             break
         if used + line_cost > max_manifest_chars and shown == 0:
             # Budget too tight for even one path: header + overflow only.
             lines.append(
                 f"... and {len(paths)} more changed path(s) not listed; "
-                "call list_changed_files() then read_file(path) to reach them."
+                "call list_changed_files(offset=0) then read_file(path) to reach them "
+                "(page with offset/limit when the list is long)."
             )
             break
         lines.append(path)
