@@ -79,8 +79,11 @@ _ACTIVITY_RETRY = RetryPolicy(
 _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # One design attempt runs the whole per-cycle phase pipeline (up to
 # ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` model round-trips plus backtests), so it
-# needs a far wider ceiling than a single LLM/gate/persist activity.
-_DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
+# needs a far wider ceiling than a single LLM/gate/persist activity. Must exceed
+# the platform ``LLM_TIMEOUT`` default (120 min) so Temporal does not cancel a
+# still-streaming call mid-attempt; sized for several long round-trips rather
+# than the pathological full-timeout × max-call-count product.
+_DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=8)
 
 # A cycle child workflow is expensive and its own activities already retry
 # internally, so a failed cycle is not re-run at the child level — it surfaces
@@ -88,8 +91,8 @@ _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
 # in thread mode.
 _CHILD_RETRY = RetryPolicy(maximum_attempts=1)
 # A whole cycle (design re-entries × phase pipeline) can run for hours; bound it
-# generously rather than leaving it unbounded.
-_CHILD_EXECUTION_TIMEOUT = timedelta(hours=8)
+# to cover ``MAX_DESIGN_REENTRIES + 1`` attempts at ``_DESIGN_ATTEMPT_TIMEOUT``.
+_CHILD_EXECUTION_TIMEOUT = timedelta(hours=24)
 
 
 async def _exec(
