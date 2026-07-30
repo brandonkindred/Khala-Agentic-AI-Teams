@@ -49,7 +49,7 @@ ENV_LLM_MODEL = "LLM_MODEL"
 ENV_LLM_BASE_URL = "LLM_BASE_URL"
 ENV_LLM_TIMEOUT = "LLM_TIMEOUT"
 ENV_LLM_CONTEXT_SIZE = "LLM_CONTEXT_SIZE"
-ENV_LLM_MAX_TOKENS = "LLM_MAX_TOKENS"
+ENV_LLM_MAX_OUTPUT_TOKENS = "LLM_MAX_OUTPUT_TOKENS"
 ENV_LLM_MAX_RETRIES = "LLM_MAX_RETRIES"
 ENV_LLM_BACKOFF_BASE = "LLM_BACKOFF_BASE"
 ENV_LLM_BACKOFF_MAX = "LLM_BACKOFF_MAX"
@@ -440,10 +440,10 @@ def resolve_provider() -> str:
     return raw
 
 
-def resolve_max_tokens() -> int:
-    """Return the configured output-token cap from ``LLM_MAX_TOKENS``, or 0 if unset.
+def resolve_max_output_tokens() -> int:
+    """Return the configured output-token cap from ``LLM_MAX_OUTPUT_TOKENS``, or 0 if unset.
 
-    Centralizes the ``LLM_MAX_TOKENS`` env lookup so provider clients don't read
+    Centralizes the ``LLM_MAX_OUTPUT_TOKENS`` env lookup so provider clients don't read
     ``os.environ`` directly (mirrors the other resolvers here) — used by
     :meth:`OllamaLLMClient._resolve_max_tokens`. A missing,
     non-integer, or non-positive value yields ``0`` — the caller's "unset"
@@ -452,7 +452,7 @@ def resolve_max_tokens() -> int:
 
     Postconditions: returns an int ``>= 0``. Never raises.
     """
-    raw = os.environ.get(ENV_LLM_MAX_TOKENS)
+    raw = os.environ.get(ENV_LLM_MAX_OUTPUT_TOKENS)
     if not raw:
         return 0
     try:
