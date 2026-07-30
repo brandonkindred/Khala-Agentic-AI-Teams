@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Last-resort transport timeout (seconds) when even ``resolve_timeout`` returns a
 # non-positive / non-finite value. Mirrors the platform default so the resolver's
 # "positive, finite float" postcondition holds unconditionally.
-_DEFAULT_TRANSPORT_TIMEOUT = 3600.0
+_DEFAULT_TRANSPORT_TIMEOUT = 7200.0
 
 # Per-agent-key sampling temperature defaults. Only ``strategy_design`` — whose
 # prompts explicitly push for novel, diverse output — samples above zero; every
@@ -60,8 +60,8 @@ def _resolve_strands_timeout(agent_key: str) -> float:
             if parsed > 0 and math.isfinite(parsed):
                 return parsed
     # ``resolve_timeout`` is a total function — it reads an env var (defaulting
-    # to "3600") and catches the only failure mode (``float()`` ValueError),
-    # returning 3600.0 — so it cannot raise. No ``try/except`` wraps it by design:
+    # to "7200") and catches the only failure mode (``float()`` ValueError),
+    # returning 7200.0 — so it cannot raise. No ``try/except`` wraps it by design:
     # per the project DbC rule we never try/except around a callee's contract
     # failure to hide it; a future ``resolve_timeout`` that violated its
     # ``-> float`` contract by raising should surface, not silently degrade.

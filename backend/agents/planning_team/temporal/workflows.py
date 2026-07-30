@@ -35,8 +35,10 @@ with workflow.unsafe.imports_passed_through():
 #: Deterministic/cheap phases (intake, synthesis, finalize).
 QUICK_TIMEOUT = timedelta(minutes=5)
 #: LLM phases (discovery, requirements) + the optional market-research call —
-#: a large spec becomes many per-section LLM round-trips.
-LLM_TIMEOUT = timedelta(hours=1)
+#: a large spec becomes many per-section LLM round-trips. Must exceed the
+#: platform ``LLM_TIMEOUT`` default (120 min) so Temporal does not cancel a
+#: still-streaming client call, with headroom for multi-section overhead.
+LLM_TIMEOUT = timedelta(hours=3)
 #: Long external-poll phases (document production's PRA wait, sub-agent
 #: provisioning's AI-Systems wait). The PRA poll alone can run up to an hour.
 EXTERNAL_TIMEOUT = timedelta(hours=2)
