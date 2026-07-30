@@ -304,16 +304,21 @@ Exposes HTTP log endpoint.
 
 ## Observability (OpenTelemetry)
 
-Every team microservice, the unified API, the blogging service, and the job
-service bootstrap OpenTelemetry via `shared.observability.init_otel`. Metrics are
-collected by Prometheus scraping `/metrics`; traces are exported over OTLP. See
-`backend/shared/observability/README.md` for the full SDK-honored list.
+Every team microservice, the unified API, and the blogging service bootstrap
+OpenTelemetry via `shared.observability.init_otel`. Metrics are collected by
+Prometheus scraping `/metrics`; traces are exported over OTLP only when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. See `backend/shared/observability/README.md`
+for the full SDK-honored list.
 
 ### OTEL_EXPORTER_OTLP_ENDPOINT
 OTLP collector endpoint for trace (and, unless disabled, metric) export. When
-unset, no exporter is built and spans are created but not shipped. The docker
-stack defaults this to the in-stack Grafana Tempo backend (`http://tempo:4318`);
-point it at any external collector to override.
+unset, no exporter is built and spans are created but not shipped. In the docker
+stack this is set only on the services you are actively debugging — currently
+`se-service`, `investment-service`, and `branding-service` (via the compose
+`*team-otel-export` anchor, defaulting to the in-stack Grafana Tempo backend at
+`http://tempo:4318`). All other team containers, blogging, and the unified API
+leave it unset so they do not flood Tempo. Point it at any external collector to
+override on those opted-in services.
 
 ### OTEL_EXPORTER_OTLP_PROTOCOL
 `http/protobuf` (default) or `grpc`.
@@ -323,6 +328,14 @@ Standard OTel selector. Set to `none` to skip OTLP metric export while still
 exporting traces — the docker stack uses this so metrics stay on Prometheus
 scraping and aren't pushed at the traces-only Tempo backend. Any other value (or
 unset) leaves OTLP metric export gated on `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG
+Standard OpenTelemetry head-sampling knobs. The docker stack defaults to
+`parentbased_traceidratio` / `0.05` (5% of root traces; child spans follow the
+parent decision). The Python SDK's `TracerProvider` reads these when no explicit
+sampler is passed (see `shared.observability.otel.init_otel`). Raise the ratio
+toward `1.0` when you need denser traces on the opted-in services; leave unset
+services alone — without an endpoint they never export regardless of sampler.
 
 ### OTEL_EXPORTER_OTLP_TIMEOUT
 Standard OTel exporter timeout in seconds (SDK default 10). The docker stack sets
