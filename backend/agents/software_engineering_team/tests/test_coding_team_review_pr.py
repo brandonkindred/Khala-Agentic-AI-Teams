@@ -5336,8 +5336,8 @@ class TestCreateReviewIssuesUnit:
     def test_malformed_proposals_field_yields_no_candidates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A non-list pending_issue_proposals field degrades to no candidates rather
-        than raising, and never constructs a GitHubClient."""
+        """A non-list pending_issue_proposals field degrades to no candidates and
+        never constructs a GitHub client."""
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
 
@@ -5348,6 +5348,12 @@ class TestCreateReviewIssuesUnit:
         }
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
 
+        def _fail_client(**_k):
+            raise AssertionError(
+                "GitHubClient must not be constructed for malformed proposals"
+            )
+
+        monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
         def _no_client(**_kw):
             raise AssertionError("GitHubClient must not be constructed for malformed proposals")
 
