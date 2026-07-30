@@ -1,6 +1,14 @@
-"""Tests for BrandingConversationStore against live Postgres."""
+"""Tests for BrandingConversationStore against live Postgres.
+
+Uses unique brand_id values per test so runs stay safe under pytest-xdist
+when ``real_postgres_schema`` skips truncation (worker processes share a
+persistent DB and fixed brand ids would collide on
+``idx_branding_conv_brand_unique``).
+"""
 
 from __future__ import annotations
+
+from uuid import uuid4
 
 import pytest
 
@@ -13,6 +21,11 @@ from shared.postgres.testing import real_postgres_schema
 pytestmark = [pytest.mark.integration, pytest.mark.real_postgres]
 
 _branding_schema = real_postgres_schema(BRANDING_SCHEMA, scope="function", autouse=True)
+
+
+def _brand_id(label: str = "brand") -> str:
+    """Mint a brand id unique across workers / repeated integration runs."""
+    return f"{label}_{uuid4().hex}"
 
 
 def _output(summary: str = "done") -> TeamOutput:
@@ -54,13 +67,14 @@ def test_get_state_includes_messages_and_brand_id() -> None:
     """get_state returns messages in order and the attached brand id; the legacy
     3-tuple view stays in sync."""
     store = BrandingConversationStore()
-    cid = store.create(brand_id="brand_xyz", mission=_acme_mission())
+    brand_id = _brand_id("xyz")
+    cid = store.create(brand_id=brand_id, mission=_acme_mission())
     assert store.append_message(cid, "user", "hello")
     assert store.append_message(cid, "assistant", "hi there")
 
     state = store.get_state(cid)
     assert state is not None
-    assert state.brand_id == "brand_xyz"
+    assert state.brand_id == brand_id
     assert [(m.role, m.content) for m in state.messages] == [
         ("user", "hello"),
         ("assistant", "hi there"),
@@ -113,11 +127,12 @@ def test_get_by_brand_id_single_join() -> None:
     """get_by_brand_id loads the brand's conversation, messages, and mission in
     one query; returns None for an unknown brand."""
     store = BrandingConversationStore()
-    cid = store.create(brand_id="brand_join", mission=_acme_mission())
+    brand_id = _brand_id("join")
+    cid = store.create(brand_id=brand_id, mission=_acme_mission())
     store.append_message(cid, "user", "one")
     store.append_message(cid, "assistant", "two")
 
-    result = store.get_by_brand_id("brand_join")
+    result = store.get_by_brand_id(brand_id)
     assert result is not None
     rcid, messages, mission, latest_output = result
     assert rcid == cid
@@ -125,7 +140,7 @@ def test_get_by_brand_id_single_join() -> None:
     assert mission.company_name == "Acme"
     assert latest_output is None
 
-    assert store.get_by_brand_id("brand_absent") is None
+    assert store.get_by_brand_id(_brand_id("absent")) is None
 
 
 def test_get_by_brand_id_ignores_stale_conversation_for_same_brand() -> None:
@@ -133,14 +148,14 @@ def test_get_by_brand_id_ignores_stale_conversation_for_same_brand() -> None:
     must return only the most-recently-updated conversation's own messages —
     never a merge of messages from multiple conversations."""
     from datetime import datetime, timezone
-    from uuid import uuid4
 
     from psycopg.types.json import Json
 
     from shared.postgres.client import get_conn
 
     store = BrandingConversationStore()
-    stale_cid = store.create(brand_id="brand_dup", mission=_acme_mission())
+    brand_id = _brand_id("dup")
+    stale_cid = store.create(brand_id=brand_id, mission=_acme_mission())
     store.append_message(stale_cid, "user", "stale one")
     store.append_message(stale_cid, "assistant", "stale two")
 
@@ -160,14 +175,14 @@ def test_get_by_brand_id_ignores_stale_conversation_for_same_brand() -> None:
                 "INSERT INTO branding_conversations "
                 "(conversation_id, brand_id, mission_json, latest_output_json, created_at, updated_at) "
                 "VALUES (%s, %s, %s, NULL, %s, %s)",
-                (fresh_cid, "brand_dup", mission_json, ts_new, ts_new),
+                (fresh_cid, brand_id, mission_json, ts_new, ts_new),
             )
         conn.commit()
 
     try:
         store.append_message(fresh_cid, "user", "fresh one")
 
-        result = store.get_by_brand_id("brand_dup")
+        result = store.get_by_brand_id(brand_id)
         assert result is not None
         rcid, messages, _, _ = result
         assert rcid == fresh_cid
@@ -190,10 +205,11 @@ def test_get_by_brand_id_loads_non_none_latest_output() -> None:
     """get_by_brand_id surfaces a persisted latest_output, covering the
     non-None branch of the single-query load."""
     store = BrandingConversationStore()
-    cid = store.create(brand_id="brand_out", mission=_acme_mission())
+    brand_id = _brand_id("out")
+    cid = store.create(brand_id=brand_id, mission=_acme_mission())
     assert store.update_output(cid, _output("live")) is True
 
-    result = store.get_by_brand_id("brand_out")
+    result = store.get_by_brand_id(brand_id)
     assert result is not None
     rcid, _, _, latest_output = result
     assert rcid == cid
@@ -215,8 +231,9 @@ def test_get_conversation_brand_id_dict_row() -> None:
     unbound = store.create(mission=_acme_mission())
     assert store.get_conversation_brand_id(unbound) is None
 
-    bound = store.create(brand_id="brand_abc", mission=_acme_mission())
-    assert store.get_conversation_brand_id(bound) == "brand_abc"
+    brand_id = _brand_id("abc")
+    bound = store.create(brand_id=brand_id, mission=_acme_mission())
+    assert store.get_conversation_brand_id(bound) == brand_id
 
 
 def test_update_mission_and_set_brand() -> None:
@@ -236,9 +253,10 @@ def test_update_mission_and_set_brand() -> None:
     assert state is not None
     assert state.mission.company_name == "Beta"
 
-    assert store.set_brand(cid, "brand_set") is True
-    assert store.set_brand("missing", "brand_set") is False
-    assert store.get_conversation_brand_id(cid) == "brand_set"
+    brand_id = _brand_id("set")
+    assert store.set_brand(cid, brand_id) is True
+    assert store.set_brand("missing", brand_id) is False
+    assert store.get_conversation_brand_id(cid) == brand_id
 
     assert store.set_brand(cid, None) is True
     assert store.get_conversation_brand_id(cid) is None
@@ -255,28 +273,31 @@ def test_attach_and_update_mission() -> None:
         company_description="Updated description",
         target_audience="operators",
     )
-    assert store.attach_and_update_mission(cid, "brand_atomic", updated) is True
-    assert store.get_conversation_brand_id(cid) == "brand_atomic"
+    brand_id = _brand_id("atomic")
+    assert store.attach_and_update_mission(cid, brand_id, updated) is True
+    assert store.get_conversation_brand_id(cid) == brand_id
     state = store.get_state(cid)
     assert state is not None
     assert state.mission.company_name == "Beta"
 
-    assert store.attach_and_update_mission("missing", "brand_atomic", updated) is False
+    assert store.attach_and_update_mission("missing", brand_id, updated) is False
 
 
 def test_list_conversations_with_and_without_brand_filter() -> None:
     """list_conversations returns summaries, optionally filtered by brand_id."""
     store = BrandingConversationStore()
-    a = store.create(brand_id="brand_a", mission=_acme_mission())
-    b = store.create(brand_id="brand_b", mission=_acme_mission())
+    brand_a = _brand_id("a")
+    brand_b = _brand_id("b")
+    a = store.create(brand_id=brand_a, mission=_acme_mission())
+    b = store.create(brand_id=brand_b, mission=_acme_mission())
     store.create(mission=_acme_mission())
     store.append_message(a, "user", "hello")
 
     all_rows = store.list_conversations()
     assert {r.conversation_id for r in all_rows} >= {a, b}
-    by_a = store.list_conversations(brand_id="brand_a")
+    by_a = store.list_conversations(brand_id=brand_a)
     assert len(by_a) == 1
     assert by_a[0].conversation_id == a
-    assert by_a[0].brand_id == "brand_a"
+    assert by_a[0].brand_id == brand_a
     assert by_a[0].message_count == 1
-    assert store.list_conversations(brand_id="brand_absent") == []
+    assert store.list_conversations(brand_id=_brand_id("absent")) == []
