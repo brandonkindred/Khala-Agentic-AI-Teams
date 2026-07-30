@@ -237,6 +237,27 @@ def test_aliased_file_paths_group_under_canonical_key() -> None:
     result = consolidate_side_effect_issues(issues, index)
     assert len(result) == 1
     assert result[0].file_path == "app/foo.py"
+    assert result[0].start_line == 2
+    assert result[0].line == 3
+
+
+def test_aliased_path_tie_publishes_canonical_span() -> None:
+    """Basename-first tie still votes as the resolved file and spans all aliased lines."""
+    # Tall function so an early alias (line 2) and a later canonical finding
+    # (line 20) merge; without resolve_path voting the alias would win the
+    # 1–1 tie and drop line 20 from the published range.
+    body = ["def foo():"] + [f"    x{i} = {i}" for i in range(1, 20)] + ["    return x1", ""]
+    content = "\n".join(body)
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(file_path="foo.py", line=2, description="basename map finding"),
+        _issue(file_path="app/foo.py", line=20, description="canonical additive finding"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert result[0].file_path == "app/foo.py"
+    assert result[0].start_line == 2
+    assert result[0].line == 20
 
 
 # --------------------------------------------------------------------------- passthrough / non-merge cases

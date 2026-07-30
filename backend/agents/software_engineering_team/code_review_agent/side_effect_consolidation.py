@@ -186,7 +186,25 @@ def _dedupe_exact(items: List[str]) -> List[str]:
     return unique
 
 
-def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
+def _canonical_path(shared_index: CodebaseIndex, file_path: str) -> str:
+    """Resolve ``file_path`` to a vote/range key, or ``""`` when unanchored.
+
+    Postconditions:
+        - Blank/`None` paths yield ``""`` (they do not vote).
+        - Otherwise returns ``shared_index.resolve_path(...)`` when that
+          succeeds, else the stripped literal — so an unresolvable path still
+          participates under its own spelling rather than being dropped.
+    """
+    stripped = (file_path or "").strip()
+    if not stripped:
+        return ""
+    return shared_index.resolve_path(stripped) or stripped
+
+
+def _merge_group(
+    group: List[CodeReviewIssue],
+    shared_index: CodebaseIndex,
+) -> CodeReviewIssue:
     """Merge two or more side-effect findings into one consolidated issue.
 
     Starts from the highest-severity member's full ``model_dump()`` so any
@@ -197,17 +215,22 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
 
     Preconditions:
         - ``len(group) >= 2``; every issue's ``category`` is ``"side-effects"``.
+        - ``shared_index`` is the same index used for construct grouping, so
+          path aliases (``foo.py`` vs ``app/foo.py``) resolve consistently.
 
     Postconditions:
-        - ``file_path`` is the group's majority **non-blank** file (ties broken
-          by earliest occurrence among non-blank paths). Blank/`None` paths do
-          not vote, so an unanchored finding that citation-groups with an
-          anchored one cannot wipe the known anchor and turn the merge into a
-          standalone comment. Falls back to ``""`` only when every member is
-          unanchored.
-        - ``line``/``start_line`` span that file's cited lines within the group
-          (``start_line`` is None when only one distinct line is cited,
-          matching a single-line issue's shape).
+        - ``file_path`` is the group's majority **non-blank** file after
+          ``CodebaseIndex.resolve_path`` (ties broken by earliest occurrence
+          among non-blank canonical keys). Blank/`None` paths do not vote, so
+          an unanchored finding that citation-groups with an anchored one
+          cannot wipe the known anchor. Path aliases that resolve to the same
+          file vote as one key, so a basename map finding cannot win a tie
+          over a canonically spelled additive finding and exclude its lines
+          from the published range. Falls back to ``""`` only when every
+          member is unanchored.
+        - ``line``/``start_line`` span that canonical file's cited lines within
+          the group (``start_line`` is None when only one distinct line is
+          cited, matching a single-line issue's shape).
         - ``severity`` is the highest-ranked severity in the group
           (``critical`` > ``high`` > ``medium`` > ``low`` > ``info``).
         - ``category`` is always ``"side-effects"``.
@@ -226,7 +249,7 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
     """
     file_counts: "OrderedDict[str, int]" = OrderedDict()
     for issue in group:
-        fp = (issue.file_path or "").strip()
+        fp = _canonical_path(shared_index, issue.file_path or "")
         if not fp:
             # Unanchored members still merge via citations, but must not win
             # the location vote over a known path:file anchor.
@@ -238,16 +261,19 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
     # (start_line..line); use each member's effective start (its own
     # start_line, falling back to its line for a single-line issue) so a
     # merge doesn't collapse an already-multi-line member down to just its
-    # end line.
+    # end line. Compare on canonical paths so basename aliases contribute
+    # their lines to the same span as the resolved key.
     starts = [
         issue.start_line if issue.start_line is not None else issue.line
         for issue in group
-        if (issue.file_path or "").strip() == majority_file and issue.line is not None
+        if _canonical_path(shared_index, issue.file_path or "") == majority_file
+        and issue.line is not None
     ]
     ends = [
         issue.line
         for issue in group
-        if (issue.file_path or "").strip() == majority_file and issue.line is not None
+        if _canonical_path(shared_index, issue.file_path or "") == majority_file
+        and issue.line is not None
     ]
     line = max(ends) if ends else None
     earliest_start = min(starts) if starts else None
@@ -365,7 +391,10 @@ def consolidate_side_effect_issues(
         if len(positions) < 2:
             continue
         member_indices = sorted(side_effect_indices[p] for p in positions)
-        merged_at[member_indices[0]] = _merge_group([issues[i] for i in member_indices])
+        merged_at[member_indices[0]] = _merge_group(
+            [issues[i] for i in member_indices],
+            shared_index,
+        )
         dropped.update(member_indices[1:])
 
     return [merged_at.get(idx, issue) for idx, issue in enumerate(issues) if idx not in dropped]
