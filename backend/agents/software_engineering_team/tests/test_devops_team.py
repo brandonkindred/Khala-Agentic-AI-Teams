@@ -1883,6 +1883,14 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "staging"
 
+    def test_build_legacy_spec_missing_production_approval_still_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-safeguard",
+            task_description="No production approval gate is configured; add one",
+            requirements="Add the missing gate and document rollback",
+        )
+        assert spec.environment == "production"
+
     def test_build_legacy_spec_recognizes_parenthesized_production(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-wrap-1",

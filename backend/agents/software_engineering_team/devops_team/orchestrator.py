@@ -83,10 +83,64 @@ _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
 MAX_LEGACY_TITLE_LENGTH: int = 120
 
 _NEGATION_TOKENS = frozenset({"not", "no", "non"})
+# After a ``no``/``not`` + prod token, these indicate a missing production
+# *control* (still a production concern) rather than excluding production.
+_PROD_SAFEGUARD_TOKENS = frozenset(
+    {
+        "approval",
+        "approvals",
+        "gate",
+        "gates",
+        "credential",
+        "credentials",
+        "access",
+        "policy",
+        "policies",
+        "check",
+        "checks",
+        "control",
+        "controls",
+        "requirement",
+        "requirements",
+        "signoff",
+    }
+)
 # Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher:
 # alphanumerics + underscore, split on any other separator (``/``, Markdown
 # punctuation, em dashes, whitespace, hyphens, etc.).
 _LEGACY_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
+_PROD_SAFEGUARD_LOOKAHEAD = 3
+
+
+def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
+    """Return True when ``tokens[prod_index]`` is an excluded-environment phrase.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens.
+        - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
+          ``prod`` or ``production``.
+    Postconditions:
+        - ``non`` immediately before the prod token always counts as negation
+          (``non-production``).
+        - ``no`` / ``not`` immediately before counts as negation unless one of
+          the next ``_PROD_SAFEGUARD_LOOKAHEAD`` tokens is a production-
+          safeguard noun (e.g. ``approval``, ``gate``), which means the text
+          is about a missing production control rather than excluding production.
+        - Otherwise returns False.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
+    if prod_index == 0:
+        return False
+    prev = tokens[prod_index - 1]
+    if prev not in _NEGATION_TOKENS:
+        return False
+    if prev == "non":
+        return True
+    window = tokens[prod_index + 1 : prod_index + 1 + _PROD_SAFEGUARD_LOOKAHEAD]
+    if any(t in _PROD_SAFEGUARD_TOKENS for t in window):
+        return False
+    return True
 
 
 def _legacy_environment_from_text(combined_text: str) -> str:
@@ -96,11 +150,14 @@ def _legacy_environment_from_text(combined_text: str) -> str:
         - ``combined_text`` is a str (may be empty); caller lowercases input.
     Postconditions:
         - Returns ``\"production\"`` iff some word token equals ``prod`` or
-          ``production`` and the immediately preceding word token is not a
-          negation token (``not``, ``no``, ``non``). Separators (``/``, hyphens,
-          Markdown link punctuation, em dashes, wrappers) do not glue tokens
-          together — e.g. ``production/blue``, ``[production](...)``, and
+          ``production`` and that occurrence is not an environment-exclusion
+          phrase (see :func:`_is_environment_negation`). Separators (``/``,
+          hyphens, Markdown link punctuation, em dashes, wrappers) do not glue
+          tokens together — e.g. ``production/blue``, ``[production](...)``, and
           ``non-production`` yield distinct tokens.
+        - Phrases like ``no production approval gate`` still map to production
+          (missing-safeguard wording); ``non-production``, ``not prod``, and
+          ``no production traffic`` map to staging.
         - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
     """
     assert isinstance(combined_text, str), "combined_text must be a str"
@@ -108,7 +165,7 @@ def _legacy_environment_from_text(combined_text: str) -> str:
     for i, token in enumerate(tokens):
         if token not in ("prod", "production"):
             continue
-        if i > 0 and tokens[i - 1] in _NEGATION_TOKENS:
+        if _is_environment_negation(tokens, i):
             continue
         return "production"
     return "staging"
