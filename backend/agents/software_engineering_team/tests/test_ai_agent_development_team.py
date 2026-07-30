@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -18,6 +19,7 @@ from software_engineering_team.ai_agent_development_team.models import (
 from software_engineering_team.ai_agent_development_team.orchestrator import (
     AIAgentDevelopmentTeamLead,
 )
+from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.ai_agent_development_team.phases.deliver import run_deliver
 from software_engineering_team.ai_agent_development_team.phases.intake import run_intake
 from software_engineering_team.ai_agent_development_team.phases.planning import run_planning
@@ -387,3 +389,52 @@ def test_run_deliver_raises_on_non_object_json_response(monkeypatch) -> None:
             execution_result=execution_result,
             review_result=review_result,
         )
+
+
+def test_ai_agent_repo_context_cache_is_lazy_and_reused(tmp_path: Path) -> None:
+    """Same resolved repo reuses one RepoContextCache; a different repo gets another."""
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    first = lead._repo_context_cache_for(tmp_path)
+    second = lead._repo_context_cache_for(tmp_path)
+    assert first is second
+
+    other = tmp_path / "other"
+    other.mkdir()
+    third = lead._repo_context_cache_for(other)
+    assert third is not first
+
+
+def test_ai_agent_read_repo_code_second_call_hits_cache(tmp_path: Path) -> None:
+    """Second _read_repo_code on an unchanged tree does not re-_render files."""
+    (tmp_path / "a.py").write_text("A = 1\n")
+    (tmp_path / "b.md").write_text("# B\n")
+
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    first = lead._read_repo_code(tmp_path)
+    assert "a.py" in first and "b.md" in first
+
+    renders: list[Path] = []
+    real_render = RepoContextCache._render
+
+    def _spy(f: Path, repo_path: Path):
+        renders.append(f)
+        return real_render(f, repo_path)
+
+    with patch.object(RepoContextCache, "_render", staticmethod(_spy)):
+        second = lead._read_repo_code(tmp_path)
+
+    assert second == first
+    assert renders == []
+
+
+def test_ai_agent_lead_wires_repo_briefing_contract(tmp_path: Path) -> None:
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    assert lead._extensions == frozenset({".py", ".md", ".yaml", ".yml", ".json", ".toml"})
+    assert lead._exclude_dirs == frozenset(
+        {".git", "node_modules", "__pycache__", ".venv", "venv"}
+    )
+    assert lead._max_chars == 20_000
+    cache = lead._repo_context_cache_for(tmp_path)
+    assert cache._ext_set == lead._extensions
+    assert cache._excl_set == lead._exclude_dirs
+    assert cache._max_chars == 20_000
