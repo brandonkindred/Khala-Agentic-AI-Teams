@@ -441,7 +441,8 @@ def test_returns_empty_when_disabled_via_env(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_runs_when_no_architecture_document_or_overview() -> None:
     """Blank overview/document must not skip the pass — architecture review
-    can use established repository structure without a formal document."""
+    can use established repository structure without a formal document when
+    repository evidence (e.g. existing_codebase) is available."""
     arch = SystemArchitecture(overview="", architecture_document="")
     prompts: list = []
 
@@ -452,7 +453,15 @@ def test_runs_when_no_architecture_document_or_overview() -> None:
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
-    result = find_architecture_and_redundancy_issues(_EmptyFindings(), _input(architecture=arch))
+    result = find_architecture_and_redundancy_issues(
+        _EmptyFindings(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            architecture=arch,
+            existing_codebase="existing/shared_helper.py\n",
+        ),
+    )
     assert result == []
     assert len(prompts) == 1
     assert "no formal" in prompts[0].lower() or "not provided" in prompts[0].lower()
@@ -492,9 +501,32 @@ def test_runs_when_no_architecture_at_all() -> None:
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
-    result = find_architecture_and_redundancy_issues(_EmptyFindings(), _input(architecture=None))
+    # No formal architecture document, but an existing-codebase excerpt gives
+    # the pass repository evidence to derive established structure from.
+    result = find_architecture_and_redundancy_issues(
+        _EmptyFindings(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            architecture=None,
+            existing_codebase="existing/shared_helper.py\n",
+        ),
+    )
     assert result == []
     assert len(prompts) == 1
+
+
+def test_skips_when_no_architecture_evidence() -> None:
+    """Without a document, repo_reader, or existing_codebase, tools only see
+    the changed submission — do not ask the model to invent architecture rules."""
+
+    class _FailIfAsked(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(_FailIfAsked(), _input(architecture=None))
+    assert result == []
 
 
 def test_returns_empty_when_submission_has_no_readable_files() -> None:

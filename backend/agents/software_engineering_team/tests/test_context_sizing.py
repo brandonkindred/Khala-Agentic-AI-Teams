@@ -256,3 +256,35 @@ def test_merged_pass_budgets_single_half_uses_smaller_response_reserve() -> None
 
 def test_merged_pass_response_reserve_is_dual_array_floor() -> None:
     assert CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS == 8192
+
+
+def test_merged_pass_budgets_reserve_tool_schemas() -> None:
+    """Tool schemas consume context outside the prompt bodies; without a
+    reserve, an 8K model can allocate all remaining room to the response and
+    still overflow once schemas are attached."""
+    llm = _StubLLM(8_192)
+    without_tools = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=14_000,
+        tool_schema_chars=0,
+        finding_array_count=2,
+    )
+    with_tools = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=14_000,
+        finding_array_count=2,
+    )
+    assert without_tools is not None
+    assert with_tools is not None
+    assert with_tools.reserved_response_tokens <= without_tools.reserved_response_tokens
+    # Fixed reserves that cannot leave a usable response room skip the call.
+    impossible = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=14_000,
+        tool_schema_chars=50_000,
+        finding_array_count=2,
+    )
+    assert impossible is None

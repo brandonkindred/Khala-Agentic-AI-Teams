@@ -36,11 +36,13 @@ from software_engineering_team.shared.context_sizing import (
     CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
     compute_code_review_merged_pass_budgets,
 )
-from software_engineering_team.shared.models import SystemArchitecture
 
 from . import architecture_consistency_pass as arch_pass
 from . import side_effect_impact_pass as side_pass
-from .architecture_context import render_architecture_context
+from .architecture_context import (
+    architecture_document_text,
+    architecture_evidence_available,
+)
 from .false_positive_filter import CodebaseIndex, _build_tools, code_fence_for
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
@@ -91,7 +93,7 @@ def find_architecture_and_side_effect_issues(
     # existing-codebase evidence. Without those, list_files()/read_file() only
     # see the changed submission files, so "established repository structure"
     # cannot be verified and any architecture finding would be speculation.
-    if arch_on and not _architecture_evidence_available(input_data, repo_reader, index):
+    if arch_on and not architecture_evidence_available(input_data, repo_reader, index):
         arch_on = False
     if not arch_on and not side_on:
         return [], []
@@ -113,30 +115,6 @@ def find_architecture_and_side_effect_issues(
             exc,
         )
         return [], []
-
-
-def _architecture_evidence_available(
-    input_data: CodeReviewInput,
-    repo_reader: Optional[RepoReader],
-    index: Optional[CodebaseIndex],
-) -> bool:
-    """Whether Part 1 has a source for architecture / redundancy judgments.
-
-    Postconditions:
-        - Returns ``True`` when a nonempty architecture document/context is on
-          the input, a ``repo_reader`` is attached, or a nonempty
-          ``existing_codebase`` excerpt is available (on the input or a shared
-          ``index``). Otherwise ``False``. Never raises.
-    """
-    if _architecture_document_text(input_data.architecture):
-        return True
-    if repo_reader is not None:
-        return True
-    if (input_data.existing_codebase or "").strip():
-        return True
-    if index is not None and (index.existing_codebase or "").strip():
-        return True
-    return False
 
 
 def _run_pass(
@@ -167,7 +145,7 @@ def _run_pass(
         return [], []
 
     system_prompt = build_merged_architecture_side_effect_prompt(arch_on=arch_on, side_on=side_on)
-    arch_body = _architecture_document_text(input_data.architecture) if arch_on else ""
+    arch_body = architecture_document_text(input_data.architecture) if arch_on else ""
     changed_paths = list(index.files.keys())
     manifest_chars = _manifest_chars(changed_paths)
     budgets = compute_code_review_merged_pass_budgets(
@@ -311,27 +289,6 @@ def _with_merged_pass_output_budget(
     if effective != response_tokens:
         return model.clone(max_tokens=response_tokens)
     return model
-
-
-def _architecture_document_text(architecture: Optional[SystemArchitecture]) -> str:
-    """Flatten the optional architecture payload into the inlined body text.
-
-    Postconditions:
-        - Returns ``""`` when ``architecture`` is ``None`` or has no document /
-          rendered context content.
-        - Otherwise returns the same joined body ``_build_prompt`` inlines
-          (without fences or section headers).
-    """
-    if architecture is None:
-        return ""
-    return "\n\n".join(
-        p
-        for p in (
-            (architecture.architecture_document or "").strip(),
-            render_architecture_context(architecture),
-        )
-        if p
-    )
 
 
 def _issues_from_half(

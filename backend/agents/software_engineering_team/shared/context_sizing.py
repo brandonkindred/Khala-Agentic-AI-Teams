@@ -148,6 +148,11 @@ _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS = 1024
 # Fixed user-prompt headers / tool+return instructions excluding the variable
 # changed-file path manifest (that size is passed in by the caller).
 CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS = 1_500
+# Conservative reserve for serialized tool schemas / descriptions attached to
+# the strands Agent (read_file, list_files, search_codebase, find_function_at_line,
+# list_changed_files, and optionally search_repository). These are outside the
+# system/user prompt bodies but still consume context on every merged call.
+CODE_REVIEW_MERGED_PASS_TOOL_SCHEMA_CHARS = 8_000
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,7 @@ def compute_code_review_merged_pass_budgets(
     system_prompt_chars: int,
     manifest_chars: int = 0,
     base_scaffolding_chars: int = CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
+    tool_schema_chars: int = CODE_REVIEW_MERGED_PASS_TOOL_SCHEMA_CHARS,
     finding_array_count: int = 2,
 ) -> MergedPassBudgets | None:
     """Budget architecture, changed-file manifest, and code for the merged pass.
@@ -176,7 +182,8 @@ def compute_code_review_merged_pass_budgets(
     either standalone pass. Reusing the map-call code allowance alone can therefore
     overflow smaller-context models. This helper:
 
-    1. Reserves the (possibly half-filtered) system prompt and fixed scaffolding.
+    1. Reserves the (possibly half-filtered) system prompt, fixed scaffolding,
+       and a conservative allowance for serialized tool schemas.
     2. Takes up to a dual-array (``8192``) or single-array (``4096``) response
        reserve based on ``finding_array_count``, shrinking that reserve when the
        context cannot hold the full floor — never inventing a positive content
@@ -203,7 +210,12 @@ def compute_code_review_merged_pass_budgets(
         raise ValueError(f"finding_array_count must be 1 or 2, got {finding_array_count!r}")
     ctx = llm.get_max_context_tokens()
     fixed_prompt_tokens = int(
-        (max(0, system_prompt_chars) + max(0, base_scaffolding_chars)) / CHARS_PER_TOKEN
+        (
+            max(0, system_prompt_chars)
+            + max(0, base_scaffolding_chars)
+            + max(0, tool_schema_chars)
+        )
+        / CHARS_PER_TOKEN
     )
     if fixed_prompt_tokens >= ctx:
         return None
