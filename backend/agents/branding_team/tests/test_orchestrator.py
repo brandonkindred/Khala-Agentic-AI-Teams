@@ -387,7 +387,8 @@ def test_design_assets_integration() -> None:
     assert result.degraded_phases == []
 
 
-def test_run_with_store_appends_version(fake_pg) -> None:
+@pytest.mark.usefixtures("fake_pg")
+def test_run_with_store_appends_version() -> None:
     from branding_team.store import BrandingStore
 
     store = BrandingStore()

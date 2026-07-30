@@ -18,6 +18,12 @@ from branding_team.graphs.phase5_governance import build_phase5_graph
 from branding_team.graphs.shared import phase_index
 from branding_team.models import BrandPhase
 
+# BrandPhase ends with COMPLETE (not a runnable pipeline stage).
+_MAX_RUNNABLE_PHASE_INDEX = len(BrandPhase) - 2
+# Outer graph budget covers all five phases; per-node budget covers one phase sub-graph.
+_DEFAULT_EXECUTION_TIMEOUT_SECONDS = 600.0
+_DEFAULT_NODE_TIMEOUT_SECONDS = 180.0
+
 
 def build_branding_graph(
     *,
@@ -37,13 +43,13 @@ def build_branding_graph(
         (the serialised ``BrandingMission``).
     """
     stop_idx = (
-        phase_index(target_phase) if target_phase else len(BrandPhase) - 2
-    )  # exclude COMPLETE
+        phase_index(target_phase) if target_phase else _MAX_RUNNABLE_PHASE_INDEX
+    )
 
     builder = GraphBuilder()
     builder.set_graph_id("branding_pipeline")
-    builder.set_execution_timeout(600.0)
-    builder.set_node_timeout(180.0)
+    builder.set_execution_timeout(_DEFAULT_EXECUTION_TIMEOUT_SECONDS)
+    builder.set_node_timeout(_DEFAULT_NODE_TIMEOUT_SECONDS)
 
     # ---- Phase 1: Strategic Core (always runs) ----
     phase1 = build_phase1_graph()

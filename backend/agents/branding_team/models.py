@@ -199,8 +199,9 @@ class BrandDiscoveryAudit(BaseModel):
 
 
 class BrandDiscoveryAuditOutput(BaseModel):
-    """Agent-facing brand discovery schema (see ``PurposeVisionOutput`` on required fields).
+    """Agent-facing brand discovery schema.
 
+    Requires non-empty content so Strands retries blank structured_output.
     Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
     model so this one can require real content without breaking
     ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
@@ -231,8 +232,9 @@ class PurposeVisionOutput(BaseModel):
 
 
 class CoreValuesOutput(BaseModel):
-    """A set of brand core values (see ``PurposeVisionOutput`` on required fields).
+    """A set of brand core values.
 
+    Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
     """
 
@@ -240,8 +242,9 @@ class CoreValuesOutput(BaseModel):
 
 
 class AudienceSegmentsOutput(BaseModel):
-    """A set of target audience segments (see ``PurposeVisionOutput`` on required fields).
+    """A set of target audience segments.
 
+    Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
     """
 
@@ -249,8 +252,9 @@ class AudienceSegmentsOutput(BaseModel):
 
 
 class DifferentiationPillarsOutput(BaseModel):
-    """A set of competitive differentiation pillars (see ``PurposeVisionOutput`` on required fields).
+    """A set of competitive differentiation pillars.
 
+    Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
     """
 
@@ -258,7 +262,10 @@ class DifferentiationPillarsOutput(BaseModel):
 
 
 class PositioningOutput(BaseModel):
-    """Synthesised positioning statement and brand promise (see ``PurposeVisionOutput`` on required fields)."""
+    """Synthesised positioning statement and brand promise.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
 
     positioning_statement: str = Field(min_length=1)
     brand_promise: str = Field(min_length=1)
@@ -329,8 +336,9 @@ class PersonaProfile(BaseModel):
 
 
 class BrandStoryOutput(BaseModel):
-    """Agent-facing brand story schema (see ``PurposeVisionOutput`` on required fields).
+    """Agent-facing brand story schema.
 
+    Requires non-empty content so Strands retries blank structured_output.
     ``boilerplate_variants`` cardinality encodes the prompt's stated "3 versions
     (short/medium/long)".
     """

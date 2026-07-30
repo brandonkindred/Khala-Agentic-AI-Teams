@@ -151,7 +151,17 @@ class DummyLLMClient(LLMClient, Model):
         system_prompt: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        raise NotImplementedError("DummyLLMClient.structured_output is not implemented for tests")
+        """Not used by Strands agent structured-output flows.
+
+        Agents with ``structured_output=`` invoke the structured-output tool
+        through ``stream()`` / ``chat()``. Raising here fails loudly if a
+        caller hits the ABC method by mistake instead of silently returning
+        an empty/invalid model instance.
+        """
+        raise NotImplementedError(
+            "DummyLLMClient.structured_output is unused; Strands structured "
+            "output goes through stream()/chat() with StructuredOutputTool"
+        )
 
     async def stream(
         self,
@@ -590,7 +600,6 @@ class DummyLLMClient(LLMClient, Model):
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)
                 or f"module_{counter}"
             )
-            slug.title().replace("_", "")
             return {
                 "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
@@ -1233,7 +1242,7 @@ class DummyLLMClient(LLMClient, Model):
 
     def chat(
         self,
-        messages: list,
+        messages: list[dict[str, Any]],
         *,
         objective: str = "dummy",
         response_format: str = "json",

@@ -96,7 +96,7 @@ async def _gather_integrations(
     strategic_core: Optional[StrategicCoreOutput],
     include_market_research: bool,
     include_design_assets: bool,
-):
+) -> tuple[Optional[Any], Optional[Any]]:
     """Run the optional market-research and design-asset integrations concurrently.
 
     The two integrations are independent — market research is a multi-minute
@@ -256,7 +256,7 @@ class BrandingTeamOrchestrator:
         mission: BrandingMission,
         phase: BrandPhase,
         prior_outputs: Optional[dict[str, dict]] = None,
-    ) -> "tuple[BaseModel, bool]":
+    ) -> tuple[BaseModel, bool]:
         """Run a single pipeline phase in isolation and return its output model.
 
         The monolithic ``build_branding_graph`` wires phases as sequential nodes,
