@@ -1,6 +1,6 @@
 """Top-level branding pipeline graph.
 
-Wires Phase 1–5 sub-graphs/swarms into a single ``GraphBuilder`` Graph with
+Wires Phase 1–5 sub-graphs into a single ``GraphBuilder`` Graph with
 conditional edges for phase gating and optional adapter nodes.
 """
 
@@ -11,12 +11,18 @@ from typing import Optional
 from strands.multiagent.graph import Graph, GraphBuilder
 
 from branding_team.graphs.phase1_strategic_core import build_phase1_graph
-from branding_team.graphs.phase2_narrative import build_phase2_swarm
+from branding_team.graphs.phase2_narrative import build_phase2_graph
 from branding_team.graphs.phase3_visual import build_phase3_graph
 from branding_team.graphs.phase4_channel import build_phase4_graph
 from branding_team.graphs.phase5_governance import build_phase5_graph
 from branding_team.graphs.shared import phase_index
 from branding_team.models import BrandPhase
+
+# BrandPhase ends with COMPLETE (not a runnable pipeline stage).
+_MAX_RUNNABLE_PHASE_INDEX = len(BrandPhase) - 2
+# Outer graph budget covers all five phases; per-node budget covers one phase sub-graph.
+_DEFAULT_EXECUTION_TIMEOUT_SECONDS = 600.0
+_DEFAULT_NODE_TIMEOUT_SECONDS = 180.0
 
 
 def build_branding_graph(
@@ -37,13 +43,13 @@ def build_branding_graph(
         (the serialised ``BrandingMission``).
     """
     stop_idx = (
-        phase_index(target_phase) if target_phase else len(BrandPhase) - 2
-    )  # exclude COMPLETE
+        phase_index(target_phase) if target_phase else _MAX_RUNNABLE_PHASE_INDEX
+    )
 
     builder = GraphBuilder()
     builder.set_graph_id("branding_pipeline")
-    builder.set_execution_timeout(600.0)
-    builder.set_node_timeout(180.0)
+    builder.set_execution_timeout(_DEFAULT_EXECUTION_TIMEOUT_SECONDS)
+    builder.set_node_timeout(_DEFAULT_NODE_TIMEOUT_SECONDS)
 
     # ---- Phase 1: Strategic Core (always runs) ----
     phase1 = build_phase1_graph()
@@ -54,7 +60,7 @@ def build_branding_graph(
 
     # ---- Phase 2: Narrative & Messaging ----
     if stop_idx >= 1:
-        phase2 = build_phase2_swarm()
+        phase2 = build_phase2_graph()
         p2_node = builder.add_node(phase2, node_id="phase2_narrative")
         builder.add_edge(last_node, p2_node)
         last_node = p2_node

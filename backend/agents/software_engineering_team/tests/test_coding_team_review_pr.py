@@ -569,7 +569,7 @@ class TestAuthenticatedLogin:
 
 
 class _FakeOutput:
-    """Stand-in for the code-review agent's output: issues, summary, and spec-compliance notes."""
+    """Stand-in for the code-review agent's output: issues, summary, spec-compliance notes, and suggested commit message."""
 
     def __init__(self, issues: list[Any], summary: str = "S", spec: str = "SC") -> None:
         self.issues = issues
@@ -1140,16 +1140,23 @@ class TestReviewEndpoint:
     def test_reviewer_bare_timeout_error_records_type_name_not_empty_string(
         self, review_app
     ) -> None:
-        # A bare TimeoutError() (e.g. the durable-review client-side wait timing
-        # out with no attached detail) has an empty str() — recording
-        # "code review failed: " would be useless for triage. The except block
-        # must fall back to naming the exception type when it carries no message.
+        """Bare TimeoutError() has empty str(); job error must name the type.
+
+        A durable-review client-side wait that times out with no attached detail
+        would otherwise record ``code review failed: `` (useless for triage). The
+        except block must fall back to the exception type name, keep that detail
+        in the job store, and still post exactly one neutral outage note — never
+        leak ``code review failed`` onto the PR.
+        """
         review_app["github"]["agent_output"] = TimeoutError()
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
-        assert job.get("error") == "code review failed: TimeoutError (no error message)"
+        error = job.get("error") or ""
+        assert "code review failed:" in error
+        assert "TimeoutError" in error
+        assert "no error message" in error
         gh = review_app["github"]["client"]
         # Never leaks onto the PR either.
         assert not any("code review failed" in body for _n, body in gh.comments)
@@ -1162,8 +1169,11 @@ class TestReviewEndpoint:
         assert gh.reviews == []
 
     def test_outage_notice_suppressed_when_disabled(self, review_app, monkeypatch) -> None:
-        # With PR_REVIEW_POST_OUTAGE_NOTICE off, a reviewer outage posts NOTHING on
-        # the PR but still marks the job failed (detail preserved in the store).
+        """With PR_REVIEW_POST_OUTAGE_NOTICE off, outages post nothing on the PR.
+
+        The job must still be marked failed with the error detail preserved in
+        the store, and neither comments nor a pull request review may be created.
+        """
         monkeypatch.setenv("PR_REVIEW_POST_OUTAGE_NOTICE", "false")
         review_app["github"]["agent_output"] = RuntimeError("llm down")
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1259,6 +1269,7 @@ class TestReviewEndpoint:
         assert not any("ghp_LEAKEDTOKEN" in body for _n, body in gh.comments)
 
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
+        """POST /review-pr with github_token=None must return 400 because a GitHub token is required."""
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         resp = review_app["client"].post(
             "/review-pr", json={**_review_body(), "github_token": None}
@@ -1266,6 +1277,7 @@ class TestReviewEndpoint:
         assert resp.status_code == 400
 
     def test_pr_not_found_returns_502(self, review_app) -> None:
+        """POST /review-pr must return 502 when GitHub cannot resolve the pull request."""
         review_app["github"]["client"].fail_get_pr = True
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 502
@@ -1663,8 +1675,10 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_bad_line_is_bisected_out_keeping_other_lines_inline(self, review_app) -> None:
-        # A single off-diff line must not collapse the whole review: the good lines
-        # stay inline and only the bad one is demoted to a file-level comment.
+        # A single line rejected by GitHub (bad_lines) must not collapse the whole
+        # review: the good lines stay inline and only the bad one is demoted to a
+        # file-level comment. (Diff valid lines for a.py are {1, 2, 3}; line 3 is
+        # in-diff but still rejected by the fake client.)
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="good line"),
@@ -1693,9 +1707,10 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_multiple_bad_lines_are_bisected_out(self, review_app) -> None:
-        # Bisection must isolate more than one off-diff line: with two bad lines
-        # among three in-diff findings, only the good line stays inline and both
-        # bad lines are demoted to file-level comments (none lost to standalone).
+        # Bisection must isolate more than one line rejected by GitHub (bad_lines):
+        # with two bad lines among three in-diff findings, only the good line stays
+        # inline and both bad lines are demoted to file-level comments (none lost
+        # to standalone).
         # (Diff valid lines for a.py are {1, 2, 3}, so all three are line-anchored.)
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -1705,7 +1720,7 @@ class TestReviewEndpoint:
             ]
         )
         gh = review_app["github"]["client"]
-        gh.bad_lines = {1, 3}  # two off-diff lines rejected inline by GitHub
+        gh.bad_lines = {1, 3}  # two lines rejected inline by GitHub (bad_lines)
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -1861,14 +1876,16 @@ class TestReviewEndpoint:
         gh.review_fail_times = 1  # the lone summary-only review attempt 422s
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff only")
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="off-hunk line in changed file"
+                )
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # The summary never posted, but the file-level finding did — and nothing
+        # The summary never posted, but the in-diff file-level finding did — and nothing
         # fell through to a standalone conversation comment.
         assert gh.submitted_reviews == []
         assert len(gh.review_comments) == 1
@@ -1983,7 +2000,9 @@ class TestReviewEndpoint:
         gh.review_comment_fail_status = 403
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff find")
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="off-hunk line in changed file"
+                )
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1992,7 +2011,7 @@ class TestReviewEndpoint:
         assert job["status"] == "failed"
         # The finding was NOT silently posted as a standalone conversation comment;
         # only the failure notice (which never carries the finding text) is allowed.
-        assert not any("off-diff find" in body for _n, body in gh.comments)
+        assert not any("off-hunk line in changed file" in body for _n, body in gh.comments)
 
     def test_all_changed_files_are_reviewed_without_cap(self, review_app) -> None:
         gh = review_app["github"]["client"]
@@ -3188,12 +3207,12 @@ class TestWholeFileReview:
         secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
         files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
 
-        class _C:
+        class _FakeGitHubClient:
             def get_file_contents(self, o, r, path, ref):
                 raise RuntimeError(f"fetch failed: {secret_url}")
 
         with caplog.at_level("WARNING"):
-            assert _fetch_head_files(_C(), "o", "r", files, "sha1") == {}
+            assert _fetch_head_files(_FakeGitHubClient(), "o", "r", files, "sha1") == {}
 
         assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
         assert not any(secret_url in r.getMessage() for r in caplog.records)
@@ -3207,21 +3226,32 @@ class TestWholeFileReview:
         worker's (filename, content) pair must land under its own key, never a
         sibling's, even when several fetches are in flight at once.
         """
-        import time
+        import threading
 
-        from software_engineering_team.api.pr_review import _fetch_head_files
+        from software_engineering_team.api.pr_review import (
+            _HEAD_FETCH_PARALLELISM,
+            _fetch_head_files,
+        )
 
         num_files = 16
+        parties = min(_HEAD_FETCH_PARALLELISM, num_files)
+        assert parties > 1, "test requires the parallel fetch path"
+        barrier = threading.Barrier(parties)
         files = [
             PullRequestFile(f"f{i}.py", "modified", f"@@ -1 +1 @@\n+x{i}", 1, 0, None)
             for i in range(num_files)
         ]
 
         def _contents(o, r, path, ref):
-            time.sleep(0.01)  # widen the race window so fetches overlap
+            barrier.wait(timeout=5)
             return f"WHOLE-{path}\n"
 
-        out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
+        try:
+            out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
+        except threading.BrokenBarrierError:
+            pytest.fail(
+                f"fetches did not run concurrently: barrier timed out waiting for {parties} parties"
+            )
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
@@ -3572,7 +3602,7 @@ class TestParallelReviewReads:
             id=1, path="a.py", line=2, body="desc", html_url="https://example/comment/1"
         )
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 barrier.wait(timeout=5)
                 return [review_comment]
@@ -3586,7 +3616,7 @@ class TestParallelReviewReads:
                 return []
 
         try:
-            out = _fetch_existing_comments(_C(), "o", "r", 7)
+            out = _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7)
         except threading.BrokenBarrierError:
             pytest.fail("fetches did not run concurrently: barrier timed out waiting for 3 parties")
         assert barrier.n_waiting == 0  # confirms the fetches actually ran concurrently
@@ -3606,7 +3636,7 @@ class TestParallelReviewReads:
         partial result from the two calls that succeeded."""
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 if failing_method == "list_review_comments":
                     raise GitHubAPIError(500, "boom")
@@ -3622,7 +3652,7 @@ class TestParallelReviewReads:
                     raise GitHubAPIError(500, "boom")
                 return []
 
-        assert _fetch_existing_comments(_C(), "o", "r", 7) == []
+        assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
 
     @pytest.mark.parametrize(
         "failing_method",
@@ -3637,7 +3667,7 @@ class TestParallelReviewReads:
         just a GitHubAPIError."""
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 if failing_method == "list_review_comments":
                     raise RuntimeError("unexpected")
@@ -3653,7 +3683,7 @@ class TestParallelReviewReads:
                     raise RuntimeError("unexpected")
                 return []
 
-        assert _fetch_existing_comments(_C(), "o", "r", 7) == []
+        assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
 
 
 class TestSafeCommentUnit:
@@ -3663,33 +3693,33 @@ class TestSafeCommentUnit:
     def test_returns_false_on_github_api_error(self, review_app) -> None:
         from software_engineering_team.api.pr_review import _safe_comment
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 raise GitHubAPIError(403, "rate limited")
 
-        assert _safe_comment(_C(), "o", "r", 7, "body") is False
+        assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is False
 
     def test_returns_false_on_non_api_error(self, review_app) -> None:
         """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) must
         ALSO degrade to False rather than propagate."""
         from software_engineering_team.api.pr_review import _safe_comment
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 raise RuntimeError("unexpected")
 
-        assert _safe_comment(_C(), "o", "r", 7, "body") is False
+        assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is False
 
     def test_returns_true_on_success(self, review_app) -> None:
         from software_engineering_team.api.pr_review import _safe_comment
 
         posted: list[tuple[int, str]] = []
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 posted.append((n, body))
 
-        assert _safe_comment(_C(), "o", "r", 7, "body") is True
+        assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is True
         assert posted == [(7, "body")]
 
     def test_scrubs_token_from_failure_warning(
@@ -3699,12 +3729,12 @@ class TestSafeCommentUnit:
 
         secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
 
-        class _C:
+        class _FakeGitHubClient:
             def add_issue_comment(self, o, r, n, body):
                 raise RuntimeError(f"comment failed: {secret_url}")
 
         with caplog.at_level("WARNING"):
-            assert _safe_comment(_C(), "o", "r", 7, "body") is False
+            assert _safe_comment(_FakeGitHubClient(), "o", "r", 7, "body") is False
 
         assert not any("ghp_LEAKEDTOKEN" in r.getMessage() for r in caplog.records)
         assert not any(secret_url in r.getMessage() for r in caplog.records)
@@ -4558,7 +4588,7 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1, 2, 99]}
         changed_by_path = {"a.py": [1]}  # line 99 was NOT added by this PR
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return []
 
@@ -4572,7 +4602,7 @@ class TestPartitionReviewIssuesUnit:
                 return iter(())
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == []
         assert result.preexisting_issues == [issue]
@@ -4586,7 +4616,7 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1]}
         changed_by_path = {"a.py": [1]}  # line 1 WAS added by this PR
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return []
 
@@ -4597,7 +4627,7 @@ class TestPartitionReviewIssuesUnit:
                 return set()
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
@@ -4608,11 +4638,11 @@ class TestPartitionReviewIssuesUnit:
 
         output = _FakeOutput(issues=[])
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 raise AssertionError("should not be called when pr_issues is empty")
 
-        result = pr_review._partition_review_issues(output, _C(), "o", "r", 7, {}, {})
+        result = pr_review._partition_review_issues(output, _FakeGitHubClient(), "o", "r", 7, {}, {})
         assert result.pr_issues == []
         assert result.addressed_issues == []
 
@@ -4628,7 +4658,7 @@ class TestPartitionReviewIssuesUnit:
             id=1, path="a.py", line=2, body="dup finding", html_url="https://example/comment/1"
         )
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return [existing]
 
@@ -4639,7 +4669,7 @@ class TestPartitionReviewIssuesUnit:
                 return {1}  # resolved
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == []
         assert result.addressed_issues == [issue]
@@ -4659,7 +4689,7 @@ class TestPartitionReviewIssuesUnit:
         valid_by_path = {"a.py": [1, 2]}
         changed_by_path = {"a.py": [1, 2]}
 
-        class _C:
+        class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
                 return []
 
@@ -4673,7 +4703,7 @@ class TestPartitionReviewIssuesUnit:
                 return iter(())
 
         result = pr_review._partition_review_issues(
-            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+            output, _FakeGitHubClient(), "o", "r", 7, valid_by_path, changed_by_path
         )
         assert result.pr_issues == [issue]
         assert result.preexisting_issues == []
@@ -5083,7 +5113,7 @@ def _file_contents_client(get_contents: Callable[..., Any]) -> Any:
         - ``get_contents`` matches ``(owner, repo, path, ref) -> Optional[str]``.
     Postconditions:
         - Returns an instance whose ``get_file_contents`` delegates to
-          ``get_contents``. Consistent stand-in for the scattered ``_C`` /
+          ``get_contents``. Consistent stand-in for the scattered ``_FakeGitHubClient`` /
           ``_Client`` stubs used by whole-file / decide-mode unit tests.
     """
 
@@ -5192,12 +5222,18 @@ class TestCreateReviewIssuesUnit:
         assert out["proposals"][0]["issue_url"] == "u11"
 
     def test_raises_review_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Neither store knowing the job id raises ReviewNotFoundError."""
+        """Neither store knowing the job id raises ReviewNotFoundError before any
+        GitHub client is constructed."""
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
 
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: None)
+
+        def _fail_client(**_k):
+            raise AssertionError("client should not be constructed when review is not found")
+
+        monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
         with pytest.raises(pr_review_issues.ReviewNotFoundError):
             pr_review_issues.create_review_issues("missing", ["p0"], token="t")
 
@@ -5300,8 +5336,8 @@ class TestCreateReviewIssuesUnit:
     def test_malformed_proposals_field_yields_no_candidates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A non-list pending_issue_proposals field degrades to no candidates rather
-        than raising."""
+        """A non-list pending_issue_proposals field degrades to no candidates and
+        never constructs a GitHub client."""
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
 
@@ -5311,7 +5347,17 @@ class TestCreateReviewIssuesUnit:
             "review_summary": {"pending_issue_proposals": "not-a-list"},
         }
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
-        # No client is needed: a malformed proposals field yields no candidates.
+
+        def _fail_client(**_k):
+            raise AssertionError(
+                "GitHubClient must not be constructed for malformed proposals"
+            )
+
+        monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
+        def _no_client(**_kw):
+            raise AssertionError("GitHubClient must not be constructed for malformed proposals")
+
+        monkeypatch.setattr(api_main, "GitHubClient", _no_client)
         out = pr_review_issues.create_review_issues("job1", ["p0"], token="t")
         assert out["created"] == []
         assert out["proposals"] == []
@@ -5381,9 +5427,13 @@ class TestCreateReviewIssuesUnit:
         assert len(calls) == 1
         assert [c["proposal_id"] for c in out["created"]] == ["p0"]
 
-    def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_persist_swallows_store_errors(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A failure persisting the updated proposals never fails the request — the
-        GitHub issue already exists regardless of whether the local record updates."""
+        GitHub issue already exists regardless of whether the local record updates —
+        but both store failures must still be logged at WARNING so the swallow is
+        observable."""
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
 
@@ -5403,9 +5453,15 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "update_review", _boom)
 
         monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client())
-        # Both stores fail, but the issue was created, so the call still succeeds.
-        out = pr_review_issues.create_review_issues("job1", ["p0"], token="t")
+        # Both stores fail, but the issue was created, so the call still succeeds —
+        # and both failures must appear in WARNING logs (with exc_info).
+        with caplog.at_level("WARNING"):
+            out = pr_review_issues.create_review_issues("job1", ["p0"], token="t")
         assert out["created"][0]["issue_url"] == "u1"
+        logged = caplog.text
+        assert "could not update job" in logged
+        assert "could not update review row" in logged
+        assert "store down" in logged
 
     def test_repo_mismatch_raises_before_any_issue(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A mismatched expected owner/repo raises RepoMismatchError before the
@@ -5554,6 +5610,8 @@ class TestCreateReviewIssuesUnit:
         Postconditions:
             - The loaded context's pending_issue_proposals carry the row's
               filed issue_url for the shared proposal id.
+            - Those proposal dicts are fresh copies (not aliases of the job or
+              row dicts), so later mutation cannot touch persisted review state.
         """
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
@@ -5573,6 +5631,12 @@ class TestCreateReviewIssuesUnit:
         ctx = pr_review_issues._load_review_issue_context("job1")
         assert ctx is not None
         assert ctx.summary["pending_issue_proposals"][0]["issue_url"] == "u0"
+        # Fresh dicts — never aliases of either store's proposal list.
+        _assert_no_aliased_dicts(
+            ctx.summary["pending_issue_proposals"],
+            job["review_summary"]["pending_issue_proposals"],
+            row["review_summary"]["pending_issue_proposals"],
+        )
 
 
 def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
@@ -5591,6 +5655,8 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     Postconditions:
         - A fresh interpreter that imports pr_review_issues before any other
           coding-team api module exits 0.
+        - The child ``PYTHONPATH`` still contains any runner-provided entries
+          that were present before ``backend_root`` was prepended.
     """
     import os
     import subprocess
@@ -5603,15 +5669,22 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     backend_root = agents_root.parent
     # `shared.env` (imported transitively by pr_review_issues) now lives under
     # backend/shared/, one level above agents_root — mirrors the production
-    # container's `ENV PYTHONPATH=/app:/app/agents` (backend/Dockerfile) rather
-    # than relying on cwd=agents_root alone, which only ever reached shared_*
-    # packages back when they lived directly under agents/.
-    env = dict(os.environ, PYTHONPATH=str(backend_root))
+    # container's `ENV PYTHONPATH=/app:/app/agents` (backend/Dockerfile). Prepend
+    # backend_root so CI/runner PYTHONPATH entries (extra package roots) are kept.
+    env = os.environ.copy()
+    sentinel = "/tmp/khala-pythonpath-sentinel-should-be-preserved"
+    # Simulate a runner-provided PYTHONPATH entry that must survive into the child.
+    prior = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (prior, sentinel) if p)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(backend_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     proc = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import software_engineering_team.api.pr_review_issues",
+            "import os, software_engineering_team.api.pr_review_issues as _\n"
+            "print(os.environ.get('PYTHONPATH', ''))",
         ],
         cwd=str(agents_root),
         capture_output=True,
@@ -5620,3 +5693,9 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
         env=env,
     )
     assert proc.returncode == 0, proc.stderr
+    child_pp = proc.stdout.strip().split(os.pathsep)
+    assert str(backend_root) in child_pp
+    assert sentinel in child_pp, (
+        "subprocess PYTHONPATH must preserve pre-existing entries; "
+        f"got {proc.stdout.strip()!r}"
+    )
