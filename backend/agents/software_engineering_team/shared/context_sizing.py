@@ -41,6 +41,24 @@ CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
 # the block, so a single value keeps the reservation and the truncation in sync
 # (the sibling surface carries only symbol names, so a small cap suffices).
 CODE_REVIEW_SIBLING_SURFACE_ABS_CHARS = 2_000  # CODE_REVIEW_SIBLING_SURFACE_CHARS, floor 0
+# Shared floor for the CODE_REVIEW_MAP_CHUNK_CHARS env override (map + merged-pass
+# code caps); keep both readers on one call site so the floor cannot drift.
+_CODE_REVIEW_MAP_CHUNK_CHARS_FLOOR = 10_000
+
+
+def code_review_map_chunk_chars_cap() -> int:
+    """Absolute code-inline ceiling for map calls and the merged pass.
+
+    Postconditions:
+        - Reads ``CODE_REVIEW_MAP_CHUNK_CHARS`` (default
+          ``CODE_REVIEW_ABS_CHUNK_CHARS``, floor
+          ``_CODE_REVIEW_MAP_CHUNK_CHARS_FLOOR``). Never raises.
+    """
+    return parse_env_int(
+        "CODE_REVIEW_MAP_CHUNK_CHARS",
+        CODE_REVIEW_ABS_CHUNK_CHARS,
+        _CODE_REVIEW_MAP_CHUNK_CHARS_FLOOR,
+    )
 
 
 def compute_code_review_sibling_surface_chars() -> int:
@@ -123,7 +141,7 @@ def compute_code_review_chunk_chars(llm: LLMClient) -> int:
         reserved_response_tokens=4096,
         min_chars=12000,
     )
-    cap = parse_env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
+    cap = code_review_map_chunk_chars_cap()
     return min(derived, cap)
 
 
@@ -212,7 +230,8 @@ def compute_code_review_merged_pass_budgets(
           the LLM call).
         - Otherwise returns a :class:`MergedPassBudgets` with all fields ``>= 0``.
           ``max_inline_code_chars`` never exceeds the map-chunk absolute cap.
-        - Never raises.
+        - Raises ``ValueError`` if ``finding_array_count`` is not ``1`` or ``2``.
+          Does not raise for budgeting arithmetic itself.
     """
     if finding_array_count not in (1, 2):
         raise ValueError(f"finding_array_count must be 1 or 2, got {finding_array_count!r}")
@@ -255,7 +274,7 @@ def compute_code_review_merged_pass_budgets(
     max_manifest = min(manifest_wanted, after_arch)
     code_room = after_arch - max_manifest
 
-    code_cap = parse_env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
+    code_cap = code_review_map_chunk_chars_cap()
     max_code = 0 if code_room <= 0 else min(code_room, code_cap)
     return MergedPassBudgets(
         max_architecture_chars=max_arch,

@@ -384,6 +384,9 @@ def _issues_from_half(
     Preconditions:
         - ``parse`` / ``validate`` are the corresponding standalone pass helpers
           (``parse_findings`` / ``validate_findings``).
+        - ``parse`` accepts a dict shaped like ``{"findings": <raw_list>}`` (the
+          same envelope each standalone pass's JSON schema uses); callers wrap
+          the merged half-array that way.
 
     Postconditions:
         - Returns ``[]`` when ``raw_list`` is missing or not a list (that half
@@ -474,64 +477,11 @@ def _build_prompt(
         if remaining <= 0:
             omitted = len(changed_files) - i
             break
-        heading = f"### {path} ###"
-        # Fence length is content-dependent; reserve a small worst-case fence so
-        # heading + fences never push the block past ``remaining``.
-        fence_reserve = 8
-        base_overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
-        # Reserve the truncation note whenever the file may not fit in full —
-        # otherwise body consumes the remainder and the appended note overflows,
-        # causing this branch to drop the file entirely.
-        note_reserve = (
-            len(
-                f"(Only the first {remaining} characters of `{path}` are shown above; call "
-                "read_file to see the rest.)"
-            )
-            + 1
-        )
-        if base_overhead >= remaining:
+        block_lines, _truncated = _fit_changed_file_block(path, content, remaining)
+        if block_lines is None:
             omitted = len(changed_files) - i
             break
-        if base_overhead + len(content) <= remaining:
-            overhead = base_overhead
-            body = content
-            include_note = False
-        else:
-            overhead = base_overhead + note_reserve
-            if remaining <= overhead:
-                omitted = len(changed_files) - i
-                break
-            body = content[: remaining - overhead]
-            include_note = True
-        body_fence = code_fence_for(body)
-        block_lines = [heading, body_fence, body, body_fence]
-        if include_note:
-            block_lines.append(
-                f"(Only the first {len(body)} characters of `{path}` are shown above; call "
-                "read_file to see the rest.)"
-            )
         block = "\n".join(block_lines)
-        if len(block) > remaining:
-            # Actual fence longer than reserve: shrink the body rather than drop
-            # the file (and every subsequent file) when a prefix would still fit.
-            excess = len(block) - remaining
-            if include_note and len(body) > excess:
-                body = body[: len(body) - excess]
-                body_fence = code_fence_for(body)
-                block_lines = [
-                    heading,
-                    body_fence,
-                    body,
-                    body_fence,
-                    (
-                        f"(Only the first {len(body)} characters of `{path}` are shown above; call "
-                        "read_file to see the rest.)"
-                    ),
-                ]
-                block = "\n".join(block_lines)
-            if len(block) > remaining:
-                omitted = len(changed_files) - i
-                break
         parts.extend(block_lines)
         remaining -= len(block) + 1  # +1 for the join newline before the next block
     if omitted:
@@ -571,11 +521,23 @@ def _build_prompt(
     return "\n".join(parts)
 
 
+def _overflow_manifest_note(omitted: int) -> str:
+    """Tool-reachable note for changed paths omitted from the inline manifest."""
+    return (
+        f"... and {omitted} more changed path(s) not listed; "
+        "call list_changed_files(offset=0) then read_file(path) to reach them "
+        "(page with offset/limit when the list is long)."
+    )
+
+
 def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
     """Render the changed-file path list, truncated to ``max_manifest_chars``.
 
     Postconditions:
         - Always includes the section header.
+        - When the full remaining list fits in the budget, renders every remaining
+          path (no overflow note) — never reserves note room that would hide
+          paths that already fit.
         - When the full list exceeds the budget, includes as many paths as fit
           and a tool-reachable overflow note for the rest.
     """
@@ -583,32 +545,92 @@ def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
     lines: List[str] = [header]
     used = len(header) + 1
     shown = 0
-    for path in paths:
+    for i, path in enumerate(paths):
+        # Prefer emitting the full remainder when it fits without an overflow note.
+        rest_cost = sum(len(p) + 1 for p in paths[i:])
+        if used + rest_cost <= max_manifest_chars:
+            lines.extend(paths[i:])
+            return lines
+
         line_cost = len(path) + 1
-        overflow_note = (
-            f"... and {len(paths) - shown} more changed path(s) not listed; "
-            "call list_changed_files(offset=0) then read_file(path) to reach them "
-            "(page with offset/limit when the list is long)."
+        omitted_after = len(paths) - (shown + 1)
+        room_for_note = (
+            len(_overflow_manifest_note(omitted_after)) + 1 if omitted_after > 0 else 0
         )
-        # Leave room for an overflow note if this isn't the last path.
-        need_note_room = shown + 1 < len(paths)
-        room_for_note = len(overflow_note) + 1 if need_note_room else 0
         if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
-            lines.append(
-                f"... and {len(paths) - shown} more changed path(s) not listed; "
-                "call list_changed_files(offset=0) then read_file(path) to reach them "
-                "(page with offset/limit when the list is long)."
-            )
+            lines.append(_overflow_manifest_note(len(paths) - shown))
             break
         if used + line_cost > max_manifest_chars and shown == 0:
             # Budget too tight for even one path: header + overflow only.
-            lines.append(
-                f"... and {len(paths)} more changed path(s) not listed; "
-                "call list_changed_files(offset=0) then read_file(path) to reach them "
-                "(page with offset/limit when the list is long)."
-            )
+            lines.append(_overflow_manifest_note(len(paths)))
             break
         lines.append(path)
         used += line_cost
         shown += 1
     return lines
+
+
+def _fit_changed_file_block(
+    path: str,
+    content: str,
+    remaining: int,
+) -> Tuple[Optional[List[str]], bool]:
+    """Build one changed-file prompt block that fits in ``remaining`` characters.
+
+    Preconditions:
+        - ``remaining`` is ``>= 0``.
+        - ``path`` / ``content`` are the submission path and body to inline.
+
+    Postconditions:
+        - Returns ``(None, True)`` when even a heading/fence shell cannot fit
+          (caller should omit this and every later file).
+        - Otherwise returns ``(block_lines, truncated)`` where ``block_lines``
+          join to a string of length ``<= remaining``. When the body is a
+          prefix of ``content``, ``truncated`` is ``True`` and a read_file note
+          is included. Never raises.
+    """
+    heading = f"### {path} ###"
+    fence_reserve = 8
+    base_overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
+    note_template = (
+        "(Only the first {n} characters of `{path}` are shown above; call "
+        "read_file to see the rest.)"
+    )
+    # Worst-case note length uses ``remaining`` as the digit width upper bound.
+    note_reserve = len(note_template.format(n=remaining, path=path)) + 1
+    if base_overhead >= remaining:
+        return None, True
+
+    if base_overhead + len(content) <= remaining:
+        body = content
+        include_note = False
+    else:
+        overhead = base_overhead + note_reserve
+        if remaining <= overhead:
+            return None, True
+        body = content[: remaining - overhead]
+        include_note = True
+
+    def _lines_for(body_text: str, with_note: bool) -> List[str]:
+        fence = code_fence_for(body_text)
+        out = [heading, fence, body_text, fence]
+        if with_note:
+            out.append(note_template.format(n=len(body_text), path=path))
+        return out
+
+    block_lines = _lines_for(body, include_note)
+    block = "\n".join(block_lines)
+    # Actual fences can exceed the fixed reserve (long backtick runs). Shrink
+    # the body — including full-file blocks — rather than dropping this file
+    # and every later one.
+    while len(block) > remaining and body:
+        excess = len(block) - remaining
+        if len(body) <= excess:
+            return None, True
+        body = body[: len(body) - excess]
+        include_note = True
+        block_lines = _lines_for(body, True)
+        block = "\n".join(block_lines)
+    if len(block) > remaining:
+        return None, True
+    return block_lines, include_note or len(body) < len(content)

@@ -549,6 +549,10 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
 
     from llm_service import LLMClientModel
+    from software_engineering_team.shared.context_sizing import (
+        _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS,
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    )
 
     monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
     clones: list = []
@@ -575,8 +579,8 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
 
     find_architecture_and_side_effect_issues(backing, _input())
     assert len(clones) == 1
-    assert clones[0]["max_tokens"] < 8192
-    assert clones[0]["max_tokens"] >= 1024
+    assert clones[0]["max_tokens"] < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
+    assert clones[0]["max_tokens"] >= _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS
 
 
 def test_clamps_oversized_cap_to_full_dual_array_reserve(
@@ -636,7 +640,44 @@ def test_truncation_note_is_reserved_so_large_file_still_inlines() -> None:
     )
     assert "### big.py ###" in prompt
     assert "Only the first" in prompt
-    assert "### small.py ###" in prompt or "list_changed_files()" in prompt
+    assert "### small.py ###" in prompt or "list_changed_files" in prompt
+
+
+def test_render_manifest_emits_full_list_when_budget_matches_full_size() -> None:
+    """When max_manifest_chars equals _manifest_chars, every path must render —
+    do not reserve overflow-note room that would hide paths that already fit."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    paths = ["a", "b", "c"]
+    budget = pass_mod._manifest_chars(paths)
+    rendered = pass_mod._render_manifest(paths, budget)
+    text = "\n".join(rendered)
+    assert "a" in text and "b" in text and "c" in text
+    assert "more changed path(s) not listed" not in text
+    # ``_manifest_chars`` counts a trailing newline after the last path; join does not.
+    assert len(text) <= budget
+
+
+def test_fit_changed_file_block_shrinks_when_fence_exceeds_reserve() -> None:
+    """A full-file block whose actual fence exceeds the 8-char reserve must
+    shrink the body instead of dropping the file entirely."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    # Eight+ backticks force code_fence_for to emit a longer fence than the reserve.
+    content = "x = '''" + ("`" * 12) + "'''\n" + ("y = 1\n" * 40)
+    heading = "### fencey.py ###"
+    fence_reserve = 8
+    base_overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
+    # Budget that appears to fit under the reserve but not under the real fence.
+    remaining = base_overhead + len(content)
+    block_lines, truncated = pass_mod._fit_changed_file_block("fencey.py", content, remaining)
+    assert block_lines is not None
+    block = "\n".join(block_lines)
+    assert len(block) <= remaining
+    assert "### fencey.py ###" in block
+    # Either the full content fit with the real fence, or we shrunk with a note.
+    if truncated:
+        assert "Only the first" in block
 
 
 def test_list_changed_files_tool_returns_submission_paths_only() -> None:

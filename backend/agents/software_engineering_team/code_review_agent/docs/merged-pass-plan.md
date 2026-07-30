@@ -18,7 +18,7 @@
 - Fail-safe: merged and architecture passes never raise to the coordinator; failures yield empty findings.
 - Do not modify Temporal activities/workflows in this plan.
 - Do not delete `architecture_consistency_pass.py` or `side_effect_impact_pass.py`.
-- Prefer reusing existing `_parse_findings` / `_validate_findings` / `_build_side_effect_tools` over forking logic.
+- Prefer reusing existing `_parse_findings` / `_validate_findings` / `build_side_effect_tools` over forking logic.
 - Run tests from the worktree `backend/` directory via `.venv/bin/python -m pytest` (or from the repo root via `backend/.venv/bin/python -m pytest`).
 - Never mention issue numbers in commit messages.
 
@@ -45,8 +45,7 @@
 
 **Files:**
 - Modify: `backend/agents/software_engineering_team/code_review_agent/prompts.py` (`_ARCHITECTURE_CONSISTENCY_BODY`)
-- Modify: `backend/agents/software_engineering_team/tests/test_merged_review_prompt.py`
-- Test: `backend/agents/software_engineering_team/tests/test_merged_review_prompt.py`
+- Modify/Test: `backend/agents/software_engineering_team/tests/test_merged_review_prompt.py`
 
 **Interfaces:**
 - Consumes: existing body composition into `ARCHITECTURE_CONSISTENCY_PROMPT` and `MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`
@@ -248,7 +247,7 @@ EOF
 - Modify: `backend/agents/software_engineering_team/code_review_agent/models.py` (merged schema docstring)
 
 **Interfaces:**
-- Consumes: `MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`, `MergedArchitectureSideEffectResponse`, `side_effect_impact_pass._build_side_effect_tools`, `architecture_consistency_pass._parse_findings` + `_validate_findings`, `side_effect_impact_pass._parse_findings` + `_validate_findings`, `resolve_code_review_model`, `compute_code_review_map_chunk_chars`, `CodebaseIndex`, `env_flag_enabled`
+- Consumes: `MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`, `MergedArchitectureSideEffectResponse`, `side_effect_impact_pass.build_side_effect_tools` (public wrapper over `_build_side_effect_tools`), `architecture_consistency_pass._parse_findings` + `_validate_findings`, `side_effect_impact_pass._parse_findings` + `_validate_findings`, `resolve_code_review_model`, `compute_code_review_map_chunk_chars`, `CodebaseIndex`, `env_flag_enabled`
 - Produces:
 
 ```python

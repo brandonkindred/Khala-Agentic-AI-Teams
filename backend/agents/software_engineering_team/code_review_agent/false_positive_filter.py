@@ -315,8 +315,8 @@ class CodebaseIndex:
             hits = [
                 p
                 for p in self.files
-                if self._normalize_leading(p) == normalized
-                or self._normalize_leading(p).endswith("/" + normalized)
+                if (norm_p := self._normalize_leading(p)) == normalized
+                or norm_p.endswith("/" + normalized)
             ]
         else:
             hits = [p for p in self.files if self._final_segment(p) == normalized]
@@ -404,6 +404,13 @@ class CodebaseIndex:
         then ambiguous submission hits as an error (before any repo-reader
         lookup); then repo-reader fallback for absent submission paths;
         then missing-excerpt / not-found errors.
+
+        Postconditions:
+            - Returns ``(content, None)`` on exact or unique-suffix match, or
+              when the repo reader supplies the file.
+            - Returns ``(None, error_string)`` for blank paths, ambiguous
+              matches, missing excerpts, or not-found paths.
+            - Never raises.
         """
         key = (path or "").strip()
         if not key:
