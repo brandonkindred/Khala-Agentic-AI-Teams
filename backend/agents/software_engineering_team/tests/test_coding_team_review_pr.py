@@ -1675,8 +1675,9 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_bad_line_is_bisected_out_keeping_other_lines_inline(self, review_app) -> None:
-        # A single off-diff line must not collapse the whole review: the good lines
-        # stay inline and only the bad one is demoted to a file-level comment.
+        # A single GitHub-rejected in-diff line (bad_lines) must not collapse the
+        # whole review: the good lines stay inline and only the bad one is demoted
+        # to a file-level comment.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="good line"),
@@ -1705,9 +1706,10 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_multiple_bad_lines_are_bisected_out(self, review_app) -> None:
-        # Bisection must isolate more than one off-diff line: with two bad lines
-        # among three in-diff findings, only the good line stays inline and both
-        # bad lines are demoted to file-level comments (none lost to standalone).
+        # Bisection must isolate more than one line rejected by GitHub (bad_lines):
+        # with two bad lines among three in-diff findings, only the good line stays
+        # inline and both bad lines are demoted to file-level comments (none lost
+        # to standalone).
         # (Diff valid lines for a.py are {1, 2, 3}, so all three are line-anchored.)
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -1717,7 +1719,7 @@ class TestReviewEndpoint:
             ]
         )
         gh = review_app["github"]["client"]
-        gh.bad_lines = {1, 3}  # two off-diff lines rejected inline by GitHub
+        gh.bad_lines = {1, 3}  # two lines rejected inline by GitHub (bad_lines)
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
