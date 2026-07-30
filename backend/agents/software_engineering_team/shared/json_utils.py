@@ -149,7 +149,7 @@ def parse_json_with_recovery(
         if not chunks:
             try:
                 return complete_json_with_continuation(llm, prompt, task_id=agent_name)
-            except (LLMTruncatedError, LLMJsonParseError, Exception):
+            except (LLMTruncatedError, LLMJsonParseError):
                 return None
         results: List[Dict[str, Any]] = []
         for i, chunk in enumerate(chunks):
@@ -164,7 +164,7 @@ def parse_json_with_recovery(
                 )
                 if isinstance(data, dict):
                     results.append(data)
-            except (LLMTruncatedError, LLMJsonParseError, Exception) as e:
+            except (LLMTruncatedError, LLMJsonParseError) as e:
                 logger.warning(
                     "%s: Chunk %d JSON failed: %s",
                     agent_name,
@@ -175,7 +175,7 @@ def parse_json_with_recovery(
         return merge_fn(results) if results else None
     try:
         return complete_json_with_continuation(llm, prompt, task_id=agent_name)
-    except (LLMTruncatedError, LLMJsonParseError, Exception):
+    except (LLMTruncatedError, LLMJsonParseError):
         return None
 
 
