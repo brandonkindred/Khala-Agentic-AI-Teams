@@ -32,7 +32,7 @@ import logging
 import os
 import threading
 import time
-from typing import Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 
 from .models import AgentManifest
 
@@ -167,7 +167,7 @@ def upsert(manifest: AgentManifest) -> None:
     """Insert or replace a dynamic manifest by id.
 
     Preconditions:
-        * ``manifest.id`` is non-empty.
+        * ``manifest.id`` is a non-empty string (enforced; raises ``ValueError``).
     Postconditions:
         * ``get(manifest.id)`` returns an equal manifest from any worker. A single
           transient failure is retried once (see :func:`_with_retry`) before
@@ -176,6 +176,9 @@ def upsert(manifest: AgentManifest) -> None:
     """
     from shared.postgres import Json, get_conn
     from shared.postgres.metrics import timed_query
+
+    if not manifest.id:
+        raise ValueError("upsert: manifest.id must be non-empty")
 
     @timed_query(store=_STORE, op="upsert")
     def _do() -> None:
@@ -220,47 +223,75 @@ def delete(agent_id: str) -> None:
 def replace_manifests(
     upserts: list[AgentManifest],
     delete_ids: list[str],
+    *,
+    conn: Any | None = None,
 ) -> None:
-    """Atomically upsert ``upserts`` and delete ``delete_ids`` in one transaction.
+    """Atomically upsert ``upserts`` and delete ``delete_ids``.
 
     Used by generated-roster replacement so a mid-replace failure cannot leave
     the shared store with some new rows installed and some stale rows already
     deleted while the caller's roster DB transaction rolls back.
 
+    When ``conn`` is provided (chat-save path), statements run on that connection
+    and join the caller's open transaction — no nested ``get_conn()`` commit.
+    When ``conn`` is ``None``, opens a dedicated transaction (retried once on
+    transient failure; see :func:`_with_retry`).
+
     Preconditions:
-        * Every ``manifest.id`` in ``upserts`` is non-empty.
-        * ``upserts`` and ``delete_ids`` are disjoint (callers compute the
-          replacement set that way).
+        * Every ``manifest.id`` in ``upserts`` is a non-empty string.
+        * ``upserts`` ids and ``delete_ids`` are disjoint.
     Postconditions:
-        * On success, every upserted id is readable via :func:`get` on any
-          worker and every ``delete_ids`` entry is gone. On any statement
-          failure the whole transaction rolls back — the store is unchanged
-          and the exception propagates. Clears the ``all()`` micro-cache on
-          success. Retried once on transient failure (see :func:`_with_retry`).
+        * On success (standalone ``conn is None``): every upserted id is readable
+          via :func:`get` on any worker and every ``delete_ids`` entry is gone;
+          the dedicated transaction has committed.
+        * On success (shared ``conn``): statements are pending on ``conn`` until
+          the caller commits; other connections do not see them yet.
+        * On any statement failure the active transaction rolls back (standalone)
+          or is marked failed for the caller (shared); the exception propagates.
+          Clears the ``all()`` micro-cache on success. Standalone path retries
+          once on transient failure; shared-``conn`` path does not retry (a
+          mid-batch failure would leave the caller's txn aborted).
     """
     from shared.postgres import Json, get_conn
     from shared.postgres.metrics import timed_query
 
+    upsert_ids = []
     for m in upserts:
-        assert m.id, "replace_manifests: every upsert must have a non-empty id"
+        if not m.id:
+            raise ValueError("replace_manifests: every upsert must have a non-empty id")
+        upsert_ids.append(m.id)
+    overlap = set(upsert_ids) & set(delete_ids)
+    if overlap:
+        raise ValueError(
+            f"replace_manifests: upserts and delete_ids must be disjoint; overlap={sorted(overlap)!r}"
+        )
+
+    def _execute(cur) -> None:
+        for manifest in upserts:
+            payload = manifest.model_dump(mode="json")
+            cur.execute(
+                f"INSERT INTO {_TABLE} (id, team, tags, manifest, updated_at) "
+                "VALUES (%s, %s, %s, %s, NOW()) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "team = EXCLUDED.team, tags = EXCLUDED.tags, "
+                "manifest = EXCLUDED.manifest, updated_at = NOW()",
+                (manifest.id, manifest.team, Json(list(manifest.tags)), Json(payload)),
+            )
+        for agent_id in delete_ids:
+            cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
+
+    _ensure_schema()
+    if conn is not None:
+        with conn.cursor() as cur:
+            _execute(cur)
+        clear_cache()
+        return
 
     @timed_query(store=_STORE, op="replace_manifests")
     def _do() -> None:
-        with get_conn() as conn, conn.cursor() as cur:
-            for manifest in upserts:
-                payload = manifest.model_dump(mode="json")
-                cur.execute(
-                    f"INSERT INTO {_TABLE} (id, team, tags, manifest, updated_at) "
-                    "VALUES (%s, %s, %s, %s, NOW()) "
-                    "ON CONFLICT (id) DO UPDATE SET "
-                    "team = EXCLUDED.team, tags = EXCLUDED.tags, "
-                    "manifest = EXCLUDED.manifest, updated_at = NOW()",
-                    (manifest.id, manifest.team, Json(list(manifest.tags)), Json(payload)),
-                )
-            for agent_id in delete_ids:
-                cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
+        with get_conn() as owned, owned.cursor() as cur:
+            _execute(cur)
 
-    _ensure_schema()
     _with_retry(_do)
     clear_cache()
 

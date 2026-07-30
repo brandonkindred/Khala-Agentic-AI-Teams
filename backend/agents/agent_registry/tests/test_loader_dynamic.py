@@ -60,7 +60,8 @@ class _FakeStore:
         self._maybe_raise("manifests_with_prefix")
         return [m for m in self.rows.values() if m.id.startswith(prefix)]
 
-    def replace_manifests(self, upserts, delete_ids) -> None:
+    def replace_manifests(self, upserts, delete_ids, *, conn=None) -> None:
+        del conn
         self._maybe_raise("replace_manifests")
         for agent_id in delete_ids:
             self.rows.pop(agent_id, None)
@@ -241,6 +242,23 @@ def test_replace_dynamic_manifests_leaves_local_unchanged_on_store_failure(
     assert "agentic.team-1.new" not in fake_store.rows
     assert reg.get(prior.id) is not None
     assert reg._by_id[prior.id].id == prior.id
+
+
+def test_replace_manifests_rejects_empty_id_and_overlap() -> None:
+    # Hit the real validators before any Postgres work (no fake_store patch).
+    from agent_registry.dynamic_store import replace_manifests
+
+    with pytest.raises(ValueError, match="non-empty id"):
+        replace_manifests([_manifest("")], [])
+    with pytest.raises(ValueError, match="disjoint"):
+        replace_manifests([_manifest("agent_studio.x")], ["agent_studio.x"])
+
+
+def test_upsert_rejects_empty_id() -> None:
+    from agent_registry.dynamic_store import upsert
+
+    with pytest.raises(ValueError, match="non-empty"):
+        upsert(_manifest(""))
 
 
 def test_manifests_with_id_prefix_require_store_propagates(

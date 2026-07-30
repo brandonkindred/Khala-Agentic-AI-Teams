@@ -221,14 +221,16 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     if not generated:
         return
 
-    def _register(merged: list[AgenticTeamAgent]) -> None:
+    def _register(merged: list[AgenticTeamAgent], conn) -> None:
         # Install the generated agents into the live registry so the Agent Console
         # catalog and /api/agents/{id}/invoke resolve them (skips registry-source
-        # entries internally). Runs under the team lock so it's serialized with
-        # the single-agent routes' registry cleanup. Raises on registry failure
-        # so merge_generated_agents rolls back the roster write and keeps both
+        # entries internally). Runs under the team lock on the roster connection so
+        # it's serialized with the single-agent routes' registry cleanup and the
+        # dynamic-store replace joins this transaction — a commit failure rolls
+        # roster + registry back together. Raises on registry failure so
+        # merge_generated_agents rolls back the roster write and keeps both
         # stores consistent.
-        register_team_manifests(team_id, merged)
+        register_team_manifests(team_id, merged, conn=conn)
 
     # Merge under a team-row lock so the read (preserve registry agents), the write,
     # and the registry register all happen in one atomic, serialized transaction.

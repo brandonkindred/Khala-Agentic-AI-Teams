@@ -181,7 +181,12 @@ def is_generated_manifest(manifest: AgentManifest) -> bool:
     return "generated" in manifest.tags
 
 
-def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> list[AgentManifest]:
+def register_team_manifests(
+    team_id: str,
+    agents: list[AgenticTeamAgent],
+    *,
+    conn: object | None = None,
+) -> list[AgentManifest]:
     """Build and install the live registry entries for a team's roster.
 
     Generated agents are not discovered from disk, so they are registered into the
@@ -194,9 +199,11 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     ``AgentRegistry.replace_dynamic_manifests``), the full replacement
     (upserts + stale deletes) commits in **one** Postgres transaction before
     local memory is updated, so other workers and per-invoke sandboxes that
-    share that store never observe a partial replace. When no dynamic store
-    is active (Postgres off / sandboxed), registration is local-only and other
-    processes won't see these entries until they generate their own.
+    share that store never observe a partial replace. When ``conn`` is provided
+    (chat-save ``on_merged``), those store statements join the caller's open
+    roster transaction so both commit or roll back together. When no dynamic
+    store is active (Postgres off / sandboxed), registration is local-only and
+    other processes won't see these entries until they generate their own.
 
     Preconditions:
         * ``team_id`` is non-empty.
@@ -247,7 +254,6 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     }
     stale = [agent_id for agent_id in prior_generated if agent_id not in new_ids]
     # Single atomic replace: shared-store upserts + deletes commit together (or
-    # not at all), then local memory is updated. No mid-replace compensation —
-    # the store transaction is the unit of fail-closedness.
-    registry.replace_dynamic_manifests(manifests, stale)
+    # join ``conn`` when provided), then local memory is updated.
+    registry.replace_dynamic_manifests(manifests, stale, conn=conn)
     return manifests

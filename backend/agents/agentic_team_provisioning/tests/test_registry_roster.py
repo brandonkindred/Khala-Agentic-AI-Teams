@@ -67,7 +67,8 @@ class _FakeRegistry:
     def unregister(self, agent_id: str) -> bool:
         return self._by_id.pop(agent_id, None) is not None
 
-    def replace_dynamic_manifests(self, upserts, delete_ids) -> None:
+    def replace_dynamic_manifests(self, upserts, delete_ids, *, conn=None) -> None:
+        del conn  # fake has no dynamic store
         for agent_id in delete_ids:
             self._by_id.pop(agent_id, None)
         for manifest in upserts:
@@ -767,7 +768,7 @@ def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyP
     result = store.merge_generated_agents(
         "missing",
         [AgenticTeamAgent(agent_name="X", role="x", skills=["y"])],
-        on_merged=lambda ms: seen.append([m.agent_name for m in ms]),
+        on_merged=lambda ms, _conn: seen.append([m.agent_name for m in ms]),
     )
     assert result == []
     assert store.list_team_agents("missing") == []
@@ -828,7 +829,41 @@ def test_merge_generated_agents_invokes_on_merged(client: TestClient) -> None:
     merged = store.merge_generated_agents(
         team_id,
         [AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"])],
-        on_merged=lambda ms: seen.append([m.agent_name for m in ms]),
+        on_merged=lambda ms, _conn: seen.append([m.agent_name for m in ms]),
     )
     assert [m.agent_name for m in merged] == ["Writer"]
     assert seen == [["Writer"]]  # called exactly once with the merged list
+
+
+def test_merge_generated_agents_passes_conn_and_propagates_on_merged_failure(
+    client: TestClient,
+) -> None:
+    """Chat-save wiring: on_merged receives the roster conn and a raise escapes.
+
+    Production ``get_conn`` rolls the open transaction back on that escape so the
+    roster write is undone together with any registry statements that joined
+    ``conn``. The dict-backed fake mutates eagerly (no txn rollback), so this
+    test asserts the fail-closed *control path* rather than fake DB contents.
+    """
+    team_id = _new_team()
+    store = AgenticTeamStore()
+    store.save_team_agents(
+        team_id,
+        [AgenticTeamAgent(agent_name="Prior", role="p", skills=["x"], source="generated")],
+    )
+
+    seen_conn: list[object] = []
+
+    def _boom(merged, conn):
+        seen_conn.append(conn)
+        raise RuntimeError("registry replace failed")
+
+    with pytest.raises(RuntimeError, match="registry replace failed"):
+        store.merge_generated_agents(
+            team_id,
+            [AgenticTeamAgent(agent_name="New", role="n", skills=["y"])],
+            on_merged=_boom,
+        )
+
+    assert len(seen_conn) == 1
+    assert seen_conn[0] is not None

@@ -255,7 +255,7 @@ def test_register_team_manifests_propagates_atomic_replace_failure(
     )
     prior_a_id = first[0].id
 
-    def _boom(upserts, delete_ids):
+    def _boom(upserts, delete_ids, *, conn=None):
         raise RuntimeError("replace boom")
 
     monkeypatch.setattr(reg, "replace_dynamic_manifests", _boom)

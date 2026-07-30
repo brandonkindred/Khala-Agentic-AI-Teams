@@ -530,6 +530,8 @@ class AgentRegistry:
         self,
         upserts: Sequence[AgentManifest],
         delete_ids: Sequence[str],
+        *,
+        conn: Any | None = None,
     ) -> None:
         """Atomically install ``upserts`` and drop ``delete_ids`` for dynamic agents.
 
@@ -542,10 +544,15 @@ class AgentRegistry:
             * No ``delete_ids`` entry names a static/disk id.
             * ``upserts`` ids and ``delete_ids`` are disjoint.
         Postconditions:
-            * When a dynamic store is active, all upserts and deletes commit in
-              **one** Postgres transaction before local memory is updated. A store
-              failure leaves both store and local registry unchanged and
-              propagates.
+            * When a dynamic store is active and ``conn`` is ``None``, all upserts
+              and deletes commit in **one** dedicated Postgres transaction before
+              local memory is updated. A store failure leaves both store and local
+              registry unchanged and propagates.
+            * When ``conn`` is provided (chat-save), store statements join that
+              open transaction so a later roster-commit failure rolls both back
+              together. Local memory is still updated after the statements succeed
+              on ``conn`` (process-local residual if the outer commit then fails —
+              other workers never see the uncommitted store rows).
             * When no store is active, only this process's in-memory view is
               updated (local-authoritative, same as :meth:`register` with no
               store). After success, each upserted id resolves via :meth:`get`
@@ -554,7 +561,8 @@ class AgentRegistry:
         upsert_list = list(upserts)
         delete_list = list(delete_ids)
         for manifest in upsert_list:
-            assert manifest.id, "replace_dynamic_manifests: manifest.id must be non-empty"
+            if not manifest.id:
+                raise ValueError("replace_dynamic_manifests: manifest.id must be non-empty")
             if manifest.id in self._static_ids:
                 raise ValueError(f"replace_dynamic_manifests: refusing static id {manifest.id!r}")
         for agent_id in delete_list:
@@ -567,7 +575,7 @@ class AgentRegistry:
         if store is not None:
             # Store first: on failure local state is untouched so fail-closed
             # callers can roll back their roster write against an unchanged catalog.
-            store.replace_manifests(upsert_list, delete_list)
+            store.replace_manifests(upsert_list, delete_list, conn=conn)
 
         with self._lock:
             for manifest in upsert_list:
