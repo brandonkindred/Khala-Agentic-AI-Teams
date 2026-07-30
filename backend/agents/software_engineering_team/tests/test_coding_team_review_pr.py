@@ -1861,14 +1861,16 @@ class TestReviewEndpoint:
         gh.review_fail_times = 1  # the lone summary-only review attempt 422s
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff only")
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="off-hunk line in changed file"
+                )
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # The summary never posted, but the file-level finding did — and nothing
+        # The summary never posted, but the in-diff file-level finding did — and nothing
         # fell through to a standalone conversation comment.
         assert gh.submitted_reviews == []
         assert len(gh.review_comments) == 1
@@ -1983,7 +1985,9 @@ class TestReviewEndpoint:
         gh.review_comment_fail_status = 403
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff find")
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="off-hunk line in changed file"
+                )
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1992,7 +1996,7 @@ class TestReviewEndpoint:
         assert job["status"] == "failed"
         # The finding was NOT silently posted as a standalone conversation comment;
         # only the failure notice (which never carries the finding text) is allowed.
-        assert not any("off-diff find" in body for _n, body in gh.comments)
+        assert not any("off-hunk line in changed file" in body for _n, body in gh.comments)
 
     def test_all_changed_files_are_reviewed_without_cap(self, review_app) -> None:
         gh = review_app["github"]["client"]
