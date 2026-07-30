@@ -257,6 +257,21 @@ def test_parse_json_with_recovery_propagates_non_recovery_exception(monkeypatch)
         raise AssertionError("expected ValueError to propagate")
 
 
+def test_parse_json_with_recovery_returns_none_on_transient_llm_error(monkeypatch) -> None:
+    """parse_json_with_recovery returns None when completion raises a transient LLM error."""
+    from llm_service import LLMTemporaryError
+    from software_engineering_team.shared import json_utils
+
+    def boom(*a, **kw):
+        raise LLMTemporaryError("provider exhausted")
+
+    monkeypatch.setattr(
+        "software_engineering_team.shared.llm.complete_json_with_continuation", boom
+    )
+    out = json_utils.parse_json_with_recovery(MagicMock(), "p", agent_name="A")
+    assert out is None
+
+
 def test_parse_json_with_recovery_chunked(monkeypatch) -> None:
     """parse_json_with_recovery decomposes, completes each chunk, and merges the per-chunk results."""
     from software_engineering_team.shared import json_utils

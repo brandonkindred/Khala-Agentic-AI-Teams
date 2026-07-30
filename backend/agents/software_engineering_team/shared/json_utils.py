@@ -136,8 +136,22 @@ def parse_json_with_recovery(
     and merges with merge_fn. Otherwise calls the LLM once for the given prompt and
     returns parsed JSON or None on failure.
     """
-    from llm_service import LLMJsonParseError, LLMTruncatedError
+    from llm_service import (
+        LLMJsonParseError,
+        LLMRateLimitError,
+        LLMTemporaryError,
+        LLMTruncatedError,
+    )
     from software_engineering_team.shared.llm import complete_json_with_continuation
+
+    # Named recovery failures plus transient LLM exhaustion — not bare Exception
+    # (programming bugs must still propagate).
+    _recovery_errors = (
+        LLMTruncatedError,
+        LLMJsonParseError,
+        LLMRateLimitError,
+        LLMTemporaryError,
+    )
 
     if (
         decompose_fn is not None
@@ -149,7 +163,7 @@ def parse_json_with_recovery(
         if not chunks:
             try:
                 return complete_json_with_continuation(llm, prompt, task_id=agent_name)
-            except (LLMTruncatedError, LLMJsonParseError):
+            except _recovery_errors:
                 return None
         results: List[Dict[str, Any]] = []
         for i, chunk in enumerate(chunks):
@@ -164,7 +178,7 @@ def parse_json_with_recovery(
                 )
                 if isinstance(data, dict):
                     results.append(data)
-            except (LLMTruncatedError, LLMJsonParseError) as e:
+            except _recovery_errors as e:
                 logger.warning(
                     "%s: Chunk %d JSON failed: %s",
                     agent_name,
@@ -175,7 +189,7 @@ def parse_json_with_recovery(
         return merge_fn(results) if results else None
     try:
         return complete_json_with_continuation(llm, prompt, task_id=agent_name)
-    except (LLMTruncatedError, LLMJsonParseError):
+    except _recovery_errors:
         return None
 
 
