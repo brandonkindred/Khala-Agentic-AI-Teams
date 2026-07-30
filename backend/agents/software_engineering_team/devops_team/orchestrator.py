@@ -140,10 +140,25 @@ _PROD_MISSING_CONTROL_TOKENS = frozenset(
         "lack",
     }
 )
-# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher:
-# alphanumerics + underscore, split on any other separator (``/``, Markdown
-# punctuation, em dashes, whitespace, hyphens, etc.).
+# ``no production <attribute>`` negates the attribute, not the environment.
+_PROD_ATTRIBUTE_TOKENS = frozenset(
+    {
+        "downtime",
+        "interruption",
+        "interruptions",
+        "outage",
+        "outages",
+        "latency",
+        "degradation",
+        "impact",
+        "disruption",
+        "traffic",  # only when paired with interruption-style attrs nearby; see helper
+    }
+)
+# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher.
 _LEGACY_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
+# Split so ``No. Deploy to production`` does not let ``No`` govern the next sentence.
+_LEGACY_CLAUSE_SPLIT = re.compile(r"[.!?;]+")
 _PROD_CONTEXT_LOOKAHEAD = 5
 
 
@@ -151,7 +166,7 @@ def _negation_token_before(tokens: List[str], prod_index: int) -> Optional[str]:
     """Return the negation token governing ``tokens[prod_index]``, if any.
 
     Preconditions:
-        - ``tokens`` is a list of lowercase word tokens.
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
         - ``0 <= prod_index < len(tokens)``.
     Postconditions:
         - Returns ``non`` / ``no`` / ``not`` when that token immediately
@@ -173,19 +188,18 @@ def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
     """Return True when ``tokens[prod_index]`` is an excluded-environment phrase.
 
     Preconditions:
-        - ``tokens`` is a list of lowercase word tokens.
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
         - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
           ``prod`` or ``production``.
     Postconditions:
-        - ``non`` governing the prod token always counts as negation
-          (``non-production``).
+        - ``non`` governing the prod token always counts as negation.
         - ``no`` / ``not`` governing the prod token (allowing intervening
-          fillers like ``to`` / ``for`` / ``deploy``) counts as negation
-          unless the following context describes a *missing* production
-          control (safeguard noun + missing-control cue such as
-          ``configured`` / ``add``). An explicit prohibition after a
-          safeguard noun (e.g. ``no production access is allowed``) remains
-          negation / staging.
+          fillers) counts as negation unless following context shows:
+          a missing production control, a conditional approval gate
+          (``until`` / ``unless``), or a negated production *attribute*
+          (``downtime``, ``interruption``, …) rather than excluding production.
+        - Explicit prohibitions after a safeguard noun
+          (``no production access is allowed``) remain negation / staging.
         - Otherwise returns False.
     """
     assert 0 <= prod_index < len(tokens), "prod_index out of range"
@@ -196,6 +210,19 @@ def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
     if neg == "non":
         return True
     window = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
+    # Conditional gate: "do not deploy to production until approved".
+    if any(t in ("until", "unless") for t in window):
+        return False
+    # Attribute negation: "no production downtime" / "no production traffic interruption".
+    if any(t in _PROD_ATTRIBUTE_TOKENS for t in window) and not any(
+        t in _PROD_PROHIBITION_TOKENS for t in window
+    ):
+        # "no production traffic" alone (exclusion) vs "traffic interruption" (attribute).
+        if window and window[0] == "traffic" and not any(
+            t in {"interruption", "interruptions", "disruption", "impact"} for t in window[1:]
+        ):
+            return True
+        return False
     has_safeguard = any(t in _PROD_SAFEGUARD_TOKENS for t in window)
     if not has_safeguard:
         return True
@@ -207,33 +234,45 @@ def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
     return False
 
 
+def _clause_implies_production(clause: str) -> bool:
+    """Return True when a single clause positively implies production.
+
+    Preconditions: ``clause`` is a lowercase str (may be empty).
+    Postconditions: True iff a non-excluded ``prod``/``production`` token appears.
+    """
+    assert isinstance(clause, str), "clause must be a str"
+    tokens = _LEGACY_WORD_TOKEN.findall(clause)
+    for i, token in enumerate(tokens):
+        if token not in ("prod", "production"):
+            continue
+        if _is_environment_negation(tokens, i):
+            continue
+        return True
+    return False
+
+
 def _legacy_environment_from_text(combined_text: str) -> str:
     """Infer ``production`` vs ``staging`` from legacy free text.
 
     Preconditions:
         - ``combined_text`` is a str (may be empty); caller lowercases input.
     Postconditions:
-        - Returns ``\"production\"`` iff some word token equals ``prod`` or
-          ``production`` and that occurrence is not an environment-exclusion
-          phrase (see :func:`_is_environment_negation`). Separators (``/``,
-          hyphens, Markdown link punctuation, em dashes, wrappers) do not glue
-          tokens together — e.g. ``production/blue``, ``[production](...)``, and
-          ``non-production`` yield distinct tokens.
+        - Splits on clause boundaries (``.`` / ``!`` / ``?`` / ``;``) so a
+          standalone ``No.`` cannot negate a later ``Deploy to production``.
+        - Returns ``\"production\"`` iff any clause positively implies production
+          (see :func:`_clause_implies_production` / :func:`_is_environment_negation`).
         - Exclusion phrases include ``non-production``, ``not prod``,
           ``no production traffic``, ``do not deploy to production``,
           ``not for production``, and ``no production access is allowed``.
-        - Missing-control wording such as ``no production approval gate is
-          configured; add one`` still maps to production.
+        - Still production: missing-control wording, conditional
+          ``until approved``, and attribute constraints like
+          ``no production downtime``.
         - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
     """
     assert isinstance(combined_text, str), "combined_text must be a str"
-    tokens = _LEGACY_WORD_TOKEN.findall(combined_text)
-    for i, token in enumerate(tokens):
-        if token not in ("prod", "production"):
-            continue
-        if _is_environment_negation(tokens, i):
-            continue
-        return "production"
+    for clause in _LEGACY_CLAUSE_SPLIT.split(combined_text):
+        if _clause_implies_production(clause.strip()):
+            return "production"
     return "staging"
 
 

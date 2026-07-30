@@ -1907,6 +1907,40 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "staging"
 
+    def test_build_legacy_spec_clause_boundary_no_then_deploy_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-clause-1",
+            task_description="No. Deploy to production instead",
+            requirements="Include approval gate",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_no_production_downtime_still_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-attr-1",
+            task_description="No production downtime is acceptable",
+            requirements="Zero-downtime rollout",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_no_production_traffic_interruption_still_production(
+        self,
+    ) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-attr-2",
+            task_description="No production traffic interruption during the rollout",
+            requirements="Keep service available",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_do_not_deploy_until_approved_still_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-cond-1",
+            task_description="Do not deploy to production until approved",
+            requirements="Gate the prod deploy on approval",
+        )
+        assert spec.environment == "production"
+
     def test_build_legacy_spec_missing_production_approval_still_production(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-neg-safeguard",
