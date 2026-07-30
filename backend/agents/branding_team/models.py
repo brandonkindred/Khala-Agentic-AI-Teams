@@ -328,6 +328,73 @@ class PersonaProfile(BaseModel):
     jobs_to_be_done: List[str] = Field(default_factory=list)
 
 
+class BrandStoryOutput(BaseModel):
+    """Agent-facing brand story schema (see ``PurposeVisionOutput`` on required fields).
+
+    ``boilerplate_variants`` cardinality encodes the prompt's stated "3 versions
+    (short/medium/long)".
+    """
+
+    brand_story: str = Field(min_length=1)
+    hero_narrative: str = Field(min_length=1)
+    boilerplate_variants: List[str] = Field(min_length=3, max_length=3)
+
+
+class BrandArchetypesOutput(BaseModel):
+    """A set of brand archetypes (see ``PurposeVisionOutput`` on required fields).
+
+    ``min_length``/``max_length`` encode the prompt's stated "1-2 brand archetypes".
+    """
+
+    brand_archetypes: List[BrandArchetype] = Field(min_length=1, max_length=2)
+
+
+class TaglineOutput(BaseModel):
+    """Tagline, rationale, and elevator pitches (see ``PurposeVisionOutput`` on required fields).
+
+    ``elevator_pitches`` cardinality encodes the prompt's stated three tiers
+    (5-second / 30-second / 2-minute).
+    """
+
+    tagline: str = Field(min_length=1)
+    tagline_rationale: str = Field(min_length=1)
+    elevator_pitches: List[ElevatorPitch] = Field(min_length=3, max_length=3)
+
+
+class MessagingFrameworkOutput(BaseModel):
+    """Messaging pillars and audience message maps (see ``PurposeVisionOutput`` on required fields).
+
+    ``messaging_framework`` cardinality encodes the prompt's stated "3-4 messaging pillars".
+    """
+
+    messaging_framework: List[MessagingPillar] = Field(min_length=3, max_length=4)
+    audience_message_maps: List[AudienceMessageMap] = Field(min_length=1)
+
+
+class PersonaProfilesOutput(BaseModel):
+    """A set of persona profiles (see ``PurposeVisionOutput`` on required fields).
+
+    ``min_length``/``max_length`` encode the prompt's stated "2-3 persona profiles".
+    """
+
+    persona_profiles: List[PersonaProfile] = Field(min_length=2, max_length=3)
+
+
+class WritingGuidelinesOutput(BaseModel):
+    """Agent-facing writing-guidelines schema (see ``PurposeVisionOutput`` on required fields).
+
+    Field-for-field identical to ``WritingGuidelines`` — kept as a separate
+    model so this one can require real content without breaking
+    ``NarrativeMessagingOutput.writing_guidelines``'s no-argument default
+    construction. Cardinalities encode the prompt's stated "3-4" for each list.
+    """
+
+    voice_principles: List[str] = Field(min_length=3, max_length=4)
+    style_dos: List[str] = Field(min_length=3, max_length=4)
+    style_donts: List[str] = Field(min_length=3, max_length=4)
+    editorial_quality_bar: List[str] = Field(min_length=3, max_length=4)
+
+
 class NarrativeMessagingOutput(BaseModel):
     """Phase 2 output: the verbal identity of the brand."""
 

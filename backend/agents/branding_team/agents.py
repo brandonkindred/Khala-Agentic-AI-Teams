@@ -18,14 +18,20 @@ from strands import Agent
 from .graphs.shared import build_agent
 from .models import (
     AudienceSegmentsOutput,
+    BrandArchetypesOutput,
     BrandCheckRequest,
     BrandCheckResult,
     BrandDiscoveryAuditOutput,
     BrandingMission,
+    BrandStoryOutput,
     CoreValuesOutput,
     DifferentiationPillarsOutput,
+    MessagingFrameworkOutput,
+    PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
+    TaglineOutput,
+    WritingGuidelinesOutput,
 )
 
 # ===================================================================
@@ -142,6 +148,7 @@ def make_storyteller() -> Agent:
             "archetypes that align with the story. If the ArchetypeAnalyst suggests revisions, "
             "incorporate them."
         ),
+        structured_output=BrandStoryOutput,
     )
 
 
@@ -158,6 +165,7 @@ def make_archetype_analyst() -> Agent:
             "If the brand story doesn't align with the archetype, hand off back to the Storyteller "
             "with specific revision suggestions. Otherwise, hand off to the TaglineWriter."
         ),
+        structured_output=BrandArchetypesOutput,
     )
 
 
@@ -176,6 +184,7 @@ def make_tagline_writer() -> Agent:
             "   - tier: '2-minute', pitch: ...\n\n"
             "After completing, hand off to the MessageMapper."
         ),
+        structured_output=TaglineOutput,
     )
 
 
@@ -191,6 +200,7 @@ def make_message_mapper() -> Agent:
             "   - audience_segment, primary_message, supporting_messages, tone_adjustments\n\n"
             "After completing, hand off to the PersonaBuilder."
         ),
+        structured_output=MessagingFrameworkOutput,
     )
 
 
@@ -204,6 +214,7 @@ def make_persona_builder() -> Agent:
             "frustrations, media_habits, jobs_to_be_done.\n\n"
             "After completing, hand off to the VoicePrinciplesDrafter."
         ),
+        structured_output=PersonaProfilesOutput,
     )
 
 
@@ -220,6 +231,7 @@ def make_voice_principles_drafter() -> Agent:
             "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
             "This is the final step in narrative development."
         ),
+        structured_output=WritingGuidelinesOutput,
     )
 
 
