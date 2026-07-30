@@ -15,6 +15,7 @@ discovery paths.
 from __future__ import annotations
 
 import hashlib
+import logging
 
 from agent_registry.models import (
     AgentManifest,
@@ -26,6 +27,8 @@ from agent_registry.models import (
 )
 from agentic_team_provisioning.agent_env_provisioning import _slug
 from agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
+
+logger = logging.getLogger(__name__)
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
@@ -213,6 +216,11 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
           the roster write; import-time retroactive registration wraps this call.
           When a dynamic store is active, each ``register(..., require_persist=True)``
           also fails closed on Postgres upsert errors (not just local-only installs).
+          Replacement order is register-new-then-unregister-stale; if a mid-replace
+          register fails, this call's installs are compensated before the error
+          propagates (brand-new ids unregistered; overwritten ids restored from the
+          prior snapshot) so a rolled-back roster save does not leave the registry
+          pointing at the aborted replacement.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -231,22 +239,48 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     from agent_registry import get_registry
 
     registry = get_registry()
-    # Drop stale entries from a prior roster (removed/renamed agents) before
-    # registering the replacement set. Scope strictly to this team's generated
-    # ids (prefix + the "generated" tag) so a hand-authored disk manifest is
-    # never touched. ``manifests_with_id_prefix`` materializes only this team's
-    # entries (not a copy of the whole registry) — this runs under the team lock
-    # on the chat-save path, so keeping the scan's allocation small matters.
+    # Snapshot prior team-generated manifests before mutating. Scope strictly to
+    # this team's generated ids (prefix + the "generated" tag) so a hand-authored
+    # disk manifest is never touched. ``manifests_with_id_prefix`` materializes
+    # only this team's entries (not a copy of the whole registry) — this runs
+    # under the team lock on the chat-save path, so keeping the scan's allocation
+    # small matters.
     prefix = team_id_prefix(team_id)
-    stale = [
-        m.id
-        for m in registry.manifests_with_id_prefix(prefix)
-        if is_generated_manifest(m) and m.id not in new_ids
-    ]
-    for agent_id in stale:
-        registry.unregister(agent_id)
-    for manifest in manifests:
-        # require_persist: other workers / invoke sandboxes only resolve manifests
-        # via the dynamic store; a local-only install must not let chat-save commit.
-        registry.register(manifest, require_persist=True)
+    prior_generated = {
+        m.id: m for m in registry.manifests_with_id_prefix(prefix) if is_generated_manifest(m)
+    }
+    stale = [agent_id for agent_id in prior_generated if agent_id not in new_ids]
+    # Register the replacement set *before* dropping stale ids so a mid-replace
+    # failure cannot delete the old rename source before the new id lands. On
+    # failure, undo this call's installs (unregister brand-new ids; restore any
+    # overwritten priors) so a rolled-back roster write is not paired with a
+    # partial registry replacement.
+    installed: list[str] = []
+    try:
+        for manifest in manifests:
+            # require_persist: other workers / invoke sandboxes only resolve
+            # manifests via the dynamic store; a local-only install must not let
+            # chat-save commit.
+            registry.register(manifest, require_persist=True)
+            installed.append(manifest.id)
+        for agent_id in stale:
+            registry.unregister(agent_id)
+    except Exception:
+        for agent_id in installed:
+            prior = prior_generated.get(agent_id)
+            try:
+                if prior is None:
+                    registry.unregister(agent_id)
+                else:
+                    # Best-effort restore — compensation must not mask the
+                    # original failure if the store is still unhealthy.
+                    registry.register(prior)
+            except Exception:
+                logger.warning(
+                    "Failed to compensate registry install of %s after replace failure for team %s",
+                    agent_id,
+                    team_id,
+                    exc_info=True,
+                )
+        raise
     return manifests

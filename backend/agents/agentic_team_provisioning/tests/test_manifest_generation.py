@@ -237,3 +237,95 @@ def test_register_team_manifests_propagates_registry_failure(
     # Registry failures propagate so chat-save can roll back the roster write.
     with pytest.raises(RuntimeError, match="registry unavailable"):
         register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
+
+
+def test_register_team_manifests_compensates_partial_replace(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A mid-replace register failure must not leave the abort's installs behind.
+
+    Rename A→B with a failing C: B must not stick after the raise (roster will
+    roll back), and A's prior manifest must still resolve.
+    """
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    first = register_team_manifests(
+        "team-1",
+        [AgenticTeamAgent(agent_name="A", role="prior-A")],
+    )
+    prior_a_id = first[0].id
+    assert reg.get(prior_a_id) is not None
+
+    real_register = reg.register
+    calls = {"n": 0}
+
+    def _failing_register(manifest, source_path=None, *, require_persist: bool = False):
+        calls["n"] += 1
+        # Fail on the second require_persist install (agent C after renamed B).
+        if require_persist and calls["n"] >= 2:
+            raise RuntimeError("upsert boom")
+        return real_register(manifest, source_path, require_persist=require_persist)
+
+    monkeypatch.setattr(reg, "register", _failing_register)
+
+    with pytest.raises(RuntimeError, match="upsert boom"):
+        register_team_manifests(
+            "team-1",
+            [
+                AgenticTeamAgent(agent_name="B", role="renamed"),
+                AgenticTeamAgent(agent_name="C", role="new"),
+            ],
+        )
+
+    # Prior A still present (stale cleanup never ran); aborted B/C installs gone.
+    assert reg.get(prior_a_id) is not None
+    assert reg.get(prior_a_id).summary == "prior-A"
+    names = {m.name for m in reg.all()}
+    assert names == {"A"}
+    assert "B" not in names
+    assert "C" not in names
+
+
+def test_register_team_manifests_restores_overwritten_prior_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An in-place overwrite that succeeded mid-replace is restored on abort."""
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    first = register_team_manifests(
+        "team-1",
+        [AgenticTeamAgent(agent_name="A", role="prior-A")],
+    )
+    a_id = first[0].id
+
+    real_register = reg.register
+    calls = {"n": 0}
+
+    def _failing_register(manifest, source_path=None, *, require_persist: bool = False):
+        calls["n"] += 1
+        if require_persist and calls["n"] >= 2:
+            raise RuntimeError("upsert boom")
+        return real_register(manifest, source_path, require_persist=require_persist)
+
+    monkeypatch.setattr(reg, "register", _failing_register)
+
+    with pytest.raises(RuntimeError, match="upsert boom"):
+        register_team_manifests(
+            "team-1",
+            [
+                AgenticTeamAgent(agent_name="A", role="new-A"),
+                AgenticTeamAgent(agent_name="B", role="new"),
+            ],
+        )
+
+    assert reg.get(a_id) is not None
+    assert reg.get(a_id).summary == "prior-A"
+    assert {m.name for m in reg.all()} == {"A"}
