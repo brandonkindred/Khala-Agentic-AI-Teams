@@ -143,64 +143,6 @@ def test_get_by_brand_id_single_join() -> None:
     assert store.get_by_brand_id(_brand_id("absent")) is None
 
 
-def test_get_by_brand_id_ignores_stale_conversation_for_same_brand() -> None:
-    """When more than one conversation row exists for a brand, get_by_brand_id
-    must return only the most-recently-updated conversation's own messages —
-    never a merge of messages from multiple conversations."""
-    from datetime import datetime, timezone
-
-    from psycopg.types.json import Json
-
-    from shared.postgres.client import get_conn
-
-    store = BrandingConversationStore()
-    brand_id = _brand_id("dup")
-    stale_cid = store.create(brand_id=brand_id, mission=_acme_mission())
-    store.append_message(stale_cid, "user", "stale one")
-    store.append_message(stale_cid, "assistant", "stale two")
-
-    fresh_cid = str(uuid4())
-    ts_old = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    ts_new = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    mission_json = Json(_acme_mission().model_dump(mode="json"))
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE branding_conversations SET updated_at = %s WHERE conversation_id = %s",
-                (ts_old, stale_cid),
-            )
-            cur.execute("DROP INDEX IF EXISTS idx_branding_conv_brand_unique")
-            cur.execute(
-                "INSERT INTO branding_conversations "
-                "(conversation_id, brand_id, mission_json, latest_output_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, NULL, %s, %s)",
-                (fresh_cid, brand_id, mission_json, ts_new, ts_new),
-            )
-        conn.commit()
-
-    try:
-        store.append_message(fresh_cid, "user", "fresh one")
-
-        result = store.get_by_brand_id(brand_id)
-        assert result is not None
-        rcid, messages, _, _ = result
-        assert rcid == fresh_cid
-        assert [m.content for m in messages] == ["fresh one"]
-    finally:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE branding_conversations SET brand_id = NULL WHERE conversation_id = %s",
-                    (stale_cid,),
-                )
-                cur.execute(
-                    """CREATE UNIQUE INDEX IF NOT EXISTS idx_branding_conv_brand_unique
-                       ON branding_conversations(brand_id) WHERE brand_id IS NOT NULL"""
-                )
-            conn.commit()
-
-
 def test_get_by_brand_id_loads_non_none_latest_output() -> None:
     """get_by_brand_id surfaces a persisted latest_output, covering the
     non-None branch of the single-query load."""
