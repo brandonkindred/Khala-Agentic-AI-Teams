@@ -5591,6 +5591,8 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     Postconditions:
         - A fresh interpreter that imports pr_review_issues before any other
           coding-team api module exits 0.
+        - The child ``PYTHONPATH`` still contains any runner-provided entries
+          that were present before ``backend_root`` was prepended.
     """
     import os
     import subprocess
@@ -5603,15 +5605,22 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     backend_root = agents_root.parent
     # `shared.env` (imported transitively by pr_review_issues) now lives under
     # backend/shared/, one level above agents_root — mirrors the production
-    # container's `ENV PYTHONPATH=/app:/app/agents` (backend/Dockerfile) rather
-    # than relying on cwd=agents_root alone, which only ever reached shared_*
-    # packages back when they lived directly under agents/.
-    env = dict(os.environ, PYTHONPATH=str(backend_root))
+    # container's `ENV PYTHONPATH=/app:/app/agents` (backend/Dockerfile). Prepend
+    # backend_root so CI/runner PYTHONPATH entries (extra package roots) are kept.
+    env = os.environ.copy()
+    sentinel = "/tmp/khala-pythonpath-sentinel-should-be-preserved"
+    # Simulate a runner-provided PYTHONPATH entry that must survive into the child.
+    prior = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (prior, sentinel) if p)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(backend_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     proc = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import software_engineering_team.api.pr_review_issues",
+            "import os, software_engineering_team.api.pr_review_issues as _\n"
+            "print(os.environ.get('PYTHONPATH', ''))",
         ],
         cwd=str(agents_root),
         capture_output=True,
@@ -5620,3 +5629,9 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
         env=env,
     )
     assert proc.returncode == 0, proc.stderr
+    child_pp = proc.stdout.strip().split(os.pathsep)
+    assert str(backend_root) in child_pp
+    assert sentinel in child_pp, (
+        "subprocess PYTHONPATH must preserve pre-existing entries; "
+        f"got {proc.stdout.strip()!r}"
+    )
