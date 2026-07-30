@@ -50,22 +50,19 @@ def test_build_phase2_swarm_alias_returns_graph() -> None:
     assert isinstance(build_phase2_swarm(), Graph)
 
 
-def test_build_phase2_graph_wires_cumulative_fan_in() -> None:
-    """Each specialist must receive *all* upstream fragments, not only the
-    immediate predecessor — Strands' Graph input builder only injects results
-    from directly incoming edges.
+def test_build_phase2_graph_wires_linear_chain() -> None:
+    """Phase 2 uses a single-predecessor chain (Strands multi-in edges are OR-ready).
+
+    Upstream narrative travels via cumulative ``structured_output`` models, not
+    fan-in edges.
     """
     from branding_team.graphs.phase2_narrative import _PHASE2_NODE_ORDER
 
     graph = build_phase2_graph()
     edges = {(e.from_node.node_id, e.to_node.node_id) for e in graph.edges}
-    expected = {
-        (prior, node_id)
-        for i, node_id in enumerate(_PHASE2_NODE_ORDER)
-        for prior in _PHASE2_NODE_ORDER[:i]
-    }
+    expected = set(zip(_PHASE2_NODE_ORDER, _PHASE2_NODE_ORDER[1:]))
     assert edges == expected
-    assert len(edges) == 15  # 1+2+3+4+5 predecessors across five downstream nodes
+    assert len(edges) == 5
 
 
 def test_build_phase3_graph_is_a_graph() -> None:

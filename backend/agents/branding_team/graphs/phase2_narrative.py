@@ -1,4 +1,4 @@
-"""Phase 2 — Narrative & Messaging graph (sequential specialists).
+"""Phase 2 — Narrative & Messaging graph (linear specialists).
 
 Six agents run Storyteller → ArchetypeAnalyst → TaglineWriter →
 MessageMapper → PersonaBuilder → VoicePrinciplesDrafter.
@@ -6,15 +6,15 @@ MessageMapper → PersonaBuilder → VoicePrinciplesDrafter.
 This is intentionally a Graph rather than a Swarm. Agents built with
 ``structured_output=`` force Strands' structured-output tool and then
 stop the agent loop (``stop_loop=True``), so they never call
-``handoff_to_agent``. A Swarm therefore completes after the entry node and
-drops every downstream fragment. Graph edges sequence the specialists
-without relying on tool-based handoffs.
+``handoff_to_agent``.
 
-Each non-entry node has edges from *every* upstream specialist, not just
-its immediate predecessor. Strands' ``_build_node_input`` only includes
-results from directly incoming edges, so a single-predecessor chain would
-drop earlier fragments (e.g. TaglineWriter would see ArchetypeAnalyst but
-not Storyteller) even though those prompts depend on the full narrative.
+Edges are a *single-predecessor chain*. Strands' readiness check treats
+multiple incoming edges as OR (any one satisfied predecessor makes the
+node ready), so a cumulative fan-in would launch every downstream agent
+as soon as Storyteller finished. Instead, each specialist's
+``structured_output`` model *carries forward* upstream fields so the
+immediate predecessor already exposes the full prior narrative in
+``Inputs from previous nodes``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from branding_team.agents import (
     make_voice_principles_drafter,
 )
 
-# Execution order = merge order. Downstream nodes fan in from every prior id.
 _PHASE2_NODE_ORDER: tuple[str, ...] = (
     "Storyteller",
     "ArchetypeAnalyst",
@@ -42,22 +41,15 @@ _PHASE2_NODE_ORDER: tuple[str, ...] = (
 
 
 def build_phase2_graph() -> Graph:
-    """Build the Phase 2 Narrative & Messaging cumulative fan-in graph.
+    """Build the Phase 2 Narrative & Messaging linear Graph.
 
-    Topology (each node depends on all earlier specialists)::
+    Topology::
 
-        Storyteller ─────────────────────────────────────┐
-             │                                           │
-             ├──────────────▶ ArchetypeAnalyst ──────────┤
-             │                     │                     │
-             ├─────────────────────┼──▶ TaglineWriter ───┤
-             │                     │          │          │
-             ├─────────────────────┼──────────┼──▶ MessageMapper ─┐
-             │                     │          │          │         │
-             └─────────────────────┴──────────┴──────────┴──▶ … ──▶ VoicePrinciplesDrafter
+        Storyteller → ArchetypeAnalyst → TaglineWriter → MessageMapper
+            → PersonaBuilder → VoicePrinciplesDrafter
 
-    Each node emits its own ``structured_output`` fragment; the orchestrator
-    merges them into ``NarrativeMessagingOutput``.
+    Each node emits a cumulative ``structured_output`` fragment; the
+    orchestrator merges them into ``NarrativeMessagingOutput``.
 
     Returns:
         A configured ``Graph`` instance ready for invocation.
@@ -78,14 +70,8 @@ def build_phase2_graph() -> Graph:
     }
 
     builder.set_entry_point("Storyteller")
-    # Cumulative fan-in: node i waits on — and receives input from — every
-    # node j < i, so Strands' dependency-only input builder still sees the
-    # full prior narrative (brand story, archetypes, tagline, …).
-    for i, node_id in enumerate(_PHASE2_NODE_ORDER):
-        if i == 0:
-            continue
-        for prior_id in _PHASE2_NODE_ORDER[:i]:
-            builder.add_edge(nodes[prior_id], nodes[node_id])
+    for prior_id, node_id in zip(_PHASE2_NODE_ORDER, _PHASE2_NODE_ORDER[1:]):
+        builder.add_edge(nodes[prior_id], nodes[node_id])
 
     return builder.build()
 

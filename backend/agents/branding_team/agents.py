@@ -154,8 +154,10 @@ def make_archetype_analyst() -> Agent:
         name="ArchetypeAnalyst",
         description="Selects brand archetypes with rationale and personality traits.",
         system_prompt=(
-            "You are a Brand Archetype Analyst. Review the brand story and strategic core, then "
-            "select 1-2 brand archetypes (e.g. The Sage, The Creator, The Explorer). For each:\n"
+            "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
+            "nodes and the strategic core, then select 1-2 brand archetypes "
+            "(e.g. The Sage, The Creator, The Explorer). Carry forward brand_story, hero_narrative, "
+            "and boilerplate_variants unchanged, and add for each archetype:\n"
             "- archetype: name\n"
             "- rationale: why this fits\n"
             "- personality_traits: 3-5 traits"
@@ -169,8 +171,8 @@ def make_tagline_writer() -> Agent:
         name="TaglineWriter",
         description="Creates tagline, tagline rationale, and elevator pitches.",
         system_prompt=(
-            "You are a Tagline Writer. Using the brand story, archetypes, and strategic core, "
-            "produce:\n"
+            "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
+            "and the strategic core, carry forward every prior narrative field unchanged and add:\n"
             "1. tagline — a memorable brand tagline (max 8 words)\n"
             "2. tagline_rationale — why this tagline works\n"
             "3. elevator_pitches — three variants:\n"
@@ -187,7 +189,8 @@ def make_message_mapper() -> Agent:
         name="MessageMapper",
         description="Builds messaging framework pillars and audience message maps.",
         system_prompt=(
-            "You are a Message Mapper. Using all narrative context so far, produce:\n"
+            "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
+            "nodes, carry them forward unchanged and add:\n"
             "1. messaging_framework — 3-4 messaging pillars, each with:\n"
             "   - pillar, key_message, proof_points\n"
             "2. audience_message_maps — one per audience segment, each with:\n"
@@ -202,9 +205,10 @@ def make_persona_builder() -> Agent:
         name="PersonaBuilder",
         description="Creates rich persona profiles with psychographic depth.",
         system_prompt=(
-            "You are a Persona Builder. Using audience segments and brand narrative, create 2-3 "
-            "persona profiles. Each persona has: name, role, demographics, psychographics, goals, "
-            "frustrations, media_habits, jobs_to_be_done."
+            "You are a Persona Builder. Using audience segments and all prior narrative fields "
+            "from Inputs from previous nodes, carry those fields forward unchanged and create "
+            "2-3 persona profiles. Each persona has: name, role, demographics, psychographics, "
+            "goals, frustrations, media_habits, jobs_to_be_done."
         ),
         structured_output=PersonaProfilesOutput,
     )
@@ -215,8 +219,9 @@ def make_voice_principles_drafter() -> Agent:
         name="VoicePrinciplesDrafter",
         description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
         system_prompt=(
-            "You are a Voice Principles Drafter. Using the brand story, archetypes, and mission's "
-            "desired_voice, produce writing guidelines:\n"
+            "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
+            "previous nodes and the mission's desired_voice, carry the prior fields forward "
+            "unchanged and produce writing_guidelines:\n"
             "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
             "2. style_dos — 3-4 writing best practices\n"
             "3. style_donts — 3-4 things to avoid\n"

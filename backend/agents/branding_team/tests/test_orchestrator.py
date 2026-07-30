@@ -56,6 +56,7 @@ from branding_team.models import (
     VisualIdentityOutput,
     WikiEntry,
     WritingGuidelines,
+    WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
 from branding_team.shared.coro_runner import run_coroutine
@@ -822,56 +823,77 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     """Phase 2 wraps six sequential Graph agents as one top-level node;
     get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
     upstream agents' fragments must be merged in separately."""
+    _story = dict(
+        brand_story="Origin story about shipping on-brand experiences.",
+        hero_narrative="Brand that ships with the product.",
+        boilerplate_variants=["short bio", "medium bio", "long bio"],
+    )
+    _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
+    _pitches = [
+        ElevatorPitch(tier="5-second", pitch="On-brand, shipped weekly."),
+        ElevatorPitch(tier="30-second", pitch="Keep every touchpoint intentional."),
+        ElevatorPitch(tier="2-minute", pitch="Turn strategy into a workable system."),
+    ]
+    _pillars = [
+        MessagingPillar(pillar="Cohesion"),
+        MessagingPillar(pillar="Speed"),
+        MessagingPillar(pillar="Clarity"),
+    ]
+    _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
+    _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
     voice_leaf = _phase1_leaf_node(
         WritingGuidelinesOutput(
-            voice_principles=["Confident", "Human", "Concrete"],
-            style_dos=["Lead with outcome", "Use active voice", "Name the audience"],
-            style_donts=["Empty superlatives", "Bury the offer", "Mix slang with claims"],
-            editorial_quality_bar=["States who it's for", "Cites proof", "Matches tone"],
+            **_story,
+            brand_archetypes=_archetypes,
+            tagline="Ship brand with the product",
+            tagline_rationale="Ties cohesion to shipping speed.",
+            elevator_pitches=_pitches,
+            messaging_framework=_pillars,
+            audience_message_maps=_maps,
+            persona_profiles=_personas,
+            writing_guidelines=WritingGuidelinesBody(
+                voice_principles=["Confident", "Human", "Concrete"],
+                style_dos=["Lead with outcome", "Use active voice", "Name the audience"],
+                style_donts=["Empty superlatives", "Bury the offer", "Mix slang with claims"],
+                editorial_quality_bar=["States who it's for", "Cites proof", "Matches tone"],
+            ),
         )
     )
     nested_results = {
-        "Storyteller": _phase1_leaf_node(
-            BrandStoryOutput(
-                brand_story="Origin story about shipping on-brand experiences.",
-                hero_narrative="Brand that ships with the product.",
-                boilerplate_variants=["short bio", "medium bio", "long bio"],
-            )
-        ),
+        "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
         "ArchetypeAnalyst": _phase1_leaf_node(
-            BrandArchetypesOutput(
-                brand_archetypes=[BrandArchetype(archetype="The Creator", rationale="Inventive.")]
-            )
+            BrandArchetypesOutput(**_story, brand_archetypes=_archetypes)
         ),
         "TaglineWriter": _phase1_leaf_node(
             TaglineOutput(
+                **_story,
+                brand_archetypes=_archetypes,
                 tagline="Ship brand with the product",
                 tagline_rationale="Ties cohesion to shipping speed.",
-                elevator_pitches=[
-                    ElevatorPitch(tier="5-second", pitch="On-brand, shipped weekly."),
-                    ElevatorPitch(tier="30-second", pitch="Keep every touchpoint intentional."),
-                    ElevatorPitch(tier="2-minute", pitch="Turn strategy into a workable system."),
-                ],
+                elevator_pitches=_pitches,
             )
         ),
         "MessageMapper": _phase1_leaf_node(
             MessagingFrameworkOutput(
-                messaging_framework=[
-                    MessagingPillar(pillar="Cohesion"),
-                    MessagingPillar(pillar="Speed"),
-                    MessagingPillar(pillar="Clarity"),
-                ],
-                audience_message_maps=[
-                    AudienceMessageMap(audience_segment="Enterprise product leaders")
-                ],
+                **_story,
+                brand_archetypes=_archetypes,
+                tagline="Ship brand with the product",
+                tagline_rationale="Ties cohesion to shipping speed.",
+                elevator_pitches=_pitches,
+                messaging_framework=_pillars,
+                audience_message_maps=_maps,
             )
         ),
         "PersonaBuilder": _phase1_leaf_node(
             PersonaProfilesOutput(
-                persona_profiles=[
-                    PersonaProfile(name="Alex Rivera"),
-                    PersonaProfile(name="Jordan Lee"),
-                ]
+                **_story,
+                brand_archetypes=_archetypes,
+                tagline="Ship brand with the product",
+                tagline_rationale="Ties cohesion to shipping speed.",
+                elevator_pitches=_pitches,
+                messaging_framework=_pillars,
+                audience_message_maps=_maps,
+                persona_profiles=_personas,
             )
         ),
         "VoicePrinciplesDrafter": voice_leaf,

@@ -35,6 +35,7 @@ from branding_team.models import (
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
 
@@ -134,93 +135,127 @@ def test_brand_story_output_rejects_missing_and_enforces_cardinality() -> None:
     assert output.hero_narrative == "Punchy hero."
 
 
-def test_brand_archetypes_output_enforces_stated_cardinality() -> None:
-    """Prompt asks for "1-2 brand archetypes"."""
-    archetype = BrandArchetype(archetype="The Creator")
-    with pytest.raises(ValidationError):
-        BrandArchetypesOutput(brand_archetypes=[])  # below min of 1
-    with pytest.raises(ValidationError):
-        BrandArchetypesOutput(brand_archetypes=[archetype] * 3)  # above max of 2
+_STORY = dict(
+    brand_story="Origin story.",
+    hero_narrative="Punchy hero.",
+    boilerplate_variants=["short", "medium", "long"],
+)
+_ARCHETYPE = BrandArchetype(archetype="The Creator")
+_PITCHES = [
+    ElevatorPitch(tier="5-second", pitch="a"),
+    ElevatorPitch(tier="30-second", pitch="b"),
+    ElevatorPitch(tier="2-minute", pitch="c"),
+]
+_PILLAR = MessagingPillar(pillar="Cohesion")
+_AUDIENCE = AudienceMessageMap(audience_segment="Enterprise leaders")
+_PERSONA = PersonaProfile(name="Alex")
+_GUIDELINES = WritingGuidelinesBody(
+    voice_principles=["a", "b", "c"],
+    style_dos=["a", "b", "c"],
+    style_donts=["a", "b", "c"],
+    editorial_quality_bar=["a", "b", "c"],
+)
 
-    output = BrandArchetypesOutput(brand_archetypes=[archetype])
+
+def test_brand_archetypes_output_enforces_stated_cardinality() -> None:
+    """Prompt asks for "1-2 brand archetypes"; inherits Storyteller fields."""
+    with pytest.raises(ValidationError):
+        BrandArchetypesOutput(**_STORY, brand_archetypes=[])
+    with pytest.raises(ValidationError):
+        BrandArchetypesOutput(**_STORY, brand_archetypes=[_ARCHETYPE] * 3)
+
+    output = BrandArchetypesOutput(**_STORY, brand_archetypes=[_ARCHETYPE])
     assert len(output.brand_archetypes) == 1
+    assert output.brand_story == "Origin story."
 
 
 def test_tagline_output_rejects_missing_and_enforces_cardinality() -> None:
-    """Prompt asks for three elevator pitch tiers."""
-    pitches = [
-        ElevatorPitch(tier="5-second", pitch="a"),
-        ElevatorPitch(tier="30-second", pitch="b"),
-        ElevatorPitch(tier="2-minute", pitch="c"),
-    ]
+    """Prompt asks for three elevator pitch tiers; inherits prior narrative."""
+    base = {**_STORY, "brand_archetypes": [_ARCHETYPE]}
     with pytest.raises(ValidationError):
-        TaglineOutput()
+        TaglineOutput(**base, tagline="", tagline_rationale="x", elevator_pitches=_PITCHES)
     with pytest.raises(ValidationError):
-        TaglineOutput(tagline="", tagline_rationale="x", elevator_pitches=pitches)
-    with pytest.raises(ValidationError):
-        TaglineOutput(tagline="x", tagline_rationale="y", elevator_pitches=pitches[:2])
+        TaglineOutput(**base, tagline="x", tagline_rationale="y", elevator_pitches=_PITCHES[:2])
 
     output = TaglineOutput(
-        tagline="Ship brand", tagline_rationale="Clear", elevator_pitches=pitches
+        **base, tagline="Ship brand", tagline_rationale="Clear", elevator_pitches=_PITCHES
     )
     assert output.tagline == "Ship brand"
+    assert output.brand_archetypes[0].archetype == "The Creator"
 
 
 def test_messaging_framework_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "3-4 messaging pillars" and at least one audience map."""
-    pillar = MessagingPillar(pillar="Cohesion")
-    audience_map = AudienceMessageMap(audience_segment="Enterprise leaders")
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+        "elevator_pitches": _PITCHES,
+    }
     with pytest.raises(ValidationError):
         MessagingFrameworkOutput(
-            messaging_framework=[pillar, pillar],
-            audience_message_maps=[audience_map],
+            **base, messaging_framework=[_PILLAR, _PILLAR], audience_message_maps=[_AUDIENCE]
         )
     with pytest.raises(ValidationError):
         MessagingFrameworkOutput(
-            messaging_framework=[pillar] * 5,
-            audience_message_maps=[audience_map],
+            **base, messaging_framework=[_PILLAR] * 5, audience_message_maps=[_AUDIENCE]
         )
     with pytest.raises(ValidationError):
         MessagingFrameworkOutput(
-            messaging_framework=[pillar] * 3,
-            audience_message_maps=[],
+            **base, messaging_framework=[_PILLAR] * 3, audience_message_maps=[]
         )
 
     output = MessagingFrameworkOutput(
-        messaging_framework=[pillar] * 3,
-        audience_message_maps=[audience_map],
+        **base, messaging_framework=[_PILLAR] * 3, audience_message_maps=[_AUDIENCE]
     )
     assert len(output.messaging_framework) == 3
 
 
 def test_persona_profiles_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "2-3 persona profiles"."""
-    persona = PersonaProfile(name="Alex")
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+        "elevator_pitches": _PITCHES,
+        "messaging_framework": [_PILLAR] * 3,
+        "audience_message_maps": [_AUDIENCE],
+    }
     with pytest.raises(ValidationError):
-        PersonaProfilesOutput(persona_profiles=[persona])  # below min of 2
+        PersonaProfilesOutput(**base, persona_profiles=[_PERSONA])
     with pytest.raises(ValidationError):
-        PersonaProfilesOutput(persona_profiles=[persona] * 4)  # above max of 3
+        PersonaProfilesOutput(**base, persona_profiles=[_PERSONA] * 4)
 
-    output = PersonaProfilesOutput(persona_profiles=[persona, persona])
+    output = PersonaProfilesOutput(**base, persona_profiles=[_PERSONA, _PERSONA])
     assert len(output.persona_profiles) == 2
 
 
 def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() -> None:
-    """Prompt asks for 3-4 items on each of the four lists."""
+    """Voice agent requires full carry-forward plus nested writing_guidelines."""
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+        "elevator_pitches": _PITCHES,
+        "messaging_framework": [_PILLAR] * 3,
+        "audience_message_maps": [_AUDIENCE],
+        "persona_profiles": [_PERSONA, _PERSONA],
+    }
     with pytest.raises(ValidationError):
-        WritingGuidelinesOutput()
+        WritingGuidelinesOutput(**base)
     with pytest.raises(ValidationError):
         WritingGuidelinesOutput(
-            voice_principles=["a", "b"],
-            style_dos=["a", "b", "c"],
-            style_donts=["a", "b", "c"],
-            editorial_quality_bar=["a", "b", "c"],
+            **base,
+            writing_guidelines=WritingGuidelinesBody(
+                voice_principles=["a", "b"],
+                style_dos=["a", "b", "c"],
+                style_donts=["a", "b", "c"],
+                editorial_quality_bar=["a", "b", "c"],
+            ),
         )
 
-    output = WritingGuidelinesOutput(
-        voice_principles=["a", "b", "c"],
-        style_dos=["a", "b", "c"],
-        style_donts=["a", "b", "c"],
-        editorial_quality_bar=["a", "b", "c"],
-    )
-    assert len(output.voice_principles) == 3
+    output = WritingGuidelinesOutput(**base, writing_guidelines=_GUIDELINES)
+    assert len(output.writing_guidelines.voice_principles) == 3

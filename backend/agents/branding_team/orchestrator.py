@@ -680,19 +680,19 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
-# Phase 2 sequential Graph node id -> the NarrativeMessagingOutput key its
-# structured_output nests under, or None to merge its fields in flat.
-# VoicePrinciplesDrafter alone nests: NarrativeMessagingOutput.writing_guidelines
-# is typed WritingGuidelines, not WritingGuidelinesOutput — field-for-field
-# identical (see models.py), so WritingGuidelinesOutput's model_dump()
-# validates cleanly as a WritingGuidelines once nested here.
+# Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
+# or None to merge fields in flat. Each specialist's structured_output is a
+# cumulative carry-forward model (see models.py), so merging any subset of
+# node dumps is field-compatible; require_all still insists every specialist
+# actually ran. VoicePrinciplesDrafter already nests writing_guidelines in its
+# own schema — no remap needed.
 _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
     "Storyteller": None,
     "ArchetypeAnalyst": None,
     "TaglineWriter": None,
     "MessageMapper": None,
     "PersonaBuilder": None,
-    "VoicePrinciplesDrafter": "writing_guidelines",
+    "VoicePrinciplesDrafter": None,
 }
 
 
