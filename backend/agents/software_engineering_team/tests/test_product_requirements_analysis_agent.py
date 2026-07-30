@@ -3139,6 +3139,22 @@ def test_filter_duplicate_questions_preserves_short_lexical_ll() -> None:
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_preserves_prefixed_lexical_ll() -> None:
+    """overfilled/rebilled keep lexical ll cores despite prefix length."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which jobs overfill rebill queues?")
+    ]
+    qa_history = (
+        "Q: Which jobs overfilled rebilled queues during soak?\n"
+        "A: Batch jobs overfilled rebilled queues before the cutover."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_matches_inflectional_doubled_l() -> None:
     """controlled/signalled/equalled collapse while install/fill stay lexical."""
     questions = [
@@ -3357,6 +3373,86 @@ def test_filter_duplicate_questions_does_not_exact_match_restoration_stubs() -> 
 
     assert filtered == questions
     assert duplicates == []
+
+
+def test_filter_duplicate_questions_preserves_short_ch_bases() -> None:
+    """arches/inches exact-match arch/inch; caches still use silent-e."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which arch inch limits apply?")
+    ]
+    qa_history = (
+        "Q: Which arches inches limits apply after resize?\n"
+        "A: Documented arches inches limits apply after resize."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_short_silent_e_ses() -> None:
+    """cases/bases need silent-e (not exact cas), while buses stay exact."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which case base should services expose?")
+    ]
+    qa_history = (
+        "Q: Which cases bases should services expose?\n"
+        "A: Expose the documented cases bases from the catalog endpoint."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_does_not_match_cases_to_cas_acronym() -> None:
+    """cases→cas must not exact-match a raw CAS acronym token."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which cases should the model classify?")
+    ]
+    qa_history = (
+        "Q: Which CAS should the model classify for labels?\n"
+        "A: Use the documented CAS for labels in the model card."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
+
+
+def test_filter_duplicate_questions_matches_shoes_via_silent_e() -> None:
+    """shoes→sho matches shoe via silent-e while echoes stay exact."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which shoe sizes should catalogs list?")
+    ]
+    qa_history = (
+        "Q: Which shoes sizes should catalogs list?\n"
+        "A: List the documented shoes sizes in the catalog feed."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_normalizes_plural_ing_forms() -> None:
+    """settings/mappings recurse through -ing so they match setting/map stems."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which setting should the service expose?")
+    ]
+    qa_history = (
+        "Q: Which settings should the service expose after mappings land?\n"
+        "A: Expose the documented settings after mappings land."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
 
 
 def test_filter_duplicate_questions_matches_silent_e_ches_and_zes() -> None:
