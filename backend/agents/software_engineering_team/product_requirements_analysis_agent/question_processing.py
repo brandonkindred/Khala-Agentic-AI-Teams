@@ -53,6 +53,7 @@ def cap_open_questions(
     logger.info("Truncated open questions: %d->%d", len(questions), limit)
     return questions[:limit]
 
+
 ORGANIZATIONAL_PHRASES = [
     "decision process",
     "approval process",
@@ -81,18 +82,15 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
     Preconditions: ``w`` is a cleaned token (lowercase).
     Postconditions: returns
         ``(stem, silent_e_candidate, y_or_ie_stub, exact_ok)``. Never raises.
-        ``exact_ok`` is False for restoration-only stubs (``ies``/``ied`` and
-        silent-e plural ``-es`` forms) so they cannot exact-match unrelated
-        raw tokens like ``spec``/``cas``. Lexical doubles and ``-pick``/
-        ``-kick``/``-click`` compounds are preserved. Short lexical ``ll``
-        cores (including prefixes like ``overfill``/``rebill``) are kept;
-        longer lexical ``ll`` stays on the denylist while inflectional
-        ``signalled``/``controlled`` still undouble. Plural ``settings`` /
-        ``mappings`` recurse through ``-ing`` normalization.
+        ``exact_ok`` is False for restoration-only stubs (``ies``/``ied``, short
+        silent-e ``-ing`` stubs, and silent-e plural ``-es`` forms) so they
+        cannot exact-match unrelated raw tokens like ``spec``/``cas``/``cod``.
+        Lexical doubles and true ``-c`` verb ``k`` insertion are preserved;
+        default for unknown ``ll`` is keep. Plural ``settings``/``mappings``
+        recurse through ``-ing`` normalization.
     """
     w = w.strip()
     vowels = set("aeiou")
-    # Longer lexical -ll bases (len >= 6) that must not undouble.
     lexical_ll = frozenset(
         {
             "appall",
@@ -108,11 +106,11 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
             "quell",
             "recall",
             "reinstall",
+            "scroll",
             "thrill",
             "uninstall",
         }
     )
-    # Short lexical -ll cores kept even with prefixes (overfill, rebill).
     short_ll_cores = frozenset(
         {
             "ball",
@@ -137,6 +135,20 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
             "will",
         }
     )
+    ll_prefixes = frozenset(
+        {
+            "back",
+            "down",
+            "mis",
+            "out",
+            "over",
+            "pre",
+            "re",
+            "un",
+            "under",
+            "up",
+        }
+    )
     lexical_tt = frozenset(
         {
             "batt",
@@ -148,6 +160,15 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         }
     )
     complete_ses_bases = frozenset({"bus", "gas"})
+    insert_k_stems = frozenset(
+        {
+            "frolick",
+            "mimick",
+            "panick",
+            "picnick",
+            "traffick",
+        }
+    )
 
     def _undouble_inflectional(base: str) -> str:
         """Undouble only when -ed/-ing spelling doubled a final consonant."""
@@ -157,29 +178,17 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         if doubled in "fsz":
             return base
         if doubled == "l":
-            # Lexical short cores, including known prefixes (overfill/rebill),
-            # but not accidental suffixes inside longer stems (controll≠roll).
+            # Keep lexical cores/denylist/prefixes; default keep unknown ll.
             if base in short_ll_cores or base in lexical_ll:
                 return base
             for core in short_ll_cores:
-                if not base.endswith(core):
-                    continue
-                prefix = base[: -len(core)]
-                if prefix in {
-                    "over",
-                    "under",
-                    "re",
-                    "out",
-                    "un",
-                    "mis",
-                    "pre",
-                    "up",
-                    "down",
-                }:
+                if base.endswith(core) and base[: -len(core)] in ll_prefixes:
                     return base
-            if len(base) < 6:
-                return base
-            return base[:-1]
+            undoubled = base[:-1]
+            # Inflectional British -l doubling: control/compel/signal/equal/cancel/...
+            if len(base) >= 6 and undoubled.endswith(("el", "ol", "al")) and len(undoubled) >= 3:
+                return undoubled
+            return base
         if doubled == "t":
             if base in lexical_tt or base.endswith("cott"):
                 return base
@@ -187,24 +196,24 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         return base[:-1]
 
     def _strip_inserted_ck(base: str) -> str:
-        """Remove spelling-only k after -c verbs (mimick→mimic).
+        """Remove spelling-only k after known -c verbs only (mimick→mimic).
 
-        Keep lexical ``-pick``/``-kick``/``-click`` compounds
-        (``handpick``, ``sidekick``, ``misclick``).
+        Keep lexical ``-ick`` verbs (``unbrick``, ``lipstick``, ``bootlick``)
+        and ``-pick``/``-kick``/``-click`` compounds.
         """
         if base.endswith(("pick", "kick", "click")):
             return base
-        if base.endswith("ick") and sum(1 for c in base if c in vowels) >= 2:
+        if base in insert_k_stems or any(base.endswith(s) for s in insert_k_stems):
             return base[:-1]
         return base
 
-    if w == "uses":
+    if w in {"uses", "used"}:
+        # Third-person / past of use (len 4) must not fall through short-token guard.
         return "use", False, False, True
 
     if w.endswith("ied") and len(w) >= 4:
         stub = w[:-3]
         if stub:
-            # Restoration-only: match via +y/+ie or stub-to-stub, not raw exact.
             return stub, False, True, False
 
     if len(w) <= 4:
@@ -222,8 +231,12 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         raw = w[:-3]
         base = _strip_inserted_ck(_undouble_inflectional(raw))
         if len(base) >= 3:
-            silent_e = base == raw
-            return base, silent_e, False, True
+            # Non-doubled -ing is often silent-e (coding→cod), but -x verbs
+            # (fixing→fix) never restore e.
+            silent_e = base == raw and not base.endswith("x")
+            # Short silent-e stubs (coding→cod, making→mak) are restoration-only.
+            exact_ok = not (silent_e and len(base) <= 3)
+            return base, silent_e, False, exact_ok
 
     if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
         return w[:-3], False, True, False
@@ -234,15 +247,15 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
     if w.endswith("zes") and len(w) > 4:
         base = w[:-2]
         if base.endswith("zz"):
+            # quizzes→quizz→quiz; buzzes→buzz stays lexical.
+            if base.endswith("izz") and len(base) <= 5:
+                return base[:-1], False, False, True
             return base, False, False, True
-        # sizes→siz (silent e); keep quizzes→quizz above.
         return base, True, False, False
     if w.endswith("ches") and len(w) > 4:
         base = w[:-2]
         if base.endswith("tch") or len(base) >= 5:
-            return base, False, False, True  # matches/beaches
-        # Short *ch: silent-e only when a vowel precedes ch (caches→cach);
-        # arches/inches/etches are complete.
+            return base, False, False, True
         if len(base) >= 3 and base[-3] in vowels:
             return base, True, False, False
         return base, False, False, True
@@ -250,19 +263,21 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         return w[:-2], False, False, True
     if w.endswith("ses") and len(w) > 4:
         base = w[:-2]
-        # statuses→status exact; buses/gas exact; cases/bases/houses need silent e.
-        if base.endswith(("us", "is", "os")) or base in complete_ses_bases:
+        # Latinate complete singulars need len>=5 so hous/clos/ris stay silent-e.
+        if (base.endswith(("us", "is", "os")) and len(base) >= 5) or base in complete_ses_bases:
             return base, False, False, True
         return base, True, False, False
     if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
         base = w[:-2]
-        # echoes/heroes/potatoes are complete (>=4); shoes→sho needs silent e.
-        if len(base) >= 4:
+        # Complete -o nouns (echo/hero/potato/volcano); silent-e for shoe/canoe/oboe.
+        # Require len>=6 for -ano so canoes→canoe, not exact cano.
+        if base.endswith(("cho", "ero", "ato", "ado", "edo", "eto", "emo", "ito")) or (
+            base.endswith("ano") and len(base) >= 6
+        ):
             return base, False, False, True
         return base, True, False, False
     if w.endswith("s") and len(w) > 4 and not w.endswith(("ss", "us", "is")):
         singular = w[:-1]
-        # settings/mappings: strip plural then normalize the remaining -ing form.
         if singular.endswith("ing") and len(singular) > 5:
             return _stem_info(singular)
         return singular, False, False, True

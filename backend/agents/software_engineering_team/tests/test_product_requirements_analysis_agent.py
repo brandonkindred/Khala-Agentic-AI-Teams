@@ -1019,9 +1019,7 @@ def test_parse_question_option_preserves_valid_numeric_confidence() -> None:
     assert parsed.confidence == 0.9
 
 
-@pytest.mark.parametrize(
-    "malformed_confidence", [None, "high", float("nan"), -3, 7, 10**400]
-)
+@pytest.mark.parametrize("malformed_confidence", [None, "high", float("nan"), -3, 7, 10**400])
 def test_parse_question_option_clamps_or_defaults_confidence(
     malformed_confidence: Any,
 ) -> None:
@@ -2824,9 +2822,7 @@ def test_assess_sub_phase_gaps_survives_brace_bearing_spec() -> None:
         {"is_complete": True, "completeness_rationale": "Done.", "follow_up_questions": []}
     )
     agent = ProductRequirementsAnalysisAgent(llm)
-    brace_spec = (
-        "Use template {curly} and also }unbalanced{ braces; document {all_decisions}."
-    )
+    brace_spec = "Use template {curly} and also }unbalanced{ braces; document {all_decisions}."
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.DEPLOYMENT,
         brace_spec,
@@ -3157,9 +3153,7 @@ def test_filter_duplicate_questions_strips_punctuation_before_stemming() -> None
 def test_filter_duplicate_questions_matches_past_tense_silent_e() -> None:
     """Past-tense stems that drop a silent e (stored->stor) must still match the
     base form (store) so already-answered questions are not re-asked."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Where do we store and create data files?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Where do we store and create data files?")]
     # History uses past-tense "stored"/"created"; question uses base forms.
     # Without silent-e normalization these would not meet the 90% threshold.
     qa_history = (
@@ -3175,9 +3169,7 @@ def test_filter_duplicate_questions_matches_past_tense_silent_e() -> None:
 
 def test_filter_duplicate_questions_matches_five_letter_silent_e_past_tense() -> None:
     """Five-letter silent-e past forms like moved/saved match base move/save via silent-e."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Where should we move data files?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Where should we move data files?")]
     qa_history = "Q: Where should data files be moved?\nA: Files were moved to cold storage."
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
@@ -3211,9 +3203,7 @@ def test_filter_duplicate_questions_matches_regular_cvc_past_tense() -> None:
 
 def test_filter_duplicate_questions_matches_non_cvc_silent_e_past_tense() -> None:
     """Non-CVC five-letter silent-e pasts like freed/glued still match free/glue."""
-    questions = [
-        OpenQuestion(id="q1", question_text="When should we free and glue resources?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="When should we free and glue resources?")]
     qa_history = (
         "Q: When should resources be freed and glued?\n"
         "A: Resources were freed after artifacts were glued into the bundle."
@@ -3227,9 +3217,7 @@ def test_filter_duplicate_questions_matches_non_cvc_silent_e_past_tense() -> Non
 
 def test_filter_duplicate_questions_matches_doubled_consonant_and_ied_past_tense() -> None:
     """planned→plan and carried→carry so base-form questions match answered past tense."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Where should we plan data backups?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Where should we plan data backups?")]
     qa_history = (
         "Q: Where should data backups be planned?\n"
         "A: Backups were planned for the warm tier after migrations were carried over."
@@ -3247,9 +3235,7 @@ def test_filter_duplicate_questions_preserves_lexical_doubled_consonants() -> No
     Inflectional doubling (planned→plan) still undoubles; lexical doubles must
     not become instal/fil/adres or base-form questions fall below 90% match.
     """
-    questions = [
-        OpenQuestion(id="q1", question_text="Where do we install packages?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Where do we install packages?")]
     qa_history = (
         "Q: Where were packages installed after the form was filled?\n"
         "A: Packages were installed once addressed findings were fixed."
@@ -3263,9 +3249,7 @@ def test_filter_duplicate_questions_preserves_lexical_doubled_consonants() -> No
 
 def test_filter_duplicate_questions_preserves_lexical_ff_doubles() -> None:
     """sniffed/staffed keep lexical ff (not sniff→snif / staff→staf)."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which probes sniff staff traffic?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which probes sniff staff traffic?")]
     qa_history = (
         "Q: Which probes sniffed staff traffic during soak tests?\n"
         "A: Edge probes sniffed staff traffic before the soak window closed."
@@ -3279,9 +3263,7 @@ def test_filter_duplicate_questions_preserves_lexical_ff_doubles() -> None:
 
 def test_filter_duplicate_questions_preserves_short_lexical_ll() -> None:
     """billed/drilled/chilled keep lexical ll without relying on a short denylist."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which teams bill drill chill pipelines?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which teams bill drill chill pipelines?")]
     qa_history = (
         "Q: Which teams billed drilled chilled pipelines last quarter?\n"
         "A: Platform teams billed drilled chilled pipelines before freeze."
@@ -3295,9 +3277,7 @@ def test_filter_duplicate_questions_preserves_short_lexical_ll() -> None:
 
 def test_filter_duplicate_questions_preserves_prefixed_lexical_ll() -> None:
     """overfilled/rebilled keep lexical ll cores despite prefix length."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which jobs overfill rebill queues?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which jobs overfill rebill queues?")]
     qa_history = (
         "Q: Which jobs overfilled rebilled queues during soak?\n"
         "A: Batch jobs overfilled rebilled queues before the cutover."
@@ -3311,9 +3291,7 @@ def test_filter_duplicate_questions_preserves_prefixed_lexical_ll() -> None:
 
 def test_filter_duplicate_questions_matches_inflectional_doubled_l() -> None:
     """controlled/signalled/equalled collapse while install/fill stay lexical."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which service controls retries?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which service controls retries?")]
     qa_history = (
         "Q: Which service controlled retries when callers were compelled to wait?\n"
         "A: The gateway controlled retries after callers were compelled to back off."
@@ -3327,9 +3305,7 @@ def test_filter_duplicate_questions_matches_inflectional_doubled_l() -> None:
 
 def test_filter_duplicate_questions_matches_inflectional_doubled_l_after_a() -> None:
     """signalled/equalled/rivalled → signal/equal/rival (not only e/o before ll)."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which signal should equal rival alerts?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which signal should equal rival alerts?")]
     qa_history = (
         "Q: Which signalled event should have equalled rivalled alerts?\n"
         "A: The primary signalled event equalled the rivalled alerts threshold."
@@ -3343,9 +3319,7 @@ def test_filter_duplicate_questions_matches_inflectional_doubled_l_after_a() -> 
 
 def test_filter_duplicate_questions_matches_inserted_ck_verbs() -> None:
     """mimicked/mimicking/panicked drop spelling-only k to match mimic/panic."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which services mimic panic behavior?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which services mimic panic behavior?")]
     qa_history = (
         "Q: Which services mimicked panic behavior while mimicking outages?\n"
         "A: Edge services mimicked failures after operators panicked."
@@ -3359,9 +3333,7 @@ def test_filter_duplicate_questions_matches_inserted_ck_verbs() -> None:
 
 def test_filter_duplicate_questions_keeps_lexical_pick_compounds() -> None:
     """handpicked/nitpicked keep lexical -pick (not handpic/nitpic)."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which reviewers handpick nitpick findings?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which reviewers handpick nitpick findings?")]
     qa_history = (
         "Q: Which reviewers handpicked nitpick findings during triage?\n"
         "A: Senior reviewers handpicked nitpick findings before merge."
@@ -3375,9 +3347,7 @@ def test_filter_duplicate_questions_keeps_lexical_pick_compounds() -> None:
 
 def test_filter_duplicate_questions_keeps_lexical_click_compounds() -> None:
     """misclicked/doubleclicked keep lexical -click (not misclic/doubleclic)."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which users misclick doubleclick targets?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which users misclick doubleclick targets?")]
     qa_history = (
         "Q: Which users misclicked doubleclick targets during onboarding?\n"
         "A: New users misclicked doubleclick targets before the tooltip shipped."
@@ -3391,9 +3361,7 @@ def test_filter_duplicate_questions_keeps_lexical_click_compounds() -> None:
 
 def test_filter_duplicate_questions_matches_progressive_ing_forms() -> None:
     """monitoring→monitor, running→run, making→make so base verbs match -ing history."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which services monitor application errors?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which services monitor application errors?")]
     qa_history = (
         "Q: Which services are monitoring application errors while making alerts?\n"
         "A: The worker services are monitoring errors while the notifier is running."
@@ -3407,9 +3375,7 @@ def test_filter_duplicate_questions_matches_progressive_ing_forms() -> None:
 
 def test_filter_duplicate_questions_matches_es_and_ies_plurals() -> None:
     """processes→process and policies→policy so singular questions match plural history."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which process and policy should we use?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which process and policy should we use?")]
     qa_history = (
         "Q: Which processes and policies should we use?\n"
         "A: Follow the documented processes and security policies."
@@ -3478,6 +3444,133 @@ def test_filter_duplicate_questions_stems_uses_to_use() -> None:
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_stems_used_to_use() -> None:
+    """Past used→use even though used is length-4 (short-token guard)."""
+    questions = [OpenQuestion(id="q1", question_text="Which services use Redis storage?")]
+    qa_history = (
+        "Q: Which services used Redis storage last quarter?\n"
+        "A: Cache services used Redis storage for sessions."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_houses_closes_via_silent_e() -> None:
+    """houses/closes/rises restore silent-e; short us/os/is stubs stay non-exact."""
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which house close rise rules apply?",
+        )
+    ]
+    qa_history = (
+        "Q: Which houses closes rises rules apply after zoning?\n"
+        "A: Documented houses closes rises rules apply after zoning."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_does_not_exact_match_coding_to_cod() -> None:
+    """coding→cod is restoration-only and must not exact-match raw COD."""
+    questions = [OpenQuestion(id="q1", question_text="Which coding standards apply?")]
+    qa_history = (
+        "Q: Which COD standards apply for seafood labels?\n"
+        "A: Use the documented COD standards for seafood labels."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
+
+
+def test_filter_duplicate_questions_matches_code_to_coding() -> None:
+    """coding still matches code via silent-e restoration."""
+    questions = [OpenQuestion(id="q1", question_text="Which code standards apply?")]
+    qa_history = (
+        "Q: Which coding standards apply for services?\n"
+        "A: Documented coding standards apply for services."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_keeps_lexical_ick_verbs() -> None:
+    """unbrick/lipstick/bootlick keep lexical -ick; mimick still strips."""
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which bots unbrick lipstick bootlick routines?",
+        )
+    ]
+    qa_history = (
+        "Q: Which bots unbricked lipsticked bootlicked routines during drills?\n"
+        "A: Swarm bots unbricked lipsticked bootlicked routines before downtime."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_preserves_unknown_lexical_ll() -> None:
+    """backfilled/scrolled keep lexical ll; cancelled still undoubles."""
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which jobs backfill scroll queues after cancel?",
+        )
+    ]
+    qa_history = (
+        "Q: Which jobs backfilled scrolled queues after cancelled work?\n"
+        "A: Worker jobs backfilled scrolled queues after cancelled work."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_quizzes_to_quiz() -> None:
+    """quizzes→quiz (strip inflectional z); buzzes stay lexical buzz."""
+    questions = [OpenQuestion(id="q1", question_text="Which quiz buzz patterns apply?")]
+    qa_history = (
+        "Q: Which quizzes buzzes patterns apply after onboarding?\n"
+        "A: Documented quizzes buzzes patterns apply after onboarding."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_canoes_oboes_via_silent_e() -> None:
+    """canoes/oboes restore silent-e; echoes still exact-match echo."""
+    questions = [OpenQuestion(id="q1", question_text="Which canoe oboe models ship?")]
+    qa_history = (
+        "Q: Which canoes oboes models ship after echoes clear?\n"
+        "A: Catalog canoes oboes models ship after echoes clear."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_matches_short_history_base_verbs() -> None:
     """History retains length-3 bases so fixed/added match fix/add in answers."""
     questions = [
@@ -3499,9 +3592,7 @@ def test_filter_duplicate_questions_matches_short_history_base_verbs() -> None:
 
 def test_filter_duplicate_questions_matches_ie_plurals_and_y_plurals() -> None:
     """cookies→cookie and policies→policy via shared y/ie stub matching."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which cookie policy should browsers apply?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which cookie policy should browsers apply?")]
     qa_history = (
         "Q: Which cookies policies should browsers apply?\n"
         "A: Apply the documented cookies policies in the browser agent."
@@ -3515,9 +3606,7 @@ def test_filter_duplicate_questions_matches_ie_plurals_and_y_plurals() -> None:
 
 def test_filter_duplicate_questions_does_not_exact_match_restoration_stubs() -> None:
     """species/cases stubs must not exact-match raw spec/cas tokens."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which species should the model classify?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which species should the model classify?")]
     qa_history = (
         "Q: Which spec should the model classify for CAS labels?\n"
         "A: Use the documented spec for CAS labels in the model card."
@@ -3531,9 +3620,7 @@ def test_filter_duplicate_questions_does_not_exact_match_restoration_stubs() -> 
 
 def test_filter_duplicate_questions_preserves_short_ch_bases() -> None:
     """arches/inches exact-match arch/inch; caches still use silent-e."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which arch inch limits apply?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which arch inch limits apply?")]
     qa_history = (
         "Q: Which arches inches limits apply after resize?\n"
         "A: Documented arches inches limits apply after resize."
@@ -3547,9 +3634,7 @@ def test_filter_duplicate_questions_preserves_short_ch_bases() -> None:
 
 def test_filter_duplicate_questions_matches_short_silent_e_ses() -> None:
     """cases/bases need silent-e (not exact cas), while buses stay exact."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which case base should services expose?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which case base should services expose?")]
     qa_history = (
         "Q: Which cases bases should services expose?\n"
         "A: Expose the documented cases bases from the catalog endpoint."
@@ -3563,9 +3648,7 @@ def test_filter_duplicate_questions_matches_short_silent_e_ses() -> None:
 
 def test_filter_duplicate_questions_does_not_match_cases_to_cas_acronym() -> None:
     """cases→cas must not exact-match a raw CAS acronym token."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which cases should the model classify?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which cases should the model classify?")]
     qa_history = (
         "Q: Which CAS should the model classify for labels?\n"
         "A: Use the documented CAS for labels in the model card."
@@ -3579,9 +3662,7 @@ def test_filter_duplicate_questions_does_not_match_cases_to_cas_acronym() -> Non
 
 def test_filter_duplicate_questions_matches_shoes_via_silent_e() -> None:
     """shoes→sho matches shoe via silent-e while echoes stay exact."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which shoe sizes should catalogs list?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which shoe sizes should catalogs list?")]
     qa_history = (
         "Q: Which shoes sizes should catalogs list?\n"
         "A: List the documented shoes sizes in the catalog feed."
@@ -3595,9 +3676,7 @@ def test_filter_duplicate_questions_matches_shoes_via_silent_e() -> None:
 
 def test_filter_duplicate_questions_normalizes_plural_ing_forms() -> None:
     """settings/mappings recurse through -ing so they match setting/map stems."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which setting should the service expose?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which setting should the service expose?")]
     qa_history = (
         "Q: Which settings should the service expose after mappings land?\n"
         "A: Expose the documented settings after mappings land."
@@ -3611,9 +3690,7 @@ def test_filter_duplicate_questions_normalizes_plural_ing_forms() -> None:
 
 def test_filter_duplicate_questions_matches_silent_e_ches_and_zes() -> None:
     """caches→cache and sizes→size via silent-e restoration after -es strip."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which cache size should services expose?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which cache size should services expose?")]
     qa_history = (
         "Q: Which caches sizes should services expose?\n"
         "A: Expose the documented caches sizes from the metrics endpoint."
@@ -3627,9 +3704,7 @@ def test_filter_duplicate_questions_matches_silent_e_ches_and_zes() -> None:
 
 def test_filter_duplicate_questions_keeps_lexical_kick_compounds() -> None:
     """sidekicked/dropkicked keep lexical -kick (not sidekic/dropkic)."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which bots sidekick dropkick routines?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which bots sidekick dropkick routines?")]
     qa_history = (
         "Q: Which bots sidekicked dropkick routines during drills?\n"
         "A: Swarm bots sidekicked dropkick routines before downtime."
@@ -3643,9 +3718,7 @@ def test_filter_duplicate_questions_keeps_lexical_kick_compounds() -> None:
 
 def test_filter_duplicate_questions_preserves_lexical_tt_doubles() -> None:
     """boycotted/butted keep lexical tt while patted still undoubles to pat."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which vendors boycott butt extensions?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which vendors boycott butt extensions?")]
     qa_history = (
         "Q: Which vendors boycotted butt extensions after review?\n"
         "A: Partner vendors boycotted butt extensions after the audit."
@@ -3659,9 +3732,7 @@ def test_filter_duplicate_questions_preserves_lexical_tt_doubles() -> None:
 
 def test_filter_duplicate_questions_matches_ie_silent_e_past_tense() -> None:
     """untied/belied keep ie bases (untie/belie), while carried still matches carry."""
-    questions = [
-        OpenQuestion(id="q1", question_text="When should we untie and belie flags?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="When should we untie and belie flags?")]
     qa_history = (
         "Q: When should flags be untied after claims were belied?\n"
         "A: Flags were untied after claims were belied and carried over."
@@ -3675,9 +3746,7 @@ def test_filter_duplicate_questions_matches_ie_silent_e_past_tense() -> None:
 
 def test_filter_duplicate_questions_does_not_equate_unrelated_silent_e_pairs() -> None:
     """Silent-e matching must not equate unrelated words like plan/plane."""
-    questions = [
-        OpenQuestion(id="q1", question_text="Which control plane should we use?")
-    ]
+    questions = [OpenQuestion(id="q1", question_text="Which control plane should we use?")]
     qa_history = (
         "Q: Which control plan should we use for rollout?\n"
         "A: Use the staged control plan documented in the runbook."
