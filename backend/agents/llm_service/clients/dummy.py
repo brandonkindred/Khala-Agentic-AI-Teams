@@ -151,7 +151,17 @@ class DummyLLMClient(LLMClient, Model):
         system_prompt: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        raise NotImplementedError("DummyLLMClient.structured_output is not implemented for tests")
+        """Not used by Strands agent structured-output flows.
+
+        Agents with ``structured_output=`` invoke the structured-output tool
+        through ``stream()`` / ``chat()``. Raising here fails loudly if a
+        caller hits the ABC method by mistake instead of silently returning
+        an empty/invalid model instance.
+        """
+        raise NotImplementedError(
+            "DummyLLMClient.structured_output is unused; Strands structured "
+            "output goes through stream()/chat() with StructuredOutputTool"
+        )
 
     async def stream(
         self,
@@ -294,13 +304,13 @@ class DummyLLMClient(LLMClient, Model):
         # cross-contaminated other teams' prompts that happened to mention
         # those words in their persona text.
         #
-        # Exception: the branding Phase 1 branches further down DO anchor on
-        # ``system_prompt`` (see ``system_lowered``) — every Phase 1 agent
-        # receives the same serialized ``BrandingMission`` as its user
-        # message, so only each agent's own system_prompt (its required
-        # output field names) can distinguish which one is asking. Those
-        # anchors are multi-token combinations unique to one agent's prompt,
-        # not the loose single words that caused the earlier revert.
+        # Exception: the branding Phase 1 / Phase 2 branches further down DO
+        # anchor on ``system_prompt`` (see ``system_lowered``) — every agent
+        # in those phases receives the same serialized mission/phase context
+        # as its user message, so only each agent's own system_prompt (its
+        # required output field names) can distinguish which one is asking.
+        # Those anchors are multi-token combinations unique to one agent's
+        # prompt, not the loose single words that caused the earlier revert.
         lowered = prompt.lower()
         DummyLLMClient._call_counter += 1
         self._request_count += 1
@@ -590,7 +600,6 @@ class DummyLLMClient(LLMClient, Model):
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)
                 or f"module_{counter}"
             )
-            slug.title().replace("_", "")
             return {
                 "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
@@ -866,11 +875,374 @@ class DummyLLMClient(LLMClient, Model):
                 ),
                 "brand_promise": "Every customer touchpoint will feel cohesive and intentional (dummy).",
             }
+        # Branding team — Phase 2 "Narrative & Messaging" Graph agents
+        # (built with structured_output=, see agents.py). Cumulative
+        # carry-forward stubs: each specialist repeats upstream fields so a
+        # linear Graph predecessor exposes the full prior narrative.
+        elif "brand_story" in system_lowered and "boilerplate_variants" in system_lowered and (
+            "tagline_rationale" not in system_lowered
+            and "personality_traits" not in system_lowered
+            and "messaging_framework" not in system_lowered
+            and "jobs_to_be_done" not in system_lowered
+            and "writing_guidelines" not in system_lowered
+        ):
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+            }
+        elif "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered:
+            return {
+                **{
+                    "brand_story": (
+                        "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                        "We built a system that keeps every touchpoint intentional (dummy)."
+                    ),
+                    "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                    "boilerplate_variants": [
+                        "Dummy Co. helps teams ship on-brand (short).",
+                        "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                        (
+                            "Dummy Co. partners with product organizations to make every customer "
+                            "touchpoint feel cohesive and intentional (long)."
+                        ),
+                    ],
+                },
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+            }
+        elif "tagline_rationale" in system_lowered and "elevator_pitches" in system_lowered:
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+            }
+        elif "messaging_framework" in system_lowered and "audience_message_maps" in system_lowered:
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+                "messaging_framework": [
+                    {
+                        "pillar": "Cohesion",
+                        "key_message": "Every touchpoint feels intentional (dummy).",
+                        "proof_points": ["Shared tokens", "Review gates"],
+                    },
+                    {
+                        "pillar": "Speed",
+                        "key_message": "Brand work ships with the product (dummy).",
+                        "proof_points": ["Weekly cadence", "Embedded strategists"],
+                    },
+                    {
+                        "pillar": "Clarity",
+                        "key_message": "Plain language over jargon (dummy).",
+                        "proof_points": ["Short docs", "Approved phrases"],
+                    },
+                ],
+                "audience_message_maps": [
+                    {
+                        "audience_segment": "Enterprise product leaders",
+                        "primary_message": "Ship cohesive experiences faster (dummy).",
+                        "supporting_messages": ["Reduce rework", "Align teams"],
+                        "tone_adjustments": "Confident and concrete",
+                    }
+                ],
+            }
+        elif "jobs_to_be_done" in system_lowered and "media_habits" in system_lowered:
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+                "messaging_framework": [
+                    {
+                        "pillar": "Cohesion",
+                        "key_message": "Every touchpoint feels intentional (dummy).",
+                        "proof_points": ["Shared tokens", "Review gates"],
+                    },
+                    {
+                        "pillar": "Speed",
+                        "key_message": "Brand work ships with the product (dummy).",
+                        "proof_points": ["Weekly cadence", "Embedded strategists"],
+                    },
+                    {
+                        "pillar": "Clarity",
+                        "key_message": "Plain language over jargon (dummy).",
+                        "proof_points": ["Short docs", "Approved phrases"],
+                    },
+                ],
+                "audience_message_maps": [
+                    {
+                        "audience_segment": "Enterprise product leaders",
+                        "primary_message": "Ship cohesive experiences faster (dummy).",
+                        "supporting_messages": ["Reduce rework", "Align teams"],
+                        "tone_adjustments": "Confident and concrete",
+                    }
+                ],
+                "persona_profiles": [
+                    {
+                        "name": "Alex Rivera",
+                        "role": "VP Product",
+                        "demographics": "Enterprise B2B, 10+ years experience (dummy).",
+                        "psychographics": "Values clarity and speed (dummy).",
+                        "goals": ["Ship cohesive UX", "Cut brand rework"],
+                        "frustrations": ["Inconsistent messaging", "Slow agencies"],
+                        "media_habits": ["Product communities", "LinkedIn"],
+                        "jobs_to_be_done": ["Align brand and product delivery"],
+                    },
+                    {
+                        "name": "Jordan Lee",
+                        "role": "Brand Lead",
+                        "demographics": "Mid-market org, design-background (dummy).",
+                        "psychographics": "Protects voice without blocking shipping (dummy).",
+                        "goals": ["Keep voice consistent", "Enable product teams"],
+                        "frustrations": ["Ad-hoc copy", "No system of record"],
+                        "media_habits": ["Design newsletters", "Team wikis"],
+                        "jobs_to_be_done": ["Codify writing guidelines"],
+                    },
+                ],
+            }
+        elif "writing_guidelines" in system_lowered and "editorial_quality_bar" in system_lowered:
+            persona_blob = {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+                "messaging_framework": [
+                    {
+                        "pillar": "Cohesion",
+                        "key_message": "Every touchpoint feels intentional (dummy).",
+                        "proof_points": ["Shared tokens", "Review gates"],
+                    },
+                    {
+                        "pillar": "Speed",
+                        "key_message": "Brand work ships with the product (dummy).",
+                        "proof_points": ["Weekly cadence", "Embedded strategists"],
+                    },
+                    {
+                        "pillar": "Clarity",
+                        "key_message": "Plain language over jargon (dummy).",
+                        "proof_points": ["Short docs", "Approved phrases"],
+                    },
+                ],
+                "audience_message_maps": [
+                    {
+                        "audience_segment": "Enterprise product leaders",
+                        "primary_message": "Ship cohesive experiences faster (dummy).",
+                        "supporting_messages": ["Reduce rework", "Align teams"],
+                        "tone_adjustments": "Confident and concrete",
+                    }
+                ],
+                "persona_profiles": [
+                    {
+                        "name": "Alex Rivera",
+                        "role": "VP Product",
+                        "demographics": "Enterprise B2B, 10+ years experience (dummy).",
+                        "psychographics": "Values clarity and speed (dummy).",
+                        "goals": ["Ship cohesive UX", "Cut brand rework"],
+                        "frustrations": ["Inconsistent messaging", "Slow agencies"],
+                        "media_habits": ["Product communities", "LinkedIn"],
+                        "jobs_to_be_done": ["Align brand and product delivery"],
+                    },
+                    {
+                        "name": "Jordan Lee",
+                        "role": "Brand Lead",
+                        "demographics": "Mid-market org, design-background (dummy).",
+                        "psychographics": "Protects voice without blocking shipping (dummy).",
+                        "goals": ["Keep voice consistent", "Enable product teams"],
+                        "frustrations": ["Ad-hoc copy", "No system of record"],
+                        "media_habits": ["Design newsletters", "Team wikis"],
+                        "jobs_to_be_done": ["Codify writing guidelines"],
+                    },
+                ],
+            }
+            return {
+                **persona_blob,
+                "writing_guidelines": {
+                    "voice_principles": [
+                        "Use a confident, human voice (dummy).",
+                        "Prefer concrete proof over slogans (dummy).",
+                        "Keep sentences short enough to scan (dummy).",
+                    ],
+                    "style_dos": [
+                        "Lead with the customer outcome (dummy).",
+                        "Use active voice (dummy).",
+                        "Name the audience when it clarifies (dummy).",
+                    ],
+                    "style_donts": [
+                        "Avoid empty superlatives (dummy).",
+                        "Don't bury the offer (dummy).",
+                        "Don't mix casual slang with legal claims (dummy).",
+                    ],
+                    "editorial_quality_bar": [
+                        "Every piece states who it is for (dummy).",
+                        "Claims cite a proof point (dummy).",
+                        "Copy matches the approved tone spectrum (dummy).",
+                    ],
+                },
+            }
         return {"output": "Dummy response", "status": "ok"}
 
     def chat(
         self,
-        messages: list,
+        messages: list[dict[str, Any]],
         *,
         objective: str = "dummy",
         response_format: str = "json",
