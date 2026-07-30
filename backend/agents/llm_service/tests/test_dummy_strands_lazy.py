@@ -89,3 +89,42 @@ def test_dummy_attaches_real_strands_model_base_when_strands_path_used() -> None
     # Agent reads model.stateful before any stream/update_config call.
     agent = Agent(model=client)
     assert agent.model is client
+
+
+def test_ensure_invalidates_abc_negative_cache_for_pre_strands_instances() -> None:
+    """Instances built before Strands import must become ``isinstance(..., Model)``.
+
+    Preconditions: a fresh interpreter (so DummyLLMClient is constructed with no
+    prior ``isinstance(..., Model)`` on a live Model).
+    Postconditions: after ``ensure_strands_model_registration``, both
+    ``isinstance`` and ``issubclass`` succeed despite a negative ABC cache from
+    checks performed before ``__bases__`` mutation.
+    """
+    script = """
+from llm_service.clients.dummy import DummyLLMClient, ensure_strands_model_registration
+
+client = DummyLLMClient()
+from strands.models.model import Model
+
+# Pollute ABCMeta's negative cache while Model is still absent from the MRO.
+assert isinstance(client, Model) is False
+assert issubclass(DummyLLMClient, Model) is False
+
+ensure_strands_model_registration()
+assert Model in DummyLLMClient.__mro__
+assert isinstance(client, Model) is True, "negative ABC cache survived __bases__ mutation"
+assert issubclass(DummyLLMClient, Model) is True
+print("ok")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": _subprocess_pythonpath()},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"subprocess failed (rc={result.returncode})\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "ok" in result.stdout

@@ -52,7 +52,8 @@ def ensure_strands_model_registration() -> None:
         The ``strands`` package is installed and importable.
     Postconditions:
         ``isinstance(DummyLLMClient(), strands.models.model.Model)`` is True and
-        ``Model`` appears in ``DummyLLMClient.__mro__``.
+        ``Model`` appears in ``DummyLLMClient.__mro__``, including for instances
+        constructed before Strands was imported (ABC negative caches are cleared).
         Idempotent: subsequent calls are no-ops once inheritance is attached.
     """
     global _STRANDS_MODEL_REGISTERED
@@ -64,6 +65,11 @@ def ensure_strands_model_registration() -> None:
     # properties/methods, matching the pre-lazy ``(LLMClient, Model)`` bases.
     if Model not in DummyLLMClient.__mro__:
         DummyLLMClient.__bases__ = (*DummyLLMClient.__bases__, Model)
+        # Mutating ``__bases__`` does not bump ABCMeta's invalidation counter, so a
+        # prior negative ``isinstance(client, Model)`` / ``issubclass(...)`` result
+        # stays cached forever. Clear Model's ABC caches so the postcondition holds
+        # for instances constructed before Strands was imported.
+        Model._abc_caches_clear()
     _STRANDS_MODEL_REGISTERED = True
 
 _STRIP_VERBS = {
