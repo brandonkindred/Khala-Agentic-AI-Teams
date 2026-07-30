@@ -49,7 +49,10 @@ class _FakeRegistry:
     def get(self, agent_id: str) -> AgentManifest | None:
         return self._by_id.get(agent_id)
 
-    def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
+    def manifests_with_id_prefix(
+        self, prefix: str, *, require_store: bool = False
+    ) -> list[AgentManifest]:
+        del require_store  # fake has no dynamic store
         # Mirror AgentRegistry.manifests_with_id_prefix so register_team_manifests'
         # stale-cleanup scan runs against the fake (without this method the call
         # would raise AttributeError and fail the register/unregister path).
@@ -63,6 +66,12 @@ class _FakeRegistry:
 
     def unregister(self, agent_id: str) -> bool:
         return self._by_id.pop(agent_id, None) is not None
+
+    def replace_dynamic_manifests(self, upserts, delete_ids) -> None:
+        for agent_id in delete_ids:
+            self._by_id.pop(agent_id, None)
+        for manifest in upserts:
+            self._by_id[manifest.id] = manifest
 
 
 @pytest.fixture

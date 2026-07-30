@@ -103,7 +103,9 @@ def test_ensure_schema_registers_once_per_process(monkeypatch: pytest.MonkeyPatc
     import shared.postgres
 
     calls = []
-    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda schema: calls.append(schema))
+    monkeypatch.setattr(
+        shared.postgres, "register_team_schemas", lambda schema: calls.append(schema)
+    )
     monkeypatch.setattr(ds, "_schema_ensured", False)
     ds._ensure_schema()
     ds._ensure_schema()  # guarded — no second DDL apply
@@ -111,7 +113,9 @@ def test_ensure_schema_registers_once_per_process(monkeypatch: pytest.MonkeyPatc
     assert ds._schema_ensured is True
 
 
-def test_ensure_schema_failure_leaves_guard_unset_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_schema_failure_leaves_guard_unset_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import shared.postgres
 
     monkeypatch.setattr(ds, "_schema_ensured", False)
@@ -205,3 +209,15 @@ class TestLivePostgres:
         ds.upsert(_manifest("agent_studio.axb"))
         got = ds.manifests_with_prefix("agent_studio.a_")
         assert {m.id for m in got} == {"agent_studio.a_b"}
+
+    def test_replace_manifests_is_atomic(self) -> None:
+        keep = _manifest("agent_studio.keep")
+        drop = _manifest("agent_studio.drop")
+        ds.upsert(keep)
+        ds.upsert(drop)
+        new = _manifest("agent_studio.new")
+        ds.replace_manifests([new], [drop.id])
+        assert ds.get(drop.id) is None
+        assert ds.get(new.id) is not None
+        assert ds.get(keep.id) is not None
+        assert {m.id for m in ds.all()} == {"agent_studio.keep", "agent_studio.new"}

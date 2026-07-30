@@ -60,11 +60,26 @@ class _FakeStore:
         self._maybe_raise("manifests_with_prefix")
         return [m for m in self.rows.values() if m.id.startswith(prefix)]
 
+    def replace_manifests(self, upserts, delete_ids) -> None:
+        self._maybe_raise("replace_manifests")
+        for agent_id in delete_ids:
+            self.rows.pop(agent_id, None)
+        for manifest in upserts:
+            self.rows[manifest.id] = manifest
+
 
 @pytest.fixture
 def fake_store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     store = _FakeStore()
-    for name in ("_store_active", "get", "all", "upsert", "delete", "manifests_with_prefix"):
+    for name in (
+        "_store_active",
+        "get",
+        "all",
+        "upsert",
+        "delete",
+        "manifests_with_prefix",
+        "replace_manifests",
+    ):
         monkeypatch.setattr(ds_mod, name, getattr(store, name))
     return store
 
@@ -192,6 +207,51 @@ def test_register_require_persist_succeeds_when_store_inactive(
     reg.register(m, require_persist=True)
     assert reg.get("agent_studio.strict-local") is m
     assert "agent_studio.strict-local" in reg._unconfirmed
+
+
+def test_replace_dynamic_manifests_writes_atomically(fake_store: _FakeStore) -> None:
+    reg = AgentRegistry([], {})
+    prior = _manifest("agentic.team-1.old", team="agentic_team_provisioning")
+    reg.register(prior)
+    replacement = _manifest("agentic.team-1.new", team="agentic_team_provisioning")
+
+    reg.replace_dynamic_manifests([replacement], [prior.id])
+
+    assert prior.id not in fake_store.rows
+    assert replacement.id in fake_store.rows
+    assert reg.get(prior.id) is None
+    assert reg.get(replacement.id) is replacement
+
+
+def test_replace_dynamic_manifests_leaves_local_unchanged_on_store_failure(
+    fake_store: _FakeStore,
+) -> None:
+    reg = AgentRegistry([], {})
+    prior = _manifest("agentic.team-1.old", team="agentic_team_provisioning")
+    reg.register(prior)
+    fake_store.raise_on = {"replace_manifests"}
+
+    with pytest.raises(RuntimeError, match="boom:replace_manifests"):
+        reg.replace_dynamic_manifests(
+            [_manifest("agentic.team-1.new", team="agentic_team_provisioning")],
+            [prior.id],
+        )
+
+    assert prior.id in fake_store.rows
+    assert "agentic.team-1.new" not in fake_store.rows
+    assert reg.get(prior.id) is not None
+    assert reg._by_id[prior.id].id == prior.id
+
+
+def test_manifests_with_id_prefix_require_store_propagates(
+    fake_store: _FakeStore,
+) -> None:
+    reg = AgentRegistry([], {})
+    fake_store.raise_on = {"manifests_with_prefix"}
+    with pytest.raises(RuntimeError, match="boom:manifests_with_prefix"):
+        reg.manifests_with_id_prefix("agentic.", require_store=True)
+    # Default still degrades to local.
+    assert reg.manifests_with_id_prefix("agentic.") == []
 
 
 def test_unregister_deletes_from_store(fake_store: _FakeStore) -> None:

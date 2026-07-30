@@ -16,7 +16,7 @@ import time
 from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import yaml
 from pydantic import ValidationError
@@ -269,7 +269,9 @@ class AgentRegistry:
     def all(self) -> list[AgentManifest]:
         return self._merged_manifests()
 
-    def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
+    def manifests_with_id_prefix(
+        self, prefix: str, *, require_store: bool = False
+    ) -> list[AgentManifest]:
         """Return registered manifests whose ``id`` starts with ``prefix``.
 
         Materializes only the matching subset in one pass, unlike :meth:`all`, which
@@ -285,7 +287,10 @@ class AgentRegistry:
             Carries the same brief scan-then-lock eventual-consistency window as
             :meth:`_merged_manifests` (a dynamic id registered between the store
             prefix scan and the lock may be momentarily absent); see that method's
-            consistency note.
+            consistency note. Default store-scan failure degrades to this process's
+            local subset. When ``require_store`` is True and a dynamic store is
+            active, a scan failure propagates instead — fail-closed callers (roster
+            replace) must not omit another worker's stale ids.
         """
         with self._lock:
             local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
@@ -295,6 +300,8 @@ class AgentRegistry:
         try:
             dynamic = store.manifests_with_prefix(prefix)
         except Exception:
+            if require_store:
+                raise
             logger.warning(
                 "dynamic store prefix scan failed for %r; serving local", prefix, exc_info=True
             )
@@ -518,6 +525,66 @@ class AgentRegistry:
                     exc_info=True,
                 )
         return removed
+
+    def replace_dynamic_manifests(
+        self,
+        upserts: Sequence[AgentManifest],
+        delete_ids: Sequence[str],
+    ) -> None:
+        """Atomically install ``upserts`` and drop ``delete_ids`` for dynamic agents.
+
+        Generated-roster replacement uses this so the shared store and this
+        process's in-memory view stay aligned with the roster DB transaction:
+        either the whole replacement lands, or nothing does.
+
+        Preconditions:
+            * Every upsert has a non-empty ``id`` that is not a static/disk id.
+            * No ``delete_ids`` entry names a static/disk id.
+            * ``upserts`` ids and ``delete_ids`` are disjoint.
+        Postconditions:
+            * When a dynamic store is active, all upserts and deletes commit in
+              **one** Postgres transaction before local memory is updated. A store
+              failure leaves both store and local registry unchanged and
+              propagates.
+            * When no store is active, only this process's in-memory view is
+              updated (local-authoritative, same as :meth:`register` with no
+              store). After success, each upserted id resolves via :meth:`get`
+              and each deleted id does not (subject to tombstone / store semantics).
+        """
+        upsert_list = list(upserts)
+        delete_list = list(delete_ids)
+        for manifest in upsert_list:
+            assert manifest.id, "replace_dynamic_manifests: manifest.id must be non-empty"
+            if manifest.id in self._static_ids:
+                raise ValueError(f"replace_dynamic_manifests: refusing static id {manifest.id!r}")
+        for agent_id in delete_list:
+            if agent_id in self._static_ids:
+                raise ValueError(
+                    f"replace_dynamic_manifests: refusing to delete static id {agent_id!r}"
+                )
+
+        store = self._dynamic_store()
+        if store is not None:
+            # Store first: on failure local state is untouched so fail-closed
+            # callers can roll back their roster write against an unchanged catalog.
+            store.replace_manifests(upsert_list, delete_list)
+
+        with self._lock:
+            for manifest in upsert_list:
+                self._by_id[manifest.id] = manifest
+                self._tombstones.pop(manifest.id, None)
+                if store is None:
+                    self._unconfirmed.add(manifest.id)
+                else:
+                    self._unconfirmed.discard(manifest.id)
+            for agent_id in delete_list:
+                self._source_paths.pop(agent_id, None)
+                self._by_id.pop(agent_id, None)
+                self._unconfirmed.discard(agent_id)
+                self._tombstones[agent_id] = time.monotonic()
+                self._tombstones.move_to_end(agent_id)
+                while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
+                    self._tombstones.popitem(last=False)
 
     def search(
         self,

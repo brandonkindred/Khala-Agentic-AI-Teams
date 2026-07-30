@@ -15,7 +15,6 @@ discovery paths.
 from __future__ import annotations
 
 import hashlib
-import logging
 
 from agent_registry.models import (
     AgentManifest,
@@ -27,8 +26,6 @@ from agent_registry.models import (
 )
 from agentic_team_provisioning.agent_env_provisioning import _slug
 from agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
-
-logger = logging.getLogger(__name__)
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
@@ -194,9 +191,10 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
 
     Scope: registration always updates *this process's* in-memory registry
     immediately. When a Postgres-backed dynamic store is active (see
-    ``AgentRegistry.register``), each manifest is also write-through persisted
-    there, so other workers and per-invoke sandboxes that share that store
-    resolve the same entries — not just this process. When no dynamic store
+    ``AgentRegistry.replace_dynamic_manifests``), the full replacement
+    (upserts + stale deletes) commits in **one** Postgres transaction before
+    local memory is updated, so other workers and per-invoke sandboxes that
+    share that store never observe a partial replace. When no dynamic store
     is active (Postgres off / sandboxed), registration is local-only and other
     processes won't see these entries until they generate their own.
 
@@ -211,16 +209,12 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
           absent from this roster are unregistered, so removed/renamed agents stop
           appearing in the catalog. Idempotent; persisted to the dynamic store
           when one is active, in-memory-only otherwise (see Scope above).
-          Registry failures propagate — callers that must keep the DB roster and
-          registry in sync (e.g. chat-save ``on_merged``) let the raise roll back
-          the roster write; import-time retroactive registration wraps this call.
-          When a dynamic store is active, each ``register(..., require_persist=True)``
-          also fails closed on Postgres upsert errors (not just local-only installs).
-          Replacement order is register-new-then-unregister-stale; if a mid-replace
-          register fails, this call's installs are compensated before the error
-          propagates (brand-new ids unregistered; overwritten ids restored from the
-          prior snapshot) so a rolled-back roster save does not leave the registry
-          pointing at the aborted replacement.
+          Registry / store failures propagate — callers that must keep the DB
+          roster and registry in sync (e.g. chat-save ``on_merged``) let the
+          raise roll back the roster write; import-time retroactive registration
+          wraps this call. The prefix scan that computes the stale set uses
+          ``require_store=True`` so a failed cross-worker scan cannot silently
+          omit another worker's stale ids.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -241,46 +235,19 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     registry = get_registry()
     # Snapshot prior team-generated manifests before mutating. Scope strictly to
     # this team's generated ids (prefix + the "generated" tag) so a hand-authored
-    # disk manifest is never touched. ``manifests_with_id_prefix`` materializes
-    # only this team's entries (not a copy of the whole registry) — this runs
+    # disk manifest is never touched. ``require_store=True`` so a dynamic-store
+    # scan failure cannot silently omit another worker's stale ids. This runs
     # under the team lock on the chat-save path, so keeping the scan's allocation
     # small matters.
     prefix = team_id_prefix(team_id)
     prior_generated = {
-        m.id: m for m in registry.manifests_with_id_prefix(prefix) if is_generated_manifest(m)
+        m.id: m
+        for m in registry.manifests_with_id_prefix(prefix, require_store=True)
+        if is_generated_manifest(m)
     }
     stale = [agent_id for agent_id in prior_generated if agent_id not in new_ids]
-    # Register the replacement set *before* dropping stale ids so a mid-replace
-    # failure cannot delete the old rename source before the new id lands. On
-    # failure, undo this call's installs (unregister brand-new ids; restore any
-    # overwritten priors) so a rolled-back roster write is not paired with a
-    # partial registry replacement.
-    installed: list[str] = []
-    try:
-        for manifest in manifests:
-            # require_persist: other workers / invoke sandboxes only resolve
-            # manifests via the dynamic store; a local-only install must not let
-            # chat-save commit.
-            registry.register(manifest, require_persist=True)
-            installed.append(manifest.id)
-        for agent_id in stale:
-            registry.unregister(agent_id)
-    except Exception:
-        for agent_id in installed:
-            prior = prior_generated.get(agent_id)
-            try:
-                if prior is None:
-                    registry.unregister(agent_id)
-                else:
-                    # Best-effort restore — compensation must not mask the
-                    # original failure if the store is still unhealthy.
-                    registry.register(prior)
-            except Exception:
-                logger.warning(
-                    "Failed to compensate registry install of %s after replace failure for team %s",
-                    agent_id,
-                    team_id,
-                    exc_info=True,
-                )
-        raise
+    # Single atomic replace: shared-store upserts + deletes commit together (or
+    # not at all), then local memory is updated. No mid-replace compensation —
+    # the store transaction is the unit of fail-closedness.
+    registry.replace_dynamic_manifests(manifests, stale)
     return manifests

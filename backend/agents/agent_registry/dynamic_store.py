@@ -217,6 +217,54 @@ def delete(agent_id: str) -> None:
     clear_cache()
 
 
+def replace_manifests(
+    upserts: list[AgentManifest],
+    delete_ids: list[str],
+) -> None:
+    """Atomically upsert ``upserts`` and delete ``delete_ids`` in one transaction.
+
+    Used by generated-roster replacement so a mid-replace failure cannot leave
+    the shared store with some new rows installed and some stale rows already
+    deleted while the caller's roster DB transaction rolls back.
+
+    Preconditions:
+        * Every ``manifest.id`` in ``upserts`` is non-empty.
+        * ``upserts`` and ``delete_ids`` are disjoint (callers compute the
+          replacement set that way).
+    Postconditions:
+        * On success, every upserted id is readable via :func:`get` on any
+          worker and every ``delete_ids`` entry is gone. On any statement
+          failure the whole transaction rolls back — the store is unchanged
+          and the exception propagates. Clears the ``all()`` micro-cache on
+          success. Retried once on transient failure (see :func:`_with_retry`).
+    """
+    from shared.postgres import Json, get_conn
+    from shared.postgres.metrics import timed_query
+
+    for m in upserts:
+        assert m.id, "replace_manifests: every upsert must have a non-empty id"
+
+    @timed_query(store=_STORE, op="replace_manifests")
+    def _do() -> None:
+        with get_conn() as conn, conn.cursor() as cur:
+            for manifest in upserts:
+                payload = manifest.model_dump(mode="json")
+                cur.execute(
+                    f"INSERT INTO {_TABLE} (id, team, tags, manifest, updated_at) "
+                    "VALUES (%s, %s, %s, %s, NOW()) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "team = EXCLUDED.team, tags = EXCLUDED.tags, "
+                    "manifest = EXCLUDED.manifest, updated_at = NOW()",
+                    (manifest.id, manifest.team, Json(list(manifest.tags)), Json(payload)),
+                )
+            for agent_id in delete_ids:
+                cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
+
+    _ensure_schema()
+    _with_retry(_do)
+    clear_cache()
+
+
 def get(agent_id: str) -> AgentManifest | None:
     """Return the dynamic manifest for ``agent_id``, or ``None`` if unknown.
 
