@@ -59,7 +59,7 @@ def test_ollama_complete_json_with_schema_and_tools_raises_value_error(
     chat-completions request (a prior /api/show max-tokens-resolution call is
     unrelated plumbing and may still occur)."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")  # skip the /api/show max-tokens fallback
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "4096")  # skip the /api/show max-tokens fallback
     tools = [{"type": "function", "function": {"name": "fn"}}]
     with patch("httpx.Client") as mock_client_cls:
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)

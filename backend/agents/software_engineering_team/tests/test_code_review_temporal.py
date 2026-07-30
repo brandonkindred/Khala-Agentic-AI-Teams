@@ -1141,7 +1141,7 @@ class _LegacySequentialCodeReviewWorkflow:
                 bool(review_input.get("skip_false_positive_filter", False)),
             ],
             task_queue=task_queue,
-            start_to_close_timeout=_timedelta(minutes=30),
+            start_to_close_timeout=_timedelta(minutes=60),
             retry_policy=_cr_workflows._LLM_RETRY,
         )
 
