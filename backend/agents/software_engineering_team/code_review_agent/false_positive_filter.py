@@ -537,7 +537,9 @@ def _find_python_function_at_line(
     if line_number > len(lines):
         return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
 
-    construct = enclosing_construct(content, line_number)
+    construct = enclosing_construct(
+        content, line_number, annotated_hunks=line_mapper is not None
+    )
 
     if construct is None:
         # enclosing_construct() never raises; re-parse once here only to tell a

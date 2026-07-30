@@ -205,7 +205,7 @@ def test_strip_numbered_prefixes_detects_and_strips() -> None:
 
 
 def test_strip_numbered_prefixes_preserves_inter_hunk_separators() -> None:
-    """Bare ``...`` gap markers are kept so :func:`enclosing_construct` can resolve hunks independently."""
+    """Bare ``...`` gap markers are kept so annotated hunks resolve independently."""
     content = "\n".join(
         [
             "10: def first():",
@@ -221,13 +221,14 @@ def test_strip_numbered_prefixes_preserves_inter_hunk_separators() -> None:
     assert mapper(4) == 100
     # Later hunk starts mid-function without its declaration — do not invent
     # an enclosing construct by joining across the gap.
-    assert enclosing_construct(stripped, physical) is None
-    assert enclosing_construct(stripped, 2) is not None
-    assert enclosing_construct(stripped, 2).name == "first"
+    assert enclosing_construct(stripped, physical, annotated_hunks=True) is None
+    first = enclosing_construct(stripped, 2, annotated_hunks=True)
+    assert first is not None
+    assert first.name == "first"
 
 
-def test_enclosing_construct_does_not_join_across_hunk_gap() -> None:
-    """Indented continuation after ``...`` is not attached to the prior hunk's function."""
+def test_enclosing_construct_does_not_join_across_annotated_hunk_gap() -> None:
+    """Indented continuation after annotated ``...`` is not attached to the prior hunk."""
     content = "\n".join(
         [
             "def first():",
@@ -236,10 +237,20 @@ def test_enclosing_construct_does_not_join_across_hunk_gap() -> None:
             "    changed()",
         ]
     )
-    first = enclosing_construct(content, 2)
+    first = enclosing_construct(content, 2, annotated_hunks=True)
     assert first is not None
     assert first.name == "first"
-    assert enclosing_construct(content, 4) is None
+    assert enclosing_construct(content, 4, annotated_hunks=True) is None
+
+
+def test_enclosing_construct_preserves_ellipsis_stub_bodies() -> None:
+    """Ordinary full-file Ellipsis statements are not treated as hunk separators."""
+    content = "def foo():\n    ...\n    return 1\n"
+    result = enclosing_construct(content, 3)
+    assert result is not None
+    assert result.name == "foo"
+    assert result.start_line == 1
+    assert result.end_line == 3
 
 
 def test_strip_numbered_prefixes_empty_content() -> None:

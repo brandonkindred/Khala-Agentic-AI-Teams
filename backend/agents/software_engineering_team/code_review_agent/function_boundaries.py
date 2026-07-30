@@ -136,7 +136,10 @@ def strip_numbered_prefixes(
 
 
 def _hunk_segments(lines: List[str]) -> List[Tuple[int, int, List[str]]]:
-    """Split ``lines`` on bare ``...`` separators into contiguous hunks.
+    """Split ``lines`` on bare column-0 ``...`` separators into contiguous hunks.
+
+    Only exact ``...`` lines (no leading/trailing whitespace) count — indented
+    Ellipsis statements in real Python bodies must not open a gap.
 
     Postconditions:
         - Returns ``(global_start, global_end, segment_lines)`` triples with
@@ -148,7 +151,7 @@ def _hunk_segments(lines: List[str]) -> List[Tuple[int, int, List[str]]]:
     current: List[str] = []
     start = 1
     for i, line in enumerate(lines, start=1):
-        if line.strip() == _HUNK_SEPARATOR:
+        if line == _HUNK_SEPARATOR:
             if current:
                 segments.append((start, i - 1, current))
                 current = []
@@ -200,15 +203,24 @@ def _enclosing_construct_ast(content: str, line_number: int) -> Optional[Enclosi
     )
 
 
-def enclosing_construct(content: str, line_number: int) -> Optional[EnclosingConstruct]:
+def enclosing_construct(
+    content: str,
+    line_number: int,
+    *,
+    annotated_hunks: bool = False,
+) -> Optional[EnclosingConstruct]:
     """Find the innermost Python function/method/class enclosing ``line_number``.
 
-    When ``content`` contains bare ``...`` hunk-gap markers (from
-    ``render_annotated_hunks``), each gap-bounded hunk is resolved
-    independently. Joining across the gap would attach a later hunk's
-    indented lines to the preceding open construct and invent a false
-    enclosing function; an unparseable continuation hunk (declaration
-    outside the shown context) returns ``None`` rather than guessing.
+    When ``annotated_hunks`` is True (content produced by stripping
+    ``render_annotated_hunks`` output), bare column-0 ``...`` gap markers
+    split the excerpt into independently resolved hunks. Joining across a
+    gap would attach a later hunk's indented lines to the preceding open
+    construct and invent a false enclosing function; an unparseable
+    continuation hunk returns ``None`` rather than guessing.
+
+    When ``annotated_hunks`` is False (ordinary full-file source), ``...`` is
+    left alone — it is a valid Ellipsis statement in protocol/stub bodies,
+    and splitting on it would incorrectly report those lines as module-level.
 
     Preconditions:
         - ``content`` is a string (may be empty).
@@ -216,7 +228,7 @@ def enclosing_construct(content: str, line_number: int) -> Optional[EnclosingCon
 
     Postconditions:
         - Returns ``None`` when ``content`` fails to parse as Python, the
-          target line falls in an unparseable hunk, or no
+          target line falls in an unparseable annotated hunk, or no
           ``FunctionDef``/``AsyncFunctionDef``/``ClassDef`` node brackets
           ``line_number`` (module level). Never raises.
         - Otherwise returns the smallest-span (innermost) enclosing node,
@@ -225,22 +237,23 @@ def enclosing_construct(content: str, line_number: int) -> Optional[EnclosingCon
         - Start/end lines come from the shared ``node_start_line``/
           ``node_end_line`` helpers so AST consumers agree on ranges.
     """
-    lines = content.splitlines()
-    if any(line.strip() == _HUNK_SEPARATOR for line in lines):
-        for seg_start, seg_end, seg_lines in _hunk_segments(lines):
-            if not (seg_start <= line_number <= seg_end):
-                continue
-            local_line = line_number - seg_start + 1
-            local = _enclosing_construct_ast("\n".join(seg_lines), local_line)
-            if local is None:
-                return None
-            return EnclosingConstruct(
-                start_line=local.start_line + seg_start - 1,
-                end_line=local.end_line + seg_start - 1,
-                name=local.name,
-                kind=local.kind,
-            )
-        return None
+    if annotated_hunks:
+        lines = content.splitlines()
+        if any(line == _HUNK_SEPARATOR for line in lines):
+            for seg_start, seg_end, seg_lines in _hunk_segments(lines):
+                if not (seg_start <= line_number <= seg_end):
+                    continue
+                local_line = line_number - seg_start + 1
+                local = _enclosing_construct_ast("\n".join(seg_lines), local_line)
+                if local is None:
+                    return None
+                return EnclosingConstruct(
+                    start_line=local.start_line + seg_start - 1,
+                    end_line=local.end_line + seg_start - 1,
+                    name=local.name,
+                    kind=local.kind,
+                )
+            return None
 
     return _enclosing_construct_ast(content, line_number)
 

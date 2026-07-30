@@ -409,6 +409,27 @@ def test_cross_hunk_indented_continuation_does_not_false_merge() -> None:
     assert result[1].description == "unrelated mid-function change"
 
 
+def test_ellipsis_stub_bodies_still_group_in_full_file_source() -> None:
+    """Indented Ellipsis in real Python stubs is not treated as an annotated hunk gap."""
+    content = "\n".join(
+        [
+            "def foo():",  # 1
+            "    ...",  # 2
+            "    return 1",  # 3
+            "",
+        ]
+    )
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(line=2, description="ellipsis body changed"),
+        _issue(line=3, description="return shape changed"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert "ellipsis body changed" in result[0].description
+    assert "return shape changed" in result[0].description
+
+
 def test_merge_keeps_distinct_caller_citations() -> None:
     """Near-identical descriptions that cite different callers all survive consolidation."""
     content = "def foo():\n    return 1\n"

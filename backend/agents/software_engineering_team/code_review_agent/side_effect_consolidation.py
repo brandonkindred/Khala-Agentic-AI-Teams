@@ -115,10 +115,12 @@ class _ConstructResolver:
               independent findings. Prefer no consolidation over false merges.
             - Content carrying the PR-review path's ``"N: "``-prefixed hunk
               annotations is normalized (prefixes stripped, ``line`` remapped
-              to its physical index) before resolution. Bare ``...`` gap
-              markers are preserved; ``enclosing_construct`` resolves each
-              hunk independently so a later indented continuation is not
-              attached to the preceding open construct.
+              to its physical index) before resolution. When the source was
+              annotated-hunk content, bare column-0 ``...`` gap markers are
+              preserved and ``enclosing_construct(..., annotated_hunks=True)``
+              resolves each hunk independently so a later indented continuation
+              is not attached to the preceding open construct. Ordinary
+              full-file Ellipsis stubs are left alone.
         """
         if not file_path or not line or line < 1:
             return None
@@ -128,13 +130,15 @@ class _ConstructResolver:
         content = self._content(canonical)
         if not content:
             return None
-        stripped, physical, _mapper = strip_numbered_prefixes(content, line)
+        stripped, physical, mapper = strip_numbered_prefixes(content, line)
         _, ext = os.path.splitext(canonical)
         if ext.lower() not in _PYTHON_EXTS:
             # Column-0 heuristics cannot tell indented methods apart; skip
             # same-construct grouping for non-Python rather than false-merge.
             return None
-        construct = enclosing_construct(stripped, physical)
+        construct = enclosing_construct(
+            stripped, physical, annotated_hunks=mapper is not None
+        )
         if construct is None:
             return None
         return (canonical, construct.start_line)
