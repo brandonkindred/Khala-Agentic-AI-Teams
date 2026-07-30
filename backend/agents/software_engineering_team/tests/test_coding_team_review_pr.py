@@ -5397,9 +5397,13 @@ class TestCreateReviewIssuesUnit:
         assert len(calls) == 1
         assert [c["proposal_id"] for c in out["created"]] == ["p0"]
 
-    def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_persist_swallows_store_errors(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A failure persisting the updated proposals never fails the request — the
-        GitHub issue already exists regardless of whether the local record updates."""
+        GitHub issue already exists regardless of whether the local record updates —
+        but both store failures must still be logged at WARNING so the swallow is
+        observable."""
         from software_engineering_team.api import coding_team_main as api_main
         from software_engineering_team.api import pr_review_issues
 
@@ -5419,9 +5423,15 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "update_review", _boom)
 
         monkeypatch.setattr(api_main, "GitHubClient", _github_issue_client())
-        # Both stores fail, but the issue was created, so the call still succeeds.
-        out = pr_review_issues.create_review_issues("job1", ["p0"], token="t")
+        # Both stores fail, but the issue was created, so the call still succeeds —
+        # and both failures must appear in WARNING logs (with exc_info).
+        with caplog.at_level("WARNING"):
+            out = pr_review_issues.create_review_issues("job1", ["p0"], token="t")
         assert out["created"][0]["issue_url"] == "u1"
+        logged = caplog.text
+        assert "could not update job" in logged
+        assert "could not update review row" in logged
+        assert "store down" in logged
 
     def test_repo_mismatch_raises_before_any_issue(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A mismatched expected owner/repo raises RepoMismatchError before the
