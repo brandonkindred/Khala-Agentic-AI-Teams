@@ -50,7 +50,7 @@ flowchart TB
 
     P1 --> P2
 
-    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, sequential)"]
+    subgraph P2 ["Phase 2 · Narrative & Messaging (Graph, cumulative fan-in)"]
         direction LR
         P2a[Storyteller] --> P2b[ArchetypeAnalyst]
         P2b -. revise .-> P2a
@@ -137,7 +137,7 @@ Per-phase participating nodes. For Graph-based phases (1, 2, 4, and 5) and the o
 | Phase | Construct | Nodes |
 |---|---|---|
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
-| 2 — Narrative & Messaging | `Graph`, sequential | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` |
+| 2 — Narrative & Messaging | `Graph`, cumulative fan-in | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (each node edged from every upstream specialist) |
 | 3 — Visual & Expressive Identity | Graph-of-Swarm | inner `Swarm` (node id `diverge_swarm`): `CreativeDirector` + 3 `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
 | 4 — Channel Activation | `Graph`, fan-out/fan-in | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` → `channel_compositor` |
 | 5 — Governance & Evolution | `Graph`, fan-out/fan-in | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` → `governance_compositor` |
@@ -193,14 +193,16 @@ Output model: `StrategicCoreOutput`
 | `differentiation_mapper` | Maps competitive differentiation pillars with proof points | `differentiation_pillars` |
 | `positioning_synthesizer` | Synthesises the fragments above into a positioning statement and brand promise | `positioning_statement`, `brand_promise` |
 
-### Phase 2 — Narrative & Messaging (Graph: sequential)
+### Phase 2 — Narrative & Messaging (Graph: cumulative fan-in)
 
 Output model: `NarrativeMessagingOutput`
 
-Phase 2 is a fixed sequential Graph (not a Swarm). Agents use
-`structured_output=`, which stops Strands' agent loop after the structured
-payload is produced, so tool-based `handoff_to_agent` cannot sequence them.
-Graph edges provide the Storyteller → … → VoicePrinciplesDrafter order instead.
+Phase 2 is a Graph (not a Swarm). Agents use `structured_output=`, which stops
+Strands' agent loop after the structured payload is produced, so tool-based
+`handoff_to_agent` cannot sequence them. Each non-entry node has edges from
+*every* earlier specialist — Strands builds node input from the original task
+plus only directly incoming dependency results, so a single-predecessor chain
+would omit earlier narrative fragments from later prompts.
 
 | Agent | Purpose | Output field(s) |
 |-------|---------|------------------|
