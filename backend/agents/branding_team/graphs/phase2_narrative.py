@@ -1,14 +1,19 @@
-"""Phase 2 — Narrative & Messaging swarm (creative handoff chain).
+"""Phase 2 — Narrative & Messaging graph (sequential specialists).
 
-Six agents collaborate via dynamic handoffs: Storyteller (entry) hands
-off to ArchetypeAnalyst, then TaglineWriter, MessageMapper,
-PersonaBuilder, and finally VoicePrinciplesDrafter.  Agents may hand
-back upstream when revisions are needed (e.g. archetype mis-alignment).
+Six agents run in a fixed pipeline: Storyteller → ArchetypeAnalyst →
+TaglineWriter → MessageMapper → PersonaBuilder → VoicePrinciplesDrafter.
+
+This is intentionally a Graph rather than a Swarm. Agents built with
+``structured_output=`` force Strands' structured-output tool and then
+stop the agent loop (``stop_loop=True``), so they never call
+``handoff_to_agent``. A Swarm therefore completes after the entry node and
+drops every downstream fragment. Graph edges sequence the specialists
+without relying on tool-based handoffs.
 """
 
 from __future__ import annotations
 
-from strands.multiagent.swarm import Swarm
+from strands.multiagent.graph import Graph, GraphBuilder
 
 from branding_team.agents import (
     make_archetype_analyst,
@@ -20,35 +25,39 @@ from branding_team.agents import (
 )
 
 
-def build_phase2_swarm() -> Swarm:
-    """Build the Phase 2 Narrative & Messaging swarm.
+def build_phase2_graph() -> Graph:
+    """Build the Phase 2 Narrative & Messaging sequential graph.
 
-    Agents:
-        Storyteller (entry), ArchetypeAnalyst, TaglineWriter,
-        MessageMapper, PersonaBuilder, VoicePrinciplesDrafter
+    Topology::
 
-    The swarm allows up to 10 handoffs and times out after 180 seconds.
+        Storyteller → ArchetypeAnalyst → TaglineWriter → MessageMapper
+            → PersonaBuilder → VoicePrinciplesDrafter
+
+    Each node emits its own ``structured_output`` fragment; the orchestrator
+    merges them into ``NarrativeMessagingOutput``.
 
     Returns:
-        A configured ``Swarm`` instance ready for invocation.
+        A configured ``Graph`` instance ready for invocation.
     """
-    storyteller = make_storyteller()
-    archetype_analyst = make_archetype_analyst()
-    tagline_writer = make_tagline_writer()
-    message_mapper = make_message_mapper()
-    persona_builder = make_persona_builder()
-    voice_drafter = make_voice_principles_drafter()
+    builder = GraphBuilder()
 
-    return Swarm(
-        nodes=[
-            storyteller,
-            archetype_analyst,
-            tagline_writer,
-            message_mapper,
-            persona_builder,
-            voice_drafter,
-        ],
-        entry_point=storyteller,
-        max_handoffs=10,
-        execution_timeout=180.0,
-    )
+    storyteller = builder.add_node(make_storyteller(), node_id="Storyteller")
+    archetype = builder.add_node(make_archetype_analyst(), node_id="ArchetypeAnalyst")
+    tagline = builder.add_node(make_tagline_writer(), node_id="TaglineWriter")
+    message = builder.add_node(make_message_mapper(), node_id="MessageMapper")
+    persona = builder.add_node(make_persona_builder(), node_id="PersonaBuilder")
+    voice = builder.add_node(make_voice_principles_drafter(), node_id="VoicePrinciplesDrafter")
+
+    builder.set_entry_point("Storyteller")
+    builder.add_edge(storyteller, archetype)
+    builder.add_edge(archetype, tagline)
+    builder.add_edge(tagline, message)
+    builder.add_edge(message, persona)
+    builder.add_edge(persona, voice)
+
+    return builder.build()
+
+
+# Back-compat alias — Phase 2 used to be a Swarm; callers that still import
+# the old name get the Graph that preserves structured_output sequencing.
+build_phase2_swarm = build_phase2_graph

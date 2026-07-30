@@ -12,10 +12,9 @@ from __future__ import annotations
 import pytest
 from strands import Agent
 from strands.multiagent.graph import Graph
-from strands.multiagent.swarm import Swarm
 
 from branding_team.graphs.phase1_strategic_core import build_phase1_graph
-from branding_team.graphs.phase2_narrative import build_phase2_swarm
+from branding_team.graphs.phase2_narrative import build_phase2_graph, build_phase2_swarm
 from branding_team.graphs.phase3_visual import build_phase3_graph
 from branding_team.graphs.phase4_channel import build_phase4_graph
 from branding_team.graphs.phase5_governance import build_phase5_graph
@@ -41,8 +40,14 @@ def test_build_phase1_graph_is_a_graph() -> None:
     assert isinstance(build_phase1_graph(), Graph)
 
 
-def test_build_phase2_swarm_is_a_swarm() -> None:
-    assert isinstance(build_phase2_swarm(), Swarm)
+def test_build_phase2_graph_is_a_graph() -> None:
+    assert isinstance(build_phase2_graph(), Graph)
+
+
+def test_build_phase2_swarm_alias_returns_graph() -> None:
+    """Phase 2 used to be a Swarm; the alias still works and returns the Graph."""
+    assert build_phase2_swarm is build_phase2_graph
+    assert isinstance(build_phase2_swarm(), Graph)
 
 
 def test_build_phase3_graph_is_a_graph() -> None:

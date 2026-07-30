@@ -130,7 +130,7 @@ def make_positioning_synthesizer() -> Agent:
 
 
 # ===================================================================
-# Phase 2 — Narrative & Messaging  (Swarm)
+# Phase 2 — Narrative & Messaging  (Graph: sequential specialists)
 # ===================================================================
 
 
@@ -143,10 +143,7 @@ def make_storyteller() -> Agent:
             "craft:\n"
             "1. brand_story — a compelling 2-3 paragraph origin/purpose story\n"
             "2. hero_narrative — a shorter, punchy version for hero sections\n"
-            "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios\n\n"
-            "After completing your work, hand off to the ArchetypeAnalyst to define brand "
-            "archetypes that align with the story. If the ArchetypeAnalyst suggests revisions, "
-            "incorporate them."
+            "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios"
         ),
         structured_output=BrandStoryOutput,
     )
@@ -161,9 +158,7 @@ def make_archetype_analyst() -> Agent:
             "select 1-2 brand archetypes (e.g. The Sage, The Creator, The Explorer). For each:\n"
             "- archetype: name\n"
             "- rationale: why this fits\n"
-            "- personality_traits: 3-5 traits\n\n"
-            "If the brand story doesn't align with the archetype, hand off back to the Storyteller "
-            "with specific revision suggestions. Otherwise, hand off to the TaglineWriter."
+            "- personality_traits: 3-5 traits"
         ),
         structured_output=BrandArchetypesOutput,
     )
@@ -181,8 +176,7 @@ def make_tagline_writer() -> Agent:
             "3. elevator_pitches — three variants:\n"
             "   - tier: '5-second', pitch: ...\n"
             "   - tier: '30-second', pitch: ...\n"
-            "   - tier: '2-minute', pitch: ...\n\n"
-            "After completing, hand off to the MessageMapper."
+            "   - tier: '2-minute', pitch: ..."
         ),
         structured_output=TaglineOutput,
     )
@@ -197,8 +191,7 @@ def make_message_mapper() -> Agent:
             "1. messaging_framework — 3-4 messaging pillars, each with:\n"
             "   - pillar, key_message, proof_points\n"
             "2. audience_message_maps — one per audience segment, each with:\n"
-            "   - audience_segment, primary_message, supporting_messages, tone_adjustments\n\n"
-            "After completing, hand off to the PersonaBuilder."
+            "   - audience_segment, primary_message, supporting_messages, tone_adjustments"
         ),
         structured_output=MessagingFrameworkOutput,
     )
@@ -211,8 +204,7 @@ def make_persona_builder() -> Agent:
         system_prompt=(
             "You are a Persona Builder. Using audience segments and brand narrative, create 2-3 "
             "persona profiles. Each persona has: name, role, demographics, psychographics, goals, "
-            "frustrations, media_habits, jobs_to_be_done.\n\n"
-            "After completing, hand off to the VoicePrinciplesDrafter."
+            "frustrations, media_habits, jobs_to_be_done."
         ),
         structured_output=PersonaProfilesOutput,
     )

@@ -819,9 +819,9 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
 
 
 def test_extract_phase_output_merges_every_phase2_fragment() -> None:
-    """Phase 2 wraps six Swarm agents as one top-level node; get_agent_results()[-1]
-    only ever sees VoicePrinciplesDrafter, so the five upstream agents' fragments
-    must be merged in separately (same extraction bug Phase 1 had)."""
+    """Phase 2 wraps six sequential Graph agents as one top-level node;
+    get_agent_results()[-1] only ever sees VoicePrinciplesDrafter, so the five
+    upstream agents' fragments must be merged in separately."""
     voice_leaf = _phase1_leaf_node(
         WritingGuidelinesOutput(
             voice_principles=["Confident", "Human", "Concrete"],
@@ -913,6 +913,41 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         "Cites proof",
         "Matches tone",
     ]
+
+
+def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
+    """A Phase 2 run that only produced Storyteller must not validate as a
+    complete NarrativeMessagingOutput via field defaults (the structured_output
+    + Swarm failure mode where handoff never fired)."""
+    nested_results = {
+        "Storyteller": _phase1_leaf_node(
+            BrandStoryOutput(
+                brand_story="Origin story.",
+                hero_narrative="Hero.",
+                boilerplate_variants=["short", "medium", "long"],
+            )
+        )
+    }
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        nested_results["Storyteller"].get_agent_results.return_value[0]
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase2_narrative": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase2_narrative", NarrativeMessagingOutput
+    )
+
+    assert degraded is True
+    assert output == NarrativeMessagingOutput()
+    assert output.brand_story == ""
+    assert output.tagline == ""
 
 
 def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
