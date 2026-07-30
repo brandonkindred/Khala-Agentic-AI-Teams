@@ -938,6 +938,116 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     ]
 
 
+def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
+    """Later carry-forward dumps must not overwrite earlier specialists' fields.
+
+    A real LLM may rewrite inherited ``brand_story`` when Voice emits its
+    cumulative payload; merge keeps Storyteller's authoritative value.
+    """
+    _story = dict(
+        brand_story="Authoritative origin from Storyteller.",
+        hero_narrative="Authoritative hero from Storyteller.",
+        boilerplate_variants=["short bio", "medium bio", "long bio"],
+    )
+    _rewritten = dict(
+        brand_story="Rewritten by VoicePrinciplesDrafter.",
+        hero_narrative="Rewritten hero.",
+        boilerplate_variants=["v-short", "v-medium", "v-long"],
+    )
+    _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
+    _pitches = [
+        ElevatorPitch(tier="5-second", pitch="a"),
+        ElevatorPitch(tier="30-second", pitch="b"),
+        ElevatorPitch(tier="2-minute", pitch="c"),
+    ]
+    _pillars = [
+        MessagingPillar(pillar="Cohesion"),
+        MessagingPillar(pillar="Speed"),
+        MessagingPillar(pillar="Clarity"),
+    ]
+    _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
+    _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
+    guidelines = WritingGuidelinesBody(
+        voice_principles=["Confident", "Human", "Concrete"],
+        style_dos=["Lead with outcome", "Use active voice", "Name the audience"],
+        style_donts=["Empty superlatives", "Bury the offer", "Mix slang with claims"],
+        editorial_quality_bar=["States who it's for", "Cites proof", "Matches tone"],
+    )
+    nested_results = {
+        "Storyteller": _phase1_leaf_node(BrandStoryOutput(**_story)),
+        "ArchetypeAnalyst": _phase1_leaf_node(
+            BrandArchetypesOutput(**_rewritten, brand_archetypes=_archetypes)
+        ),
+        "TaglineWriter": _phase1_leaf_node(
+            TaglineOutput(
+                **_rewritten,
+                brand_archetypes=_archetypes,
+                tagline="Ship brand with the product",
+                tagline_rationale="Ties cohesion to shipping speed.",
+                elevator_pitches=_pitches,
+            )
+        ),
+        "MessageMapper": _phase1_leaf_node(
+            MessagingFrameworkOutput(
+                **_rewritten,
+                brand_archetypes=_archetypes,
+                tagline="Ship brand with the product",
+                tagline_rationale="Ties cohesion to shipping speed.",
+                elevator_pitches=_pitches,
+                messaging_framework=_pillars,
+                audience_message_maps=_maps,
+            )
+        ),
+        "PersonaBuilder": _phase1_leaf_node(
+            PersonaProfilesOutput(
+                **_rewritten,
+                brand_archetypes=_archetypes,
+                tagline="Ship brand with the product",
+                tagline_rationale="Ties cohesion to shipping speed.",
+                elevator_pitches=_pitches,
+                messaging_framework=_pillars,
+                audience_message_maps=_maps,
+                persona_profiles=_personas,
+            )
+        ),
+        "VoicePrinciplesDrafter": _phase1_leaf_node(
+            WritingGuidelinesOutput(
+                **_rewritten,
+                brand_archetypes=_archetypes,
+                tagline="Ship brand with the product",
+                tagline_rationale="Ties cohesion to shipping speed.",
+                elevator_pitches=_pitches,
+                messaging_framework=_pillars,
+                audience_message_maps=_maps,
+                persona_profiles=_personas,
+                writing_guidelines=guidelines,
+            )
+        ),
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+    mock_result = MagicMock()
+    mock_result.result = {"phase2_narrative": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase2_narrative", NarrativeMessagingOutput
+    )
+
+    assert degraded is False
+    assert output.brand_story == "Authoritative origin from Storyteller."
+    assert output.hero_narrative == "Authoritative hero from Storyteller."
+    assert output.boilerplate_variants == ["short bio", "medium bio", "long bio"]
+    assert [a.archetype for a in output.brand_archetypes] == ["The Creator"]
+    assert output.tagline == "Ship brand with the product"
+    assert output.writing_guidelines.voice_principles == ["Confident", "Human", "Concrete"]
+
+
 def test_extract_phase_output_rejects_incomplete_phase2_fragments() -> None:
     """A Phase 2 run that only produced Storyteller must not validate as a
     complete NarrativeMessagingOutput via field defaults (the structured_output

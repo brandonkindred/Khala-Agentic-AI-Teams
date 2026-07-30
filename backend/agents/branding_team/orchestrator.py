@@ -682,10 +682,10 @@ _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
 
 # Phase 2 linear Graph node id -> nest-under key on NarrativeMessagingOutput,
 # or None to merge fields in flat. Each specialist's structured_output is a
-# cumulative carry-forward model (see models.py), so merging any subset of
-# node dumps is field-compatible; require_all still insists every specialist
-# actually ran. VoicePrinciplesDrafter already nests writing_guidelines in its
-# own schema — no remap needed.
+# cumulative carry-forward model (see models.py). Merge uses prefer_first so
+# upstream-owned keys are not overwritten by later re-emissions; require_all
+# still insists every specialist actually ran. VoicePrinciplesDrafter already
+# nests writing_guidelines in its own schema — no remap needed.
 _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
     "Storyteller": None,
     "ArchetypeAnalyst": None,
@@ -702,6 +702,7 @@ def _merge_named_fragments(
     node_merge: dict[str, Optional[str]],
     *,
     require_all: bool = False,
+    prefer_first: bool = False,
 ) -> Optional[BaseModel]:
     """Merge every recognized child's ``structured_output`` into one phase output.
 
@@ -722,6 +723,11 @@ def _merge_named_fragments(
         True and at least one id is missing, or the merged data fails
         validation — in every None case the caller falls back to its existing
         single-agent-result logic unchanged.
+
+        When ``prefer_first`` is True, the first child that sets a flat key
+        wins (later dumps do not overwrite). Phase 2 needs this because each
+        specialist's cumulative ``structured_output`` re-emits upstream fields
+        that a real LLM may rewrite.
     """
     nested_results = getattr(getattr(node_result, "result", None), "results", None)
     if not isinstance(nested_results, dict):
@@ -742,7 +748,12 @@ def _merge_named_fragments(
         found_ids.add(child_node_id)
         data = structured.model_dump()
         if nest_under:
+            if prefer_first and nest_under in merged:
+                continue
             merged[nest_under] = data
+        elif prefer_first:
+            for key, value in data.items():
+                merged.setdefault(key, value)
         else:
             merged.update(data)
 
@@ -793,6 +804,10 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     — a partial run (e.g. entry agent only) must not validate as a complete
     ``NarrativeMessagingOutput`` via field defaults.
 
+    Cumulative carry-forward models re-emit upstream fields; merge keeps the
+    first value for each key so a later specialist cannot overwrite the
+    authoritative upstream fragment (e.g. Voice rewriting ``brand_story``).
+
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
         (may or may not wrap a nested multi-agent result).
@@ -803,7 +818,9 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
         the merged data fails validation — same None contract as
         ``_merge_phase1_fragments``.
     """
-    return _merge_named_fragments(node_result, model_class, _PHASE2_NODE_MERGE, require_all=True)
+    return _merge_named_fragments(
+        node_result, model_class, _PHASE2_NODE_MERGE, require_all=True, prefer_first=True
+    )
 
 
 def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
