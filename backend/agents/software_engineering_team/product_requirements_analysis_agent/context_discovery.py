@@ -36,7 +36,7 @@ def run_context_constraints_discovery(
     Postconditions: returns a non-empty question list — the LLM's when valid, else the
         fixed fallback; never raises.
     """
-    spec_excerpt = (spec_content or "")
+    spec_excerpt = spec_content or ""
     prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
     try:
         parsed = call_llm_json(model, prompt)
@@ -45,7 +45,15 @@ def run_context_constraints_discovery(
             return _context_discovery_fallback_questions()
         out: List[OpenQuestion] = []
         for i, q_data in enumerate(questions_data):
-            q = parse_open_question(q_data, i)
+            try:
+                q = parse_open_question(q_data, i)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping malformed context-discovery question at index %d: %s",
+                    i,
+                    exc,
+                )
+                continue
             if q.source == "spec_review":
                 q = q.model_copy(update={"source": "context_discovery"})
             out.append(q)

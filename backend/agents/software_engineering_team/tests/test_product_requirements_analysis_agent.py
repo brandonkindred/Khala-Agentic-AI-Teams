@@ -329,8 +329,12 @@ def test_run_workflow_uses_next_version_after_existing_v6(tmp_path: Path) -> Non
     update_spec_calls = []
 
     def capture_update_spec(*args, **kwargs):
-        update_spec_calls.append(kwargs.get("version") or (args[3] if len(args) > 3 else None))
-        return kwargs.get("current_spec", args[0] if args else "") + "\n# Updated"
+        version = kwargs["version"] if "version" in kwargs else (args[3] if len(args) > 3 else None)
+        update_spec_calls.append(version)
+        current_spec = (
+            kwargs["current_spec"] if "current_spec" in kwargs else (args[0] if args else "")
+        )
+        return current_spec + "\n# Updated"
 
     agent._update_spec = MagicMock(side_effect=capture_update_spec)
 
@@ -474,8 +478,12 @@ def test_run_workflow_renames_validated_spec_when_needs_more_detail(tmp_path: Pa
     update_spec_calls = []
 
     def capture_update_spec(*args, **kwargs):
-        update_spec_calls.append(kwargs.get("version") or (args[3] if len(args) > 3 else None))
-        return kwargs.get("current_spec", args[0] if args else "") + "\n# Updated"
+        version = kwargs["version"] if "version" in kwargs else (args[3] if len(args) > 3 else None)
+        update_spec_calls.append(version)
+        current_spec = (
+            kwargs["current_spec"] if "current_spec" in kwargs else (args[0] if args else "")
+        )
+        return current_spec + "\n# Updated"
 
     agent._update_spec = MagicMock(side_effect=capture_update_spec)
 
@@ -3248,7 +3256,7 @@ def test_filter_duplicate_questions_preserves_lexical_doubled_consonants() -> No
 
 
 def test_filter_duplicate_questions_preserves_lexical_ff_doubles() -> None:
-    """sniffed/staffed keep lexical ff (not sniff→snif / staff→staf)."""
+    """Inflectional sniffed/staffed stay lexical sniff/staff and match as duplicates."""
     questions = [OpenQuestion(id="q1", question_text="Which probes sniff staff traffic?")]
     qa_history = (
         "Q: Which probes sniffed staff traffic during soak tests?\n"
@@ -3756,6 +3764,68 @@ def test_filter_duplicate_questions_does_not_equate_unrelated_silent_e_pairs() -
 
     assert filtered == questions
     assert duplicates == []
+
+
+def test_filter_duplicate_questions_matches_short_british_l_inflections() -> None:
+    """fuelled/dialled/duelled undouble to fuel/dial/duel while billed stays lexical."""
+    questions = [OpenQuestion(id="q1", question_text="Which fuel dial duel checks apply?")]
+    qa_history = (
+        "Q: Which fuelled dialled duelled checks apply after billed work?\n"
+        "A: Documented fuelled dialled duelled checks apply after billed work."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_long_silent_e_ses() -> None:
+    """promises/advises/enterprises restore silent-e; statuses stay exact status."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which promise advise enterprise status apply?")
+    ]
+    qa_history = (
+        "Q: Which promises advises enterprises statuses apply after review?\n"
+        "A: Documented promises advises enterprises statuses apply after review."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_complete_o_nouns() -> None:
+    """mangoes/cargoes/dominoes/buffaloes exact-match mango/cargo/domino/buffalo."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which mango cargo domino buffalo catalogs ship?")
+    ]
+    qa_history = (
+        "Q: Which mangoes cargoes dominoes buffaloes catalogs ship after echoes clear?\n"
+        "A: Catalog mangoes cargoes dominoes buffaloes ship after echoes clear."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_long_silent_e_ches() -> None:
+    """headaches/avalanches/quiches restore silent-e; arches/speeches stay exact."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which headache avalanche quiche limits apply after?")
+    ]
+    qa_history = (
+        "Q: Which headaches avalanches quiches limits apply after arches speeches?\n"
+        "A: Documented headaches avalanches quiches limits apply after arches speeches."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
 
 
 def test_filter_duplicate_questions_keeps_non_duplicate() -> None:

@@ -45,8 +45,9 @@ def cap_open_questions(
 
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`; ``limit`` >= 0.
     Postconditions: returns ``questions`` unchanged when ``len(questions) <= limit``,
-        otherwise the first ``limit`` items; never raises.
+        otherwise the first ``limit`` items; never raises for valid inputs.
     """
+    assert isinstance(questions, list), "questions must be a list"
     assert limit >= 0, f"limit must be >= 0, got {limit}"
     if len(questions) <= limit:
         return list(questions)
@@ -72,8 +73,155 @@ ORGANIZATIONAL_PHRASES = [
 
 
 def _clean_token(w: str) -> str:
-    """Strip punctuation so tokens like 'store?' match their bare form."""
+    """Strip punctuation so tokens like 'store?' match their bare form.
+
+    Preconditions: ``w`` is a string.
+    Postconditions: returns the lowercase-ready alphanumeric core; never raises.
+    """
     return re.sub(r"[^a-z0-9]", "", w.strip())
+
+
+_LEXICAL_LL = frozenset(
+    {
+        "appall",
+        "distill",
+        "enrol",
+        "enroll",
+        "forestall",
+        "fulfil",
+        "fulfill",
+        "install",
+        "instill",
+        "misspell",
+        "quell",
+        "recall",
+        "reinstall",
+        "scroll",
+        "thrill",
+        "uninstall",
+    }
+)
+_SHORT_LL_CORES = frozenset(
+    {
+        "ball",
+        "bill",
+        "call",
+        "chill",
+        "drill",
+        "fall",
+        "fill",
+        "kill",
+        "pull",
+        "roll",
+        "sell",
+        "shell",
+        "small",
+        "spell",
+        "spill",
+        "stall",
+        "swell",
+        "tell",
+        "wall",
+        "will",
+    }
+)
+_LL_PREFIXES = frozenset(
+    {
+        "back",
+        "down",
+        "mis",
+        "out",
+        "over",
+        "pre",
+        "re",
+        "un",
+        "under",
+        "up",
+    }
+)
+_LEXICAL_TT = frozenset(
+    {
+        "batt",
+        "boycott",
+        "butt",
+        "mitt",
+        "putt",
+        "watt",
+    }
+)
+_COMPLETE_SES_BASES = frozenset({"bus", "gas"})
+_INSERT_K_STEMS = frozenset(
+    {
+        "frolick",
+        "mimick",
+        "panick",
+        "picnick",
+        "traffick",
+    }
+)
+# Silent-e -oes stubs (shoe/canoe/oboe); other -oes forms are complete -o nouns.
+_SILENT_E_OES_BASES = frozenset({"sho", "cano", "obo"})
+# Silent-e -ches stubs that do not match the vowel-immediately-before-ch pattern.
+_SILENT_E_CH_BASES = frozenset({"quich", "pastich"})
+# Complete vowel+ch singulars that must not take silent-e restoration.
+_COMPLETE_VOWEL_CH = frozenset(
+    {
+        "beach",
+        "leech",
+        "mooch",
+        "peach",
+        "pooch",
+        "reach",
+        "speech",
+        "teach",
+    }
+)
+
+
+def _undouble_inflectional(base: str) -> str:
+    """Undouble only when -ed/-ing spelling doubled a final consonant.
+
+    Preconditions: ``base`` is a lowercase stem after suffix strip.
+    Postconditions: returns the undoubled stem when inflectional, else ``base``.
+        Lexical ``ll``/``tt``/``fsz`` doubles are preserved. Never raises.
+    """
+    vowels = set("aeiou")
+    if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
+        return base
+    doubled = base[-1]
+    if doubled in "fsz":
+        return base
+    if doubled == "l":
+        # Keep lexical cores/denylist/prefixes; default keep unknown ll.
+        if base in _SHORT_LL_CORES or base in _LEXICAL_LL:
+            return base
+        for core in _SHORT_LL_CORES:
+            if base.endswith(core) and base[: -len(core)] in _LL_PREFIXES:
+                return base
+        undoubled = base[:-1]
+        # Inflectional British -l doubling, including short bases (fuel/dial/duel).
+        if len(base) >= 5 and undoubled.endswith(("el", "ol", "al")) and len(undoubled) >= 3:
+            return undoubled
+        return base
+    if doubled == "t":
+        if base in _LEXICAL_TT or base.endswith("cott"):
+            return base
+        return base[:-1]
+    return base[:-1]
+
+
+def _strip_inserted_ck(base: str) -> str:
+    """Remove spelling-only k after known -c verbs only (mimick→mimic).
+
+    Preconditions: ``base`` is a lowercase stem after suffix strip / undoubling.
+    Postconditions: returns ``base`` without inserted ``k`` for allowlisted stems;
+        lexical ``-ick``/``-pick``/``-kick``/``-click`` forms are unchanged. Never raises.
+    """
+    if base.endswith(("pick", "kick", "click")):
+        return base
+    if base in _INSERT_K_STEMS or any(base.endswith(s) for s in _INSERT_K_STEMS):
+        return base[:-1]
+    return base
 
 
 def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
@@ -91,124 +239,9 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
     """
     w = w.strip()
     vowels = set("aeiou")
-    lexical_ll = frozenset(
-        {
-            "appall",
-            "distill",
-            "enrol",
-            "enroll",
-            "forestall",
-            "fulfil",
-            "fulfill",
-            "install",
-            "instill",
-            "misspell",
-            "quell",
-            "recall",
-            "reinstall",
-            "scroll",
-            "thrill",
-            "uninstall",
-        }
-    )
-    short_ll_cores = frozenset(
-        {
-            "ball",
-            "bill",
-            "call",
-            "chill",
-            "drill",
-            "fall",
-            "fill",
-            "kill",
-            "pull",
-            "roll",
-            "sell",
-            "shell",
-            "small",
-            "spell",
-            "spill",
-            "stall",
-            "swell",
-            "tell",
-            "wall",
-            "will",
-        }
-    )
-    ll_prefixes = frozenset(
-        {
-            "back",
-            "down",
-            "mis",
-            "out",
-            "over",
-            "pre",
-            "re",
-            "un",
-            "under",
-            "up",
-        }
-    )
-    lexical_tt = frozenset(
-        {
-            "batt",
-            "boycott",
-            "butt",
-            "mitt",
-            "putt",
-            "watt",
-        }
-    )
-    complete_ses_bases = frozenset({"bus", "gas"})
-    insert_k_stems = frozenset(
-        {
-            "frolick",
-            "mimick",
-            "panick",
-            "picnick",
-            "traffick",
-        }
-    )
-
-    def _undouble_inflectional(base: str) -> str:
-        """Undouble only when -ed/-ing spelling doubled a final consonant."""
-        if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
-            return base
-        doubled = base[-1]
-        if doubled in "fsz":
-            return base
-        if doubled == "l":
-            # Keep lexical cores/denylist/prefixes; default keep unknown ll.
-            if base in short_ll_cores or base in lexical_ll:
-                return base
-            for core in short_ll_cores:
-                if base.endswith(core) and base[: -len(core)] in ll_prefixes:
-                    return base
-            undoubled = base[:-1]
-            # Inflectional British -l doubling: control/compel/signal/equal/cancel/...
-            if len(base) >= 6 and undoubled.endswith(("el", "ol", "al")) and len(undoubled) >= 3:
-                return undoubled
-            return base
-        if doubled == "t":
-            if base in lexical_tt or base.endswith("cott"):
-                return base
-            return base[:-1]
-        return base[:-1]
-
-    def _strip_inserted_ck(base: str) -> str:
-        """Remove spelling-only k after known -c verbs only (mimick→mimic).
-
-        Keep lexical ``-ick`` verbs (``unbrick``, ``lipstick``, ``bootlick``)
-        and ``-pick``/``-kick``/``-click`` compounds.
-        """
-        if base.endswith(("pick", "kick", "click")):
-            return base
-        if base in insert_k_stems or any(base.endswith(s) for s in insert_k_stems):
-            return base[:-1]
-        return base
 
     if w in {"uses", "used"}:
-        # Third-person / past of use (len 4) must not fall through short-token guard.
+        # Third-person / past of use (len 5) must not fall through short-token guard.
         return "use", False, False, True
 
     if w.endswith("ied") and len(w) >= 4:
@@ -254,28 +287,33 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         return base, True, False, False
     if w.endswith("ches") and len(w) > 4:
         base = w[:-2]
-        if base.endswith("tch") or len(base) >= 5:
+        if base.endswith("tch") or base in _COMPLETE_VOWEL_CH:
             return base, False, False, True
-        if len(base) >= 3 and base[-3] in vowels:
+        # Silent-e: *ache/*anche/*iche and short vowel+ch (cache); else exact (arch).
+        if (
+            (base.endswith("ach") and not base.endswith(("beach", "peach")))
+            or base.endswith("anch")
+            or base in _SILENT_E_CH_BASES
+            or (len(base) == 4 and base[-3] in vowels)
+        ):
             return base, True, False, False
         return base, False, False, True
     if w.endswith("shes") and len(w) > 4:
         return w[:-2], False, False, True
     if w.endswith("ses") and len(w) > 4:
         base = w[:-2]
-        # Latinate complete singulars need len>=5 so hous/clos/ris stay silent-e.
-        if (base.endswith(("us", "is", "os")) and len(base) >= 5) or base in complete_ses_bases:
+        # Exact for Latinate -us/-os (status/focus); -is stubs like promis/advis
+        # need silent-e (promise/advise). Short bus/gas stay exact.
+        if (base.endswith(("us", "os")) and len(base) >= 5) or base in _COMPLETE_SES_BASES:
             return base, False, False, True
         return base, True, False, False
     if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
         base = w[:-2]
-        # Complete -o nouns (echo/hero/potato/volcano); silent-e for shoe/canoe/oboe.
-        # Require len>=6 for -ano so canoes→canoe, not exact cano.
-        if base.endswith(("cho", "ero", "ato", "ado", "edo", "eto", "emo", "ito")) or (
-            base.endswith("ano") and len(base) >= 6
-        ):
-            return base, False, False, True
-        return base, True, False, False
+        # Silent-e allowlist (shoe/canoe/oboe); other -oes are complete -o nouns
+        # (echo/mango/cargo/domino/buffalo/...).
+        if base in _SILENT_E_OES_BASES:
+            return base, True, False, False
+        return base, False, False, True
     if w.endswith("s") and len(w) > 4 and not w.endswith(("ss", "us", "is")):
         singular = w[:-1]
         if singular.endswith("ing") and len(singular) > 5:
@@ -342,7 +380,9 @@ def filter_duplicate_questions(
     Preconditions: ``new_questions`` is a list of :class:`OpenQuestion`;
         ``qa_history`` is a string.
     Postconditions: the two returned lists partition ``new_questions`` (order
-        preserved within each); never raises.
+        preserved within each). Never raises for well-typed inputs
+        (``List[OpenQuestion]``, ``str``); ``_stem_info`` / ``_clean_token`` are
+        total over cleaned lowercase tokens.
     """
     qa_history_lower = (qa_history or "").lower()
     filtered = []
@@ -493,7 +533,11 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         issues=issues,
         gaps=gaps,
         open_questions=open_questions,
-        summary=str(raw.get("summary") or "Spec review complete"),
+        summary=(
+            str(raw["summary"])
+            if "summary" in raw and raw["summary"] is not None
+            else "Spec review complete"
+        ),
     )
 
 
@@ -592,9 +636,10 @@ def _coerce_list(value: Any, *, allow_str: bool = False, allow_dict: bool = Fals
     """Coerce LLM-provided list-valued output to a list.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns a list.
+    Postconditions: returns a new list containing the same elements; does not
+        mutate the original value. Nested objects are referenced, not deep-copied.
         - None -> []
-        - list/tuple -> list(value)
+        - list/tuple -> list(value) (shallow copy)
         - string -> [value] when ``allow_str`` is True
         - dict -> [value] when ``allow_dict`` is True
         - any other scalar -> []
@@ -627,12 +672,12 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
         - A present non-string ``id`` or ``question_text`` raises ``ValueError``
           (missing ``id`` / ``question_text`` still fall back to ``q{index}`` /
           ``""``).
-        - The coercions above cover every known malformed-input shape from an
-          LLM response, but this function has no top-level try/except of its
-          own: it does not guarantee never raising in the face of an
-          unanticipated input, and every production caller (parse_spec_review_response,
-          consolidate_open_questions, review_question_answer_alignment,
-          run_context_constraints_discovery) wraps it accordingly.
+        - This function has no top-level try/except of its own and may raise on
+          unanticipated input. Callers handle failures differently:
+          ``parse_spec_review_response``, ``consolidate_open_questions``, and
+          ``review_question_answer_alignment`` catch per item;
+          ``run_context_constraints_discovery`` catches per item and falls back
+          to the fixed list when none parse.
     """
     if isinstance(q_data, dict):
         raw_options = _coerce_list(q_data.get("options", []), allow_str=True, allow_dict=True)
@@ -644,13 +689,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
                 logger.warning("Skipping malformed question option at index %d: %s", i, exc)
 
         if options and not any(opt.is_default for opt in options):
-            default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
+            best = max(options, key=lambda opt: opt.confidence)
+            default_idx = options.index(best)
             options[default_idx] = QuestionOption(
-                id=options[default_idx].id,
-                label=options[default_idx].label,
+                id=best.id,
+                label=best.label,
                 is_default=True,
-                rationale=options[default_idx].rationale,
-                confidence=options[default_idx].confidence,
+                rationale=best.rationale,
+                confidence=best.confidence,
             )
 
         raw_depends = q_data.get("depends_on")
@@ -775,8 +821,8 @@ def dedupe_questions_by_answer_similarity(
     if not open_questions:
         return list(open_questions)
 
-    def norm(t: str) -> str:
-        return " ".join((t or "").lower().split()).strip()
+    def norm(t: Any) -> str:
+        return " ".join(str(t or "").lower().split()).strip()
 
     # Build set of existing answers (normalized) we already have.
     # Keep a list for stable iteration order during SequenceMatcher checks.
@@ -788,8 +834,9 @@ def dedupe_questions_by_answer_similarity(
             if s not in existing_answers_set:
                 existing_answers.append(s)
                 existing_answers_set.add(s)
-        if getattr(aq, "other_text", None) and aq.other_text.strip():
-            o = norm(aq.other_text)
+        other = getattr(aq, "other_text", None)
+        if other is not None and str(other).strip():
+            o = norm(other)
             if o and o not in existing_answers_set:
                 existing_answers.append(o)
                 existing_answers_set.add(o)
