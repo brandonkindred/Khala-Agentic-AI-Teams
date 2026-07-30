@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,9 +83,10 @@ _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
 MAX_LEGACY_TITLE_LENGTH: int = 120
 
 _NEGATION_TOKENS = frozenset({"not", "no", "non"})
-# Strip both leading and trailing wrappers so "(production)", "\"prod\"", and
-# Markdown `` `production` `` still match the way the old ``\\b`` regex did.
-_TOKEN_STRIP_CHARS = ",.!?;:()[]{}\"'`"
+# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher:
+# alphanumerics + underscore, split on any other separator (``/``, Markdown
+# punctuation, em dashes, whitespace, hyphens, etc.).
+_LEGACY_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
 
 
 def _legacy_environment_from_text(combined_text: str) -> str:
@@ -93,17 +95,16 @@ def _legacy_environment_from_text(combined_text: str) -> str:
     Preconditions:
         - ``combined_text`` is a str (may be empty); caller lowercases input.
     Postconditions:
-        - Returns ``\"production\"`` iff some token equals ``prod`` or ``production``
-          (leading/trailing punctuation and wrappers stripped) and the
-          immediately preceding token is not a negation token (``not``, ``no``,
-          ``non``). Hyphenated forms like ``non-production`` count as negated
-          (leading ``non`` segment).
+        - Returns ``\"production\"`` iff some word token equals ``prod`` or
+          ``production`` and the immediately preceding word token is not a
+          negation token (``not``, ``no``, ``non``). Separators (``/``, hyphens,
+          Markdown link punctuation, em dashes, wrappers) do not glue tokens
+          together — e.g. ``production/blue``, ``[production](...)``, and
+          ``non-production`` yield distinct tokens.
         - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
     """
     assert isinstance(combined_text, str), "combined_text must be a str"
-    # Split on whitespace and hyphens so "non-production" -> ["non", "production"].
-    raw_tokens = combined_text.replace("-", " ").split()
-    tokens = [t.strip(_TOKEN_STRIP_CHARS) for t in raw_tokens]
+    tokens = _LEGACY_WORD_TOKEN.findall(combined_text)
     for i, token in enumerate(tokens):
         if token not in ("prod", "production"):
             continue

@@ -1907,6 +1907,30 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "production"
 
+    def test_build_legacy_spec_recognizes_production_slash_suffix(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-sep-1",
+            task_description="Deploy production/blue",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_recognizes_markdown_link_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-sep-2",
+            task_description="Deploy [production](https://example.com)",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_recognizes_emdash_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-sep-3",
+            task_description="production—canary rollout",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
     def test_build_legacy_spec_always_has_rollback(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-3",
