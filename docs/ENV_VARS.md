@@ -654,16 +654,19 @@ single verify activity — see `CODE_REVIEW_VERIFY_TIMEOUT_SECONDS` below), so
 this ceiling still bounds *verification* concurrency in all dispatch modes.
 
 ### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
-Int (default `300`, floor `1`). Per-group timeout for the false-positive
+Int (default `3600`, floor `1`). Per-group timeout for the false-positive
 verification phase's LLM calls (one call per cited file, fanned out across
 `CODE_REVIEW_MAP_PARALLELISM` worker threads when there is more than one
-group). A group whose verification call exceeds this timeout is treated the
-same as any other verification failure — fail-safe: its findings are kept
-and a warning is logged — rather than blocking the rest of the phase
-indefinitely. Unlike `CODE_REVIEW_MAP_PARALLELISM`'s map-phase restriction,
-this applies in **both** dispatch modes: the verification phase always runs
-its per-file calls via an in-process `ThreadPoolExecutor`, even under the
-default Temporal dispatch mode, where it executes inside the single
+group). The default matches the Temporal verify activity's 60-minute
+`start_to_close` budget so a tool-using verifier agent on a slow host is not
+cut off mid-call while the activity still has wall-clock left. A group whose
+verification call exceeds this timeout is treated the same as any other
+verification failure — fail-safe: its findings are kept and a warning is
+logged — rather than blocking the rest of the phase indefinitely. Unlike
+`CODE_REVIEW_MAP_PARALLELISM`'s map-phase restriction, this applies in
+**both** dispatch modes: the verification phase always runs its per-file
+calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
+dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
