@@ -1883,6 +1883,30 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "staging"
 
+    def test_build_legacy_spec_ignores_do_not_deploy_to_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-phrase-1",
+            task_description="Do not deploy to production",
+            requirements="staging only",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_ignores_not_for_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-phrase-2",
+            task_description="Build artifacts not for production",
+            requirements="Use staging environments",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_ignores_no_production_access_allowed(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-phrase-3",
+            task_description="No production access is allowed; staging only",
+            requirements="Keep all traffic in staging",
+        )
+        assert spec.environment == "staging"
+
     def test_build_legacy_spec_missing_production_approval_still_production(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-neg-safeguard",

@@ -83,8 +83,12 @@ _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
 MAX_LEGACY_TITLE_LENGTH: int = 120
 
 _NEGATION_TOKENS = frozenset({"not", "no", "non"})
-# After a ``no``/``not`` + prod token, these indicate a missing production
-# *control* (still a production concern) rather than excluding production.
+# Skippable fillers between a negation and a prod token ("not deploy to production").
+_NEGATION_INTERVENING_TOKENS = frozenset(
+    {"to", "for", "into", "on", "deploy", "deploying", "deployment", "the", "a", "an"}
+)
+# After a ``no``/``not`` + prod token, these may indicate a production *control*
+# under discussion rather than excluding production as a target.
 _PROD_SAFEGUARD_TOKENS = frozenset(
     {
         "approval",
@@ -105,11 +109,64 @@ _PROD_SAFEGUARD_TOKENS = frozenset(
         "signoff",
     }
 )
+# With a safeguard noun, these mark an explicit prohibition → still staging.
+_PROD_PROHIBITION_TOKENS = frozenset(
+    {
+        "allowed",
+        "allow",
+        "permitted",
+        "permit",
+        "forbidden",
+        "denied",
+        "prohibited",
+        "excluded",
+        "exclude",
+    }
+)
+# With a safeguard noun, these mark a missing/absent control → production work.
+_PROD_MISSING_CONTROL_TOKENS = frozenset(
+    {
+        "configured",
+        "missing",
+        "absent",
+        "needed",
+        "need",
+        "add",
+        "adds",
+        "require",
+        "requires",
+        "required",
+        "lacking",
+        "lack",
+    }
+)
 # Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher:
 # alphanumerics + underscore, split on any other separator (``/``, Markdown
 # punctuation, em dashes, whitespace, hyphens, etc.).
 _LEGACY_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
-_PROD_SAFEGUARD_LOOKAHEAD = 3
+_PROD_CONTEXT_LOOKAHEAD = 5
+
+
+def _negation_token_before(tokens: List[str], prod_index: int) -> Optional[str]:
+    """Return the negation token governing ``tokens[prod_index]``, if any.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens.
+        - ``0 <= prod_index < len(tokens)``.
+    Postconditions:
+        - Returns ``non`` / ``no`` / ``not`` when that token immediately
+          precedes the prod token, or when only intervening fillers from
+          ``_NEGATION_INTERVENING_TOKENS`` sit between them
+          (e.g. ``not deploy to production``, ``not for production``).
+        - Returns ``None`` when no such negation governs the prod token.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    j = prod_index - 1
+    while j >= 0 and tokens[j] in _NEGATION_INTERVENING_TOKENS:
+        j -= 1
+    if j >= 0 and tokens[j] in _NEGATION_TOKENS:
+        return tokens[j]
+    return None
 
 
 def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
@@ -120,27 +177,34 @@ def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
         - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
           ``prod`` or ``production``.
     Postconditions:
-        - ``non`` immediately before the prod token always counts as negation
+        - ``non`` governing the prod token always counts as negation
           (``non-production``).
-        - ``no`` / ``not`` immediately before counts as negation unless one of
-          the next ``_PROD_SAFEGUARD_LOOKAHEAD`` tokens is a production-
-          safeguard noun (e.g. ``approval``, ``gate``), which means the text
-          is about a missing production control rather than excluding production.
+        - ``no`` / ``not`` governing the prod token (allowing intervening
+          fillers like ``to`` / ``for`` / ``deploy``) counts as negation
+          unless the following context describes a *missing* production
+          control (safeguard noun + missing-control cue such as
+          ``configured`` / ``add``). An explicit prohibition after a
+          safeguard noun (e.g. ``no production access is allowed``) remains
+          negation / staging.
         - Otherwise returns False.
     """
     assert 0 <= prod_index < len(tokens), "prod_index out of range"
     assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
-    if prod_index == 0:
+    neg = _negation_token_before(tokens, prod_index)
+    if neg is None:
         return False
-    prev = tokens[prod_index - 1]
-    if prev not in _NEGATION_TOKENS:
-        return False
-    if prev == "non":
+    if neg == "non":
         return True
-    window = tokens[prod_index + 1 : prod_index + 1 + _PROD_SAFEGUARD_LOOKAHEAD]
-    if any(t in _PROD_SAFEGUARD_TOKENS for t in window):
+    window = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
+    has_safeguard = any(t in _PROD_SAFEGUARD_TOKENS for t in window)
+    if not has_safeguard:
+        return True
+    if any(t in _PROD_PROHIBITION_TOKENS for t in window):
+        return True
+    if any(t in _PROD_MISSING_CONTROL_TOKENS for t in window):
         return False
-    return True
+    # Safeguard noun without prohibition/missing cue: treat as production concern.
+    return False
 
 
 def _legacy_environment_from_text(combined_text: str) -> str:
@@ -155,9 +219,11 @@ def _legacy_environment_from_text(combined_text: str) -> str:
           hyphens, Markdown link punctuation, em dashes, wrappers) do not glue
           tokens together — e.g. ``production/blue``, ``[production](...)``, and
           ``non-production`` yield distinct tokens.
-        - Phrases like ``no production approval gate`` still map to production
-          (missing-safeguard wording); ``non-production``, ``not prod``, and
-          ``no production traffic`` map to staging.
+        - Exclusion phrases include ``non-production``, ``not prod``,
+          ``no production traffic``, ``do not deploy to production``,
+          ``not for production``, and ``no production access is allowed``.
+        - Missing-control wording such as ``no production approval gate is
+          configured; add one`` still maps to production.
         - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
     """
     assert isinstance(combined_text, str), "combined_text must be a str"
