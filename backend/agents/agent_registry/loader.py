@@ -380,7 +380,13 @@ class AgentRegistry:
                 return None
             return self._by_id.get(agent_id) if agent_id in self._unconfirmed else None
 
-    def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
+    def register(
+        self,
+        manifest: AgentManifest,
+        source_path: Path | None = None,
+        *,
+        require_persist: bool = False,
+    ) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
 
         Disk discovery (:meth:`load`) is the norm; teams that *generate* agents at
@@ -390,16 +396,26 @@ class AgentRegistry:
         Preconditions:
             * ``manifest.id`` is non-empty.
         Postconditions:
-            * ``get(manifest.id)`` returns ``manifest`` (re-registering the same id
-              overwrites the prior entry). Always updates this process's in-memory
-              view; when a dynamic store is active and ``manifest.id`` is not a
-              static/disk id, it is also persisted to Postgres so other workers and
-              the per-invoke sandbox resolve it. The write-through is best-effort —
-              a Postgres error is logged, never raised (callers like the generated
-              roster path hold a lock and swallow registry errors).
+            * On success, ``get(manifest.id)`` returns ``manifest`` (re-registering
+              the same id overwrites the prior entry). Always updates this process's
+              in-memory view; when a dynamic store is active and ``manifest.id`` is
+              not a static/disk id, it is also persisted to Postgres so other
+              workers and the per-invoke sandbox resolve it.
+            * Default write-through is best-effort — a Postgres error is logged,
+              never raised, and the local entry remains (``_unconfirmed``) so this
+              worker still sees read-your-writes.
+            * When ``require_persist`` is True and a dynamic store is active, a
+              Postgres upsert failure restores the prior local state (if any) and
+              re-raises so fail-closed callers (e.g. generated roster chat-save)
+              can roll back their DB write. When no store is active, local-only
+              registration still succeeds — there is nothing to persist.
         """
         assert manifest.id, "register: manifest.id must be non-empty"
         with self._lock:
+            prior_manifest = self._by_id.get(manifest.id)
+            prior_source = self._source_paths.get(manifest.id)
+            prior_tombstone = self._tombstones.get(manifest.id)
+            was_unconfirmed = manifest.id in self._unconfirmed
             self._by_id[manifest.id] = manifest
             if source_path is not None:
                 self._source_paths[manifest.id] = source_path
@@ -414,13 +430,36 @@ class AgentRegistry:
             if store is None:
                 # No active store to confirm against (Postgres off / in sandbox):
                 # the local copy is authoritative, so a store miss must never drop
-                # it. Treat as unconfirmed.
+                # it. Treat as unconfirmed. ``require_persist`` is a no-op here —
+                # there is no store that other workers could miss.
                 with self._lock:
                     self._unconfirmed.add(manifest.id)
                 return
             try:
                 store.upsert(manifest)
             except Exception:
+                if require_persist:
+                    # Undo the in-memory install so fail-closed callers do not leave
+                    # a half-registered local entry when their transaction rolls back.
+                    with self._lock:
+                        if prior_manifest is None:
+                            self._by_id.pop(manifest.id, None)
+                            self._source_paths.pop(manifest.id, None)
+                            self._unconfirmed.discard(manifest.id)
+                        else:
+                            self._by_id[manifest.id] = prior_manifest
+                            if prior_source is not None:
+                                self._source_paths[manifest.id] = prior_source
+                            elif source_path is not None:
+                                self._source_paths.pop(manifest.id, None)
+                            if was_unconfirmed:
+                                self._unconfirmed.add(manifest.id)
+                            else:
+                                self._unconfirmed.discard(manifest.id)
+                        if prior_tombstone is not None:
+                            self._tombstones[manifest.id] = prior_tombstone
+                            self._tombstones.move_to_end(manifest.id)
+                    raise
                 logger.warning(
                     "dynamic store upsert failed for %s; registered locally only",
                     manifest.id,

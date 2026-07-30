@@ -147,9 +147,51 @@ def test_register_never_persists_static_ids(fake_store: _FakeStore) -> None:
 def test_register_swallows_store_error(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
     fake_store.raise_on = {"upsert"}
-    # Must not raise — the generated path holds a lock and swallows registry errors.
+    # Default path is best-effort: local install survives a store upsert failure.
     reg.register(_manifest("agent_studio.err-1"))
     assert reg._by_id["agent_studio.err-1"].id == "agent_studio.err-1"
+
+
+def test_register_require_persist_raises_and_rolls_back_local(fake_store: _FakeStore) -> None:
+    reg = AgentRegistry([], {})
+    fake_store.raise_on = {"upsert"}
+    m = _manifest("agent_studio.strict-1")
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        reg.register(m, require_persist=True)
+    assert "agent_studio.strict-1" not in reg._by_id
+    assert "agent_studio.strict-1" not in reg._unconfirmed
+    assert "agent_studio.strict-1" not in fake_store.rows
+
+
+def test_register_require_persist_restores_prior_on_upsert_failure(
+    fake_store: _FakeStore,
+) -> None:
+    reg = AgentRegistry([], {})
+    prior = _manifest("agent_studio.strict-overwrite", name="Prior")
+    reg.register(prior)
+    assert "agent_studio.strict-overwrite" in fake_store.rows
+
+    fake_store.raise_on = {"upsert"}
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        reg.register(
+            _manifest("agent_studio.strict-overwrite", name="New"),
+            require_persist=True,
+        )
+    # Prior local entry restored; store still has the last successful upsert.
+    assert reg._by_id["agent_studio.strict-overwrite"].name == "Prior"
+    assert fake_store.rows["agent_studio.strict-overwrite"].name == "Prior"
+
+
+def test_register_require_persist_succeeds_when_store_inactive(
+    fake_store: _FakeStore,
+) -> None:
+    # No dynamic store → local-only is authoritative; require_persist is a no-op.
+    fake_store.active = False
+    reg = AgentRegistry([], {})
+    m = _manifest("agent_studio.strict-local")
+    reg.register(m, require_persist=True)
+    assert reg.get("agent_studio.strict-local") is m
+    assert "agent_studio.strict-local" in reg._unconfirmed
 
 
 def test_unregister_deletes_from_store(fake_store: _FakeStore) -> None:

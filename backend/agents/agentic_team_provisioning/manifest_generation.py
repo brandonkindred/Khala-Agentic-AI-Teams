@@ -211,6 +211,8 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
           Registry failures propagate — callers that must keep the DB roster and
           registry in sync (e.g. chat-save ``on_merged``) let the raise roll back
           the roster write; import-time retroactive registration wraps this call.
+          When a dynamic store is active, each ``register(..., require_persist=True)``
+          also fails closed on Postgres upsert errors (not just local-only installs).
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -244,5 +246,7 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     for agent_id in stale:
         registry.unregister(agent_id)
     for manifest in manifests:
-        registry.register(manifest)
+        # require_persist: other workers / invoke sandboxes only resolve manifests
+        # via the dynamic store; a local-only install must not let chat-save commit.
+        registry.register(manifest, require_persist=True)
     return manifests

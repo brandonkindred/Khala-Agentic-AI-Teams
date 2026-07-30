@@ -55,7 +55,10 @@ class _FakeRegistry:
         # would raise AttributeError and fail the register/unregister path).
         return [m for m in self._by_id.values() if m.id.startswith(prefix)]
 
-    def register(self, manifest: AgentManifest, source_path=None) -> None:
+    def register(
+        self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False
+    ) -> None:
+        del source_path, require_persist  # fake has no dynamic store to persist
         self._by_id[manifest.id] = manifest
 
     def unregister(self, agent_id: str) -> bool:
