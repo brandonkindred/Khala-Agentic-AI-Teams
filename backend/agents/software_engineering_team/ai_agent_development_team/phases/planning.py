@@ -6,7 +6,7 @@ from software_engineering_team.shared.llm import complete_json_with_continuation
 from software_engineering_team.shared.models import Task
 
 from ..models import IntakeResult, Microtask, PlanningResult, ToolAgentKind
-from ..prompts import PLANNING_PROMPT
+from ..prompts import planning_system_prompt
 
 
 def run_planning(
@@ -37,7 +37,7 @@ def run_planning(
         f"Task: {task.description}\n"
         f"Spec:\n{(spec_content or '')}"
     )
-    raw = complete_json_with_continuation(llm, prompt, system_prompt=PLANNING_PROMPT)
+    raw = complete_json_with_continuation(llm, prompt, system_prompt=planning_system_prompt())
     if not isinstance(raw, dict):
         raise ValueError(f"Planning LLM response is not a JSON object (got {type(raw).__name__})")
     microtasks = []

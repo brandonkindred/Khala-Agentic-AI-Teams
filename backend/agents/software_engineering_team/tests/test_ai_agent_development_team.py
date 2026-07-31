@@ -12,6 +12,10 @@ from software_engineering_team.ai_agent_development_team import constants as tea
 from software_engineering_team.ai_agent_development_team.constants import (
     REQUIRED_ARTIFACT_HINTS,
 )
+from software_engineering_team.ai_agent_development_team.prompts import (
+    intake_system_prompt,
+    planning_system_prompt,
+)
 from software_engineering_team.ai_agent_development_team.models import (
     ExecutionResult,
     IntakeResult,
@@ -116,6 +120,17 @@ def test_required_artifact_hints_tuple() -> None:
 def test_review_uses_shared_required_artifact_hints() -> None:
     """Review must import the team constant, not redefine the five-string tuple."""
     assert review_mod.REQUIRED_ARTIFACT_HINTS is team_constants.REQUIRED_ARTIFACT_HINTS
+
+
+def test_intake_and_planning_prompts_include_required_artifact_hints() -> None:
+    """Intake/planning system prompts list every shared artifact-category hint."""
+    intake = intake_system_prompt()
+    planning = planning_system_prompt()
+    for hint in REQUIRED_ARTIFACT_HINTS:
+        assert hint in intake
+        assert hint in planning
+    assert "spec intake specialist" in intake
+    assert "AI systems planner" in planning
 
 
 def test_ai_agent_development_workflow_success(tmp_path: Path):
