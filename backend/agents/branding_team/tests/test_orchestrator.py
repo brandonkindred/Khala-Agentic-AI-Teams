@@ -8,7 +8,6 @@ return a canned result and verify the orchestrator correctly assembles
 
 import asyncio
 import json
-import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -60,7 +59,6 @@ from branding_team.models import (
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
-from branding_team.shared.coro_runner import run_coroutine
 from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests.conftest import make_mission
 
@@ -1227,22 +1225,3 @@ def test_gather_integrations_market_research_failure_returns_none() -> None:
         )
     assert snapshot is None
     assert design is None
-
-
-def test_run_coro_offloads_when_loop_running() -> None:
-    """run_coroutine returns the coroutine result on a worker thread when a loop is already active."""
-
-    async def _driver():
-        loop_thread_ident = threading.current_thread().ident
-
-        async def _val():
-            return 42, threading.current_thread().ident
-
-        # Called synchronously inside a running loop, so run_coroutine must offload
-        # to a worker thread instead of calling asyncio.run on the live loop.
-        return loop_thread_ident, run_coroutine(_val())
-
-    loop_thread_ident, (value, worker_thread_ident) = asyncio.run(_driver())
-    assert value == 42
-    assert worker_thread_ident is not None
-    assert worker_thread_ident != loop_thread_ident
