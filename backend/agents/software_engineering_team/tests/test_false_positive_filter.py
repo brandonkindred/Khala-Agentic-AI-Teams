@@ -743,6 +743,34 @@ def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:
     assert _parse_verdicts({"verdicts": "not a list"}, 2) == {}
 
 
+def test_parse_verdicts_keeps_first_on_duplicate_index(caplog) -> None:
+    """Duplicate indices keep the first verdict and log a warning for later ones."""
+    data = {
+        "verdicts": [
+            {
+                "index": 0,
+                "is_real_issue": True,
+                "confidence": "high",
+                "reasoning": "first",
+            },
+            {
+                "index": 0,
+                "is_real_issue": False,
+                "confidence": "high",
+                "reasoning": "duplicate overwrite attempt",
+            },
+        ]
+    }
+    with caplog.at_level(logging.WARNING):
+        parsed = _parse_verdicts(data, count=1)
+    assert set(parsed) == {0}
+    assert parsed[0].is_false_positive is False
+    assert parsed[0].reasoning == "first"
+    assert any(
+        "duplicate verdict for index 0" in r.message for r in caplog.records
+    )
+
+
 # --------------------------------------------------------------------------- prompt
 
 
