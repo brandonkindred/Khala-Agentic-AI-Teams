@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
@@ -54,7 +55,7 @@ def test_team_schema_defaults():
 
 def test_team_schema_frozen():
     schema = TeamSchema(team="foo")
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         schema.team = "bar"  # type: ignore[misc]
 
 
