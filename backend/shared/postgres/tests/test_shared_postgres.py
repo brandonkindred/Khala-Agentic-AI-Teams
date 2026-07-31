@@ -196,7 +196,7 @@ def test_register_team_schemas_noop_for_every_schema_in_a_multi_schema_set(monke
     def _fail_if_called(*_a, **_k):
         raise AssertionError("get_conn must not be called when POSTGRES_HOST is unset")
 
-    monkeypatch.setattr("shared.postgres.client.get_conn", _fail_if_called)
+    monkeypatch.setattr(runner_mod, "get_conn", _fail_if_called)
 
     schemas = [
         TeamSchema(team="demo-primary", statements=["SELECT 1"]),
