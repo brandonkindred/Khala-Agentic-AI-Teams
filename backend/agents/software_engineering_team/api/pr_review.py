@@ -1135,21 +1135,12 @@ def _decide_review_mode(
         )
         return None
 
-    valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
-    # Lines the PR actually ADDED — narrower than valid_by_path, which also
-    # includes unchanged context lines (so a finding cited on one can still
-    # be anchored inline per map_issues_to_comments). Only an added line can
-    # override a reviewer's pre_existing tag below: a genuine pre-existing
-    # bug on an unchanged context line inside a modified hunk must still
-    # route to a proposal, not a PR comment.
-    changed_by_path = {f.filename: parse_valid_lines(f.patch, added_only=True) for f in files}
-
-    # "Nothing reviewable" gate, BEFORE any hunk rendering or whole-file
-    # fetch: `reviewable` applies the same non-removed+has-patch
+    # "Nothing reviewable" gate, BEFORE parse_valid_lines, hunk rendering, or
+    # whole-file fetch: `reviewable` applies the same non-removed+has-patch
     # predicate _build_review_code applies internally, so an empty set
     # here means _build_review_code(files) would also render "" — skip
-    # straight to the noop rather than paying for a hunk render or a
-    # head-content fetch that could only ever come back empty.
+    # straight to the noop rather than paying for line-map parsing, a hunk
+    # render, or a head-content fetch that could only ever come back empty.
     reviewable = {f.filename for f in files if _is_whole_file_reviewable(f)}
     if not reviewable:
         _complete_review_noop(
@@ -1163,6 +1154,15 @@ def _decide_review_mode(
             status_text="No reviewable file content",
         )
         return None
+
+    valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
+    # Lines the PR actually ADDED — narrower than valid_by_path, which also
+    # includes unchanged context lines (so a finding cited on one can still
+    # be anchored inline per map_issues_to_comments). Only an added line can
+    # override a reviewer's pre_existing tag below: a genuine pre-existing
+    # bug on an unchanged context line inside a modified hunk must still
+    # route to a proposal, not a PR comment.
+    changed_by_path = {f.filename: parse_valid_lines(f.patch, added_only=True) for f in files}
 
     # Prefer whole-file review over diff hunks: complete files remove
     # the hunk-boundary "truncation" false positive, and the repo
