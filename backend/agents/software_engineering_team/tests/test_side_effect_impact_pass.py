@@ -301,6 +301,9 @@ def test_search_repository_tool_reports_no_reader() -> None:
     index = CodebaseIndex(files={"app/main.py": "code"})
     search_repository = _build_side_effect_tools(index)[-1]
     assert "No repository access" in search_repository("bar")
+    doc = " ".join((search_repository.__doc__ or "").split()).lower()
+    assert "fall back" not in doc
+    assert "no repository access is available beyond the submission" in doc
 
 
 def test_search_repository_tool_reports_no_matches() -> None:

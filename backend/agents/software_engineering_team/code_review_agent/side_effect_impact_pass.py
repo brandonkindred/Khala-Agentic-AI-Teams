@@ -233,8 +233,8 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
         Use this to find callers of a changed function/method that live
         outside the diff -- ``search_codebase`` only searches the files shown
         in this prompt. Requires a repository reader to be attached to this
-        review; when none is attached, fall back to ``list_files()``/
-        ``read_file()``.
+        review; when none is attached, this tool reports that no repository
+        access is available beyond the submission.
 
         Args:
             query: The substring to search for (e.g. a function or class name).
