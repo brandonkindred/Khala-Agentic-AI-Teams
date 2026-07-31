@@ -1,22 +1,27 @@
 """Tests for the code review agent's Temporal instrumentation.
 
-Covers the five things testable without a live (deployed) Temporal server:
+Covers the seven things testable without a live (deployed) Temporal server:
 
 1. The default-on address resolver / enablement gate (``temporal.config``).
 2. The activity-boundary DTO round-trips (``temporal.phase_models``).
 3. The activity wrappers driven end-to-end with the ``dummy`` LLM harness,
    replicating the workflow's orchestration in-process and asserting the verdict
-   matches ``run_coordinator`` (durable path is behavior-identical to thread mode).
+   matches ``run_coordinator`` (durable path is behavior-identical to thread mode),
+   plus ``repo_root`` reader reconstruction across the Temporal boundary.
 4. ``CodeReviewAgent.run``'s Temporal-first dispatch and its fallbacks.
-5. A real ``CodeReviewWorkflow`` execute + replay round-trip, driven by
+5. Worker registration / boot (concurrency ceiling, ``start_team_worker``
+   delegation) and per-review adaptive Temporal fan-out width.
+6. Real ``CodeReviewWorkflow`` execute + replay round-trips driven by
    ``temporalio.testing.WorkflowEnvironment``'s embedded time-skipping test
    server (no live/deployed Temporal server needed, though the ephemeral test
    server binary itself requires a one-time network fetch — see
-   ``test_workflow_executes_and_replays_without_non_determinism`` near the
-   bottom of this file) and, complementing it,
-   ``test_workflow_gathers_tail_pass_activities_concurrently``, which inspects
-   the recorded history to confirm the three tail-pass activities are
-   scheduled together rather than one after another. Both are marked
+   ``test_workflow_executes_and_replays_without_non_determinism`` and related
+   tests near the bottom of this file).
+7. Concurrent tail-pass gather / re-raise semantics: the pure-async unit test
+   ``test_gather_return_exceptions_reproduces_sequential_error_precedence``,
+   plus ``WorkflowEnvironment`` tests for verify-failure precedence, concurrent
+   scheduling, out-of-order completion, partial failure, and pre-migration
+   sequential-history replay. The ``WorkflowEnvironment`` tests are marked
    ``integration`` (run with ``-m integration``) since standing up the
    embedded server is heavier than this file's other pure-Python tests.
 """
