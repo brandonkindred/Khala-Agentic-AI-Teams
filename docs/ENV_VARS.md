@@ -1152,12 +1152,15 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the layer's **enablement gate** (`shared.neo4j.is_neo4j_enabled()`): a
-real deployment always sets it (Neo4j is required infra — Graphiti runs on top of it), and an unset
-value is tolerated only so the unit-test suite can run against a faked Graphiti without a live
-database. The graph ingests agent memories as temporal episodes partitioned per agent
-(`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
-rule-proposal grounding.
+`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`).
+Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it), but processes
+that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this unset so
+they skip Graphiti client construction and the background graph sync worker (lifespan no-ops cleanly).
+Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set `NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that
+process into graph sync (extra memory/CPU for the driver + worker). An unset value is also how the
+unit-test suite runs against a faked Graphiti without a live database. When enabled, the graph
+ingests agent memories as temporal episodes partitioned per agent (`group_id = agent_id`) and serves
+recency-ranked related knowledge back for request context and rule-proposal grounding.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change
