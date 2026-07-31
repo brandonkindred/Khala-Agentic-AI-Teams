@@ -174,6 +174,250 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
     return result or f"item{separator}1"
 
 
+def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Return a Phase 3 agent structured-output stub, or ``None`` if unmatched.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns a dict that validates against the matching Phase 3 agent
+        ``structured_output`` schema, or ``None`` when no Phase 3 agent matches.
+        CreativeDirector is checked before MoodBoardConceptualist because its
+        prompt also names the moodboard field list.
+    """
+    if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
+        return {
+            "mood_board_candidates": [
+                {
+                    "title": "Editorial Clarity",
+                    "visual_direction": "Quiet editorial layouts with generous whitespace (dummy).",
+                    "color_story": ["Ink black", "Warm ivory", "Accent rust"],
+                    "typography_direction": "Serif display with clean sans body (dummy).",
+                    "image_style": ["Documentary stills", "Soft natural light"],
+                },
+                {
+                    "title": "Minimal Signal",
+                    "visual_direction": "Sparse geometry and high-contrast marks (dummy).",
+                    "color_story": ["Charcoal", "Paper white", "Signal blue"],
+                    "typography_direction": "Single sans family with tight tracking (dummy).",
+                    "image_style": ["Product-on-void", "Hard shadows"],
+                },
+                {
+                    "title": "Bold Momentum",
+                    "visual_direction": "Large type and energetic color blocks (dummy).",
+                    "color_story": ["Electric coral", "Deep navy", "Near-black"],
+                    "typography_direction": "Heavy display sans with mono captions (dummy).",
+                    "image_style": ["Motion blur", "Saturated lifestyle"],
+                },
+            ]
+        }
+    if "moodboard conceptualist" in system_lowered and "visual_direction" in system_lowered:
+        return {
+            "title": "Dummy Moodboard Direction",
+            "visual_direction": "Cohesive visual system for Dummy Co. (dummy).",
+            "color_story": ["Primary ink", "Support gray", "Accent teal"],
+            "typography_direction": "Modern sans with restrained serif accents (dummy).",
+            "image_style": ["Clean product photography", "Soft gradients", "Human scale"],
+        }
+    if "winning_candidate_title" in system_lowered and "scores_by_candidate" in system_lowered:
+        return {
+            "winning_candidate_title": "Editorial Clarity",
+            "scoring_criteria": [
+                "Audience resonance",
+                "Distinctiveness",
+                "Cross-channel consistency",
+                "Execution feasibility",
+            ],
+            "scores_by_candidate": {
+                "Editorial Clarity": 0.91,
+                "Minimal Signal": 0.78,
+                "Bold Momentum": 0.74,
+            },
+            "rationale": "Editorial Clarity best matches Dummy Co.'s clarity promise (dummy).",
+            "workshop_prompts": [
+                "Which candidate feels most like us?",
+                "Where would this break in product UI?",
+                "What must stay constant across channels?",
+            ],
+            "decision_criteria": [
+                "Matches positioning",
+                "Feasible in 90 days",
+                "Works in dark and light UI",
+            ],
+        }
+    if "logo specifier" in system_lowered and "clear_space" in system_lowered:
+        return {
+            "logo_suite": [
+                {
+                    "variant": "primary",
+                    "usage_context": "Default lockup on light backgrounds (dummy).",
+                    "minimum_size": "24px height",
+                    "clear_space": "0.5x logo height",
+                },
+                {
+                    "variant": "monochrome",
+                    "usage_context": "Single-color print and embroidery (dummy).",
+                    "minimum_size": "24px height",
+                    "clear_space": "0.5x logo height",
+                },
+                {
+                    "variant": "icon-only",
+                    "usage_context": "App icons and favicons (dummy).",
+                    "minimum_size": "16px",
+                    "clear_space": "0.25x icon width",
+                },
+                {
+                    "variant": "reversed",
+                    "usage_context": "Dark backgrounds and photography overlays (dummy).",
+                    "minimum_size": "24px height",
+                    "clear_space": "0.5x logo height",
+                },
+            ]
+        }
+    if "psychological_rationale" in system_lowered and "color system builder" in system_lowered:
+        return {
+            "color_palette": [
+                {
+                    "name": "Ink",
+                    "hex_value": "#111827",
+                    "usage": "Primary text and logos",
+                    "psychological_rationale": "Signals clarity and confidence (dummy).",
+                },
+                {
+                    "name": "Paper",
+                    "hex_value": "#F8FAFC",
+                    "usage": "Surfaces and backgrounds",
+                    "psychological_rationale": "Keeps interfaces calm (dummy).",
+                },
+                {
+                    "name": "Signal",
+                    "hex_value": "#0EA5E9",
+                    "usage": "Accent CTAs",
+                    "psychological_rationale": "Draws attention without alarm (dummy).",
+                },
+                {
+                    "name": "Support",
+                    "hex_value": "#64748B",
+                    "usage": "Secondary text",
+                    "psychological_rationale": "Hierarchy without noise (dummy).",
+                },
+                {
+                    "name": "Critical",
+                    "hex_value": "#DC2626",
+                    "usage": "Errors and destructive actions",
+                    "psychological_rationale": "Clear urgency cue (dummy).",
+                },
+            ]
+        }
+    if "typography builder" in system_lowered and "weight_range" in system_lowered:
+        return {
+            "typography_system": [
+                {
+                    "role": "display",
+                    "font_family": "Inter Display",
+                    "weight_range": "600-700",
+                    "usage_notes": "Hero headlines only (dummy).",
+                },
+                {
+                    "role": "body",
+                    "font_family": "Inter",
+                    "weight_range": "400-500",
+                    "usage_notes": "Long-form and UI copy (dummy).",
+                },
+                {
+                    "role": "caption",
+                    "font_family": "Inter",
+                    "weight_range": "400-500",
+                    "usage_notes": "Meta labels and footnotes (dummy).",
+                },
+            ]
+        }
+    if "iconography_style" in system_lowered and "illustration_style" in system_lowered:
+        return {
+            "iconography_style": (
+                "2px stroke, 2px corner radius, limited fill — geometric and calm (dummy)."
+            ),
+            "illustration_style": (
+                "Flat editorial scenes with restrained gradients and human scale (dummy)."
+            ),
+        }
+    if "photography_direction" in system_lowered and "motion_principles" in system_lowered:
+        return {
+            "photography_direction": (
+                "Natural light, documentary framing, real product in use (dummy)."
+            ),
+            "video_direction": "Steady pacing, soft cuts, voice-forward demos (dummy).",
+            "motion_principles": [
+                "Ease-out entrances",
+                "Prefer opacity over bounce",
+                "Keep durations under 240ms for UI",
+            ],
+        }
+    if "voice_tone_spectrum" in system_lowered and "language_donts" in system_lowered:
+        return {
+            "voice_tone_spectrum": [
+                {
+                    "context": "marketing",
+                    "tone": "Confident and concrete",
+                    "examples": ["Ship brand with the product", "Clarity over slogans"],
+                },
+                {
+                    "context": "support",
+                    "tone": "Calm and helpful",
+                    "examples": ["Here is the next step", "We can fix that together"],
+                },
+                {
+                    "context": "legal",
+                    "tone": "Precise and plain",
+                    "examples": ["This agreement covers", "You may opt out"],
+                },
+                {
+                    "context": "social",
+                    "tone": "Human and brief",
+                    "examples": ["Shipped this week", "Ask us anything"],
+                },
+                {
+                    "context": "internal",
+                    "tone": "Direct and collaborative",
+                    "examples": ["Decision needed by Friday", "Proposal attached"],
+                },
+            ],
+            "language_dos": [
+                "Lead with the customer outcome (dummy).",
+                "Use active voice (dummy).",
+                "Name the proof point (dummy).",
+                "Keep sentences scannable (dummy).",
+            ],
+            "language_donts": [
+                "Avoid empty superlatives (dummy).",
+                "Don't bury the offer (dummy).",
+                "Don't invent category jargon (dummy).",
+                "Don't mix slang with legal claims (dummy).",
+            ],
+        }
+    if "foundation_tokens" in system_lowered and "component_standards" in system_lowered:
+        return {
+            "design_principles": [
+                "Clarity over decoration (dummy).",
+                "Consistency enables speed (dummy).",
+                "Every state must be intentional (dummy).",
+            ],
+            "foundation_tokens": [
+                "color",
+                "type",
+                "spacing",
+                "motion",
+                "elevation",
+            ],
+            "component_standards": [
+                "Buttons: one primary action per view (dummy).",
+                "Cards: 16px padding, single accent (dummy).",
+                "Navigation: persistent labels, no icon-only primary nav (dummy).",
+            ],
+        }
+    return None
+
+
 class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM.
 
@@ -1384,242 +1628,12 @@ class DummyLLMClient(LLMClient):
                     ],
                 },
             }
-        # Branding team — Phase 3 "Visual & Expressive Identity" Graph agents
-        # (built with structured_output=, see agents.py). Anchored on
-        # system_prompt for the same reason as Phase 1/2. CreativeDirector is
-        # checked before MoodBoardConceptualist because its prompt also names
-        # the moodboard field list.
-        elif "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
-            return {
-                "mood_board_candidates": [
-                    {
-                        "title": "Editorial Clarity",
-                        "visual_direction": "Quiet editorial layouts with generous whitespace (dummy).",
-                        "color_story": ["Ink black", "Warm ivory", "Accent rust"],
-                        "typography_direction": "Serif display with clean sans body (dummy).",
-                        "image_style": ["Documentary stills", "Soft natural light"],
-                    },
-                    {
-                        "title": "Minimal Signal",
-                        "visual_direction": "Sparse geometry and high-contrast marks (dummy).",
-                        "color_story": ["Charcoal", "Paper white", "Signal blue"],
-                        "typography_direction": "Single sans family with tight tracking (dummy).",
-                        "image_style": ["Product-on-void", "Hard shadows"],
-                    },
-                    {
-                        "title": "Bold Momentum",
-                        "visual_direction": "Large type and energetic color blocks (dummy).",
-                        "color_story": ["Electric coral", "Deep navy", "Near-black"],
-                        "typography_direction": "Heavy display sans with mono captions (dummy).",
-                        "image_style": ["Motion blur", "Saturated lifestyle"],
-                    },
-                ]
-            }
-        elif "moodboard conceptualist" in system_lowered and "visual_direction" in system_lowered:
-            return {
-                "title": "Dummy Moodboard Direction",
-                "visual_direction": "Cohesive visual system for Dummy Co. (dummy).",
-                "color_story": ["Primary ink", "Support gray", "Accent teal"],
-                "typography_direction": "Modern sans with restrained serif accents (dummy).",
-                "image_style": ["Clean product photography", "Soft gradients", "Human scale"],
-            }
-        elif "winning_candidate_title" in system_lowered and "scores_by_candidate" in system_lowered:
-            return {
-                "winning_candidate_title": "Editorial Clarity",
-                "scoring_criteria": [
-                    "Audience resonance",
-                    "Distinctiveness",
-                    "Cross-channel consistency",
-                    "Execution feasibility",
-                ],
-                "scores_by_candidate": {
-                    "Editorial Clarity": 0.91,
-                    "Minimal Signal": 0.78,
-                    "Bold Momentum": 0.74,
-                },
-                "rationale": "Editorial Clarity best matches Dummy Co.'s clarity promise (dummy).",
-                "workshop_prompts": [
-                    "Which candidate feels most like us?",
-                    "Where would this break in product UI?",
-                    "What must stay constant across channels?",
-                ],
-                "decision_criteria": [
-                    "Matches positioning",
-                    "Feasible in 90 days",
-                    "Works in dark and light UI",
-                ],
-            }
-        elif "logo specifier" in system_lowered and "clear_space" in system_lowered:
-            return {
-                "logo_suite": [
-                    {
-                        "variant": "primary",
-                        "usage_context": "Default lockup on light backgrounds (dummy).",
-                        "minimum_size": "24px height",
-                        "clear_space": "0.5x logo height",
-                    },
-                    {
-                        "variant": "monochrome",
-                        "usage_context": "Single-color print and embroidery (dummy).",
-                        "minimum_size": "24px height",
-                        "clear_space": "0.5x logo height",
-                    },
-                    {
-                        "variant": "icon-only",
-                        "usage_context": "App icons and favicons (dummy).",
-                        "minimum_size": "16px",
-                        "clear_space": "0.25x icon width",
-                    },
-                    {
-                        "variant": "reversed",
-                        "usage_context": "Dark backgrounds and photography overlays (dummy).",
-                        "minimum_size": "24px height",
-                        "clear_space": "0.5x logo height",
-                    },
-                ]
-            }
-        elif "psychological_rationale" in system_lowered and "color system builder" in system_lowered:
-            return {
-                "color_palette": [
-                    {
-                        "name": "Ink",
-                        "hex_value": "#111827",
-                        "usage": "Primary text and logos",
-                        "psychological_rationale": "Signals clarity and confidence (dummy).",
-                    },
-                    {
-                        "name": "Paper",
-                        "hex_value": "#F8FAFC",
-                        "usage": "Surfaces and backgrounds",
-                        "psychological_rationale": "Keeps interfaces calm (dummy).",
-                    },
-                    {
-                        "name": "Signal",
-                        "hex_value": "#0EA5E9",
-                        "usage": "Accent CTAs",
-                        "psychological_rationale": "Draws attention without alarm (dummy).",
-                    },
-                    {
-                        "name": "Support",
-                        "hex_value": "#64748B",
-                        "usage": "Secondary text",
-                        "psychological_rationale": "Hierarchy without noise (dummy).",
-                    },
-                    {
-                        "name": "Critical",
-                        "hex_value": "#DC2626",
-                        "usage": "Errors and destructive actions",
-                        "psychological_rationale": "Clear urgency cue (dummy).",
-                    },
-                ]
-            }
-        elif "typography builder" in system_lowered and "weight_range" in system_lowered:
-            return {
-                "typography_system": [
-                    {
-                        "role": "display",
-                        "font_family": "Inter Display",
-                        "weight_range": "600-700",
-                        "usage_notes": "Hero headlines only (dummy).",
-                    },
-                    {
-                        "role": "body",
-                        "font_family": "Inter",
-                        "weight_range": "400-500",
-                        "usage_notes": "Long-form and UI copy (dummy).",
-                    },
-                    {
-                        "role": "caption",
-                        "font_family": "Inter",
-                        "weight_range": "400-500",
-                        "usage_notes": "Meta labels and footnotes (dummy).",
-                    },
-                ]
-            }
-        elif "iconography_style" in system_lowered and "illustration_style" in system_lowered:
-            return {
-                "iconography_style": (
-                    "2px stroke, 2px corner radius, limited fill — geometric and calm (dummy)."
-                ),
-                "illustration_style": (
-                    "Flat editorial scenes with restrained gradients and human scale (dummy)."
-                ),
-            }
-        elif "photography_direction" in system_lowered and "motion_principles" in system_lowered:
-            return {
-                "photography_direction": (
-                    "Natural light, documentary framing, real product in use (dummy)."
-                ),
-                "video_direction": "Steady pacing, soft cuts, voice-forward demos (dummy).",
-                "motion_principles": [
-                    "Ease-out entrances",
-                    "Prefer opacity over bounce",
-                    "Keep durations under 240ms for UI",
-                ],
-            }
-        elif "voice_tone_spectrum" in system_lowered and "language_donts" in system_lowered:
-            return {
-                "voice_tone_spectrum": [
-                    {
-                        "context": "marketing",
-                        "tone": "Confident and concrete",
-                        "examples": ["Ship brand with the product", "Clarity over slogans"],
-                    },
-                    {
-                        "context": "support",
-                        "tone": "Calm and helpful",
-                        "examples": ["Here is the next step", "We can fix that together"],
-                    },
-                    {
-                        "context": "legal",
-                        "tone": "Precise and plain",
-                        "examples": ["This agreement covers", "You may opt out"],
-                    },
-                    {
-                        "context": "social",
-                        "tone": "Human and brief",
-                        "examples": ["Shipped this week", "Ask us anything"],
-                    },
-                    {
-                        "context": "internal",
-                        "tone": "Direct and collaborative",
-                        "examples": ["Decision needed by Friday", "Proposal attached"],
-                    },
-                ],
-                "language_dos": [
-                    "Lead with the customer outcome (dummy).",
-                    "Use active voice (dummy).",
-                    "Name the proof point (dummy).",
-                    "Keep sentences scannable (dummy).",
-                ],
-                "language_donts": [
-                    "Avoid empty superlatives (dummy).",
-                    "Don't bury the offer (dummy).",
-                    "Don't invent category jargon (dummy).",
-                    "Don't mix slang with legal claims (dummy).",
-                ],
-            }
-        elif "foundation_tokens" in system_lowered and "component_standards" in system_lowered:
-            return {
-                "design_principles": [
-                    "Clarity over decoration (dummy).",
-                    "Consistency enables speed (dummy).",
-                    "Every state must be intentional (dummy).",
-                ],
-                "foundation_tokens": [
-                    "color",
-                    "type",
-                    "spacing",
-                    "motion",
-                    "elevation",
-                ],
-                "component_standards": [
-                    "Buttons: one primary action per view (dummy).",
-                    "Cards: 16px padding, single accent (dummy).",
-                    "Navigation: persistent labels, no icon-only primary nav (dummy).",
-                ],
-            }
-        return {"output": "Dummy response", "status": "ok"}
+        # Branding Phase 3 stubs live in ``_branding_phase3_structured_stub``
+        # so ``complete_json`` stays under the mccabe complexity ceiling.
+        return _branding_phase3_structured_stub(system_lowered) or {
+            "output": "Dummy response",
+            "status": "ok",
+        }
 
     def chat(
         self,
