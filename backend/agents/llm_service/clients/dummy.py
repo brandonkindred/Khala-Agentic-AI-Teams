@@ -2,8 +2,14 @@
 Dummy LLM client for tests and environments without an LLM.
 
 Returns heuristic stub responses matching SE team prompts so existing tests keep passing.
-Also implements the ``strands.models.model.Model`` ABC so it can be passed directly to
-``strands.Agent(model=DummyLLMClient())`` in tests without requiring a live Ollama server.
+
+Strands ``Model`` compatibility is opt-in and lazy: importing / using this module as a
+plain :class:`~llm_service.interface.LLMClient` does not import ``strands``. Concrete
+``Model`` members that ``strands.Agent`` reads at construction time (``stateful``,
+``context_window_limit``, ``count_tokens``) are provided here without loading Strands.
+Call :func:`ensure_strands_model_registration` (or any Strands Model ABC method, or
+construct ``DummyLLMClient`` after ``strands`` is already imported) when callers need
+real ``isinstance(..., Model)`` / MRO inheritance.
 """
 
 from __future__ import annotations
@@ -11,16 +17,63 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from collections.abc import AsyncIterable
-from typing import Any, Dict, Optional
-
-from strands.models.model import Model
-from strands.types.content import Message as StrandsMessage
-from strands.types.content import SystemContentBlock
-from strands.types.streaming import StreamEvent
-from strands.types.tools import ToolChoice, ToolSpec
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; runtime uses lazy strands imports
+    from strands.types.content import Message as StrandsMessage
+    from strands.types.content import SystemContentBlock
+    from strands.types.streaming import StreamEvent
+    from strands.types.tools import ToolChoice, ToolSpec
+
+_STRANDS_MODEL_REGISTERED = False
+
+
+def _strands_already_imported() -> bool:
+    """Return True when any ``strands`` package module is already in ``sys.modules``.
+
+    Preconditions: none.
+    Postconditions: returns True iff ``strands`` or a ``strands.*`` module is loaded.
+    """
+    # Snapshot keys: concurrent imports can mutate ``sys.modules`` mid-iteration.
+    return "strands" in sys.modules or any(
+        name.startswith("strands.") for name in tuple(sys.modules)
+    )
+
+
+def ensure_strands_model_registration() -> None:
+    """Attach Strands ``Model`` as a real base of :class:`DummyLLMClient`.
+
+    Virtual ``Model.register()`` is intentionally *not* used: ``Agent(model=...)``
+    reads concrete ``Model`` members (``stateful``, ``count_tokens``, …) before any
+    model method runs, and virtual subclasses do not inherit those members.
+
+    Preconditions:
+        The ``strands`` package is installed and importable.
+    Postconditions:
+        ``isinstance(DummyLLMClient(), strands.models.model.Model)`` is True and
+        ``Model`` appears in ``DummyLLMClient.__mro__``, including for instances
+        constructed before Strands was imported (ABC negative caches are cleared).
+        Idempotent: subsequent calls are no-ops once inheritance is attached.
+    """
+    global _STRANDS_MODEL_REGISTERED
+    if _STRANDS_MODEL_REGISTERED:
+        return
+    from strands.models.model import Model  # noqa: PLC0415 - intentional lazy import
+
+    # Real inheritance (not ABC.register) so instances expose Model's concrete
+    # properties/methods, matching the pre-lazy ``(LLMClient, Model)`` bases.
+    if Model not in DummyLLMClient.__mro__:
+        DummyLLMClient.__bases__ = (*DummyLLMClient.__bases__, Model)
+        # Mutating ``__bases__`` does not bump ABCMeta's invalidation counter, so a
+        # prior negative ``isinstance(client, Model)`` / ``issubclass(...)`` result
+        # stays cached forever. Clear Model's ABC caches so the postcondition holds
+        # for instances constructed before Strands was imported.
+        Model._abc_caches_clear()
+    _STRANDS_MODEL_REGISTERED = True
 
 _STRIP_VERBS = {
     "implement",
@@ -121,27 +174,109 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
     return result or f"item{separator}1"
 
 
-class DummyLLMClient(LLMClient, Model):
+class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM.
 
-    Also implements the Strands ``Model`` ABC so tests can pass this directly
-    to ``strands.Agent(model=DummyLLMClient())``.
+    Also provides the Strands ``Model`` method surface. Importing or using this
+    class as a plain :class:`~llm_service.interface.LLMClient` never loads
+    ``strands``. Concrete Agent-facing Model members (``stateful``, etc.) are
+    defined here so ``strands.Agent(model=DummyLLMClient())`` works without
+    relying on virtual ABC registration. Call
+    :func:`ensure_strands_model_registration` (or construct after ``strands`` is
+    already imported) when ``isinstance(..., Model)`` / MRO inheritance is needed.
     """
 
     _call_counter: int = 0
 
     def __init__(self) -> None:
+        """Construct a dummy client.
+
+        Preconditions: none.
+        Postconditions: request counters/config are initialized; if ``strands`` is
+            already present in ``sys.modules``, Strands ``Model`` is attached to
+            the class MRO (see :func:`ensure_strands_model_registration`).
+        """
         self._request_count = 0
         self._model_config: dict[str, Any] = {}
+        # When Strands is already loaded (typical in agent/test processes),
+        # attach real Model inheritance immediately so resolve_strands_model's
+        # ``isinstance(..., Model)`` short-circuit matches pre-lazy behaviour.
+        # Cold LLMClient paths leave strands unloaded and skip this.
+        if _strands_already_imported():
+            ensure_strands_model_registration()
 
     # -----------------------------------------------------------------------
-    # strands.models.model.Model ABC implementation
+    # strands.models.model.Model concrete members (no strands import required)
+    # -----------------------------------------------------------------------
+
+    @property
+    def stateful(self) -> bool:
+        """Whether the model manages conversation state server-side.
+
+        Preconditions: none.
+        Postconditions: returns False (matches Strands ``Model`` default). Defined
+            here so ``Agent(model=...)`` can read ``model.stateful`` at construction
+            without requiring Strands inheritance yet.
+        """
+        return False
+
+    @property
+    def context_window_limit(self) -> int | None:
+        """Maximum context window size in tokens from local model config.
+
+        Preconditions: none.
+        Postconditions: returns ``context_window_limit`` from ``_model_config`` when
+            set, else None (matches Strands ``Model.context_window_limit`` semantics).
+        """
+        config = self._model_config
+        return config.get("context_window_limit") if isinstance(config, dict) else None
+
+    async def count_tokens(
+        self,
+        messages: list[StrandsMessage],
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+        system_prompt_content: list[SystemContentBlock] | None = None,
+    ) -> int:
+        """Estimate input tokens via Strands ``Model.count_tokens`` once Model is attached.
+
+        Preconditions: ``strands`` is importable.
+        Postconditions: returns the Model default estimate; attaches Model to the
+            DummyLLMClient MRO if not already attached.
+        """
+        ensure_strands_model_registration()
+        from strands.models.model import Model  # noqa: PLC0415 - intentional lazy import
+
+        return await Model.count_tokens(
+            self,
+            messages,
+            tool_specs=tool_specs,
+            system_prompt=system_prompt,
+            system_prompt_content=system_prompt_content,
+        )
+
+    # -----------------------------------------------------------------------
+    # strands.models.model.Model ABC surface (lazy real inheritance)
     # -----------------------------------------------------------------------
 
     def update_config(self, **model_config: Any) -> None:
+        """Update Strands model config.
+
+        Preconditions: none.
+        Postconditions: ``model_config`` keys are merged into the local config dict;
+            Strands ``Model`` is attached to the class MRO when importable.
+        """
+        ensure_strands_model_registration()
         self._model_config.update(model_config)
 
     def get_config(self) -> dict[str, Any]:
+        """Return a copy of the Strands model config.
+
+        Preconditions: none.
+        Postconditions: returned dict is a shallow copy of the local config;
+            Strands ``Model`` is attached to the class MRO when importable.
+        """
+        ensure_strands_model_registration()
         return dict(self._model_config)
 
     def structured_output(
@@ -157,7 +292,12 @@ class DummyLLMClient(LLMClient, Model):
         through ``stream()`` / ``chat()``. Raising here fails loudly if a
         caller hits the ABC method by mistake instead of silently returning
         an empty/invalid model instance.
+
+        Preconditions: none.
+        Postconditions: always raises ``NotImplementedError``; attaches Model when
+            importable.
         """
+        ensure_strands_model_registration()
         raise NotImplementedError(
             "DummyLLMClient.structured_output is unused; Strands structured "
             "output goes through stream()/chat() with StructuredOutputTool"
@@ -180,7 +320,12 @@ class DummyLLMClient(LLMClient, Model):
         when ``structured_output_model=...`` is used), yields a tool-use event
         invoking that tool with data from the ``complete_json`` pattern matcher.
         Otherwise yields a plain text response.
+
+        Preconditions: ``messages`` is a sequence of Strands-shaped message dicts.
+        Postconditions: yields a complete assistant stream; attaches Strands
+            ``Model`` to the class MRO when importable.
         """
+        ensure_strands_model_registration()
         # Extract user text from the last user message
         user_text = ""
         for msg in reversed(messages):
@@ -249,7 +394,7 @@ class DummyLLMClient(LLMClient, Model):
     @property
     def request_count(self) -> int:
         """Total number of LLM requests (for compatibility with blog tests)."""
-        return getattr(self, "_request_count", 0)
+        return self._request_count
 
     @staticmethod
     def _extract_task_hint(prompt: str) -> str:
@@ -299,18 +444,19 @@ class DummyLLMClient(LLMClient, Model):
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the
         # branches below look for in the user prompt they build. Scanning
-        # ``system_prompt`` here was tried and reverted in commit <<CI fix>>
-        # because loose single-word branches (``"pipeline"``, ``"security"``)
+        # ``system_prompt`` here was tried and reverted because loose
+        # single-word branches (``"pipeline"``, ``"security"``)
         # cross-contaminated other teams' prompts that happened to mention
         # those words in their persona text.
         #
         # Exception: the branding Phase 1 / Phase 2 branches further down DO
-        # anchor on ``system_prompt`` (see ``system_lowered``) — every agent
-        # in those phases receives the same serialized mission/phase context
-        # as its user message, so only each agent's own system_prompt (its
-        # required output field names) can distinguish which one is asking.
-        # Those anchors are multi-token combinations unique to one agent's
-        # prompt, not the loose single words that caused the earlier revert.
+        # anchor on ``system_prompt`` (via ``system_lowered`` later in this
+        # method) — every agent in those phases receives the same serialized
+        # mission/phase context as its user message, so only each agent's own
+        # system_prompt (its required output field names) can distinguish which
+        # one is asking. Those anchors are multi-token combinations unique to
+        # one agent's prompt, not the loose single words that caused the
+        # earlier revert.
         lowered = prompt.lower()
         DummyLLMClient._call_counter += 1
         self._request_count += 1
@@ -1248,7 +1394,7 @@ class DummyLLMClient(LLMClient, Model):
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
-        think: "bool | str | None" = None,
+        think: bool | str | None = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
@@ -1272,12 +1418,16 @@ class DummyLLMClient(LLMClient, Model):
         system_prompt = None
         user_prompt = ""
         for m in messages:
+            if not isinstance(m, dict):
+                continue
             if m.get("role") == "system":
                 system_prompt = m.get("content")
             elif m.get("role") == "user":
                 user_prompt = m.get("content") or ""
 
-        has_tool_result = any(m.get("role") == "tool" for m in messages)
+        has_tool_result = any(
+            isinstance(m, dict) and m.get("role") == "tool" for m in messages
+        )
 
         if tools and not has_tool_result:
             structured_tool = None
