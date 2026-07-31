@@ -548,6 +548,36 @@ def _numbered_file(n_lines: int, width: int = 40) -> str:
     return "\n".join(f"line {i:05d} ".ljust(width, "x") for i in range(1, n_lines + 1))
 
 
+def _failme_content_in_bisect_window(budget: int) -> str:
+    """Build FAILME lines sized into [2 * MIN_SPLIT_SEGMENT_CHARS, budget).
+
+    Preconditions:
+        - budget > 2 * MIN_SPLIT_SEGMENT_CHARS (window must admit at least one line stride).
+    Postconditions:
+        - Returned content length L satisfies 2 * MIN_SPLIT_SEGMENT_CHARS <= L < budget.
+        - Every line is 40 chars and contains the FAILME marker.
+    """
+    line_body_width = 40
+    target = (2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2
+    # Joined length of n 40-char lines is 41*n - 1; use 41 as the stride estimate.
+    n_lines = max(1, (target + 1) // (line_body_width + 1))
+    content = "\n".join(
+        f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+    )
+    while len(content) >= budget and n_lines > 1:
+        n_lines -= 1
+        content = "\n".join(
+            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+        )
+    while len(content) < 2 * MIN_SPLIT_SEGMENT_CHARS:
+        n_lines += 1
+        content = "\n".join(
+            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+        )
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    return content
+
+
 def test_split_within_budget_returns_single_whole_segment() -> None:
     content = _numbered_file(10)
     segments = split_block_into_segments("a.py", content, max_chars=10_000)
@@ -1146,10 +1176,7 @@ def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> N
     # in test_large_failing_file_bisects_then_raises_with_ranges), but semantic
     # exhaustion must not.
     budget = compute_code_review_map_chunk_chars(DummyLLMClient())
-    line_len = 41
-    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
-    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    content = _failme_content_in_bisect_window(budget)
     # retry_thinking_level set => the client actually spent its downgrade ladder,
     # so re-sampling is futile and the fast-path degrades without retry.
     client = _SelectiveRaiser(
@@ -1174,10 +1201,7 @@ def test_length_empty_semantic_exhaustion_still_line_splits() -> None:
     not. This is the same large single-file setup as the reasoning-loop test above,
     but the length variant bisects (>=2 calls) instead of degrading on the first."""
     budget = compute_code_review_map_chunk_chars(DummyLLMClient())
-    line_len = 41
-    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
-    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    content = _failme_content_in_bisect_window(budget)
     client = _SelectiveRaiser(
         "FAILME",
         exc=LLMSemanticExhaustionError(
@@ -1880,10 +1904,7 @@ def test_large_failing_file_bisects_then_raises_with_ranges() -> None:
     # the live budget so the test stays valid if the map budget shifts (e.g. the
     # sibling-surface reservation).
     budget = compute_code_review_map_chunk_chars(DummyLLMClient())
-    line_len = 41  # 40-char body + "\n"
-    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
-    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    content = _failme_content_in_bisect_window(budget)
     client = _SelectiveRaiser("FAILME")
     with pytest.raises(CodeReviewUnavailableError) as excinfo:
         run_coordinator(
