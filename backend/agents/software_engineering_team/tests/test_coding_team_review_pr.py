@@ -4465,6 +4465,13 @@ class TestDecideReviewModeUnit:
             lambda *a, **kw: noop_calls.append(kw),
         )
 
+        def _must_not_parse(*_a: Any, **_kw: Any) -> Any:
+            raise AssertionError(
+                "parse_valid_lines must not run on the no-reviewable noop path"
+            )
+
+        monkeypatch.setattr(pr_review, "parse_valid_lines", _must_not_parse)
+
         files = [
             PullRequestFile("gone.py", "removed", "@@ -1 +0 @@\n-x", 0, 1, None),
             PullRequestFile("img.png", "added", "", 0, 0, None),  # binary: no patch
