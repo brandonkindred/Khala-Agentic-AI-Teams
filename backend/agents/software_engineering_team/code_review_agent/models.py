@@ -125,8 +125,9 @@ def derive_issue_title(description: str, max_len: int = _TITLE_MAX_LEN) -> str:
     Postconditions:
         - Returns the description's first line, trimmed to at most
           ``max_len`` characters TOTAL (including a trailing "…" when
-          truncated) at a word boundary. Returns "" only when ``description``
-          is blank.
+          truncated); prefers breaking at a word boundary, but falls back to a
+          hard character boundary when the first word is longer than the limit.
+          Returns "" only when ``description`` is blank.
     """
     assert max_len > 0, "max_len must be positive"
     stripped = (description or "").strip()
