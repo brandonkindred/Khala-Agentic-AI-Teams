@@ -1681,6 +1681,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
         find_architecture_and_redundancy_activity,
@@ -1721,6 +1722,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         filter_false_positives_activity,
         find_architecture_and_redundancy_activity,
         find_side_effect_impact_activity,
+        consolidate_side_effect_issues_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
