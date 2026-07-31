@@ -330,7 +330,10 @@ def get_audit_status(job_id: str) -> AuditStatusResponse:
           ``completed``/``failed``), ``current_stage``, and ``error`` as last
           persisted in the job store. ``result`` is populated (parsed as
           :class:`SOC2AuditResult`) only once the job has produced one; it is
-          ``None`` for a job still pending or running.
+          ``None`` for a job still pending or running, and also ``None`` (with
+          a warning log) when a stored result fails validation — the rest of
+          the job status is still returned so a status poll never becomes an
+          unhandled 500.
         - Raises ``HTTPException(404)`` if no job with ``job_id`` exists.
     """
     job = job_store._job_manager.get_job(job_id)
@@ -338,8 +341,14 @@ def get_audit_status(job_id: str) -> AuditStatusResponse:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     result = None
-    if job.get("result"):
-        result = SOC2AuditResult.model_validate(job["result"])
+    raw_result = job.get("result")
+    if raw_result:
+        try:
+            result = SOC2AuditResult.model_validate(raw_result)
+        except Exception as e:
+            logger.warning(
+                "Stored result for job %s failed validation: %s", job_id, e
+            )
 
     return AuditStatusResponse(
         job_id=job_id,

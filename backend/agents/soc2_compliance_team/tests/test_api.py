@@ -85,3 +85,33 @@ def test_status_404() -> None:
     """GET status for unknown job_id returns 404."""
     r = client.get("/soc2-audit/status/00000000-0000-0000-0000-000000000000")
     assert r.status_code == 404
+
+
+def test_status_malformed_result_returns_null(_patched) -> None:
+    """GET status with a schema-invalid stored result returns 200 and result=null.
+
+    Preconditions:
+        - A completed job exists whose ``result`` cannot validate as
+          :class:`SOC2AuditResult`.
+    Postconditions:
+        - Response is HTTP 200 with the job's status fields intact and
+          ``result`` set to ``null`` (no unhandled 500).
+    """
+    job_id = "malformed-result-job"
+    _patched.create_job(
+        job_id,
+        status="completed",
+        repo_path="/repo",
+        current_stage="Done",
+        error=None,
+        result={"status": "completed", "tsc_results": "not-a-list"},
+    )
+
+    r = client.get(f"/soc2-audit/status/{job_id}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["repo_path"] == "/repo"
+    assert body["current_stage"] == "Done"
+    assert body["error"] is None
+    assert body["result"] is None
