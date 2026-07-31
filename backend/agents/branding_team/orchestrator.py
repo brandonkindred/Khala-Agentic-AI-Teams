@@ -144,7 +144,20 @@ async def _gather_integrations(
 
 
 def _build_phase_gates(up_to_phase: BrandPhase, approved: bool) -> List[PhaseGate]:
-    """Build gate statuses for all phases up to and including the target phase."""
+    """Build gate statuses for every phase in the branding workflow.
+
+    Phases before ``up_to_phase`` are marked APPROVED, ``up_to_phase`` itself is
+    marked APPROVED or PENDING_REVIEW depending on ``approved``, and all later
+    phases are marked NOT_STARTED.
+
+    Preconditions:
+        ``up_to_phase`` is a pipeline phase in ``PHASE_ORDER`` (so
+        ``phase_index`` returns a real index, not the COMPLETE sentinel).
+
+    Postconditions:
+        Returns exactly ``len(PHASE_ORDER)`` ``PhaseGate`` entries in
+        ``PHASE_ORDER`` order, with statuses as described above.
+    """
     gates: List[PhaseGate] = []
     target_idx = phase_index(up_to_phase)
     for i, phase in enumerate(PHASE_ORDER):
