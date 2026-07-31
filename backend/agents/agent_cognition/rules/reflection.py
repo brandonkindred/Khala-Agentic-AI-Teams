@@ -52,9 +52,50 @@ from agent_cognition.models import (
 from agent_cognition.rules import store as rules_store
 from agent_cognition.rules.predicate import is_valid_predicate
 from agent_cognition.runtime_config import read_positive_int
-from llm_service import compact_text, complete_validated_via_reasoning, get_client
 
 logger = logging.getLogger(__name__)
+
+
+def get_client(*args: Any, **kwargs: Any) -> Any:
+    """Lazy facade over ``llm_service.get_client``; tests may monkeypatch this name.
+
+    Preconditions: same as ``llm_service.get_client``.
+    Postconditions: returns the client from ``llm_service.get_client`` (or
+        whatever this name is monkeypatched to). Does not import ``llm_service``
+        until called.
+    """
+    from llm_service import get_client as _get_client  # noqa: PLC0415
+
+    return _get_client(*args, **kwargs)
+
+
+def compact_text(*args: Any, **kwargs: Any) -> Any:
+    """Lazy facade over ``llm_service.compact_text``; tests may monkeypatch this name.
+
+    Preconditions: same as ``llm_service.compact_text``.
+    Postconditions: returns the compacted (or original) text from
+        ``llm_service.compact_text`` (or whatever this name is monkeypatched to).
+        Does not import ``llm_service`` until called.
+    """
+    from llm_service import compact_text as _compact_text  # noqa: PLC0415
+
+    return _compact_text(*args, **kwargs)
+
+
+def complete_validated_via_reasoning(*args: Any, **kwargs: Any) -> Any:
+    """Lazy facade over ``llm_service.complete_validated_via_reasoning``.
+
+    Preconditions: same as ``llm_service.complete_validated_via_reasoning``.
+    Postconditions: returns the validated model from
+        ``llm_service.complete_validated_via_reasoning`` (or whatever this name
+        is monkeypatched to). Does not import ``llm_service`` until called.
+    """
+    from llm_service import (  # noqa: PLC0415
+        complete_validated_via_reasoning as _complete_validated_via_reasoning,
+    )
+
+    return _complete_validated_via_reasoning(*args, **kwargs)
+
 
 # Tunables (read at call time so tests/operators can override per environment).
 _DEFAULT_SUMMARY_LIMIT = 6
@@ -581,7 +622,8 @@ def _materialize(
         logger.warning("reflection: %s proposal missing rule text; dropping", action.value)
         return None
     if action == ProposalAction.AMEND and (
-        not isinstance(item.target_rule_id, str) or not _is_active_target(item.target_rule_id, active_by_id)
+        not isinstance(item.target_rule_id, str)
+        or not _is_active_target(item.target_rule_id, active_by_id)
     ):
         logger.warning(
             "reflection: amend targets non-active rule %r; dropping", item.target_rule_id
