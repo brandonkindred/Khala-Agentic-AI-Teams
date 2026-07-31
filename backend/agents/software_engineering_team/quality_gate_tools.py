@@ -22,7 +22,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,25 @@ def _default_llm_getter(agent_key: str) -> Any:
     from llm_service import get_strands_model
 
     return get_strands_model(agent_key)
+
+
+def _normalize_task_requirements(
+    task_requirements: Optional[Union[str, List[str]]],
+) -> str:
+    """Coerce ``task_requirements`` to the string ``CodeReviewInput`` expects.
+
+    Preconditions:
+        - ``task_requirements`` is None, a str, or a list of strings.
+    Postconditions:
+        - Returns ``""`` when None or an empty list.
+        - Returns a newline-joined string when given a list.
+        - Returns the input unchanged when given a str.
+    """
+    if task_requirements is None:
+        return ""
+    if isinstance(task_requirements, list):
+        return "\n".join(task_requirements)
+    return task_requirements
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +115,7 @@ def run_code_review(
     language: str,
     *,
     files: Optional[Dict[str, str]] = None,
-    task_requirements: Optional[List[str]] = None,
+    task_requirements: Optional[Union[str, List[str]]] = None,
     acceptance_criteria: Optional[List[str]] = None,
     architecture: Any = None,
     existing_codebase: Optional[str] = None,
@@ -144,7 +163,7 @@ def run_code_review(
             code=None if files is not None else code,
             spec_content=spec_content,
             task_description=task_description,
-            task_requirements=task_requirements or [],
+            task_requirements=_normalize_task_requirements(task_requirements),
             acceptance_criteria=acceptance_criteria or [],
             language=language,
             architecture=architecture,
