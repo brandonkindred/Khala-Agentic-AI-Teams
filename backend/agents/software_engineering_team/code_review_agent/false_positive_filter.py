@@ -292,9 +292,16 @@ class CodebaseIndex:
               a non-blank excerpt exists; ``(None, [])`` when it names it without
               one, or when ``key`` is blank.
             - ``(exact_key, [])`` on an exact file match.
-            - ``(sole_hit, hits)`` when exactly one suffix match, else
-              ``(None, hits)``, where ``hits`` are the candidate paths that
+            - ``(sole_exact_normalized, [])`` when exactly one stored path equals
+              ``key`` after ``_normalize_leading`` on both sides (so ``./app/main.py``
+              prefers ``app/main.py`` over a nested suffix like ``src/app/main.py``).
+            - ``(None, exact_hits)`` when multiple stored paths share that exact
+              normalized form.
+            - ``(sole_hit, hits)`` when exactly one bare-name / path-suffix match,
+              else ``(None, hits)``, where ``hits`` are the candidate paths that
               share the requested final segment or path suffix — never raises.
+            - A ``../`` prefix is never treated as ``./``; parent-dir citations do
+              not collapse to a bare basename.
         """
         if not key:
             return None, []
@@ -302,21 +309,26 @@ class CodebaseIndex:
             return (self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None), []
         if key in self.files:
             return key, []
+        # Prefer an exact match of the leading-normalized key before any
+        # bare-name / suffix fallback. ``_normalize_leading`` strips only
+        # literal ``./`` repeats (and one leading ``/``) — never ``../`` —
+        # so ``./app/main.py`` can resolve to ``app/main.py`` even when
+        # ``src/app/main.py`` would also be a suffix hit.
+        normalized = self._normalize_leading(key)
+        exact = [p for p in self.files if self._normalize_leading(p) == normalized]
+        if len(exact) == 1:
+            return exact[0], []
+        if len(exact) > 1:
+            return None, exact
         # Bare-name / suffix fallback: the model often cites ``main.py`` for
         # ``app/services/main.py``, or ``config/.env`` for ``src/config/.env``.
         # Match every stored path whose final ``/``-segment (bare name) or
-        # trailing path suffix equals ``key`` after stripping a leading ``./``
-        # or ``/`` from both sides (without mangling hidden names like
-        # ``.env``); a unique hit resolves, and the full list lets
-        # ``read_file`` distinguish ambiguity.
-        normalized = self._normalize_leading(key)
-
+        # trailing path suffix equals the normalized key (without mangling
+        # hidden names like ``.env``); a unique hit resolves, and the full
+        # list lets ``read_file`` distinguish ambiguity.
         if "/" in normalized:
             hits = [
-                p
-                for p in self.files
-                if self._normalize_leading(p) == normalized
-                or self._normalize_leading(p).endswith("/" + normalized)
+                p for p in self.files if self._normalize_leading(p).endswith("/" + normalized)
             ]
         else:
             hits = [p for p in self.files if self._final_segment(p) == normalized]
