@@ -955,9 +955,10 @@ def _cached_review_chunk(
           recomputes its own sibling surface.
 
     Postconditions:
-        - When caching is disabled (``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` ==
-          0) this is a pure passthrough to ``_review_chunk_with_recovery`` — no
-          caching and no single-flight, identical to no cache at all.
+        - When caching is disabled (non-positive
+          ``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE``) this is a pure passthrough to
+          ``_review_chunk_with_recovery`` — no caching and no single-flight,
+          identical to no cache at all.
         - On a hit, returns a deep clone of the stored outcome (never the shared
           instance), so the caller may mutate it freely; findings/verdicts are
           reproduced identically.
