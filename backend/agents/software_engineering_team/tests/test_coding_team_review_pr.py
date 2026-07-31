@@ -859,6 +859,12 @@ def _review_body(**overrides: Any) -> dict[str, Any]:
 
 
 class TestReviewEndpoint:
+    """Integration tests for the POST /review-pr endpoint.
+
+    Exercises end-to-end review submission, severity accounting,
+    token scrubbing, and failure handling via the review_app fixture.
+    """
+
     def test_happy_path_posts_review(self, review_app) -> None:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
