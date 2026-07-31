@@ -716,6 +716,9 @@ def test_run_passes_none_reader_without_repo_root(monkeypatch: pytest.MonkeyPatc
 
 
 def test_run_dispatches_to_temporal_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the Temporal feature gate is enabled, run() executes the code-review
+    workflow synchronously and converts the returned dict into a CodeReviewOutput.
+    """
     monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
     monkeypatch.setattr(
         "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
