@@ -407,10 +407,11 @@ def test_connect_timeout_env_override(monkeypatch):
     assert "connect_timeout=7" in client_mod.dsn()
 
 
-def test_connect_timeout_floored_to_one(monkeypatch):
+@pytest.mark.parametrize("raw", ["0", "-3"])
+def test_connect_timeout_floored_to_one(monkeypatch, raw):
     # A zero/negative override is clamped up so the pool can never be opened with an
     # unbounded (0 = wait forever) connect timeout against a down host.
-    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "0")
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", raw)
     assert client_mod._connect_timeout() == 1
 
 
