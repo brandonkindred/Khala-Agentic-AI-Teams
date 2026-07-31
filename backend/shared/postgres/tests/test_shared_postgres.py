@@ -420,10 +420,9 @@ def test_connect_timeout_floored_to_one(monkeypatch):
 
 
 class _ProbePool:
-    """Fake pool whose ``connection(timeout=...)`` yields a cursor returning ``row``.
+    """Fake pool whose ``connection(timeout=...)`` returns a context manager yielding a connection. The connection's cursor returns ``row``.
 
-    ``raise_on_connection`` simulates a down host / exhausted pool (the acquisition
-    itself fails), which the probe must swallow and report as unreachable.
+    ``raise_on_connection`` simulates a down host / exhausted pool (the acquisition itself fails), which the probe must swallow and report as unreachable.
     """
 
     def __init__(self, row=(1,), raise_on_connection=False):
