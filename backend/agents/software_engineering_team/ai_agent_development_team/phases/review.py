@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
+from ..constants import REQUIRED_ARTIFACT_HINTS
 from ..models import ExecutionResult, MicrotaskStatus, ReviewIssue, ReviewResult
-
-REQUIRED_ARTIFACT_HINTS = ("blueprint", "evaluation", "safety", "runbook", "mcp")
 
 
 def run_review(*, execution_result: ExecutionResult) -> ReviewResult:

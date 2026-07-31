@@ -7,6 +7,8 @@ import pytest
 
 from llm_service import DummyLLMClient
 from software_engineering_team.ai_agent_development_team import orchestrator
+import software_engineering_team.ai_agent_development_team.phases.review as review_mod
+from software_engineering_team.ai_agent_development_team import constants as team_constants
 from software_engineering_team.ai_agent_development_team.constants import (
     REQUIRED_ARTIFACT_HINTS,
 )
@@ -109,6 +111,11 @@ def test_required_artifact_hints_tuple() -> None:
         "runbook",
         "mcp",
     )
+
+
+def test_review_uses_shared_required_artifact_hints() -> None:
+    """Review must import the team constant, not redefine the five-string tuple."""
+    assert review_mod.REQUIRED_ARTIFACT_HINTS is team_constants.REQUIRED_ARTIFACT_HINTS
 
 
 def test_ai_agent_development_workflow_success(tmp_path: Path):
