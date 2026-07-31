@@ -142,7 +142,7 @@ additive-only, so it can never shorten the configured floor. Only the integer-se
 honored (HTTP-date / non-numeric / non-positive are ignored). Strands models (Strategy Lab) have no
 HTTP-level access to the header, so this applies only to the central client.
 
-### LLM_FAILOVER_FAST_429 / LLM_FAILOVER_RATE_WINDOW_S / LLM_FAILOVER_WEEKLY_WINDOW_S
+### LLM_FAILOVER_FAST_429 / LLM_FAILOVER_RATE_WINDOW_S / LLM_FAILOVER_SESSION_WINDOW_S / LLM_FAILOVER_WEEKLY_WINDOW_S
 Tune the **multi-provider fallback list** (the ordered providers configured in the LLM Provider
 settings UI / `POST /api/llm-config/providers`, stored in the `llm_provider_configs` table). When
 more than one provider is configured, a 429 on one provider marks it usage-limited (with a
@@ -151,10 +151,17 @@ reset and used again. `LLM_FAILOVER_FAST_429` (default **on**; `false`/`0`/`no` 
 non-last failover-chain clients with a **zero** in-place 429-retry budget so the hand-off isn't
 delayed by the slow `LLM_RATE_LIMIT_*` backoff above — the **last** provider in the chain keeps the
 configured backoff (nowhere left to fail over to), so a single-entry list behaves exactly as before.
-`LLM_FAILOVER_RATE_WINDOW_S` (default `300`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
-7 days) are the fallback reset windows used to compute `reset_at` only when the 429 carries no
-`Retry-After`; the weekly window is used when the error matches the Ollama weekly-limit message, the
-rate window otherwise. The provider list is the sole source of LLM resolution: with an empty list (or
+
+Ollama Cloud 429 bodies are classified into `session` / `weekly` / `rate` from phrases like
+`session usage limit` and `weekly usage limit`. Reset windows:
+
+| Kind | Env | Default | Notes |
+|---|---|---|---|
+| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `18000` (5h) | Fixed from error time; **ignores** `Retry-After` |
+| `weekly` | `LLM_FAILOVER_WEEKLY_WINDOW_S` | `86400` (24h) | Fixed from error time; **ignores** `Retry-After` (Cloud weekly bodies omit a reset timestamp) |
+| `rate` | `LLM_FAILOVER_RATE_WINDOW_S` | `300` (5m) | Used only when the 429 carries no `Retry-After`; otherwise `Retry-After` wins |
+
+The provider list is the sole source of LLM resolution: with an empty list (or
 `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError` (there
 is no single-provider env fallback).
 
@@ -226,8 +233,8 @@ the investment worker runs at once. A live paper-trading session
 (`run_paper_trading_activity`) can hold a worker thread for hours (up to
 `max_hours`), so this queue defaults above the shared framework's 4-thread cap
 to avoid a handful of concurrent sessions silently starving backtest dispatch.
-Parsed as a plain `int(...)` (unset → default `8`; garbage/unparseable →
-default `8`; parsed but `< 1` → floored to `1`). Only read by the investment
+Parsed defensively as an int (unset or unparseable → default `8`; value
+`< 1` → floored to `1`). Only read by the investment
 worker; mirrors `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`.
 
 ### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
@@ -236,8 +243,9 @@ Temporal worker runs at once. The sales pipeline fans each stage out into one
 activity per prospect, so this — not the old in-process
 `SalesPipelineConfig.pipeline_stage_workers` thread pool — bounds fan-out
 throughput; the default matches that pool's width (`8`) so wall-clock is
-preserved. Parsed via the shared `env_int` (unset/garbage/`≤0` → default, with a
-warning on a set-but-unparseable value). Only read by the sales worker.
+preserved. Parsed via the shared `env_int` (unset/garbage → default; a parsed value
+`≤0` is clamped up to the floor of 1, not reset to the default, with a warning
+logged only for the set-but-unparseable case). Only read by the sales worker.
 
 ### SALES_TEMPORAL_HEARTBEAT_INTERVAL_S
 Float seconds (default `30`, clamped to `[1, 60]`). How often each long sales

@@ -152,6 +152,28 @@ def test_complete_validated_terminal_validation_failure():
     assert "FounderAnswer" in str(excinfo.value)
 
 
+def test_complete_validated_terminal_validation_preserves_non_dict_preview():
+    """Non-dict JSON (e.g. a list) must appear in the terminal error preview."""
+
+    def handler(prompt: str, *, call_index: int) -> list[str]:
+        return ["opt-a"]
+
+    client = _StubClient(handler)
+    with pytest.raises(LLMSchemaValidationError) as excinfo:
+        complete_validated(
+            client,
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            correction_attempts=0,
+        )
+
+    preview = excinfo.value.response_preview
+    assert preview != "null"
+    assert "opt-a" in preview
+    assert excinfo.value.correction_attempts_used == 0
+
+
 # ---------------------------------------------------------------------------
 # s2-tests-no-extract-call — pin that extract_json_from_response is never called
 # ---------------------------------------------------------------------------

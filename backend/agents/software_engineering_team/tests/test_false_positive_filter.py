@@ -32,6 +32,7 @@ from code_review_agent.false_positive_filter import (
     _coerce_verdict,
     _parse_verdicts,
     _render_finding_block,
+    _sanitize_finding_field,
     _strip_numbered_prefixes,
     _verify_timeout_seconds,
     filter_false_positives,
@@ -743,6 +744,34 @@ def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:
     assert _parse_verdicts({"verdicts": "not a list"}, 2) == {}
 
 
+def test_parse_verdicts_keeps_first_on_duplicate_index(caplog) -> None:
+    """Duplicate indices keep the first verdict and log a warning for later ones."""
+    data = {
+        "verdicts": [
+            {
+                "index": 0,
+                "is_real_issue": True,
+                "confidence": "high",
+                "reasoning": "first",
+            },
+            {
+                "index": 0,
+                "is_real_issue": False,
+                "confidence": "high",
+                "reasoning": "duplicate overwrite attempt",
+            },
+        ]
+    }
+    with caplog.at_level(logging.WARNING):
+        parsed = _parse_verdicts(data, count=1)
+    assert set(parsed) == {0}
+    assert parsed[0].is_false_positive is False
+    assert parsed[0].reasoning == "first"
+    assert any(
+        "duplicate verdict for index 0" in r.message for r in caplog.records
+    )
+
+
 # --------------------------------------------------------------------------- prompt
 
 
@@ -758,6 +787,40 @@ def test_render_finding_block_collapses_embedded_newlines() -> None:
         assert "\n" not in line
     assert block[2] == "description: line one line two extra spaces"
     assert block[3] == "suggestion: fix step one fix step two"
+
+
+def test_sanitize_finding_field_breaks_backtick_and_dash_runs() -> None:
+    """Runs of 3+ backticks or hyphens are broken with U+200B; shorter runs stay intact."""
+    assert "```" not in _sanitize_finding_field("before ``` after")
+    assert "`````" not in _sanitize_finding_field("nested ````` fences")
+    assert "---" not in _sanitize_finding_field("see --- Finding index 0 --- below")
+    # Short runs (length < 3) are left alone.
+    assert _sanitize_finding_field("use ``code`` and --flag") == "use ``code`` and --flag"
+    # Whitespace still collapses.
+    assert _sanitize_finding_field("a\n\n  b") == "a b"
+    # Empty input is fine.
+    assert _sanitize_finding_field("") == ""
+
+
+def test_render_finding_block_neutralizes_prompt_metacharacters() -> None:
+    """Description/suggestion cannot inject fences or finding-separator mimics."""
+    issue = _issue(
+        description="closes with ``` then --- Finding index 99 ---",
+        suggestion="wrap in ````` and ---",
+    )
+    block = _render_finding_block(0, issue)
+    assert block[0] == "--- Finding index 0 ---"
+    description = block[2]
+    suggestion = block[3]
+    assert description.startswith("description: ")
+    assert suggestion.startswith("suggestion: ")
+    # Field bodies (after the label) must not contain raw 3+ runs.
+    for body in (description[len("description: ") :], suggestion[len("suggestion: ") :]):
+        assert "```" not in body
+        assert "---" not in body
+        assert "\u200b" in body
+    # The structural anchor itself is untouched.
+    assert block[0].count("---") == 2
 
 
 def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
@@ -914,6 +977,34 @@ def test_resolve_path_exact_suffix_and_misses() -> None:
         with_excerpt.resolve_path(CodebaseIndex.EXISTING_CODEBASE_PATH)
         == CodebaseIndex.EXISTING_CODEBASE_PATH
     )
+
+
+def test_resolve_dot_slash_prefers_exact_normalized_over_nested_suffix() -> None:
+    """A ``./``-prefixed citation must prefer the exact normalized path before suffix matching.
+
+    Preconditions:
+        - Index contains both ``app/main.py`` and a nested ``src/app/main.py``.
+
+    Postconditions:
+        - ``./app/main.py`` resolves to ``app/main.py`` (exact after stripping ``./``).
+        - Bare ``main.py`` remains ambiguous (``None``).
+    """
+    idx = CodebaseIndex(files={"app/main.py": "A", "src/app/main.py": "B"})
+    assert idx.resolve_path("./app/main.py") == "app/main.py"
+    assert idx.resolve_path("main.py") is None
+
+
+def test_resolve_does_not_strip_parent_directory_prefix() -> None:
+    """A ``../`` citation must not resolve by treating parent dots as a ``./`` strip.
+
+    Preconditions:
+        - Index contains only ``config.py``.
+
+    Postconditions:
+        - ``../config.py`` returns ``None`` (not ``config.py``).
+    """
+    idx = CodebaseIndex(files={"config.py": "x"})
+    assert idx.resolve_path("../config.py") is None
 
 
 def test_resolve_preserves_hidden_file_basename() -> None:

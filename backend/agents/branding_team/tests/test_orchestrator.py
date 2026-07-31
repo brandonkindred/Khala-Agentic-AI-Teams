@@ -59,7 +59,6 @@ from branding_team.models import (
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
-from branding_team.shared.coro_runner import run_coroutine
 from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests.conftest import make_mission
 
@@ -228,7 +227,7 @@ def _mock_graph_result(phases_to_include: list[str]):
 
 
 def _patch_graph_invoke(phases_to_include: list[str]):
-    """Return a context manager that patches graph.invoke_async."""
+    """Return a context manager that patches ``branding_team.orchestrator.build_branding_graph`` so the returned graph's ``invoke_async`` yields a canned result."""
     mock_result = _mock_graph_result(phases_to_include)
 
     async def mock_invoke_async(task, **kwargs):
@@ -1226,17 +1225,3 @@ def test_gather_integrations_market_research_failure_returns_none() -> None:
         )
     assert snapshot is None
     assert design is None
-
-
-def test_run_coro_offloads_when_loop_running() -> None:
-    """run_coroutine runs a coroutine on a worker thread when a loop is already active."""
-
-    async def _driver():
-        async def _val():
-            return 42
-
-        # Called synchronously inside a running loop, so run_coroutine must offload
-        # to a worker thread instead of calling asyncio.run on the live loop.
-        return run_coroutine(_val())
-
-    assert asyncio.run(_driver()) == 42

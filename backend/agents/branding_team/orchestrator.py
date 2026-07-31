@@ -37,7 +37,11 @@ from .graphs.phase3_visual import build_phase3_graph
 from .graphs.phase4_channel import build_phase4_graph
 from .graphs.phase5_governance import build_phase5_graph
 from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
-from .graphs.top_level import build_branding_graph
+from .graphs.top_level import (
+    DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+    DEFAULT_NODE_TIMEOUT_SECONDS,
+    build_branding_graph,
+)
 from .models import (
     BrandBook,
     BrandCheckRequest,
@@ -140,7 +144,20 @@ async def _gather_integrations(
 
 
 def _build_phase_gates(up_to_phase: BrandPhase, approved: bool) -> List[PhaseGate]:
-    """Build gate statuses for all phases up to and including the target phase."""
+    """Build gate statuses for every phase in the branding workflow.
+
+    Phases before ``up_to_phase`` are marked APPROVED, ``up_to_phase`` itself is
+    marked APPROVED or PENDING_REVIEW depending on ``approved``, and all later
+    phases are marked NOT_STARTED.
+
+    Preconditions:
+        ``up_to_phase`` is a pipeline phase in ``PHASE_ORDER`` (so
+        ``phase_index`` returns a real index, not the COMPLETE sentinel).
+
+    Postconditions:
+        Returns exactly ``len(PHASE_ORDER)`` ``PhaseGate`` entries in
+        ``PHASE_ORDER`` order, with statuses as described above.
+    """
     gates: List[PhaseGate] = []
     target_idx = phase_index(up_to_phase)
     for i, phase in enumerate(PHASE_ORDER):
@@ -178,11 +195,21 @@ class BrandingTeamOrchestrator:
         per-phase sub-graphs and swarms.  Brand-compliance checks run outside
         the graph because their inputs come from the API request.
 
-        Raises:
-            BrandVersionAppendConflict: If ``append_brand_version`` returns
-                ``None`` (brand row deleted between resolve and finalize), so the
-                caller can mark the run as failed instead of reporting success
-                without persistence.
+        Preconditions:
+            - ``target_phase`` is ``None`` or one of the runnable ``BrandPhase``
+              values (``COMPLETE`` is allowed as the upper bound but is not a
+              runnable graph node).
+            - When ``store`` and ``brand_id`` are supplied, ``store`` implements
+              ``get_brand``/``get_brand_by_id``/``append_brand_version``.
+
+        Postconditions:
+            - Returns a fully populated ``TeamOutput``.
+            - When ``store``, ``brand_id``, and a resolved ``client_id`` are
+              present, persists the output via ``store.append_brand_version``.
+              Raises ``BrandVersionAppendConflict`` if the brand row disappeared
+              during the run (``append_brand_version`` returns ``None``), so the
+              caller can mark the run as failed instead of reporting success
+              without persistence.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
@@ -288,8 +315,8 @@ class BrandingTeamOrchestrator:
 
         builder = GraphBuilder()
         builder.set_graph_id(f"branding_phase_{phase.value}")
-        builder.set_execution_timeout(600.0)
-        builder.set_node_timeout(180.0)
+        builder.set_execution_timeout(DEFAULT_EXECUTION_TIMEOUT_SECONDS)
+        builder.set_node_timeout(DEFAULT_NODE_TIMEOUT_SECONDS)
         builder.add_node(builder_fn(), node_id=node_id)
         builder.set_entry_point(node_id)
         graph = builder.build()
@@ -435,8 +462,10 @@ class BrandingTeamOrchestrator:
             ``get_brand``/``get_brand_by_id``.
         Postconditions:
             Returns ``(mission, resolved_client_id)``. When a stored brand is
-            found its mission replaces the passed one and the client id is filled
-            in; otherwise the inputs pass through unchanged.
+            found, its mission replaces the passed one. If no ``client_id`` was
+            supplied, ``resolved_client_id`` is filled in from the brand;
+            otherwise the supplied ``client_id`` is preserved. If no stored brand
+            is found, the inputs pass through unchanged.
         """
         resolved_client_id: Optional[str] = client_id
         if store and brand_id:

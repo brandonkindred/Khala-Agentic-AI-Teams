@@ -1,28 +1,32 @@
 """Tests for the code review agent's Temporal instrumentation.
 
-Covers the five things testable without a live (deployed) Temporal server:
+Covers the seven things testable without a live (deployed) Temporal server:
 
 1. The default-on address resolver / enablement gate (``temporal.config``).
 2. The activity-boundary DTO round-trips (``temporal.phase_models``).
 3. The activity wrappers driven end-to-end with the ``dummy`` LLM harness,
    replicating the workflow's orchestration in-process and asserting the verdict
-   matches ``run_coordinator`` (durable path is behavior-identical to thread mode).
+   matches ``run_coordinator`` (durable path is behavior-identical to thread mode),
+   plus ``repo_root`` reader reconstruction across the Temporal boundary.
 4. ``CodeReviewAgent.run``'s Temporal-first dispatch and its fallbacks.
-5. A real ``CodeReviewWorkflow`` execute + replay round-trip, driven by
+5. Worker registration / boot (concurrency ceiling, ``start_team_worker``
+   delegation) and per-review adaptive Temporal fan-out width.
+6. Real ``CodeReviewWorkflow`` execute + replay round-trips driven by
    ``temporalio.testing.WorkflowEnvironment``'s embedded time-skipping test
    server (no live/deployed Temporal server needed, though the ephemeral test
    server binary itself requires a one-time network fetch — see
-   ``test_workflow_executes_and_replays_without_non_determinism`` near the
-   bottom of this file) and, complementing it,
-   ``test_workflow_gathers_tail_pass_activities_concurrently``, which inspects
-   the recorded history to confirm the three tail-pass activities are
-   scheduled together rather than one after another, plus map-phase and
-   tail-pass gather sibling-completion guards
-   (``test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings``,
-   ``test_workflow_fails_on_verify_failure_without_leaking_sibling_passes``,
-   and friends). These are marked ``integration`` (run with ``-m integration``)
-   since standing up the embedded server is heavier than this file's other
-   pure-Python tests.
+   ``test_workflow_executes_and_replays_without_non_determinism`` and related
+   tests near the bottom of this file).
+7. Concurrent map-phase and tail-pass gather / re-raise semantics: the
+   pure-async unit test
+   ``test_gather_return_exceptions_reproduces_sequential_error_precedence``,
+   plus ``WorkflowEnvironment`` tests for map-chunk sibling completion
+   (``test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings``),
+   verify-failure precedence, concurrent scheduling, out-of-order completion,
+   partial failure, and pre-migration sequential-history replay. The
+   ``WorkflowEnvironment`` tests are marked ``integration`` (run with
+   ``-m integration``) since standing up the embedded server is heavier than
+   this file's other pure-Python tests.
 """
 
 from __future__ import annotations
@@ -595,6 +599,40 @@ def test_synthesize_activity_returns_none_or_dict() -> None:
     assert result is None or set(result) == {"summary", "spec_compliance_notes"}
 
 
+def test_synthesize_activity_fails_safe_when_llm_resolution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_llm()`` runs before synthesis, so a client-resolution failure
+    (e.g. no LLM provider configured) must not raise -- this activity must
+    return ``None`` so the workflow falls back to deterministic concatenation,
+    matching the fail-safe contract of the sibling architecture / side-effect
+    activities."""
+    from code_review_agent.temporal import activities as A
+
+    def _raise() -> Any:
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(A, "_resolve_llm", _raise)
+    issues = [
+        {
+            "severity": "high",
+            "category": "logic",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "x",
+            "suggestion": "",
+        }
+    ]
+    out = A.synthesize_findings_activity(
+        _input().model_dump(mode="json"),
+        approved=False,
+        issues=issues,
+        chunk_summaries=["s1", "s2"],
+        chunk_spec_notes=["n1", "n2"],
+    )
+    assert out is None
+
+
 def test_run_reraises_unrelated_workflow_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from temporalio.client import WorkflowFailureError
     from temporalio.exceptions import ApplicationError
@@ -876,6 +914,7 @@ def test_workflow_and_activities_are_registered() -> None:
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
+    assert "filter_false_positives_activity" in names
     assert "find_architecture_and_redundancy_activity" in names
     assert "find_side_effect_impact_activity" in names
 

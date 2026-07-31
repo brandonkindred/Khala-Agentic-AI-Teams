@@ -27,7 +27,11 @@ from branding_team.graphs.shared import (
     serialize_mission,
     should_advance_past,
 )
-from branding_team.graphs.top_level import build_branding_graph
+from branding_team.graphs.top_level import (
+    DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+    DEFAULT_NODE_TIMEOUT_SECONDS,
+    build_branding_graph,
+)
 from branding_team.models import BrandingMission, BrandPhase
 from branding_team.tests.conftest import make_mission
 
@@ -80,6 +84,12 @@ def test_build_phase5_graph_is_a_graph() -> None:
 # ---------------------------------------------------------------------------
 # Top-level builder — each target_phase exercises a different gating branch
 # ---------------------------------------------------------------------------
+
+
+def test_default_graph_timeout_constants() -> None:
+    """Monolithic graph and single-phase runs share these budgets."""
+    assert DEFAULT_EXECUTION_TIMEOUT_SECONDS == 600.0
+    assert DEFAULT_NODE_TIMEOUT_SECONDS == 180.0
 
 
 @pytest.mark.parametrize(
