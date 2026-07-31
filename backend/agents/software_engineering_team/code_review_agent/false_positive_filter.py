@@ -292,9 +292,16 @@ class CodebaseIndex:
               a non-blank excerpt exists; ``(None, [])`` when it names it without
               one, or when ``key`` is blank.
             - ``(exact_key, [])`` on an exact file match.
-            - ``(sole_hit, hits)`` when exactly one suffix match, else
-              ``(None, hits)``, where ``hits`` are the candidate paths that
+            - ``(sole_exact_normalized, [])`` when exactly one stored path equals
+              ``key`` after ``_normalize_leading`` on both sides (so ``./app/main.py``
+              prefers ``app/main.py`` over a nested suffix like ``src/app/main.py``).
+            - ``(None, exact_hits)`` when multiple stored paths share that exact
+              normalized form.
+            - ``(sole_hit, hits)`` when exactly one bare-name / path-suffix match,
+              else ``(None, hits)``, where ``hits`` are the candidate paths that
               share the requested final segment or path suffix — never raises.
+            - A ``../`` prefix is never treated as ``./``; parent-dir citations do
+              not collapse to a bare basename.
         """
         if not key:
             return None, []
@@ -302,21 +309,26 @@ class CodebaseIndex:
             return (self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None), []
         if key in self.files:
             return key, []
+        # Prefer an exact match of the leading-normalized key before any
+        # bare-name / suffix fallback. ``_normalize_leading`` strips only
+        # literal ``./`` repeats (and one leading ``/``) — never ``../`` —
+        # so ``./app/main.py`` can resolve to ``app/main.py`` even when
+        # ``src/app/main.py`` would also be a suffix hit.
+        normalized = self._normalize_leading(key)
+        exact = [p for p in self.files if self._normalize_leading(p) == normalized]
+        if len(exact) == 1:
+            return exact[0], []
+        if len(exact) > 1:
+            return None, exact
         # Bare-name / suffix fallback: the model often cites ``main.py`` for
         # ``app/services/main.py``, or ``config/.env`` for ``src/config/.env``.
         # Match every stored path whose final ``/``-segment (bare name) or
-        # trailing path suffix equals ``key`` after stripping a leading ``./``
-        # or ``/`` from both sides (without mangling hidden names like
-        # ``.env``); a unique hit resolves, and the full list lets
-        # ``read_file`` distinguish ambiguity.
-        normalized = self._normalize_leading(key)
-
+        # trailing path suffix equals the normalized key (without mangling
+        # hidden names like ``.env``); a unique hit resolves, and the full
+        # list lets ``read_file`` distinguish ambiguity.
         if "/" in normalized:
             hits = [
-                p
-                for p in self.files
-                if self._normalize_leading(p) == normalized
-                or self._normalize_leading(p).endswith("/" + normalized)
+                p for p in self.files if self._normalize_leading(p).endswith("/" + normalized)
             ]
         else:
             hits = [p for p in self.files if self._final_segment(p) == normalized]
@@ -922,6 +934,9 @@ def _parse_verdicts(data: object, count: int) -> Dict[int, _Verdict]:
         - Returns verdicts only for integer indices in ``[0, count)``; a verdict
           referencing an out-of-range index is dropped (it cannot be mapped to a
           finding this call was asked about).
+        - When multiple verdicts share an index, the first in-range verdict is
+          kept and later duplicates are ignored with a warning (first-wins so a
+          later malformed or incorrect entry cannot overwrite a valid earlier one).
         - A non-dict reply, or one without a list ``verdicts``, yields ``{}`` so
           the caller keeps every finding in the group.
     """
@@ -937,6 +952,12 @@ def _parse_verdicts(data: object, count: int) -> Dict[int, _Verdict]:
             continue
         index, verdict = parsed
         if 0 <= index < count:
+            if index in verdicts:
+                logger.warning(
+                    "FalsePositiveFilter: duplicate verdict for index %s, ignoring duplicate",
+                    index,
+                )
+                continue
             verdicts[index] = verdict
     return verdicts
 
@@ -968,6 +989,33 @@ def _code_fence_for(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _sanitize_finding_field(text: str) -> str:
+    """Collapse whitespace and neutralize prompt-structure metacharacters.
+
+    Finding ``description`` / ``suggestion`` text is untrusted reviewer output.
+    Runs of three or more backticks can mimic a CommonMark fence; runs of three
+    or more hyphens can mimic the ``--- Finding index i ---`` separators this
+    module emits. Breaking those runs with U+200B keeps the text readable while
+    preventing structural corruption of the verifier prompt.
+
+    Preconditions:
+        - ``text`` is a string (may be empty).
+
+    Postconditions:
+        - Returns a single line (all whitespace collapsed to spaces).
+        - Contains no run of three or more consecutive backticks or hyphens.
+        - Never raises.
+    """
+    collapsed = " ".join(text.split())
+
+    def _break_runs(match: re.Match[str]) -> str:
+        return "\u200b".join(match.group())
+
+    collapsed = re.sub(r"`{3,}", _break_runs, collapsed)
+    collapsed = re.sub(r"-{3,}", _break_runs, collapsed)
+    return collapsed
+
+
 def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     """Render one indexed finding block (anchor line + metadata) for the prompt.
 
@@ -975,9 +1023,12 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
         - Returns the lines for finding ``i``: an ``--- Finding index i ---``
           anchor the verdict contract refers back to, a severity/category/
           location line, the description, and the suggestion when present.
-        - ``description`` and ``suggestion`` are whitespace-normalized
-          (``' '.join(text.split())``) so multi-line or oddly spaced text
-          collapses to a single prompt line.
+        - ``description`` and ``suggestion`` are whitespace-normalized and
+          sanitized via ``_sanitize_finding_field`` so multi-line or oddly
+          spaced text collapses to a single prompt line and backtick / ``---``
+          runs cannot corrupt the surrounding prompt structure. The structural
+          finding-index anchor is built here and is not passed through the
+          sanitizer.
     """
     location = issue.file_path or "(file unknown)"
     if issue.line is not None:
@@ -985,10 +1036,10 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     block = [
         f"--- Finding index {i} ---",
         f"severity: {issue.severity} | category: {issue.category} | location: {location}",
-        f"description: {' '.join(issue.description.split())}",
+        f"description: {_sanitize_finding_field(issue.description)}",
     ]
     if issue.suggestion:
-        block.append(f"suggestion: {' '.join(issue.suggestion.split())}")
+        block.append(f"suggestion: {_sanitize_finding_field(issue.suggestion)}")
     return block
 
 

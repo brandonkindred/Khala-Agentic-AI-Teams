@@ -219,6 +219,23 @@ class FileSegment(BaseModel):
             f"{self.start_line + i}: {line}" for i, line in enumerate(self.content.splitlines())
         )
 
+    @model_validator(mode="after")
+    def _validate_segment(self) -> "FileSegment":
+        """Enforce the geometric invariants documented on this class.
+
+        Postconditions:
+            - ``start_line`` is ≥ 1.
+            - ``total_lines`` is at least ``line_count``.
+            - ``end_line`` does not extend past ``total_lines``.
+        """
+        if self.start_line < 1:
+            raise ValueError("start_line must be 1-based")
+        if self.total_lines < self.line_count:
+            raise ValueError("total_lines must be at least line_count")
+        if self.end_line > self.total_lines:
+            raise ValueError("segment extends past end of file")
+        return self
+
 
 class ReviewChunk(BaseModel):
     """One map-call unit: a group of file segments reviewed in a single LLM call.
@@ -229,6 +246,18 @@ class ReviewChunk(BaseModel):
     """
 
     segments: List[FileSegment] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_unique_paths(self) -> "ReviewChunk":
+        """Reject chunks where two segments share a path (including empty).
+
+        Postconditions:
+            - Every ``path`` in ``segments`` appears at most once.
+        """
+        paths = [seg.path for seg in self.segments]
+        if len(paths) != len(set(paths)):
+            raise ValueError("ReviewChunk segments must have unique paths")
+        return self
 
     @property
     def content(self) -> str:

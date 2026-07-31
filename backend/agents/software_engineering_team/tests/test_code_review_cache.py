@@ -605,7 +605,9 @@ class _RaisingReviewer:
 
 
 def _single_chunk() -> ReviewChunk:
-    return ReviewChunk(segments=[FileSegment(path="app/a.py", content="def f():\n    return 1\n")])
+    return ReviewChunk(
+        segments=[FileSegment(path="app/a.py", content="def f():\n    return 1\n", total_lines=2)]
+    )
 
 
 def _simple_outcome() -> mapping._ChunkOutcome:

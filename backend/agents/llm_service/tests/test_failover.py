@@ -211,8 +211,68 @@ def test_mark_weekly_from_message(monkeypatch):
     before = datetime.now(timezone.utc)
     _mark_entry_exhausted(_entry(3), err)
     assert captured["id"] == 3 and captured["limit_type"] == "weekly"
-    # No retry_after → long weekly window (well beyond an hour).
-    assert (captured["reset_at"] - before).total_seconds() > 3600
+    # No retry_after → fixed 24h weekly window (well beyond an hour).
+    delta = (captured["reset_at"] - before).total_seconds()
+    assert 23 * 3600 < delta < 25 * 3600
+
+
+def test_mark_weekly_from_limit_kind_ignores_retry_after(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        ps,
+        "mark_exhausted",
+        lambda i, *, limit_type, reset_at: captured.update(
+            limit_type=limit_type, reset_at=reset_at
+        ),
+    )
+    err = LLMRateLimitError(
+        "weekly usage limit",
+        status_code=429,
+        retry_after_seconds=60,
+        limit_kind="weekly",
+    )
+    before = datetime.now(timezone.utc)
+    _mark_entry_exhausted(_entry(3), err)
+    assert captured["limit_type"] == "weekly"
+    delta = (captured["reset_at"] - before).total_seconds()
+    assert 23 * 3600 < delta < 25 * 3600
+
+
+def test_mark_session_from_limit_kind_ignores_retry_after(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        ps,
+        "mark_exhausted",
+        lambda i, *, limit_type, reset_at: captured.update(
+            limit_type=limit_type, reset_at=reset_at
+        ),
+    )
+    err = LLMRateLimitError(
+        "session usage limit",
+        status_code=429,
+        retry_after_seconds=30,
+        limit_kind="session",
+    )
+    before = datetime.now(timezone.utc)
+    _mark_entry_exhausted(_entry(3), err)
+    assert captured["limit_type"] == "session"
+    delta = (captured["reset_at"] - before).total_seconds()
+    assert 4.5 * 3600 < delta < 5.5 * 3600
+
+
+def test_mark_session_from_body_phrase(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        ps,
+        "mark_exhausted",
+        lambda i, *, limit_type, reset_at: captured.update(limit_type=limit_type),
+    )
+    err = LLMRateLimitError(
+        "you have reached your session usage limit",
+        status_code=429,
+    )
+    _mark_entry_exhausted(_entry(3), err)
+    assert captured["limit_type"] == "session"
 
 
 def test_mark_rate_uses_retry_after(monkeypatch):

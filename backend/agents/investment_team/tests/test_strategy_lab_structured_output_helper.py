@@ -32,6 +32,19 @@ class _FakeModel:
         self.client = client
 
 
+def test_structured_output_available_reflects_provider_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(so_mod, "resolve_provider", lambda: "openai")
+    monkeypatch.setattr(
+        so_mod, "provider_supports_structured_output", lambda provider: provider == "openai"
+    )
+    assert so_mod.structured_output_available() is True
+
+    monkeypatch.setattr(so_mod, "provider_supports_structured_output", lambda _provider: False)
+    assert so_mod.structured_output_available() is False
+
+
 def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Happy path: structured output is available and we get the stubbed JSON."""
     client = _StubClient({"ready": True, "rationale": "ok", "issues": []})
@@ -350,7 +363,10 @@ def test_invoke_structured_with_schema_requires_availability(
         )
 
 
-@pytest.mark.parametrize("field", ["agent_key", "system_prompt", "user_prompt"])
+@pytest.mark.parametrize(
+    "field",
+    ["agent_key", "system_prompt", "user_prompt", "phase", "objective"],
+)
 def test_invoke_structured_with_schema_rejects_empty_inputs(
     monkeypatch: pytest.MonkeyPatch,
     field: str,
@@ -385,6 +401,58 @@ def test_invoke_structured_with_schema_rejects_empty_schema(
             "user",
             phase="design_generate_structured",
             schema={},
+            charge=True,
+            objective="strategy design (structured)",
+            logger=logging.getLogger("test.so"),
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+        )
+
+
+def test_invoke_structured_with_schema_propagates_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``StrategyLabLLMError`` from the envelope must propagate unmodified."""
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
+    monkeypatch.setattr(
+        so_mod,
+        "run_structured_agent",
+        lambda *_a, **_k: (_ for _ in ()).throw(StrategyLabLLMError("fatal")),
+    )
+    with pytest.raises(StrategyLabLLMError, match="fatal"):
+        so_mod.invoke_structured_with_schema(
+            "strategy_design",
+            "sys",
+            "user",
+            phase="design_generate_structured",
+            schema={"type": "object"},
+            charge=True,
+            objective="strategy design (structured)",
+            logger=logging.getLogger("test.so"),
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+        )
+
+
+def test_invoke_structured_with_schema_propagates_parse_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw ``ValueError`` from parse must propagate unwrapped by the helper."""
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
+    monkeypatch.setattr(
+        so_mod,
+        "run_structured_agent",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad json")),
+    )
+    with pytest.raises(ValueError, match="bad json"):
+        so_mod.invoke_structured_with_schema(
+            "strategy_design",
+            "sys",
+            "user",
+            phase="design_generate_structured",
+            schema={"type": "object"},
             charge=True,
             objective="strategy design (structured)",
             logger=logging.getLogger("test.so"),
