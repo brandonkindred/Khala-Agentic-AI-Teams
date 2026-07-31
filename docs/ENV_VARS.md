@@ -236,8 +236,9 @@ Temporal worker runs at once. The sales pipeline fans each stage out into one
 activity per prospect, so this — not the old in-process
 `SalesPipelineConfig.pipeline_stage_workers` thread pool — bounds fan-out
 throughput; the default matches that pool's width (`8`) so wall-clock is
-preserved. Parsed via the shared `env_int` (unset/garbage/`≤0` → default, with a
-warning on a set-but-unparseable value). Only read by the sales worker.
+preserved. Parsed via the shared `env_int` (unset/garbage → default; a parsed value
+`≤0` is clamped up to the floor of 1, not reset to the default, with a warning
+logged only for the set-but-unparseable case). Only read by the sales worker.
 
 ### SALES_TEMPORAL_HEARTBEAT_INTERVAL_S
 Float seconds (default `30`, clamped to `[1, 60]`). How often each long sales
