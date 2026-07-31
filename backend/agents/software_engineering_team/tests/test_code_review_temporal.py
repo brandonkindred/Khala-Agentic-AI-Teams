@@ -591,6 +591,40 @@ def test_synthesize_activity_returns_none_or_dict() -> None:
     assert result is None or set(result) == {"summary", "spec_compliance_notes"}
 
 
+def test_synthesize_activity_fails_safe_when_llm_resolution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_llm()`` runs before synthesis, so a client-resolution failure
+    (e.g. no LLM provider configured) must not raise -- this activity must
+    return ``None`` so the workflow falls back to deterministic concatenation,
+    matching the fail-safe contract of the sibling architecture / side-effect
+    activities."""
+    from code_review_agent.temporal import activities as A
+
+    def _raise() -> Any:
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(A, "_resolve_llm", _raise)
+    issues = [
+        {
+            "severity": "high",
+            "category": "logic",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "x",
+            "suggestion": "",
+        }
+    ]
+    out = A.synthesize_findings_activity(
+        _input().model_dump(mode="json"),
+        approved=False,
+        issues=issues,
+        chunk_summaries=["s1", "s2"],
+        chunk_spec_notes=["n1", "n2"],
+    )
+    assert out is None
+
+
 def test_run_reraises_unrelated_workflow_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from temporalio.client import WorkflowFailureError
     from temporalio.exceptions import ApplicationError
