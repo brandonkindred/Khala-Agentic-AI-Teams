@@ -227,7 +227,7 @@ def complete_validated(
     current_prompt = prompt
     last_parse_error: LLMJsonParseError | None = None
     last_validation_error: ValidationError | None = None
-    last_validation_data: dict[str, Any] | None = None
+    last_validation_data: Any = None
     attempts_used = 0
 
     # Total call budget = 1 initial + correction_attempts follow-ups.
@@ -267,7 +267,7 @@ def complete_validated(
         except ValidationError as exc:
             last_validation_error = exc
             last_parse_error = None
-            last_validation_data = data if isinstance(data, dict) else None
+            last_validation_data = data
             if attempt >= correction_attempts:
                 break
             attempts_used = attempt + 1
