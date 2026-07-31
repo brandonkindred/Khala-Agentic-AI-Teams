@@ -922,6 +922,9 @@ def _parse_verdicts(data: object, count: int) -> Dict[int, _Verdict]:
         - Returns verdicts only for integer indices in ``[0, count)``; a verdict
           referencing an out-of-range index is dropped (it cannot be mapped to a
           finding this call was asked about).
+        - When multiple verdicts share an index, the first in-range verdict is
+          kept and later duplicates are ignored with a warning (first-wins so a
+          later malformed or incorrect entry cannot overwrite a valid earlier one).
         - A non-dict reply, or one without a list ``verdicts``, yields ``{}`` so
           the caller keeps every finding in the group.
     """
@@ -937,6 +940,12 @@ def _parse_verdicts(data: object, count: int) -> Dict[int, _Verdict]:
             continue
         index, verdict = parsed
         if 0 <= index < count:
+            if index in verdicts:
+                logger.warning(
+                    "FalsePositiveFilter: duplicate verdict for index %s, ignoring duplicate",
+                    index,
+                )
+                continue
             verdicts[index] = verdict
     return verdicts
 
