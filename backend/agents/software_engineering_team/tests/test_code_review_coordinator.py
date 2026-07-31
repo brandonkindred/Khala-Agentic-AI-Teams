@@ -708,6 +708,61 @@ def test_segment_range_label_uses_embedded_numbers_for_pre_numbered() -> None:
 
 
 # ---------------------------------------------------------------------------
+# FileSegment / ReviewChunk construction invariants
+# ---------------------------------------------------------------------------
+
+
+def test_file_segment_valid_constructs() -> None:
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2", start_line=5, total_lines=20)
+    assert seg.end_line == 6
+
+
+def test_file_segment_rejects_zero_start_line() -> None:
+    with pytest.raises(ValidationError, match="start_line must be 1-based"):
+        FileSegment(path="a.py", content="x = 1", start_line=0, total_lines=1)
+
+
+def test_file_segment_rejects_total_lines_too_small() -> None:
+    with pytest.raises(ValidationError, match="total_lines must be at least line_count"):
+        FileSegment(path="a.py", content="x = 1\ny = 2", total_lines=1)
+
+
+def test_file_segment_rejects_extending_past_eof() -> None:
+    with pytest.raises(ValidationError, match="segment extends past end of file"):
+        FileSegment(path="a.py", content="x = 1\ny = 2", start_line=5, total_lines=5)
+
+
+def test_review_chunk_rejects_duplicate_paths() -> None:
+    with pytest.raises(ValidationError, match="unique paths"):
+        ReviewChunk(
+            segments=[
+                FileSegment(path="a.py", content="x = 1", total_lines=1),
+                FileSegment(path="a.py", content="y = 2", total_lines=1),
+            ]
+        )
+
+
+def test_review_chunk_rejects_duplicate_empty_paths() -> None:
+    with pytest.raises(ValidationError, match="unique paths"):
+        ReviewChunk(
+            segments=[
+                FileSegment(path="", content="x = 1", total_lines=1),
+                FileSegment(path="", content="y = 2", total_lines=1),
+            ]
+        )
+
+
+def test_review_chunk_allows_distinct_paths_including_empty() -> None:
+    chunk = ReviewChunk(
+        segments=[
+            FileSegment(path="", content="x = 1", total_lines=1),
+            FileSegment(path="a.py", content="y = 2", total_lines=1),
+        ]
+    )
+    assert len(chunk.segments) == 2
+
+
+# ---------------------------------------------------------------------------
 # build_review_chunks — no-file-dropped property
 # ---------------------------------------------------------------------------
 
