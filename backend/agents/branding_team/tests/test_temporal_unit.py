@@ -1196,9 +1196,24 @@ def test_signal_branding_cancel_swallows_errors() -> None:
 
 
 @pytest.fixture
-def branding_client() -> TestClient:
-    from branding_team.api.main import app
+def branding_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """HTTP client with in-memory stores + fake job service (no Postgres/job SID).
 
+    Temporal dispatch tests only need clients/brands present so ``/run`` can
+    resolve them; they do not exercise SQL. Installing the memory doubles here
+    keeps these cases self-contained when run alone with ``POSTGRES_HOST`` unset.
+    The fake job client likewise avoids requiring a live ``JOB_SERVICE_URL``.
+    """
+    from branding_team.api import main as main_mod
+    from branding_team.api.main import app
+    from branding_team.shared import job_store
+    from branding_team.tests._memory_stores import install_memory_stores
+    from job_service_client_fake import FakeJobServiceClient
+
+    install_memory_stores(monkeypatch)
+    fake_jobs = FakeJobServiceClient(team="branding_team")
+    monkeypatch.setattr(job_store, "_client", lambda: fake_jobs)
+    monkeypatch.setattr(main_mod, "_job_manager", fake_jobs)
     return TestClient(app)
 
 

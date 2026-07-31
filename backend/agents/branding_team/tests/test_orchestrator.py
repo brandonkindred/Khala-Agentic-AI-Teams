@@ -61,13 +61,7 @@ from branding_team.models import (
 )
 from branding_team.shared.coro_runner import run_coroutine
 from branding_team.store import BrandVersionAppendConflict
-from branding_team.tests._fake_postgres import install_fake_postgres
 from branding_team.tests.conftest import make_mission
-
-
-@pytest.fixture(autouse=False)
-def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
-    return install_fake_postgres(monkeypatch)
 
 
 def _full_strategic_core() -> StrategicCoreOutput:
@@ -387,19 +381,24 @@ def test_design_assets_integration() -> None:
     assert result.degraded_phases == []
 
 
-@pytest.mark.usefixtures("fake_pg")
 def test_run_with_store_appends_version() -> None:
-    from branding_team.store import BrandingStore
-
-    store = BrandingStore()
-    client = store.create_client("Test Client")
     mission = make_mission(
         company_description="A strategic studio helping product teams ship cohesive digital experiences",
         values=["clarity", "trust", "momentum"],
     )
-    brand = store.create_brand(client.id, mission)
-    assert brand is not None
-    assert brand.version == 0
+    brand = Brand(
+        id="brand_1",
+        client_id="client_1",
+        name="Northstar Labs",
+        mission=mission,
+        status=BrandStatus.draft,
+        version=0,
+    )
+    updated = brand.model_copy(update={"version": 1})
+
+    store = MagicMock()
+    store.get_brand.return_value = brand
+    store.append_brand_version.return_value = updated
 
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
@@ -407,14 +406,18 @@ def test_run_with_store_appends_version() -> None:
             mission=mission,
             human_review=HumanReview(approved=True),
             store=store,
-            client_id=client.id,
+            client_id=brand.client_id,
             brand_id=brand.id,
         )
 
-    updated = store.get_brand(client.id, brand.id)
-    assert updated is not None
-    assert updated.version == 1
-    assert updated.latest_output is not None
+    store.append_brand_version.assert_called_once()
+    args, kwargs = store.append_brand_version.call_args
+    assert kwargs == {}
+    assert args[0] == brand.client_id
+    assert args[1] == brand.id
+    assert args[2].status == WorkflowStatus.READY_FOR_ROLLOUT
+    assert args[2].current_phase == BrandPhase.COMPLETE
+    assert args[2].brand_book is not None
 
 
 def test_run_with_store_append_brand_version_none_raises() -> None:
