@@ -244,10 +244,23 @@ When responding to users:
 
 
 def format_specialist_results(results: list[dict], max_chars_per_result: int = 3000) -> str:
-    """Format child agent results for the synthesis prompt, with truncation."""
+    """Format child agent results for the synthesis prompt, with truncation.
+
+    Preconditions:
+        - ``max_chars_per_result > 0``
+        - each item in ``results`` is a dict with keys ``answer``, ``agent_name``,
+          ``focus_question``, and ``confidence``
+    Postconditions:
+        - returned string joins one markdown section per result
+        - each answer body is at most ``max_chars_per_result`` characters, or
+          ``max_chars_per_result`` characters plus the ``\\n\\n[truncated]`` suffix
+    """
+    assert max_chars_per_result > 0, "max_chars_per_result must be positive"
     parts = []
     for i, r in enumerate(results, 1):
         answer = r["answer"]
+        if len(answer) > max_chars_per_result:
+            answer = answer[:max_chars_per_result] + "\n\n[truncated]"
         parts.append(
             f"### Specialist {i}: {r['agent_name']}\n"
             f"**Focus:** {r['focus_question']}\n"
