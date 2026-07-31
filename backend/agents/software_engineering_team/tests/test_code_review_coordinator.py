@@ -1277,7 +1277,7 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
     )
     assert result.approved is True
     # initial no-ladder exhaustion + successful same-input retry + 1
-    # side-effect/blast-radius pass call (additive, runs once per submission).
+    # merged architecture/side-effect pass call (additive, runs once per submission).
     assert client.calls == 3
 
 
