@@ -8,6 +8,7 @@ return a canned result and verify the orchestrator correctly assembles
 
 import asyncio
 import json
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1229,14 +1230,19 @@ def test_gather_integrations_market_research_failure_returns_none() -> None:
 
 
 def test_run_coro_offloads_when_loop_running() -> None:
-    """run_coroutine runs a coroutine on a worker thread when a loop is already active."""
+    """run_coroutine returns the coroutine result on a worker thread when a loop is already active."""
 
     async def _driver():
+        loop_thread_ident = threading.current_thread().ident
+
         async def _val():
-            return 42
+            return 42, threading.current_thread().ident
 
         # Called synchronously inside a running loop, so run_coroutine must offload
         # to a worker thread instead of calling asyncio.run on the live loop.
-        return run_coroutine(_val())
+        return loop_thread_ident, run_coroutine(_val())
 
-    assert asyncio.run(_driver()) == 42
+    loop_thread_ident, (value, worker_thread_ident) = asyncio.run(_driver())
+    assert value == 42
+    assert worker_thread_ident is not None
+    assert worker_thread_ident != loop_thread_ident
