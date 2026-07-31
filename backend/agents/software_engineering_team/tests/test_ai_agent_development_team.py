@@ -31,6 +31,9 @@ from software_engineering_team.ai_agent_development_team.orchestrator import (
 from software_engineering_team.ai_agent_development_team.phases.deliver import run_deliver
 from software_engineering_team.ai_agent_development_team.phases.intake import run_intake
 from software_engineering_team.ai_agent_development_team.phases.planning import run_planning
+from software_engineering_team.ai_agent_development_team.phases.problem_solving import (
+    run_problem_solving,
+)
 from software_engineering_team.shared.models import Task, TaskType
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
@@ -131,6 +134,29 @@ def test_intake_and_planning_prompts_include_required_artifact_hints() -> None:
         assert hint in planning
     assert "spec intake specialist" in intake
     assert "AI systems planner" in planning
+
+
+def test_problem_solving_ignores_unknown_artifact_gate_token() -> None:
+    """artifact_gate issues whose category is not a shared hint create no placeholder."""
+    execution = ExecutionResult(files={"ai_system/system_blueprint.md": "# blueprint"})
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description="Missing expected artifact category: not_a_real_hint",
+                recommendation="Add at least one artifact path containing 'not_a_real_hint'.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(execution_result=execution, review_result=review)
+    assert result.resolved is False
+    assert result.fixes_applied == []
+    assert result.files == execution.files
+    assert "not_a_real_hint_placeholder.md" not in result.files
 
 
 def test_ai_agent_development_workflow_success(tmp_path: Path):
