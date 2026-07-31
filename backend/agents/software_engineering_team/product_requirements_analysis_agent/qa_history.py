@@ -410,7 +410,7 @@ def extract_answer_from_qa_history(
 
         # Calculate match score
         matches = sum(1 for w in key_words if w in recorded_question_lower)
-        match_ratio = matches / len(key_words) if key_words else 0
+        match_ratio = matches / len(key_words)
 
         if (
             match_ratio >= _QUESTION_MATCH_THRESHOLD
