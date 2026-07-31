@@ -968,6 +968,33 @@ def _code_fence_for(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _sanitize_finding_field(text: str) -> str:
+    """Collapse whitespace and neutralize prompt-structure metacharacters.
+
+    Finding ``description`` / ``suggestion`` text is untrusted reviewer output.
+    Runs of three or more backticks can mimic a CommonMark fence; runs of three
+    or more hyphens can mimic the ``--- Finding index i ---`` separators this
+    module emits. Breaking those runs with U+200B keeps the text readable while
+    preventing structural corruption of the verifier prompt.
+
+    Preconditions:
+        - ``text`` is a string (may be empty).
+
+    Postconditions:
+        - Returns a single line (all whitespace collapsed to spaces).
+        - Contains no run of three or more consecutive backticks or hyphens.
+        - Never raises.
+    """
+    collapsed = " ".join(text.split())
+
+    def _break_runs(match: re.Match[str]) -> str:
+        return "\u200b".join(match.group())
+
+    collapsed = re.sub(r"`{3,}", _break_runs, collapsed)
+    collapsed = re.sub(r"-{3,}", _break_runs, collapsed)
+    return collapsed
+
+
 def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     """Render one indexed finding block (anchor line + metadata) for the prompt.
 
@@ -975,9 +1002,12 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
         - Returns the lines for finding ``i``: an ``--- Finding index i ---``
           anchor the verdict contract refers back to, a severity/category/
           location line, the description, and the suggestion when present.
-        - ``description`` and ``suggestion`` are whitespace-normalized
-          (``' '.join(text.split())``) so multi-line or oddly spaced text
-          collapses to a single prompt line.
+        - ``description`` and ``suggestion`` are whitespace-normalized and
+          sanitized via ``_sanitize_finding_field`` so multi-line or oddly
+          spaced text collapses to a single prompt line and backtick / ``---``
+          runs cannot corrupt the surrounding prompt structure. The structural
+          finding-index anchor is built here and is not passed through the
+          sanitizer.
     """
     location = issue.file_path or "(file unknown)"
     if issue.line is not None:
@@ -985,10 +1015,10 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     block = [
         f"--- Finding index {i} ---",
         f"severity: {issue.severity} | category: {issue.category} | location: {location}",
-        f"description: {' '.join(issue.description.split())}",
+        f"description: {_sanitize_finding_field(issue.description)}",
     ]
     if issue.suggestion:
-        block.append(f"suggestion: {' '.join(issue.suggestion.split())}")
+        block.append(f"suggestion: {_sanitize_finding_field(issue.suggestion)}")
     return block
 
 
