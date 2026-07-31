@@ -908,6 +908,33 @@ def _run_reviewer(
     return outputs[0] if len(outputs) == 1 else _MergedReviewerOutput(outputs)
 
 
+def _results_draining_exceptions(futures: List[Any]) -> List[Any]:
+    """Call ``result()`` on every future; re-raise the first failure after draining all.
+
+    A generator or list-comprehension unpack stops at the first ``result()``
+    failure and leaves sibling exceptions unretrieved on the remaining futures.
+
+    Preconditions:
+        - ``futures`` is a list of ``concurrent.futures.Future`` instances.
+    Postconditions:
+        - Every future has had ``result()`` invoked (exceptions retrieved).
+        - Returns the ordered list of successful results when every future succeeds.
+        - Raises the first exception raised by any ``result()`` call when any
+          future fails (after every sibling has also been drained).
+    """
+    results: List[Any] = []
+    first_error: Optional[BaseException] = None
+    for future in futures:
+        try:
+            results.append(future.result())
+        except Exception as exc:  # noqa: BLE001 - drain siblings, then re-raise first
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+    return results
+
+
 def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int) -> List[Any]:
     """Best-effort fetch of every comment already on the PR, for de-duplicating findings.
 
@@ -940,7 +967,7 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
     try:
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = [executor.submit(t) for t in tasks]
-            review_comments, resolved_ids, issue_comments = (f.result() for f in futures)
+            review_comments, resolved_ids, issue_comments = _results_draining_exceptions(futures)
         return build_existing_comments(review_comments, resolved_ids, issue_comments)
     except Exception as e:  # noqa: BLE001 - this lookup is best-effort, never fails the review
         logger.warning(
@@ -1059,7 +1086,7 @@ def _fetch_pr_metadata(
     tasks = (_get_pr, _get_files, _get_login)
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         futures = [executor.submit(t) for t in tasks]
-        pr, files, reviewer_login = (f.result() for f in futures)
+        pr, files, reviewer_login = _results_draining_exceptions(futures)
     return pr, files, reviewer_login
 
 
