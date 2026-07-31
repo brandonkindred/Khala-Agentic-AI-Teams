@@ -574,6 +574,38 @@ def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
     assert len(gate["issues"]) == 1
 
 
+def test_finalize_activity_caps_issues_at_max() -> None:
+    from code_review_agent.coordinator import MAX_CODE_REVIEW_ISSUES
+    from code_review_agent.temporal import activities as A
+
+    findings = [
+        {
+            "severity": "low",
+            "category": "naming",
+            "file_path": "a.py",
+            "line": i,
+            "description": f"nit-{i}",
+            "suggestion": "",
+        }
+        for i in range(1, MAX_CODE_REVIEW_ISSUES + 6)
+    ]
+    # One critical last — severity-first cap must keep it and still reject.
+    findings.append(
+        {
+            "severity": "critical",
+            "category": "security",
+            "file_path": "a.py",
+            "line": 999,
+            "description": "critical-keep",
+            "suggestion": "fix",
+        }
+    )
+    gate = A.finalize_review_activity(findings, [], [], [True])
+    assert len(gate["issues"]) == MAX_CODE_REVIEW_ISSUES
+    assert gate["issues"][0]["description"] == "critical-keep"
+    assert gate["approved"] is False
+
+
 def test_synthesize_activity_returns_none_or_dict() -> None:
     from code_review_agent.temporal import activities as A
 

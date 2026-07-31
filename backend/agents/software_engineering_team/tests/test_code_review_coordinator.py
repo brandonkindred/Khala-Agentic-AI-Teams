@@ -18,9 +18,12 @@ from unittest.mock import MagicMock
 import pytest
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
 from code_review_agent.coordinator import (
+    MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
+    _cap_issues,
     _issues_from_chunk_output,
     _map_parallelism,
+    _reconcile_approval,
     _render_architecture_context,
     _segment_range_label,
     _tail_passes_run_sequentially,
@@ -35,6 +38,7 @@ from code_review_agent.coordinator import (
 from code_review_agent.models import (
     ChunkReviewOutput,
     CodeReviewInput,
+    CodeReviewIssue,
     CodeReviewOutput,
     CodeReviewUnavailableError,
     FileSegment,
@@ -68,6 +72,76 @@ _MAP_CHUNK_SEPARATION_HEADROOM = 2_000
 # ---------------------------------------------------------------------------
 # Pure-function tests
 # ---------------------------------------------------------------------------
+
+
+def _issue(severity: str, description: str, *, line: int = 1) -> CodeReviewIssue:
+    """Build a minimal ``CodeReviewIssue`` for cap/reconcile unit tests."""
+    return CodeReviewIssue(
+        severity=severity,
+        category="general",
+        file_path="a.py",
+        line=line,
+        description=description,
+        suggestion="fix it",
+    )
+
+
+def test_cap_issues_under_limit_preserves_order() -> None:
+    issues = [_issue("low", f"n{i}", line=i) for i in range(1, 6)]
+    capped = _cap_issues(issues)
+    assert capped == issues
+    assert capped is not issues  # shallow copy
+
+
+def test_cap_issues_exactly_at_limit_preserves_order() -> None:
+    issues = [_issue("medium", f"m{i}", line=i) for i in range(1, MAX_CODE_REVIEW_ISSUES + 1)]
+    capped = _cap_issues(issues)
+    assert len(capped) == MAX_CODE_REVIEW_ISSUES
+    assert [i.description for i in capped] == [i.description for i in issues]
+
+
+def test_cap_issues_over_limit_severity_first_stable_within_rank() -> None:
+    # 5 critical, 5 high, then enough medium/low/info that total exceeds the cap.
+    # Input order is deliberately low-first so a first-seen trim would keep nits.
+    lows = [_issue("low", f"low-{i}", line=100 + i) for i in range(20)]
+    mediums = [_issue("medium", f"med-{i}", line=200 + i) for i in range(20)]
+    highs = [_issue("high", f"high-{i}", line=10 + i) for i in range(5)]
+    criticals = [_issue("critical", f"crit-{i}", line=i) for i in range(5)]
+    issues = [*lows, *mediums, *highs, *criticals]
+    assert len(issues) > MAX_CODE_REVIEW_ISSUES
+
+    capped = _cap_issues(issues)
+    assert len(capped) == MAX_CODE_REVIEW_ISSUES
+    severities = [i.severity for i in capped]
+    assert severities[:5] == ["critical"] * 5
+    assert severities[5:10] == ["high"] * 5
+    assert all(s == "medium" for s in severities[10:])
+    # Within severity, original relative order is preserved.
+    assert [i.description for i in capped[:5]] == [f"crit-{i}" for i in range(5)]
+    assert [i.description for i in capped[5:10]] == [f"high-{i}" for i in range(5)]
+    assert [i.description for i in capped[10:]] == [f"med-{i}" for i in range(20)]
+
+
+def test_cap_then_reconcile_medium_only_still_approves() -> None:
+    issues = [_issue("medium", f"m{i}", line=i) for i in range(1, MAX_CODE_REVIEW_ISSUES + 6)]
+    capped = _cap_issues(issues)
+    assert len(capped) == MAX_CODE_REVIEW_ISSUES
+    approved, out = _reconcile_approval(False, capped)
+    assert approved is True
+    assert len(out) == MAX_CODE_REVIEW_ISSUES
+
+
+def test_cap_then_reconcile_keeps_critical_and_rejects() -> None:
+    # Critical arrives last in the uncapped list (would be dropped by first-seen
+    # trim) but severity-first ranking keeps it in the capped set.
+    mediums = [_issue("medium", f"m{i}", line=i) for i in range(1, MAX_CODE_REVIEW_ISSUES + 1)]
+    critical = _issue("critical", "must-keep", line=999)
+    capped = _cap_issues([*mediums, critical])
+    assert any(i.description == "must-keep" for i in capped)
+    assert capped[0].severity == "critical"
+    approved, out = _reconcile_approval(True, capped)
+    assert approved is False
+    assert any(i.severity == "critical" for i in out)
 
 
 def test_parse_code_into_file_blocks_single_file() -> None:

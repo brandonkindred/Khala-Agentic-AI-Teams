@@ -310,6 +310,58 @@ def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
     return deduped
 
 
+# Hard ceiling on findings returned by one review. Applied after dedupe and
+# before the approval gate so approval and narrative synthesis see the same
+# capped list. Severity-first ranking keeps blocking findings ahead of nits.
+MAX_CODE_REVIEW_ISSUES = 30
+
+# Mirrors synthesis._SEVERITY_RANK so the reduce-phase cap and the findings
+# digest agree on presentation order (critical → high → medium → low → info).
+_CAP_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_CAP_UNKNOWN_SEVERITY_RANK = len(_CAP_SEVERITY_RANK)
+
+
+def _cap_issues(
+    issues: List[CodeReviewIssue],
+    limit: int = MAX_CODE_REVIEW_ISSUES,
+) -> List[CodeReviewIssue]:
+    """Keep at most ``limit`` issues, ranked severity-first (stable within rank).
+
+    Preconditions:
+        - ``issues`` is the deduped merged finding list (may be empty).
+        - ``limit`` is a non-negative integer.
+
+    Postconditions:
+        - Returns a new list of length ``min(len(issues), limit)``.
+        - When truncation occurs, ordering is ``critical → high → medium →
+          low → info`` (unknown severities last), preserving input order
+          within the same severity so blocking findings are never dropped
+          in favour of nits.
+        - When ``len(issues) <= limit``, returns a shallow copy in the
+          original order (no re-sort).
+        - Never mutates ``issues``.
+    """
+    assert limit >= 0, "limit must be non-negative"
+    if len(issues) <= limit:
+        return list(issues)
+    ordered = sorted(
+        enumerate(issues),
+        key=lambda pair: (
+            _CAP_SEVERITY_RANK.get(
+                (pair[1].severity or "").strip().lower(), _CAP_UNKNOWN_SEVERITY_RANK
+            ),
+            pair[0],
+        ),
+    )
+    capped = [issue for _, issue in ordered[:limit]]
+    logger.info(
+        "CodeReview: capped issues %s -> %s (severity-first)",
+        len(issues),
+        limit,
+    )
+    return capped
+
+
 def _reconcile_approval(
     llm_approved: bool,
     issues: List[CodeReviewIssue],
@@ -317,10 +369,11 @@ def _reconcile_approval(
     """Deterministic approval gate with the anti-loop safety nets.
 
     Preconditions:
-        - ``issues`` is the deduped merged issue list. Any rejecting
-          sub-review's summary has already been synthesized into a high issue
-          per sub-review (``_review_chunk_with_recovery``), so issue text and
-          verdicts are correctly paired before they reach this gate.
+        - ``issues`` is the deduped (and typically severity-capped) merged
+          issue list. Any rejecting sub-review's summary has already been
+          synthesized into a high issue per sub-review
+          (``_review_chunk_with_recovery``), so issue text and verdicts are
+          correctly paired before they reach this gate.
 
     Postconditions:
         - ``approved is False`` implies the returned issues contain at least
@@ -791,6 +844,7 @@ def run_coordinator(
                 not_reviewed_ranges,
             )
         deduped = _dedupe_issues([*tail_pass_issues, *skipped_issues])
+    deduped = _cap_issues(deduped)
     assert outcome.approved_flags, "unreachable: guarded by the total-failure check above"
     all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)

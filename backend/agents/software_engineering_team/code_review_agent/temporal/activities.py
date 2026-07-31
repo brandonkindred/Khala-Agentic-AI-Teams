@@ -403,7 +403,7 @@ def finalize_review_activity(
     skipped_issues: List[Dict[str, Any]],
     approved_flags: List[bool],
 ) -> Dict[str, Any]:
-    """Deterministic reduce gate: dedupe the merged findings and reconcile approval.
+    """Deterministic reduce gate: dedupe, cap, and reconcile approval.
 
     Preconditions:
         - ``verified_issues`` are the post-false-positive genuine findings,
@@ -416,12 +416,13 @@ def finalize_review_activity(
 
     Postconditions:
         - Returns ``{"approved": bool, "issues": [issue dicts]}`` computed by
-          ``coordinator._dedupe_issues`` over the merged findings and
-          ``coordinator._reconcile_approval`` with the anti-loop safety nets — the
-          identical deterministic gate ``run_coordinator`` applies, so the verdict
-          matches thread mode.
+          ``coordinator._dedupe_issues`` over the merged findings,
+          ``coordinator._cap_issues`` (severity-first, at most
+          ``MAX_CODE_REVIEW_ISSUES``), and ``coordinator._reconcile_approval``
+          with the anti-loop safety nets — the identical deterministic gate
+          ``run_coordinator`` applies, so the verdict matches thread mode.
     """
-    from ..coordinator import _dedupe_issues, _reconcile_approval
+    from ..coordinator import _cap_issues, _dedupe_issues, _reconcile_approval
     from ..models import CodeReviewIssue
 
     verified = [CodeReviewIssue.model_validate(i) for i in verified_issues]
@@ -429,6 +430,7 @@ def finalize_review_activity(
     skipped = [CodeReviewIssue.model_validate(i) for i in skipped_issues]
 
     deduped = _dedupe_issues([*verified, *not_reviewed, *skipped])
+    deduped = _cap_issues(deduped)
     assert approved_flags, "unreachable: workflow raises before calling this activity when empty"
     all_llm_approved = all(approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
