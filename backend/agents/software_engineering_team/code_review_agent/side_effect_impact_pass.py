@@ -133,8 +133,8 @@ def _search_repository(
         - ``max_matches`` > 0 and, when given explicitly, ``max_files_scanned`` > 0.
 
     Postconditions:
-        - Returns ``([], False)`` when ``index.repo_reader`` is None, when the
-          query is blank, or when the reader's own ``list_files`` fails.
+        - Returns ``([], False)`` when ``index.repo_reader`` is None or when the
+          query is blank.
         - When ``max_files_scanned`` is None (the normal call path), it resolves
           to ``_DISK_REPO_SEARCH_FILE_SCAN_LIMIT`` for a ``DiskRepoReader`` (no
           per-file fetch cost -- bounded only by the reader's own listing cap) or
@@ -179,7 +179,7 @@ def _search_repository(
         paths = index.repo_reader.list_files()
     except Exception as exc:  # noqa: BLE001 - fail-safe: a reader failure must never raise
         logger.debug("SideEffectImpactPass: repo_reader.list_files() failed: %s", exc)
-        return [], False
+        return [], True
 
     results: List[Tuple[str, int, str]] = []
     scanned = 0
