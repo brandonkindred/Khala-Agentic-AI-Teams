@@ -543,7 +543,7 @@ class OllamaLLMClient(LLMClient):
 
     def __init__(
         self,
-        model: str = "llama3.1",
+        model: str = "qwen3.5:9b-mlx",
         *,
         base_url: str = "https://ollama.com",
         timeout: float = 3600.0,

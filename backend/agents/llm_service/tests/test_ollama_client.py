@@ -1840,7 +1840,7 @@ def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPat
     payload = {
         "models": [
             {"name": "llama3.2", "model": "llama3.2:latest"},
-            {"name": "llama3.1"},
+            {"name": "qwen3.5:9b-mlx"},
             {"model": "qwen3-coder:480b-cloud"},  # no name -> falls back to model
             {"name": "llama3.2"},  # duplicate -> collapsed
             {"name": ""},  # blank -> dropped
@@ -1849,7 +1849,7 @@ def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPat
     }
     mock_cls, mock_client = _patch_tags_get(_make_tags_response(200, payload))
     with patch("httpx.Client", mock_cls):
-        assert list_ollama_models() == ["llama3.1", "llama3.2", "qwen3-coder:480b-cloud"]
+        assert list_ollama_models() == ["qwen3.5:9b-mlx", "llama3.2", "qwen3-coder:480b-cloud"]
     # The request targets {base_url}/api/tags.
     called_url = mock_client.__enter__.return_value.get.call_args[0][0]
     assert called_url == "http://localhost:11434/api/tags"
