@@ -1,7 +1,7 @@
 """Agent factory functions for the branding team Strands SDK pipeline.
 
 Each function returns a configured ``strands.Agent`` instance for use as a
-node in a ``GraphBuilder`` graph or ``Swarm``.  Agents are grouped by phase.
+node in a ``GraphBuilder`` graph.  Agents are grouped by phase.
 
 ``BrandComplianceAgent`` is the only non-Strands class; it runs
 outside the graph as a post-processing utility.
@@ -24,13 +24,23 @@ from .models import (
     BrandDiscoveryAuditOutput,
     BrandingMission,
     BrandStoryOutput,
+    ColorPaletteSystemOutput,
     CoreValuesOutput,
+    CreativeRefinementDecisionOutput,
+    DesignSystemDefinitionOutput,
     DifferentiationPillarsOutput,
+    IconographyOutput,
+    LogoSuiteOutput,
     MessagingFrameworkOutput,
+    MoodBoardCandidatesOutput,
+    MoodBoardConceptOutput,
     PersonaProfilesOutput,
+    PhotographyVideoOutput,
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    TypographySystemOutput,
+    VoiceToneOutput,
     WritingGuidelinesOutput,
 )
 
@@ -233,25 +243,24 @@ def make_voice_principles_drafter() -> Agent:
 
 
 # ===================================================================
-# Phase 3 — Visual & Expressive Identity  (Graph-of-Swarm)
+# Phase 3 — Visual & Expressive Identity  (Graph: diverge fan-out + converge fan-out)
 # ===================================================================
 
-# --- Diverge Swarm agents ---
+# --- Diverge fan-out agents ---
 
 
 def make_creative_director() -> Agent:
     return build_agent(
         name="CreativeDirector",
-        description="Coordinates moodboard ideation, dispatches conceptualists, reviews candidates.",
+        description="Collects moodboard candidates from conceptualists into a unified list.",
         system_prompt=(
-            "You are a Creative Director leading visual identity exploration. Your job:\n"
-            "1. Brief each MoodBoardConceptualist with a distinct visual direction\n"
-            "2. Review their candidate moodboards\n"
-            "3. Request revisions if needed\n"
-            "4. Ensure at least 2-3 distinct candidates are produced\n\n"
-            "Hand off to each conceptualist in turn. Once all candidates are collected, "
-            "summarise the candidates and conclude."
+            "You are a Creative Director reviewing visual identity exploration. Using the three "
+            "moodboard concepts from Inputs from previous nodes, collect them into "
+            "mood_board_candidates. Preserve each concept (title, visual_direction, color_story, "
+            "typography_direction, image_style). Do not pick a winner — converge_decider selects "
+            "the winning direction."
         ),
+        structured_output=MoodBoardCandidatesOutput,
     )
 
 
@@ -267,13 +276,13 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
             f"- visual_direction: overall aesthetic description\n"
             f"- color_story: 3-4 color names/descriptions\n"
             f"- typography_direction: font style recommendations\n"
-            f"- image_style: 3-4 image style descriptions\n\n"
-            f"Hand back to the CreativeDirector when done."
+            f"- image_style: 3-4 image style descriptions"
         ),
+        structured_output=MoodBoardConceptOutput,
     )
 
 
-# --- Post-swarm Graph nodes ---
+# --- Post-diverge Graph nodes ---
 
 
 def make_converge_decider() -> Agent:
@@ -287,10 +296,11 @@ def make_converge_decider() -> Agent:
             "- Distinctiveness vs competitors\n"
             "- Cross-channel consistency\n"
             "- Execution feasibility\n\n"
-            "Output: winning_candidate_title, scoring_criteria, scores_by_candidate (dict of "
+            "Produce: winning_candidate_title, scoring_criteria, scores_by_candidate (dict of "
             "title→score), rationale, workshop_prompts (3 questions for stakeholders), and "
             "decision_criteria used."
         ),
+        structured_output=CreativeRefinementDecisionOutput,
     )
 
 
@@ -301,9 +311,9 @@ def make_logo_specifier() -> Agent:
         system_prompt=(
             "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
             "suite. For each variant (primary, monochrome, icon-only, reversed), specify:\n"
-            "- variant, usage_context, minimum_size, clear_space\n"
-            "Output valid JSON as a list of LogoUsageRule objects."
+            "- variant, usage_context, minimum_size, clear_space"
         ),
+        structured_output=LogoSuiteOutput,
     )
 
 
@@ -315,9 +325,9 @@ def make_color_system_builder() -> Agent:
             "You are a Color System Builder. Based on the winning moodboard direction, define "
             "5-7 colors. For each: name, hex_value, usage (where to use it), and "
             "psychological_rationale (why this color works for the brand). Include primary, "
-            "secondary, accent, surface, and critical colors. Output valid JSON as a list of "
-            "ColorEntry objects."
+            "secondary, accent, surface, and critical colors."
         ),
+        structured_output=ColorPaletteSystemOutput,
     )
 
 
@@ -328,9 +338,9 @@ def make_typography_builder() -> Agent:
         system_prompt=(
             "You are a Typography Builder. Based on the winning moodboard direction, define a "
             "typography system with 3-4 type roles (display, body, caption, code). For each:\n"
-            "- role, font_family, weight_range, usage_notes\n"
-            "Output valid JSON as a list of TypographySpec objects."
+            "- role, font_family, weight_range, usage_notes"
         ),
+        structured_output=TypographySystemOutput,
     )
 
 
@@ -341,9 +351,9 @@ def make_iconography_director() -> Agent:
         system_prompt=(
             "You are an Iconography Director. Based on the winning moodboard, define:\n"
             "1. iconography_style — describe the icon aesthetic (line weight, corner radius, fill)\n"
-            "2. illustration_style — describe the illustration approach (flat, isometric, etc.)\n"
-            "Output valid JSON with these two keys."
+            "2. illustration_style — describe the illustration approach (flat, isometric, etc.)"
         ),
+        structured_output=IconographyOutput,
     )
 
 
@@ -355,9 +365,9 @@ def make_photography_video_director() -> Agent:
             "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
             "1. photography_direction — shooting style, lighting, composition, subjects\n"
             "2. video_direction — pacing, tone, visual style for video content\n"
-            "3. motion_principles — 3-4 principles for animation/motion design\n"
-            "Output valid JSON with these three keys."
+            "3. motion_principles — 3-4 principles for animation/motion design"
         ),
+        structured_output=PhotographyVideoOutput,
     )
 
 
@@ -371,9 +381,9 @@ def make_voice_tone_builder() -> Agent:
             "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
             "internal), specify the tone and 2-3 examples\n"
             "2. language_dos — 4-5 approved language patterns\n"
-            "3. language_donts — 4-5 language anti-patterns\n"
-            "Output valid JSON with these three keys."
+            "3. language_donts — 4-5 language anti-patterns"
         ),
+        structured_output=VoiceToneOutput,
     )
 
 
@@ -385,9 +395,9 @@ def make_design_system_codifier() -> Agent:
             "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
             "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
             "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
-            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)\n"
-            "Output valid JSON matching the DesignSystemDefinition schema."
+            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
         ),
+        structured_output=DesignSystemDefinitionOutput,
     )
 
 

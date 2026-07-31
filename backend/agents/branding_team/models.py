@@ -480,7 +480,7 @@ class VisualIdentityOutput(BaseModel):
     voice_tone_spectrum: List[VoiceToneEntry] = Field(default_factory=list)
     language_dos: List[str] = Field(default_factory=list)
     language_donts: List[str] = Field(default_factory=list)
-    # Mood board candidates (from the MoodBoardConceptualist swarm, dispatched by CreativeDirector)
+    # Mood board candidates (from CreativeDirector collecting MoodBoardConceptualist outputs)
     mood_board_candidates: List["MoodBoardConcept"] = Field(default_factory=list)
     # Creative refinement decision (from converge_decider)
     creative_refinement: "CreativeRefinementDecision" = Field(
@@ -672,6 +672,114 @@ class DesignSystemDefinition(BaseModel):
     design_principles: List[str] = Field(default_factory=list)
     foundation_tokens: List[str] = Field(default_factory=list)
     component_standards: List[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 agent-facing structured_output schemas
+# ---------------------------------------------------------------------------
+# Merge targets above keep empty defaults so partial fragments validate.
+# Agent schemas below require content so Strands retries blank output.
+
+
+class MoodBoardConceptOutput(BaseModel):
+    """Agent-facing moodboard concept schema for MoodBoardConceptualist_*."""
+
+    title: str = Field(min_length=1)
+    visual_direction: str = Field(min_length=1)
+    color_story: List[str] = Field(min_length=1)
+    typography_direction: str = Field(min_length=1)
+    image_style: List[str] = Field(min_length=1)
+
+
+class MoodBoardCandidatesOutput(BaseModel):
+    """Agent-facing CreativeDirector schema: collected moodboard candidates.
+
+    ``min_length``/``max_length`` encode the diverge fan-out of 2–3 concepts.
+    """
+
+    mood_board_candidates: List[MoodBoardConcept] = Field(min_length=2, max_length=3)
+
+
+class CreativeRefinementDecisionOutput(BaseModel):
+    """Agent-facing converge_decider schema.
+
+    Field-for-field twin of ``CreativeRefinementDecision`` with required content.
+    """
+
+    winning_candidate_title: str = Field(min_length=1)
+    scoring_criteria: List[str] = Field(min_length=1)
+    scores_by_candidate: Dict[str, float] = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    workshop_prompts: List[str] = Field(min_length=1)
+    decision_criteria: List[str] = Field(min_length=1)
+
+
+class LogoSuiteOutput(BaseModel):
+    """Agent-facing logo_specifier schema.
+
+    ``min_length``/``max_length`` encode the prompt's four logo variants.
+    """
+
+    logo_suite: List[LogoUsageRule] = Field(min_length=4, max_length=4)
+
+
+class ColorPaletteSystemOutput(BaseModel):
+    """Agent-facing color_system_builder schema.
+
+    Named to avoid colliding with mission ``ColorPalette``.
+    ``min_length``/``max_length`` encode the prompt's stated "5-7 colors".
+    """
+
+    color_palette: List[ColorEntry] = Field(min_length=5, max_length=7)
+
+
+class TypographySystemOutput(BaseModel):
+    """Agent-facing typography_builder schema.
+
+    ``min_length``/``max_length`` encode the prompt's stated "3-4 type roles".
+    """
+
+    typography_system: List[TypographySpec] = Field(min_length=3, max_length=4)
+
+
+class IconographyOutput(BaseModel):
+    """Agent-facing iconography_director schema."""
+
+    iconography_style: str = Field(min_length=1)
+    illustration_style: str = Field(min_length=1)
+
+
+class PhotographyVideoOutput(BaseModel):
+    """Agent-facing photography_video_director schema.
+
+    ``motion_principles`` cardinality matches the prompt's stated "3-4 principles".
+    """
+
+    photography_direction: str = Field(min_length=1)
+    video_direction: str = Field(min_length=1)
+    motion_principles: List[str] = Field(min_length=3, max_length=4)
+
+
+class VoiceToneOutput(BaseModel):
+    """Agent-facing voice_tone_builder schema.
+
+    ``language_dos``/``language_donts`` match the prompt's stated "4-5" items.
+    """
+
+    voice_tone_spectrum: List[VoiceToneEntry] = Field(min_length=1)
+    language_dos: List[str] = Field(min_length=4, max_length=5)
+    language_donts: List[str] = Field(min_length=4, max_length=5)
+
+
+class DesignSystemDefinitionOutput(BaseModel):
+    """Agent-facing design_system_codifier schema.
+
+    Field-for-field twin of ``DesignSystemDefinition`` with required content.
+    """
+
+    design_principles: List[str] = Field(min_length=1)
+    foundation_tokens: List[str] = Field(min_length=1)
+    component_standards: List[str] = Field(min_length=1)
 
 
 class WikiEntry(BaseModel):
