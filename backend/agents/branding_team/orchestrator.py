@@ -37,7 +37,11 @@ from .graphs.phase3_visual import build_phase3_graph
 from .graphs.phase4_channel import build_phase4_graph
 from .graphs.phase5_governance import build_phase5_graph
 from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
-from .graphs.top_level import build_branding_graph
+from .graphs.top_level import (
+    DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+    DEFAULT_NODE_TIMEOUT_SECONDS,
+    build_branding_graph,
+)
 from .models import (
     BrandBook,
     BrandCheckRequest,
@@ -298,8 +302,8 @@ class BrandingTeamOrchestrator:
 
         builder = GraphBuilder()
         builder.set_graph_id(f"branding_phase_{phase.value}")
-        builder.set_execution_timeout(600.0)
-        builder.set_node_timeout(180.0)
+        builder.set_execution_timeout(DEFAULT_EXECUTION_TIMEOUT_SECONDS)
+        builder.set_node_timeout(DEFAULT_NODE_TIMEOUT_SECONDS)
         builder.add_node(builder_fn(), node_id=node_id)
         builder.set_entry_point(node_id)
         graph = builder.build()
