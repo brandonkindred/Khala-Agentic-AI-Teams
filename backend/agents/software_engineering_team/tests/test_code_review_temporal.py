@@ -911,6 +911,7 @@ def test_workflow_and_activities_are_registered() -> None:
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
+    assert "filter_false_positives_activity" in names
     assert "find_architecture_and_redundancy_activity" in names
     assert "find_side_effect_impact_activity" in names
 
