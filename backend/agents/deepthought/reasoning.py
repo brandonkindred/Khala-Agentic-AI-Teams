@@ -38,9 +38,6 @@ MAX_CHILDREN_PER_AGENT = 5
 # deterministic workflow state.
 DEFAULT_AGENT_BUDGET = 50
 
-# Max chars to include per child answer in deliberation/synthesis (token control).
-MAX_CHARS_PER_CHILD_ANSWER = 3000
-
 # Similarity threshold for fuzzy question matching (0-1). Two focus questions
 # whose normalised word overlap is at/above this are considered duplicates.
 SIMILARITY_THRESHOLD = 0.70
