@@ -233,8 +233,8 @@ the investment worker runs at once. A live paper-trading session
 (`run_paper_trading_activity`) can hold a worker thread for hours (up to
 `max_hours`), so this queue defaults above the shared framework's 4-thread cap
 to avoid a handful of concurrent sessions silently starving backtest dispatch.
-Parsed as a plain `int(...)` (unset → default `8`; garbage/unparseable →
-default `8`; parsed but `< 1` → floored to `1`). Only read by the investment
+Parsed defensively as an int (unset or unparseable → default `8`; value
+`< 1` → floored to `1`). Only read by the investment
 worker; mirrors `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`.
 
 ### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
