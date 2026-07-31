@@ -5,16 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
-from llm_service import DummyLLMClient
-from software_engineering_team.ai_agent_development_team import orchestrator
 import software_engineering_team.ai_agent_development_team.phases.review as review_mod
+from llm_service import DummyLLMClient
 from software_engineering_team.ai_agent_development_team import constants as team_constants
+from software_engineering_team.ai_agent_development_team import orchestrator
 from software_engineering_team.ai_agent_development_team.constants import (
     REQUIRED_ARTIFACT_HINTS,
-)
-from software_engineering_team.ai_agent_development_team.prompts import (
-    intake_system_prompt,
-    planning_system_prompt,
 )
 from software_engineering_team.ai_agent_development_team.models import (
     ExecutionResult,
@@ -33,6 +29,10 @@ from software_engineering_team.ai_agent_development_team.phases.intake import ru
 from software_engineering_team.ai_agent_development_team.phases.planning import run_planning
 from software_engineering_team.ai_agent_development_team.phases.problem_solving import (
     run_problem_solving,
+)
+from software_engineering_team.ai_agent_development_team.prompts import (
+    intake_system_prompt,
+    planning_system_prompt,
 )
 from software_engineering_team.shared.models import Task, TaskType
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
