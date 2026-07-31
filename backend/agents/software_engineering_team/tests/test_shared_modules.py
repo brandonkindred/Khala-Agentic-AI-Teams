@@ -390,7 +390,7 @@ def test_continuation_merge_responses() -> None:
 def test_continuation_num_predict_from_env(monkeypatch) -> None:
     from software_engineering_team.shared.continuation import ResponseContinuator
 
-    monkeypatch.setenv("LLM_MAX_TOKENS", "1024")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "1024")
     c = ResponseContinuator(base_url="http://x", model="m")
     assert c.num_predict == 1024
 

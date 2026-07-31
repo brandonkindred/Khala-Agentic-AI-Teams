@@ -226,10 +226,10 @@ worker finishes needs a real `pytest_sessionfinish` hook registered from a
 `conftest.py` (that hook fires once in the xdist controller, which a bare
 fixture can never reach) — until a team needs that guarantee, tests sharing a
 schema under `-n` should isolate via unique row identifiers instead (the
-existing convention — see `test_store_real_postgres.py`'s `uuid4`-suffixed
-data). Expect rows to accumulate across repeated `-n` runs against a
-persistent local Postgres; CI's per-job ephemeral Postgres container makes
-this a non-issue there.
+existing convention — see `branding_team/tests/test_conversation_store.py`'s
+`_brand_id()` / `uuid4`-suffixed data). Expect rows to accumulate across
+repeated `-n` runs against a persistent local Postgres; CI's per-job
+ephemeral Postgres container makes this a non-issue there.
 
 ## Observability
 

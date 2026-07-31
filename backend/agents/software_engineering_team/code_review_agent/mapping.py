@@ -346,21 +346,19 @@ def _thinking_off_retry_enabled() -> bool:
 def _chain_has(exc: BaseException, types: Tuple[type, ...]) -> bool:
     """Whether ``exc`` or its cause/context chain contains one of ``types``.
 
+    Preconditions:
+        - ``types`` may be empty; an empty tuple means no type can match.
+
     Postconditions:
-        - Walks the ``__cause__``/``__context__`` chain up to a bounded depth
-          (strands may wrap the client error) and returns True on the first match.
+        - Walks the ``__cause__``/``__context__`` chain via ``_exception_chain``
+          and returns True on the first match. Empty ``types`` returns False.
           Never raises. Mirrors the traversal in ``_is_content_failure`` for a
           narrower type check (used to gate the thinking-off retry to the failures
           it can actually fix).
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
-        if isinstance(current, types):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    if not types:
+        return False
+    return any(isinstance(c, types) for c in _exception_chain(exc))
 
 
 def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _ChunkOutcome:
@@ -961,9 +959,10 @@ def _cached_review_chunk(
           recomputes its own sibling surface.
 
     Postconditions:
-        - When caching is disabled (``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` ==
-          0) this is a pure passthrough to ``_review_chunk_with_recovery`` — no
-          caching and no single-flight, identical to no cache at all.
+        - When caching is disabled (non-positive
+          ``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE``) this is a pure passthrough to
+          ``_review_chunk_with_recovery`` — no caching and no single-flight,
+          identical to no cache at all.
         - On a hit, returns a deep clone of the stored outcome (never the shared
           instance), so the caller may mutate it freely; findings/verdicts are
           reproduced identically.

@@ -82,8 +82,9 @@ def _fallback_title(description: str) -> str:
     Postconditions:
         - Returns the description's first line, trimmed to at most
           ``_TITLE_MAX_LEN`` characters TOTAL (including a trailing "…" when
-          truncated) at a word boundary. Returns "" only when ``description``
-          is blank.
+          truncated); prefers breaking at a word boundary, but falls back to a
+          hard character boundary when the first word is longer than the limit.
+          Returns "" only when ``description`` is blank.
     """
     stripped = (description or "").strip()
     if not stripped:

@@ -279,7 +279,7 @@ class ClaudeLLMClient(LLMClient):
         return llm_config.resolve_claude_context_size(self.model)
 
     def _resolve_max_tokens(self, explicit: Optional[int]) -> int:
-        """Resolve the output token cap. Explicit -> ``LLM_MAX_TOKENS`` -> default.
+        """Resolve the output token cap. Explicit -> ``LLM_MAX_OUTPUT_TOKENS`` -> default.
 
         Preconditions: ``explicit`` is ``None`` or an int.
         Postconditions: returns an int in ``[1, CLAUDE_MAX_OUTPUT_TOKENS]``. A
@@ -295,7 +295,7 @@ class ClaudeLLMClient(LLMClient):
                 return min(explicit_int, CLAUDE_MAX_OUTPUT_TOKENS)
         # Centralized resolver returns 0 for unset/invalid/non-positive (mirrors the
         # explicit path above), never a 1-token cap that truncates every call.
-        env_int = llm_config.resolve_max_tokens()
+        env_int = llm_config.resolve_max_output_tokens()
         if env_int > 0:
             return min(env_int, CLAUDE_MAX_OUTPUT_TOKENS)
         return DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS

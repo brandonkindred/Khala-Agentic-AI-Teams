@@ -1,24 +1,32 @@
 """Tests for the code review agent's Temporal instrumentation.
 
-Covers the five things testable without a live (deployed) Temporal server:
+Covers the seven things testable without a live (deployed) Temporal server:
 
 1. The default-on address resolver / enablement gate (``temporal.config``).
 2. The activity-boundary DTO round-trips (``temporal.phase_models``).
 3. The activity wrappers driven end-to-end with the ``dummy`` LLM harness,
    replicating the workflow's orchestration in-process and asserting the verdict
-   matches ``run_coordinator`` (durable path is behavior-identical to thread mode).
+   matches ``run_coordinator`` (durable path is behavior-identical to thread mode),
+   plus ``repo_root`` reader reconstruction across the Temporal boundary.
 4. ``CodeReviewAgent.run``'s Temporal-first dispatch and its fallbacks.
-5. A real ``CodeReviewWorkflow`` execute + replay round-trip, driven by
+5. Worker registration / boot (concurrency ceiling, ``start_team_worker``
+   delegation) and per-review adaptive Temporal fan-out width.
+6. Real ``CodeReviewWorkflow`` execute + replay round-trips driven by
    ``temporalio.testing.WorkflowEnvironment``'s embedded time-skipping test
    server (no live/deployed Temporal server needed, though the ephemeral test
    server binary itself requires a one-time network fetch — see
-   ``test_workflow_executes_and_replays_without_non_determinism`` near the
-   bottom of this file) and, complementing it,
-   ``test_workflow_gathers_tail_pass_activities_concurrently``, which inspects
-   the recorded history to confirm the three tail-pass activities are
-   scheduled together rather than one after another. Both are marked
-   ``integration`` (run with ``-m integration``) since standing up the
-   embedded server is heavier than this file's other pure-Python tests.
+   ``test_workflow_executes_and_replays_without_non_determinism`` and related
+   tests near the bottom of this file).
+7. Concurrent map-phase and tail-pass gather / re-raise semantics: the
+   pure-async unit test
+   ``test_gather_return_exceptions_reproduces_sequential_error_precedence``,
+   plus ``WorkflowEnvironment`` tests for map-chunk sibling completion
+   (``test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings``),
+   verify-failure precedence, concurrent scheduling, out-of-order completion,
+   partial failure, and pre-migration sequential-history replay. The
+   ``WorkflowEnvironment`` tests are marked ``integration`` (run with
+   ``-m integration``) since standing up the embedded server is heavier than
+   this file's other pure-Python tests.
 """
 
 from __future__ import annotations
@@ -197,13 +205,15 @@ def test_review_prep_dto_fanout_width_round_trips() -> None:
 
 
 def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
-    """Drive the activities sequentially, in-process, to check coordinator parity.
+    """Drive the activities sequentially in-process to check coordinator parity.
 
-    Deliberately stays sequential (unlike ``CodeReviewWorkflow.run``, which now
-    schedules the three tail-pass activities concurrently via ``asyncio.gather``
-    -- see ``test_workflow_gathers_tail_pass_activities_concurrently`` below for
-    that property) since call order doesn't affect the merged verdict this
-    helper checks against ``run_coordinator``.
+    Synchronous approximation of ``CodeReviewWorkflow.run`` used only to assert
+    that the activity pipeline matches ``run_coordinator``'s final verdict. It
+    does NOT replicate the workflow's concurrent tail-pass ``asyncio.gather``
+    or its deterministic ``return_exceptions`` error precedence — see
+    ``test_gather_return_exceptions_reproduces_sequential_error_precedence``
+    and ``test_workflow_gathers_tail_pass_activities_concurrently`` for those
+    properties. Call order here does not affect the merged verdict.
     """
     from code_review_agent.models import CodeReviewIssue
     from code_review_agent.temporal import activities as A
@@ -646,6 +656,38 @@ def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
     assert len(gate["issues"]) == 1
 
 
+def test_finalize_activity_caps_issues_at_max() -> None:
+    from code_review_agent.coordinator import MAX_CODE_REVIEW_ISSUES
+    from code_review_agent.temporal import activities as A
+
+    findings = [
+        {
+            "severity": "low",
+            "category": "naming",
+            "file_path": "a.py",
+            "line": i,
+            "description": f"nit-{i}",
+            "suggestion": "",
+        }
+        for i in range(1, MAX_CODE_REVIEW_ISSUES + 6)
+    ]
+    # One critical last — severity-first cap must keep it and still reject.
+    findings.append(
+        {
+            "severity": "critical",
+            "category": "security",
+            "file_path": "a.py",
+            "line": 999,
+            "description": "critical-keep",
+            "suggestion": "fix",
+        }
+    )
+    gate = A.finalize_review_activity(findings, [], [], [True])
+    assert len(gate["issues"]) == MAX_CODE_REVIEW_ISSUES
+    assert gate["issues"][0]["description"] == "critical-keep"
+    assert gate["approved"] is False
+
+
 def test_synthesize_activity_returns_none_or_dict() -> None:
     from code_review_agent.temporal import activities as A
 
@@ -669,6 +711,40 @@ def test_synthesize_activity_returns_none_or_dict() -> None:
     # The dummy synthesis harness returns a valid narrative dict; on any failure
     # it would be None (the workflow then concatenates). Either shape is valid.
     assert result is None or set(result) == {"summary", "spec_compliance_notes"}
+
+
+def test_synthesize_activity_fails_safe_when_llm_resolution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_llm()`` runs before synthesis, so a client-resolution failure
+    (e.g. no LLM provider configured) must not raise -- this activity must
+    return ``None`` so the workflow falls back to deterministic concatenation,
+    matching the fail-safe contract of the sibling architecture / side-effect
+    activities."""
+    from code_review_agent.temporal import activities as A
+
+    def _raise() -> Any:
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(A, "_resolve_llm", _raise)
+    issues = [
+        {
+            "severity": "high",
+            "category": "logic",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "x",
+            "suggestion": "",
+        }
+    ]
+    out = A.synthesize_findings_activity(
+        _input().model_dump(mode="json"),
+        approved=False,
+        issues=issues,
+        chunk_summaries=["s1", "s2"],
+        chunk_spec_notes=["n1", "n2"],
+    )
+    assert out is None
 
 
 def test_run_reraises_unrelated_workflow_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -757,6 +833,9 @@ def test_run_passes_none_reader_without_repo_root(monkeypatch: pytest.MonkeyPatc
 
 
 def test_run_dispatches_to_temporal_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the Temporal feature gate is enabled, run() executes the code-review
+    workflow synchronously and converts the returned dict into a CodeReviewOutput.
+    """
     monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
     monkeypatch.setattr(
         "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
@@ -897,14 +976,30 @@ def test_reports_review_unavailable_walks_cause_chain() -> None:
 def test_reports_review_unavailable_terminates_on_cyclic_chain() -> None:
     from code_review_agent.agent import _reports_review_unavailable
 
-    # A pathological cyclic cause chain must not hang the walk: the ``seen`` set
-    # (and depth bound) terminate it. Neither node carries the marker, so the
+    # The ``seen`` set terminates cyclic cause chains; this test verifies it
+    # returns for a 2-node cycle. Neither node carries the marker, so the
     # result is False — the point is that it returns at all.
     a = RuntimeError("a")
     b = RuntimeError("b")
     a.__cause__ = b
     b.__cause__ = a
     assert _reports_review_unavailable(a, "CodeReviewUnavailableError") is False
+
+
+def test_reports_review_unavailable_terminates_on_depth_bound() -> None:
+    from code_review_agent.agent import _MAX_CAUSE_DEPTH, _reports_review_unavailable
+    from temporalio.exceptions import ApplicationError
+
+    marker = "CodeReviewUnavailableError"
+    # Acyclic chain longer than ``_MAX_CAUSE_DEPTH`` with the marker only past
+    # the bound — this exercises the depth limit (not ``seen``). The walk
+    # visits the wrappers and stops before reaching the marker.
+    node: BaseException = ApplicationError("m", type=marker)
+    for i in range(_MAX_CAUSE_DEPTH):
+        wrapper = RuntimeError(f"wrap-{i}")
+        wrapper.__cause__ = node
+        node = wrapper
+    assert _reports_review_unavailable(node, marker) is False
 
 
 def test_reports_review_unavailable_matches_by_class_name() -> None:
@@ -952,6 +1047,7 @@ def test_workflow_and_activities_are_registered() -> None:
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
+    assert "filter_false_positives_activity" in names
     assert "find_architecture_and_redundancy_activity" in names
     assert "find_side_effect_impact_activity" in names
     assert "consolidate_side_effect_issues_activity" in names
@@ -962,16 +1058,16 @@ def test_workflow_and_activities_are_registered() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "env_value, expected",
-    [
-        (None, 8),
-        ("16", 16),
-        ("0", 1),
-        ("-5", 1),
-        ("not-a-number", 8),
-    ],
-)
+_MAX_CONCURRENT_CASES = [
+    (None, 8),
+    ("16", 16),
+    ("0", 1),
+    ("-5", 1),
+    ("not-a-number", 8),
+]
+
+
+@pytest.mark.parametrize("env_value, expected", _MAX_CONCURRENT_CASES)
 def test_worker_max_concurrent_activities_env_parsing(
     monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
 ) -> None:
@@ -985,16 +1081,7 @@ def test_worker_max_concurrent_activities_env_parsing(
     assert worker_mod._max_concurrent_activities() == expected
 
 
-@pytest.mark.parametrize(
-    "env_value, expected",
-    [
-        (None, 8),
-        ("16", 16),
-        ("0", 1),
-        ("-5", 1),
-        ("not-a-number", 8),
-    ],
-)
+@pytest.mark.parametrize("env_value, expected", _MAX_CONCURRENT_CASES)
 def test_worker_max_concurrent_activities_delegates_to_config(
     monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
 ) -> None:
@@ -1222,7 +1309,7 @@ class _LegacySequentialCodeReviewWorkflow:
                 bool(review_input.get("skip_false_positive_filter", False)),
             ],
             task_queue=task_queue,
-            start_to_close_timeout=_timedelta(minutes=30),
+            start_to_close_timeout=_timedelta(minutes=60),
             retry_policy=_cr_workflows._LLM_RETRY,
         )
 
@@ -1573,6 +1660,86 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
     assert "TypeError" not in error_chain
     assert completed == {"side_effect"}
     assert "architecture" not in completed
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings() -> None:
+    """Map-phase ``asyncio.gather(..., return_exceptions=True)`` must await
+    every chunk activity when one fails, then re-raise that failure.
+
+    Without ``return_exceptions=True``, the first chunk exception in
+    completion order would abort the gather and leave sibling map activities
+    un-awaited (orphaned Temporal commands + non-deterministic exception
+    precedence on replay). This substitutes a selective
+    ``code_review_map_chunk`` stand-in that fails the ``main.py`` chunk and
+    delegates every other chunk to the real activity, then asserts the
+    sibling still completed and the workflow failed with the map boom.
+    """
+    from code_review_agent.models import ReviewChunk
+    from code_review_agent.temporal import (
+        ACTIVITIES,
+        TASK_QUEUE,
+        CodeReviewWorkflow,
+        filter_false_positives_activity,
+        finalize_review_activity,
+        find_architecture_and_redundancy_activity,
+        find_side_effect_impact_activity,
+        prepare_review_activity,
+        review_chunk_activity,
+        synthesize_findings_activity,
+    )
+    from code_review_agent.temporal import activities as A
+    from temporalio import activity as activity_module
+    from temporalio.client import WorkflowFailureError
+
+    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
+    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
+    review_input = _input(code=big_1 + "\n\n" + big_2)
+    prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
+    assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
+
+    completed: set[str] = set()
+
+    @activity_module.defn(name="code_review_map_chunk")
+    def _selective_map_chunk(
+        chunk: Dict[str, Any],
+        base_input: Dict[str, Any],
+        context_fp: str,
+        surface_by_path: Dict[str, list[str]],
+    ) -> Any:
+        label = ReviewChunk.model_validate(chunk).paths_label
+        if "main.py" in label:
+            raise RuntimeError("map chunk boom")
+        result = review_chunk_activity(chunk, base_input, context_fp, surface_by_path)
+        completed.add(label)
+        return result
+
+    stand_in_activities = [
+        prepare_review_activity,
+        _selective_map_chunk,
+        filter_false_positives_activity,
+        find_architecture_and_redundancy_activity,
+        find_side_effect_impact_activity,
+        finalize_review_activity,
+        synthesize_findings_activity,
+    ]
+    assert len(stand_in_activities) == len(ACTIVITIES)
+
+    async with _workflow_environment_worker(activities=stand_in_activities) as env:
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await env.client.execute_workflow(
+                CodeReviewWorkflow.run,
+                review_input.model_dump(mode="json"),
+                id="code-review-workflow-map-chunk-failure-test",
+                task_queue=TASK_QUEUE,
+            )
+
+    cause = exc_info.value.cause
+    assert cause is not None
+    assert "map chunk boom" in _error_chain_text(cause)
+    assert any("util.py" in label for label in completed)
+    assert not any("main.py" in label for label in completed)
 
 
 @pytest.mark.integration

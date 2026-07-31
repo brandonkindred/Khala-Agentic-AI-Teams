@@ -4,8 +4,11 @@ Storage + lifecycle for advisory/enforced rules and the human-in-the-loop
 proposal queue (:mod:`agent_cognition.rules.store`), the pure predicate DSL
 (:mod:`agent_cognition.rules.predicate`), and the deterministic enforcement layer
 (:mod:`agent_cognition.rules.enforcement`) that turns enforced rules into
-allow/block decisions. Importing this package has no side effects (the Postgres
-schema is registered explicitly from the unified API lifespan).
+allow/block decisions. Reflection / rule learning lives in
+:mod:`agent_cognition.rules.reflection` and is imported only by call sites that
+need it (it depends on ``llm_service``). Importing this package has no side
+effects (the Postgres schema is registered explicitly from the unified API
+lifespan).
 """
 
 from __future__ import annotations
@@ -25,7 +28,6 @@ from agent_cognition.rules.predicate import (
     validate_predicate,
 )
 from agent_cognition.rules.provision import ensure_seed_packs_installed
-from agent_cognition.rules.reflection import ReflectionReport, reflect
 from agent_cognition.rules.seed_packs import SEED_PACKS, SeedRule
 from agent_cognition.rules.store import (
     RuleStoreError,
@@ -70,9 +72,6 @@ __all__ = [
     "validate_predicate",
     # seed-pack provisioning
     "ensure_seed_packs_installed",
-    # reflection (rule learning)
-    "ReflectionReport",
-    "reflect",
     # seed packs
     "SEED_PACKS",
     "SeedRule",

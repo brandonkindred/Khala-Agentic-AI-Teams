@@ -52,10 +52,6 @@ def test_run_code_review_happy_path(monkeypatch) -> None:
         "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
         lambda llm: 10,
     )
-    # quality_gate_tools currently passes ``task_requirements or []`` (a list)
-    # to ``CodeReviewInput`` which expects a string. Pass a string explicitly
-    # to exercise the happy path; the default list behaviour is exercised by
-    # ``test_run_code_review_default_task_requirements_list``.
     result = q.run_code_review(
         code="x" * 50,
         spec_content="spec",
@@ -93,15 +89,21 @@ def test_run_code_review_forwards_user_decisions(monkeypatch) -> None:
     assert captured["input"].user_decisions == ["Which DB? → Postgres"]
 
 
-def test_run_code_review_default_task_requirements_list(monkeypatch) -> None:
-    """When ``task_requirements`` is None the tool falls through ``or []``,
-    which historically fails ``CodeReviewInput`` validation. The wrapper
-    catches that and returns a failed result; exercise that failure path."""
+def test_run_code_review_default_task_requirements_empty(monkeypatch) -> None:
+    """Omitting ``task_requirements`` normalizes to ``""`` so CodeReviewInput
+    validates and the agent actually runs (approved=True), instead of the
+    historical ``or []`` list that failed Pydantic validation."""
     from software_engineering_team import quality_gate_tools as q
+
+    captured = {}
+
+    def _run(inp, progress_callback=None):
+        captured["input"] = inp
+        return _ReviewResult()
 
     monkeypatch.setattr(
         "software_engineering_team.code_review_agent.CodeReviewAgent",
-        lambda llm: MagicMock(run=lambda inp, progress_callback=None: _ReviewResult()),
+        lambda llm: SimpleNamespace(run=_run),
     )
     monkeypatch.setattr(
         "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
@@ -114,14 +116,34 @@ def test_run_code_review_default_task_requirements_list(monkeypatch) -> None:
         language="python",
         llm_getter=lambda k: MagicMock(),
     )
-    # Intentionally tolerant: the ``or []`` fall-through means the outcome
-    # depends on whether the installed Pydantic accepts a list for the field
-    # the wrapper forwards — a version-dependent detail. Asserting ``is False``
-    # would be fragile across Pydantic releases; the contract this test pins is
-    # the weaker one that holds in all versions: the wrapper never crashes and
-    # always returns a well-formed result (``approved`` is a bool), whether the
-    # underlying validation passed or failed gracefully.
-    assert isinstance(result.approved, bool)
+    assert result.approved is True
+    assert captured["input"].task_requirements == ""
+
+
+def test_run_code_review_list_task_requirements_joined(monkeypatch) -> None:
+    """A list of requirement lines is joined with newlines before CodeReviewInput."""
+    from software_engineering_team import quality_gate_tools as q
+
+    captured = {}
+
+    def _run(inp, progress_callback=None):
+        captured["input"] = inp
+        return _ReviewResult()
+
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent",
+        lambda llm: SimpleNamespace(run=_run),
+    )
+    result = q.run_code_review(
+        code="x",
+        spec_content="spec",
+        task_description="task",
+        language="python",
+        task_requirements=["req a", "req b"],
+        llm_getter=lambda k: MagicMock(),
+    )
+    assert result.approved is True
+    assert captured["input"].task_requirements == "req a\nreq b"
 
 
 def test_run_code_review_exception_returns_failed(monkeypatch) -> None:

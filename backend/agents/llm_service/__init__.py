@@ -44,15 +44,13 @@ from .interface import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from .limit_classification import (
+    LIMIT_KIND_RATE,
+    LIMIT_KIND_SESSION,
+    LIMIT_KIND_WEEKLY,
+    classify_ollama_limit_kind,
+)
 from .pricing import estimate_cost_usd
-
-# ``strands_provider`` imports ``strands.models.model`` at module scope, so this
-# import is EAGER: getting ``get_strands_model`` / this cache-clear helper from
-# ``llm_service`` triggers the real ``strands`` package import immediately, not
-# lazily. Only ``LLMClientModel`` and ``run_json_via_strands`` (below, from the
-# separate ``strands_adapter`` module) are actually deferred via PEP 562
-# ``__getattr__``.
-from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
 from .structured import (
     complete_json_via_reasoning,
     complete_validated,
@@ -72,31 +70,36 @@ from .util import (
     extract_json_from_response,
 )
 
-# ``strands_adapter`` depends on the optional ``strands-agents`` package. Many
-# teams in this monorepo ship with a narrower requirements file that does NOT
-# include strands, and importing the adapter module eagerly would force every
-# team to install it just to use ``llm_service``. Resolve ``LLMClientModel``
-# and ``run_json_via_strands`` lazily via PEP 562 ``__getattr__`` so they only
-# trigger the strands import when a consumer actually asks for them.
-# NOTE: this lazy seam does NOT cover ``get_strands_model`` — that name is
-# imported eagerly above from ``.strands_provider``, which itself imports
-# ``strands`` at module scope. This module therefore already forces a real
-# ``strands`` import on import, regardless of what a consumer asks for; the
-# lazy seam below only avoids a *second*, redundant such import.
+# ``strands_adapter`` / ``strands_provider`` depend on the optional
+# ``strands-agents`` package and import ``strands`` at module scope. Resolve
+# their public names lazily via PEP 562 ``__getattr__`` so ``import llm_service``
+# (and ``import llm_service.clients.dummy``) does not pull Strands/botocore into
+# ``sys.modules`` until a Strands code path is exercised.
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .strands_adapter import (  # noqa: F401
         LLMClientModel,
         run_json_via_strands,
     )
+    from .strands_provider import (  # noqa: F401
+        _clear_strands_model_cache_for_testing,
+        get_strands_model,
+    )
 
-_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "run_json_via_strands"}
+_LAZY_STRANDS_ADAPTER_EXPORTS = {"LLMClientModel", "run_json_via_strands"}
+_LAZY_STRANDS_PROVIDER_EXPORTS = {"get_strands_model", "_clear_strands_model_cache_for_testing"}
 
 
 def __getattr__(name: str) -> Any:
-    if name in _LAZY_STRANDS_EXPORTS:
+    if name in _LAZY_STRANDS_ADAPTER_EXPORTS:
         from . import strands_adapter  # noqa: PLC0415 - intentional lazy import
 
         value = getattr(strands_adapter, name)
+        globals()[name] = value
+        return value
+    if name in _LAZY_STRANDS_PROVIDER_EXPORTS:
+        from . import strands_provider  # noqa: PLC0415 - intentional lazy import
+
+        value = getattr(strands_provider, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -150,6 +153,10 @@ __all__ = [
     "LLMSchemaValidationError",
     "LLMTruncatedError",
     "OLLAMA_WEEKLY_LIMIT_MESSAGE",
+    "LIMIT_KIND_RATE",
+    "LIMIT_KIND_SESSION",
+    "LIMIT_KIND_WEEKLY",
+    "classify_ollama_limit_kind",
     "OllamaLLMClient",
     "ClaudeLLMClient",
     "DummyLLMClient",

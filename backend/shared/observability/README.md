@@ -46,9 +46,10 @@ That is the entire contract. Any additional spans can be added with
 
 | Variable | Purpose |
 |---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint (e.g. `http://otel-collector:4318`). The docker stack defaults this to the in-stack Tempo backend (`http://tempo:4318`). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint (e.g. `http://otel-collector:4318`). Unset = spans created but not shipped. Docker stack sets this only on opted-in services (`se-service`, `investment-service`, `branding-service`) via `*team-otel-export`, defaulting to Tempo at `http://tempo:4318`. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `grpc` |
 | `OTEL_METRICS_EXPORTER` | Set to `none` to skip OTLP metric export while still exporting traces — used by the docker stack so metrics stay on Prometheus scraping and aren't pushed at the traces-only Tempo backend. |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | Head sampling. Docker defaults `parentbased_traceidratio` / `0.05`. Honored by `TracerProvider` when no explicit sampler is passed. |
 | `OTEL_SERVICE_NAME` | Overrides the service name passed to `init_otel` |
 | `OTEL_RESOURCE_ATTRIBUTES` | Standard OTel resource attributes (e.g. `deployment.environment=prod`) |
 | `OTEL_SDK_DISABLED` | Set to `true` to force no-op mode (useful in tests) |

@@ -43,9 +43,9 @@ from temporalio.exceptions import ActivityError
 # always breaks a phase) now costs up to 3 attempts instead of the monolith's
 # single try-and-record. The 1s initial interval (vs. the 30s used by sibling
 # Temporal teams that did the same monolith-to-phases split) is a deliberate
-# choice to bound that cost — 3 attempts at 1s/2s/4s total ~7s of extra delay
-# and LLM/network calls before ``fail_scan`` runs, instead of the tens-of-
-# seconds a 30s-initial policy would add on every deterministic failure. A
+# choice to bound that cost — 3 attempts at 1s/2s total ~3s of retry delay
+# before ``fail_scan`` runs, instead of the tens-of-seconds a 30s-initial
+# policy would add on every deterministic failure. A
 # ``maximum_interval`` is set for defensive completeness even though 3
 # attempts at this backoff never approach it.
 DEFAULT_RETRY_POLICY = RetryPolicy(

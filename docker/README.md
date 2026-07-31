@@ -3,6 +3,7 @@
 This directory defines a **Docker Compose stack** that runs:
 
 - **PostgreSQL 18** – shared database with `temporal` and `khala` databases (created at first run). The data volume is `postgres_data_v18`; the name is suffixed with the major version so each bump starts from an empty volume declaratively, without `docker compose down -v`. Orphaned previous-version volumes can be cleaned up with `docker volume prune`.
+- **Neo4j** – required knowledge-graph store for agents (Graphiti). The unified API does **not** open a Graphiti client or run background graph sync unless you set `NEO4J_BOLT_URL=bolt://neo4j:7687` (extra memory/CPU for that process).
 - **Temporal** – workflow engine (Postgres-backed, no Elasticsearch)
 - **Temporal UI** – Web UI for workflows
 - **Ollama** (optional) – local Ollama server if you override LLM to use it
@@ -39,6 +40,7 @@ This directory defines a **Docker Compose stack** that runs:
    | Prometheus     | http://localhost:9090       (scrape targets: `/targets`; metric browser: `/graph`) |
    | Grafana        | http://localhost:3000       (login `admin`/`admin` by default; Khala folder holds the FastAPI overview dashboard) |
    | Postgres       | localhost:5432 (user `postgres` / `temporal` / `khala`) |
+   | Neo4j Browser  | http://localhost:7474   (Bolt `localhost:7687`; agent knowledge graph — not used by the unified API unless `NEO4J_BOLT_URL` is set) |
    | Ollama (local) | http://localhost:11434      |
 
    Use the **Angular UI at 4201** so API requests go through the same origin and nginx proxies them to the backend. If you run only the API container and use the UI with `ng serve`, point the dev API base to `http://localhost:8888` in `user-interface/src/environments/environment.ts`.
@@ -52,6 +54,7 @@ Optional (defaults in compose / `docker/.env.example`; copy to `docker/.env` and
 - **LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
 - **LLM_MODEL** – default `deepseek-v4-pro:cloud`
 - **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `khala` DBs and users.
+- **NEO4J_BOLT_URL** – unset on `khala` by default (no Graphiti sync in the reverse proxy). Set to `bolt://neo4j:7687` to opt that process into graph sync; see `docs/ENV_VARS.md`. **NEO4J_PASSWORD** (and related Neo4j vars) configure the always-on Neo4j container for agents.
 
 Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.
 

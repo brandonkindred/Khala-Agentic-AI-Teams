@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import List, Optional
 
 from llm_service import complete_json_via_reasoning
@@ -131,7 +132,7 @@ class JobRankerAgent:
         reasons: List[str] = []
         company_l = posting.company.lower()
         for excluded in profile.excluded_companies:
-            if excluded and excluded.lower() in company_l:
+            if excluded and re.search(r"\b" + re.escape(excluded.lower()) + r"\b", company_l):
                 reasons.append(f"Excluded company: {posting.company}")
                 break
 

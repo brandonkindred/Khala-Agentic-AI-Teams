@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -21,7 +22,15 @@ from software_engineering_team.ai_agent_development_team.orchestrator import (
 from software_engineering_team.ai_agent_development_team.phases.deliver import run_deliver
 from software_engineering_team.ai_agent_development_team.phases.intake import run_intake
 from software_engineering_team.ai_agent_development_team.phases.planning import run_planning
+from software_engineering_team.ai_agent_development_team.phases.problem_solving import (
+    run_problem_solving,
+)
+from software_engineering_team.ai_agent_development_team.phases.review import (
+    ARTIFACT_GATE_DESCRIPTION_PREFIX,
+    run_review,
+)
 from software_engineering_team.shared.models import Task, TaskType
+from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
 
 
@@ -387,3 +396,144 @@ def test_run_deliver_raises_on_non_object_json_response(monkeypatch) -> None:
             execution_result=execution_result,
             review_result=review_result,
         )
+
+
+def test_ai_agent_repo_context_cache_is_lazy_and_reused(tmp_path: Path) -> None:
+    """Same resolved repo reuses one RepoContextCache; a different repo gets another."""
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    first = lead._repo_context_cache_for(tmp_path)
+    second = lead._repo_context_cache_for(tmp_path)
+    assert first is second
+
+    other = tmp_path / "other"
+    other.mkdir()
+    third = lead._repo_context_cache_for(other)
+    assert third is not first
+
+
+def test_ai_agent_read_repo_code_second_call_hits_cache(tmp_path: Path) -> None:
+    """Second _read_repo_code on an unchanged tree does not re-_render files."""
+    (tmp_path / "a.py").write_text("A = 1\n")
+    (tmp_path / "b.md").write_text("# B\n")
+
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    first = lead._read_repo_code(tmp_path)
+    assert "a.py" in first and "b.md" in first
+
+    renders: list[Path] = []
+    real_render = RepoContextCache._render
+
+    def _spy(f: Path, repo_path: Path):
+        renders.append(f)
+        return real_render(f, repo_path)
+
+    with patch.object(RepoContextCache, "_render", staticmethod(_spy)):
+        second = lead._read_repo_code(tmp_path)
+
+    assert second == first
+    assert renders == []
+
+
+def test_ai_agent_lead_wires_repo_briefing_contract(tmp_path: Path) -> None:
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    assert lead._extensions == frozenset({".py", ".md", ".yaml", ".yml", ".json", ".toml"})
+    assert lead._exclude_dirs == frozenset(
+        {".git", "node_modules", "__pycache__", ".venv", "venv"}
+    )
+    assert lead._max_chars == 20_000
+    cache = lead._repo_context_cache_for(tmp_path)
+    assert cache._ext_set == lead._extensions
+    assert cache._excl_set == lead._exclude_dirs
+    assert cache._max_chars == 20_000
+
+
+def test_artifact_gate_description_prefix_stable() -> None:
+    """Review and problem-solving share this exact prefix string."""
+    assert ARTIFACT_GATE_DESCRIPTION_PREFIX == "Missing expected artifact category: "
+
+
+def test_run_review_artifact_gate_uses_shared_prefix() -> None:
+    """Missing categories produce descriptions that start with the shared prefix."""
+    result = run_review(execution_result=ExecutionResult(files={}, microtasks=[], notes=[]))
+    gate_issues = [i for i in result.issues if i.source == "artifact_gate"]
+    assert gate_issues
+    for issue in gate_issues:
+        assert issue.description.startswith(ARTIFACT_GATE_DESCRIPTION_PREFIX)
+        hint = issue.description[len(ARTIFACT_GATE_DESCRIPTION_PREFIX) :].strip()
+        assert hint
+        assert hint in issue.recommendation
+
+
+def test_run_problem_solving_synthesizes_placeholder_from_prefix() -> None:
+    """A well-formed artifact-gate issue yields ai_system/{hint}_placeholder.md."""
+    hint = "blueprint"
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description=f"{ARTIFACT_GATE_DESCRIPTION_PREFIX}{hint}",
+                recommendation=f"Add at least one artifact path containing '{hint}'.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(
+        execution_result=ExecutionResult(files={"existing.md": "# keep"}, microtasks=[]),
+        review_result=review,
+    )
+    assert result.resolved is True
+    assert f"ai_system/{hint}_placeholder.md" in result.files
+    assert "existing.md" in result.files
+    assert any(hint in fix for fix in result.fixes_applied)
+
+
+def test_run_problem_solving_skips_malformed_artifact_gate_description() -> None:
+    """artifact_gate issues without the shared prefix do not invent placeholder paths."""
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description="category missing somehow: not-a-hint",
+                recommendation="Fix the description format.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(
+        execution_result=ExecutionResult(files={}, microtasks=[]),
+        review_result=review,
+    )
+    assert result.resolved is False
+    assert result.files == {}
+    assert result.fixes_applied == []
+    assert not any("_placeholder.md" in path for path in result.files)
+
+
+def test_run_problem_solving_skips_empty_artifact_gate_token() -> None:
+    """Prefix-only (or whitespace-only) descriptions do not create empty-token paths."""
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description=f"{ARTIFACT_GATE_DESCRIPTION_PREFIX}   ",
+                recommendation="Add a real category hint.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(
+        execution_result=ExecutionResult(files={}, microtasks=[]),
+        review_result=review,
+    )
+    assert result.resolved is False
+    assert result.files == {}
+    assert "ai_system/_placeholder.md" not in result.files

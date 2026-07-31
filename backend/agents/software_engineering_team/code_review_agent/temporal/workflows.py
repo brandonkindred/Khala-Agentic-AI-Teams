@@ -324,7 +324,10 @@ class CodeReviewWorkflow:
                     bool(review_input.get("skip_false_positive_filter", False)),
                 ],
                 task_queue=TASK_QUEUE,
-                start_to_close_timeout=timedelta(minutes=30),
+                # Matches CODE_REVIEW_VERIFY_TIMEOUT_SECONDS default (60m) so a
+                # slow per-group tool-using verifier is not killed by the activity
+                # budget before its own fail-safe timeout can fire.
+                start_to_close_timeout=timedelta(minutes=60),
                 retry_policy=_LLM_RETRY,
             )
 
