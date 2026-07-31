@@ -995,16 +995,20 @@ def test_resolve_dot_slash_prefers_exact_normalized_over_nested_suffix() -> None
 
 
 def test_resolve_does_not_strip_parent_directory_prefix() -> None:
-    """A ``../`` citation must not resolve by treating parent dots as a ``./`` strip.
+    """``../`` must not be treated as a strippable ``./`` / ``/`` prefix.
 
     Preconditions:
-        - Index contains only ``config.py``.
+        - Index contains only a root ``main.py``.
 
     Postconditions:
-        - ``../config.py`` returns ``None`` (not ``config.py``).
+        - ``_normalize_leading("../main.py")`` preserves the parent prefix.
+        - ``../main.py`` returns ``None`` (does not alias the root file).
+        - ``./main.py`` still resolves to the root file.
     """
-    idx = CodebaseIndex(files={"config.py": "x"})
-    assert idx.resolve_path("../config.py") is None
+    idx = CodebaseIndex(files={"main.py": "ROOT"})
+    assert CodebaseIndex._normalize_leading("../main.py") == "../main.py"
+    assert idx.resolve_path("../main.py") is None
+    assert idx.resolve_path("./main.py") == "main.py"
 
 
 def test_resolve_preserves_hidden_file_basename() -> None:
@@ -1013,14 +1017,6 @@ def test_resolve_preserves_hidden_file_basename() -> None:
     assert idx.resolve_path(".env") == "config/.env"
     assert idx.resolve_path("./.env") == "config/.env"
     assert idx.read_file(".env") == "SECRET=1\n"
-
-
-def test_resolve_does_not_strip_parent_directory_prefix() -> None:
-    """``../`` must not be treated as a strippable ``./`` / ``/`` prefix."""
-    idx = CodebaseIndex(files={"main.py": "ROOT"})
-    assert CodebaseIndex._normalize_leading("../main.py") == "../main.py"
-    assert idx.resolve_path("../main.py") is None
-    assert idx.resolve_path("./main.py") == "main.py"
 
 
 def test_resolve_preserves_stored_leading_dot_slash_and_absolute_prefix() -> None:
