@@ -5,6 +5,7 @@ from __future__ import annotations
 from code_review_agent.function_boundaries import (
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    segment_containing_line,
     strip_numbered_prefixes,
 )
 
@@ -251,6 +252,30 @@ def test_enclosing_construct_preserves_ellipsis_stub_bodies() -> None:
     assert result.name == "foo"
     assert result.start_line == 1
     assert result.end_line == 3
+
+
+def test_segment_containing_line_isolates_gap_bounded_hunk() -> None:
+    """A target line resolves to only its own hunk segment, not the joined content."""
+    content = "\n".join(
+        [
+            "def first():",  # 1
+            "    return 1",  # 2
+            "...",  # 3 (separator)
+            "x = 1",  # 4
+            "...",  # 5 (separator)
+            "    changed()",  # 6
+        ]
+    )
+    assert segment_containing_line(content, 2, annotated_hunks=True) == "def first():\n    return 1"
+    assert segment_containing_line(content, 4, annotated_hunks=True) == "x = 1"
+    assert segment_containing_line(content, 6, annotated_hunks=True) == "    changed()"
+
+
+def test_segment_containing_line_returns_full_content_when_not_annotated() -> None:
+    """Ordinary (non-hunk) content is returned unchanged regardless of ``...`` lines."""
+    content = "def foo():\n    ...\n    return 1\n"
+    assert segment_containing_line(content, 3) == content
+    assert segment_containing_line(content, 3, annotated_hunks=True) == content
 
 
 def test_strip_numbered_prefixes_empty_content() -> None:

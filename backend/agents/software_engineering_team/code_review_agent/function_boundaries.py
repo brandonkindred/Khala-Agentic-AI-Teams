@@ -258,6 +258,44 @@ def enclosing_construct(
     return _enclosing_construct_ast(content, line_number)
 
 
+def segment_containing_line(
+    content: str, line_number: int, *, annotated_hunks: bool = False
+) -> Optional[str]:
+    """Return the gap-bounded segment of ``content`` that contains ``line_number``.
+
+    Callers that need to re-parse around ``line_number`` for diagnostic
+    purposes (e.g. to tell a genuine ``SyntaxError`` apart from "parsed fine,
+    no enclosing construct") must not naively re-parse the whole ``content``
+    when it is annotated-hunk output: joining independent hunks across a bare
+    ``...`` gap marker can itself raise (e.g. ``IndentationError`` when a later
+    hunk's indented continuation follows the marker), which would misreport a
+    perfectly valid module-level line as unparseable. This returns exactly the
+    same segment :func:`enclosing_construct` would resolve against, so a
+    caller's fallback re-parse stays consistent with it.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+        - ``line_number`` >= 1.
+
+    Postconditions:
+        - When ``annotated_hunks`` is False, or ``content`` has no bare
+          ``...`` gap markers, returns ``content`` unchanged.
+        - When ``annotated_hunks`` is True and gap markers are present,
+          returns the single hunk segment (joined with ``\\n``) whose
+          1-based range contains ``line_number``, or ``None`` when no segment
+          contains it (``line_number`` addresses a separator line or falls
+          outside every segment). Never raises.
+    """
+    if annotated_hunks:
+        lines = content.splitlines()
+        if any(line == _HUNK_SEPARATOR for line in lines):
+            for seg_start, seg_end, seg_lines in _hunk_segments(lines):
+                if seg_start <= line_number <= seg_end:
+                    return "\n".join(seg_lines)
+            return None
+    return content
+
+
 def enclosing_construct_start_heuristic(content: str, line_number: int) -> Optional[int]:
     """Best-guess construct start line for non-Python content.
 

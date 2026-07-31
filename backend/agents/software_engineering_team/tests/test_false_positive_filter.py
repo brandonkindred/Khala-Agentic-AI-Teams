@@ -675,6 +675,22 @@ def test_find_function_at_line_hunk_separator_not_treated_as_construct() -> None
     assert "..." not in result  # separator must not appear in the output as a construct
 
 
+def test_find_function_at_line_module_level_hunk_not_broken_by_sibling_hunk() -> None:
+    """A module-level target in its own valid hunk still resolves when a
+    *different* hunk elsewhere in the file would fail to parse if joined."""
+    # Three hunks: a complete function, a standalone module-level statement
+    # (the target), and a dangling indented continuation with no declaration
+    # in its own excerpt. Naively re-parsing the whole stripped content would
+    # raise IndentationError on the third hunk and misreport the target
+    # (module-level line 2 of hunk B) as unparseable.
+    content = "10: def first():\n11:     return 1\n...\n20: x = 1\n...\n30:     changed()\n"
+    idx = CodebaseIndex(files={"worker.py": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("worker.py", 20)
+    assert "module level" in result.lower()
+    assert "could not parse" not in result.lower()
+
+
 # --------------------------------------------------------------------------- verdict parsing
 
 

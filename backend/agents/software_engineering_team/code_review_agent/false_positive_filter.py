@@ -52,6 +52,7 @@ from software_engineering_team.shared.llm import extract_json_from_response
 from .function_boundaries import (
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    segment_containing_line,
     strip_numbered_prefixes,
 )
 from .model_resolution import resolve_code_review_verify_model
@@ -537,16 +538,27 @@ def _find_python_function_at_line(
     if line_number > len(lines):
         return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
 
-    construct = enclosing_construct(
-        content, line_number, annotated_hunks=line_mapper is not None
-    )
+    construct = enclosing_construct(content, line_number, annotated_hunks=line_mapper is not None)
 
     if construct is None:
         # enclosing_construct() never raises; re-parse once here only to tell a
         # genuine parse failure apart from "parsed fine, but module level" so
-        # the two get distinct messages.
+        # the two get distinct messages. Re-parse only the gap-bounded segment
+        # enclosing_construct() itself resolved against -- naively re-parsing
+        # the full annotated-hunk content would join independent hunks across
+        # a bare "..." gap marker and can raise on its own (e.g.
+        # IndentationError from a later hunk's indented continuation),
+        # misreporting a valid module-level line as unparseable.
+        segment = segment_containing_line(
+            content, line_number, annotated_hunks=line_mapper is not None
+        )
+        if segment is None:
+            return (
+                f"Line {shown} of {path} falls between annotated hunks "
+                "(no excerpt covers that line); use read_file to inspect the full file."
+            )
         try:
-            ast.parse(content)
+            ast.parse(segment)
         except Exception as exc:
             return (
                 f"Could not parse {path} as Python ({type(exc).__name__}: {exc}); "
