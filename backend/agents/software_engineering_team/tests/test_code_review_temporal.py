@@ -959,16 +959,16 @@ def test_workflow_and_activities_are_registered() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "env_value, expected",
-    [
-        (None, 8),
-        ("16", 16),
-        ("0", 1),
-        ("-5", 1),
-        ("not-a-number", 8),
-    ],
-)
+_MAX_CONCURRENT_CASES = [
+    (None, 8),
+    ("16", 16),
+    ("0", 1),
+    ("-5", 1),
+    ("not-a-number", 8),
+]
+
+
+@pytest.mark.parametrize("env_value, expected", _MAX_CONCURRENT_CASES)
 def test_worker_max_concurrent_activities_env_parsing(
     monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
 ) -> None:
@@ -982,16 +982,7 @@ def test_worker_max_concurrent_activities_env_parsing(
     assert worker_mod._max_concurrent_activities() == expected
 
 
-@pytest.mark.parametrize(
-    "env_value, expected",
-    [
-        (None, 8),
-        ("16", 16),
-        ("0", 1),
-        ("-5", 1),
-        ("not-a-number", 8),
-    ],
-)
+@pytest.mark.parametrize("env_value, expected", _MAX_CONCURRENT_CASES)
 def test_worker_max_concurrent_activities_delegates_to_config(
     monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
 ) -> None:
