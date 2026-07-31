@@ -178,11 +178,21 @@ class BrandingTeamOrchestrator:
         per-phase sub-graphs and swarms.  Brand-compliance checks run outside
         the graph because their inputs come from the API request.
 
-        Raises:
-            BrandVersionAppendConflict: If ``append_brand_version`` returns
-                ``None`` (brand row deleted between resolve and finalize), so the
-                caller can mark the run as failed instead of reporting success
-                without persistence.
+        Preconditions:
+            - ``target_phase`` is ``None`` or one of the runnable ``BrandPhase``
+              values (``COMPLETE`` is allowed as the upper bound but is not a
+              runnable graph node).
+            - When ``store`` and ``brand_id`` are supplied, ``store`` implements
+              ``get_brand``/``get_brand_by_id``/``append_brand_version``.
+
+        Postconditions:
+            - Returns a fully populated ``TeamOutput``.
+            - When ``store``, ``brand_id``, and a resolved ``client_id`` are
+              present, persists the output via ``store.append_brand_version``.
+              Raises ``BrandVersionAppendConflict`` if the brand row disappeared
+              during the run (``append_brand_version`` returns ``None``), so the
+              caller can mark the run as failed instead of reporting success
+              without persistence.
         """
         # ---- Resolve brand from store if applicable ----
         mission, resolved_client_id = self._resolve_mission(mission, store, client_id, brand_id)
