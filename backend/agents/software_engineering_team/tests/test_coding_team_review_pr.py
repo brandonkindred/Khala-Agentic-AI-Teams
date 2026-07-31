@@ -942,7 +942,9 @@ class TestReviewEndpoint:
         # The pre-existing bug is excluded from the counts because it's routed to a
         # proposal, not silently dropped: it must show up there and never as any kind
         # of PR comment.
-        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        proposal = proposals[0]
         assert proposal["description"] == "pre-existing bug"
         assert proposal["file_path"] == "unchanged.py"
         gh = review_app["github"]["client"]
