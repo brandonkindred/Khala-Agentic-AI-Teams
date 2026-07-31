@@ -73,8 +73,21 @@ def resolve_strands_model(
     from strands.models.model import Model as _StrandsModel  # noqa: PLC0415
 
     from llm_service import LLMClient as _LLMClient  # noqa: PLC0415
+    from llm_service.clients.dummy import (  # noqa: PLC0415
+        DummyLLMClient as _DummyLLMClient,
+    )
+    from llm_service.clients.dummy import (
+        ensure_strands_model_registration,
+    )
 
     _get_strands_model = get_strands_model_fn or get_strands_model
+
+    # Cold-constructed DummyLLMClient instances skip Model attachment in
+    # ``__init__`` (Strands was not loaded yet). This resolver already imported
+    # ``Model``, so attach inheritance before the isinstance short-circuit so
+    # Dummy continues to be returned unchanged (pre-lazy behaviour).
+    if llm is not None and isinstance(llm, _DummyLLMClient):
+        ensure_strands_model_registration()
 
     if llm is not None and isinstance(llm, _StrandsModel):
         return llm

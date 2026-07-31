@@ -2,9 +2,7 @@
 
 Runs against live Postgres via ``shared.postgres.testing.real_postgres_schema``
 with ``scope="function"`` (truncate before and after each test when not under
-pytest-xdist). Skips when ``POSTGRES_HOST`` is unset. The ``real_postgres``
-marker opts this module out of the suite-wide dict-backed fake installed by
-``conftest.py``.
+pytest-xdist). Skips when ``POSTGRES_HOST`` is unset.
 
 These tests assert global table counts and are intended for the branding CI
 job / plain pytest (no ``-n``). Under xdist, truncate is skipped by the

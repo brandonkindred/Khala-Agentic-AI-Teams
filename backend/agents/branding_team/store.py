@@ -10,11 +10,10 @@ writes surface as structured log lines.
 Note for maintainers:
     ``tests/test_store.py`` exercises this module's SQL against live Postgres
     via ``shared.postgres.testing.real_postgres_schema`` (skips when
-    ``POSTGRES_HOST`` is unset). When you change or add SQL here, update those
-    tests — do not keep a parallel fake handler in sync for this module.
-    Other branding suites still use ``tests/_fake_postgres.py`` until that
-    emulator is retired; conversation-only SQL coverage that
-    ``test_store.py`` does not hit lives in ``tests/test_store_real_postgres.py``.
+    ``POSTGRES_HOST`` is unset). Conversation and session SQL live in
+    ``tests/test_conversation_store.py`` and ``tests/test_session_store.py``.
+    When you change or add SQL here, update those suites — there is no
+    parallel in-memory SQL emulator to keep in sync.
 """
 
 from __future__ import annotations
