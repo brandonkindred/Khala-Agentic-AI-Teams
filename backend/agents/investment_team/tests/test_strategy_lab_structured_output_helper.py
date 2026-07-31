@@ -393,3 +393,55 @@ def test_invoke_structured_with_schema_rejects_empty_schema(
             logger=logging.getLogger("test.so"),
             reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
         )
+
+
+def test_invoke_structured_with_schema_propagates_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``StrategyLabLLMError`` from the envelope must propagate unmodified."""
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
+    monkeypatch.setattr(
+        so_mod,
+        "run_structured_agent",
+        lambda *_a, **_k: (_ for _ in ()).throw(StrategyLabLLMError("fatal")),
+    )
+    with pytest.raises(StrategyLabLLMError, match="fatal"):
+        so_mod.invoke_structured_with_schema(
+            "strategy_design",
+            "sys",
+            "user",
+            phase="design_generate_structured",
+            schema={"type": "object"},
+            charge=True,
+            objective="strategy design (structured)",
+            logger=logging.getLogger("test.so"),
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+        )
+
+
+def test_invoke_structured_with_schema_propagates_parse_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw ``ValueError`` from parse must propagate unwrapped by the helper."""
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
+    monkeypatch.setattr(
+        so_mod,
+        "run_structured_agent",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad json")),
+    )
+    with pytest.raises(ValueError, match="bad json"):
+        so_mod.invoke_structured_with_schema(
+            "strategy_design",
+            "sys",
+            "user",
+            phase="design_generate_structured",
+            schema={"type": "object"},
+            charge=True,
+            objective="strategy design (structured)",
+            logger=logging.getLogger("test.so"),
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+        )
