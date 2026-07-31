@@ -17,13 +17,16 @@ Covers the seven things testable without a live (deployed) Temporal server:
    server binary itself requires a one-time network fetch — see
    ``test_workflow_executes_and_replays_without_non_determinism`` and related
    tests near the bottom of this file).
-7. Concurrent tail-pass gather / re-raise semantics: the pure-async unit test
+7. Concurrent map-phase and tail-pass gather / re-raise semantics: the
+   pure-async unit test
    ``test_gather_return_exceptions_reproduces_sequential_error_precedence``,
-   plus ``WorkflowEnvironment`` tests for verify-failure precedence, concurrent
-   scheduling, out-of-order completion, partial failure, and pre-migration
-   sequential-history replay. The ``WorkflowEnvironment`` tests are marked
-   ``integration`` (run with ``-m integration``) since standing up the
-   embedded server is heavier than this file's other pure-Python tests.
+   plus ``WorkflowEnvironment`` tests for map-chunk sibling completion
+   (``test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings``),
+   verify-failure precedence, concurrent scheduling, out-of-order completion,
+   partial failure, and pre-migration sequential-history replay. The
+   ``WorkflowEnvironment`` tests are marked ``integration`` (run with
+   ``-m integration``) since standing up the embedded server is heavier than
+   this file's other pure-Python tests.
 """
 
 from __future__ import annotations
@@ -1533,6 +1536,86 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
     assert "TypeError" not in error_chain
     assert completed == {"side_effect"}
     assert "architecture" not in completed
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings() -> None:
+    """Map-phase ``asyncio.gather(..., return_exceptions=True)`` must await
+    every chunk activity when one fails, then re-raise that failure.
+
+    Without ``return_exceptions=True``, the first chunk exception in
+    completion order would abort the gather and leave sibling map activities
+    un-awaited (orphaned Temporal commands + non-deterministic exception
+    precedence on replay). This substitutes a selective
+    ``code_review_map_chunk`` stand-in that fails the ``main.py`` chunk and
+    delegates every other chunk to the real activity, then asserts the
+    sibling still completed and the workflow failed with the map boom.
+    """
+    from code_review_agent.models import ReviewChunk
+    from code_review_agent.temporal import (
+        ACTIVITIES,
+        TASK_QUEUE,
+        CodeReviewWorkflow,
+        filter_false_positives_activity,
+        finalize_review_activity,
+        find_architecture_and_redundancy_activity,
+        find_side_effect_impact_activity,
+        prepare_review_activity,
+        review_chunk_activity,
+        synthesize_findings_activity,
+    )
+    from code_review_agent.temporal import activities as A
+    from temporalio import activity as activity_module
+    from temporalio.client import WorkflowFailureError
+
+    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
+    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
+    review_input = _input(code=big_1 + "\n\n" + big_2)
+    prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
+    assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
+
+    completed: set[str] = set()
+
+    @activity_module.defn(name="code_review_map_chunk")
+    def _selective_map_chunk(
+        chunk: Dict[str, Any],
+        base_input: Dict[str, Any],
+        context_fp: str,
+        surface_by_path: Dict[str, list[str]],
+    ) -> Any:
+        label = ReviewChunk.model_validate(chunk).paths_label
+        if "main.py" in label:
+            raise RuntimeError("map chunk boom")
+        result = review_chunk_activity(chunk, base_input, context_fp, surface_by_path)
+        completed.add(label)
+        return result
+
+    stand_in_activities = [
+        prepare_review_activity,
+        _selective_map_chunk,
+        filter_false_positives_activity,
+        find_architecture_and_redundancy_activity,
+        find_side_effect_impact_activity,
+        finalize_review_activity,
+        synthesize_findings_activity,
+    ]
+    assert len(stand_in_activities) == len(ACTIVITIES)
+
+    async with _workflow_environment_worker(activities=stand_in_activities) as env:
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await env.client.execute_workflow(
+                CodeReviewWorkflow.run,
+                review_input.model_dump(mode="json"),
+                id="code-review-workflow-map-chunk-failure-test",
+                task_queue=TASK_QUEUE,
+            )
+
+    cause = exc_info.value.cause
+    assert cause is not None
+    assert "map chunk boom" in _error_chain_text(cause)
+    assert any("util.py" in label for label in completed)
+    assert not any("main.py" in label for label in completed)
 
 
 @pytest.mark.integration
