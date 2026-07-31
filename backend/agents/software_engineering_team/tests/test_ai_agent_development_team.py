@@ -7,6 +7,9 @@ import pytest
 
 from llm_service import DummyLLMClient
 from software_engineering_team.ai_agent_development_team import orchestrator
+from software_engineering_team.ai_agent_development_team.constants import (
+    REQUIRED_ARTIFACT_HINTS,
+)
 from software_engineering_team.ai_agent_development_team.models import (
     ExecutionResult,
     IntakeResult,
@@ -94,6 +97,17 @@ def _build_task() -> Task:
         title="Create AI agent team",
         description="Build an AI agent development workflow",
         requirements="Must support MCP",
+    )
+
+
+def test_required_artifact_hints_tuple() -> None:
+    """Team-level constant is the sole definition of artifact-category hints."""
+    assert REQUIRED_ARTIFACT_HINTS == (
+        "blueprint",
+        "evaluation",
+        "safety",
+        "runbook",
+        "mcp",
     )
 
 
