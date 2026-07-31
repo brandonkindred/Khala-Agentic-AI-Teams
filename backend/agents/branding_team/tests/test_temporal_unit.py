@@ -673,6 +673,41 @@ def test_run_single_phase_extracts_output_and_injects_context(monkeypatch) -> No
     assert "strategic_core" in captured["task"]
 
 
+def test_run_single_phase_uses_shared_graph_timeouts(monkeypatch) -> None:
+    """Isolated phase graphs must use the same budgets as build_branding_graph."""
+    from branding_team import orchestrator as orch_mod
+    from branding_team.graphs.top_level import (
+        DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+        DEFAULT_NODE_TIMEOUT_SECONDS,
+    )
+    from branding_team.models import NarrativeMessagingOutput
+
+    canned = _canned_phase_result(
+        "phase2_narrative", NarrativeMessagingOutput(tagline="TAG").model_dump_json()
+    )
+    fake_graph = MagicMock()
+    fake_graph.invoke_async = AsyncMock(return_value=canned)
+    fake_builder = MagicMock()
+    fake_builder.build.return_value = fake_graph
+    monkeypatch.setattr(orch_mod, "GraphBuilder", MagicMock(return_value=fake_builder))
+    monkeypatch.setitem(
+        orch_mod._PHASE_SPEC,
+        BrandPhase.NARRATIVE_MESSAGING,
+        (lambda: MagicMock(), "phase2_narrative", NarrativeMessagingOutput),
+    )
+
+    orch_mod.BrandingTeamOrchestrator().run_single_phase(
+        make_mission(),
+        BrandPhase.NARRATIVE_MESSAGING,
+        {},
+    )
+
+    exec_arg = fake_builder.set_execution_timeout.call_args.args[0]
+    node_arg = fake_builder.set_node_timeout.call_args.args[0]
+    assert exec_arg is DEFAULT_EXECUTION_TIMEOUT_SECONDS
+    assert node_arg is DEFAULT_NODE_TIMEOUT_SECONDS
+
+
 def test_run_single_phase_first_phase_has_no_prior_context() -> None:
     mission = make_mission()
     task = orch_phase_task(mission, BrandPhase.STRATEGIC_CORE, {})

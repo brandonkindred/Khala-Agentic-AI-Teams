@@ -44,6 +44,12 @@ from .interface import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from .limit_classification import (
+    LIMIT_KIND_RATE,
+    LIMIT_KIND_SESSION,
+    LIMIT_KIND_WEEKLY,
+    classify_ollama_limit_kind,
+)
 from .pricing import estimate_cost_usd
 from .structured import (
     complete_json_via_reasoning,
@@ -147,6 +153,10 @@ __all__ = [
     "LLMSchemaValidationError",
     "LLMTruncatedError",
     "OLLAMA_WEEKLY_LIMIT_MESSAGE",
+    "LIMIT_KIND_RATE",
+    "LIMIT_KIND_SESSION",
+    "LIMIT_KIND_WEEKLY",
+    "classify_ollama_limit_kind",
     "OllamaLLMClient",
     "ClaudeLLMClient",
     "DummyLLMClient",

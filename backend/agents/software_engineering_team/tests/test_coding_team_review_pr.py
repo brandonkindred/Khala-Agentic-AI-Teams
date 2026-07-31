@@ -942,7 +942,9 @@ class TestReviewEndpoint:
         # The pre-existing bug is excluded from the counts because it's routed to a
         # proposal, not silently dropped: it must show up there and never as any kind
         # of PR comment.
-        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        proposal = proposals[0]
         assert proposal["description"] == "pre-existing bug"
         assert proposal["file_path"] == "unchanged.py"
         gh = review_app["github"]["client"]
@@ -3105,14 +3107,10 @@ class TestFixedRunPrReview:
         assert job["review_summary"]["comment_findings"] == 1
         assert job["review_summary"]["pending_issue_proposals"] == []
 
-    def test_out_of_diff_finding_routing_depends_on_pre_existing_tag(self, review_app) -> None:
-        """Routing of an off-diff-file finding is driven ONLY by the reviewer's own
-        pre_existing tag, never by diff/file membership alone: explicitly tagged
-        pre_existing=True (and not proven is_within_diff) routes to a proposal and
-        is never posted; left at its default False, the same finding is an
-        in-scope PR finding and is posted as its own standalone comment.
+    def test_off_diff_file_pre_existing_true_routes_to_proposal(self, review_app) -> None:
+        """Off-diff-file findings tagged pre_existing=True (and not proven
+        is_within_diff) route to a pending issue proposal and are never posted.
         """
-        # pre_existing=True: routed to a proposal, never posted.
         review_app["github"]["client"] = _FakeReviewClient()
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -3143,8 +3141,10 @@ class TestFixedRunPrReview:
         assert len(proposals) == 1
         assert proposals[0]["description"] == "out-of-scope bug (tagged)"
 
-        # pre_existing left False (default): an in-scope PR finding, posted
-        # standalone, never a proposal.
+    def test_off_diff_file_pre_existing_false_posts_standalone(self, review_app) -> None:
+        """Off-diff-file findings left at default pre_existing=False are in-scope
+        PR findings and are posted as their own standalone conversation comment.
+        """
         review_app["github"]["client"] = _FakeReviewClient()
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -3555,6 +3555,48 @@ class TestParallelReviewReads:
                 7,
             )
 
+    def test_fetch_pr_metadata_awaits_all_futures_when_first_fails(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When get_pull_request fails, siblings that also fail must still have
+        ``result()`` called — a generator unpack stops early and leaves secondary
+        exceptions unretrieved on those futures."""
+        from concurrent.futures import ThreadPoolExecutor as _RealTPE
+
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.api.pr_review import _fetch_pr_metadata
+
+        result_calls = {"n": 0}
+        futures_seen: list[Any] = []
+
+        class _CountingExecutor(_RealTPE):
+            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+                fut = super().submit(fn, *args, **kwargs)
+                futures_seen.append(fut)
+                real_result = fut.result
+
+                def _counting_result(*a: Any, **kw: Any) -> Any:
+                    result_calls["n"] += 1
+                    return real_result(*a, **kw)
+
+                fut.result = _counting_result  # type: ignore[method-assign]
+                return fut
+
+        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+
+        with pytest.raises(GitHubAPIError, match="missing PR"):
+            _fetch_pr_metadata(
+                _pr_metadata_client(
+                    fail_pr=GitHubAPIError(404, "missing PR"),
+                    fail_files=GitHubAPIError(502, "files unavailable"),
+                ),
+                "o",
+                "r",
+                7,
+            )
+        assert len(futures_seen) == 3
+        assert result_calls["n"] == 3
+
     def test_fetch_pr_metadata_get_authenticated_login_failure_degrades(self, review_app) -> None:
         """A get_authenticated_login failure must degrade to "" without blocking
         or failing the (independent) pr/files fetches, unlike get_pull_request and
@@ -3653,6 +3695,49 @@ class TestParallelReviewReads:
                 return []
 
         assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
+
+    def test_fetch_existing_comments_awaits_all_futures_when_first_fails(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the first concurrent comment fetch fails, siblings that also fail
+        must still have ``result()`` called. The call still degrades to []
+        (best-effort)."""
+        from concurrent.futures import ThreadPoolExecutor as _RealTPE
+
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.api.pr_review import _fetch_existing_comments
+
+        result_calls = {"n": 0}
+        futures_seen: list[Any] = []
+
+        class _CountingExecutor(_RealTPE):
+            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+                fut = super().submit(fn, *args, **kwargs)
+                futures_seen.append(fut)
+                real_result = fut.result
+
+                def _counting_result(*a: Any, **kw: Any) -> Any:
+                    result_calls["n"] += 1
+                    return real_result(*a, **kw)
+
+                fut.result = _counting_result  # type: ignore[method-assign]
+                return fut
+
+        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+
+        class _FakeGitHubClient:
+            def list_review_comments(self, o, r, n):
+                raise GitHubAPIError(500, "reviews boom")
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                raise GitHubAPIError(500, "resolved boom")
+
+            def list_issue_comments(self, o, r, n):
+                raise GitHubAPIError(500, "issues boom")
+
+        assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
+        assert len(futures_seen) == 3
+        assert result_calls["n"] == 3
 
     @pytest.mark.parametrize(
         "failing_method",
@@ -4462,6 +4547,13 @@ class TestDecideReviewModeUnit:
             "_complete_review_noop",
             lambda *a, **kw: noop_calls.append(kw),
         )
+
+        def _must_not_parse(*_a: Any, **_kw: Any) -> Any:
+            raise AssertionError(
+                "parse_valid_lines must not run on the no-reviewable noop path"
+            )
+
+        monkeypatch.setattr(pr_review, "parse_valid_lines", _must_not_parse)
 
         files = [
             PullRequestFile("gone.py", "removed", "@@ -1 +0 @@\n-x", 0, 1, None),
