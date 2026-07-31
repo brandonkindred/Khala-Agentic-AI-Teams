@@ -22,40 +22,6 @@ if not logging.getLogger().handlers:
 logger = logging.getLogger(__name__)
 
 
-def _start_temporal_worker_backstop() -> None:
-    """Start the SOC2 Temporal worker when serving the app standalone.
-
-    The team_service entrypoint normally starts the worker via
-    ``TEAM_TEMPORAL_WORKER_MODULE``/``_FUNC`` before uvicorn accepts requests.
-    This backstop covers running the app standalone (``uvicorn ...:app``, local
-    dev / unified API): without it, a ``TEMPORAL_ADDRESS``-set process has no
-    worker, so ``start_audit_workflow`` would stall waiting for a client.
-
-    Postconditions:
-        - Starts the worker thread when Temporal is enabled; a no-op when
-          ``TEMPORAL_ADDRESS`` is unset. Never raises — a failure is logged so
-          it cannot abort app boot (``start_team_worker`` is idempotent per
-          team, so double-starting with the entrypoint is harmless).
-    """
-    try:
-        from soc2_compliance_team.temporal.worker import (
-            start_soc2_temporal_worker_thread,
-        )
-
-        start_soc2_temporal_worker_thread()
-    except Exception:  # noqa: BLE001 - backstop must not abort app boot
-        logger.warning("SOC2 Temporal worker backstop failed to start", exc_info=True)
-
-
-app = create_team_app(
-    service_name="soc2-compliance-team",
-    team_key="soc2_compliance",
-    title="SOC2 Compliance Audit Team API",
-    description="Run a SOC2 compliance audit on a code repository. POST to start, GET status to poll.",
-    version="1.0.0",
-    on_startup=_start_temporal_worker_backstop,
-)
-
 # The decomposed Temporal pipeline (temporal/workflows.py) can go up to 90
 # minutes between job-row touches while a criterion fan-out or report-writing
 # activity is queued/running (AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT /
@@ -88,11 +54,74 @@ app = create_team_app(
 # = 150 min.
 _STALE_JOB_THRESHOLD_SECONDS = 150 * 60
 
-_stale_monitor_stop = start_stale_job_monitor(
-    job_store._job_manager,
-    interval_seconds=15.0,
-    stale_after_seconds=_STALE_JOB_THRESHOLD_SECONDS,
-    reason="Job heartbeat stale while pending/running",
+_stale_monitor_stop: Optional[threading.Event] = None
+
+
+def _start_temporal_worker_backstop() -> None:
+    """Start the SOC2 Temporal worker when serving the app standalone.
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE``/``_FUNC`` before uvicorn accepts requests.
+    This backstop covers running the app standalone (``uvicorn ...:app``, local
+    dev / unified API): without it, a ``TEMPORAL_ADDRESS``-set process has no
+    worker, so ``start_audit_workflow`` would stall waiting for a client.
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — a failure is logged so
+          it cannot abort app boot (``start_team_worker`` is idempotent per
+          team, so double-starting with the entrypoint is harmless).
+    """
+    try:
+        from soc2_compliance_team.temporal.worker import (
+            start_soc2_temporal_worker_thread,
+        )
+
+        start_soc2_temporal_worker_thread()
+    except Exception:  # noqa: BLE001 - backstop must not abort app boot
+        logger.warning("SOC2 Temporal worker backstop failed to start", exc_info=True)
+
+
+def _start_stale_job_monitor() -> None:
+    """Start the stale-job heartbeat monitor (app startup only).
+
+    Preconditions:
+        - Intended to run once from the FastAPI ``on_startup`` hook so import
+          of this module stays free of background-thread side effects.
+    Postconditions:
+        - Binds ``_stale_monitor_stop`` to the stop ``Event`` returned by
+          ``start_stale_job_monitor``, using the shared job manager and the
+          module threshold / reason.
+    """
+    global _stale_monitor_stop
+    _stale_monitor_stop = start_stale_job_monitor(
+        job_store._job_manager,
+        interval_seconds=15.0,
+        stale_after_seconds=_STALE_JOB_THRESHOLD_SECONDS,
+        reason="Job heartbeat stale while pending/running",
+    )
+
+
+def _on_startup() -> None:
+    """Combined FastAPI startup: Temporal backstop + stale-job monitor.
+
+    Preconditions:
+        - None (safe to call once at app startup).
+    Postconditions:
+        - Invokes ``_start_temporal_worker_backstop`` then
+          ``_start_stale_job_monitor``.
+    """
+    _start_temporal_worker_backstop()
+    _start_stale_job_monitor()
+
+
+app = create_team_app(
+    service_name="soc2-compliance-team",
+    team_key="soc2_compliance",
+    title="SOC2 Compliance Audit Team API",
+    description="Run a SOC2 compliance audit on a code repository. POST to start, GET status to poll.",
+    version="1.0.0",
+    on_startup=_on_startup,
 )
 
 
