@@ -462,8 +462,10 @@ class BrandingTeamOrchestrator:
             ``get_brand``/``get_brand_by_id``.
         Postconditions:
             Returns ``(mission, resolved_client_id)``. When a stored brand is
-            found its mission replaces the passed one and the client id is filled
-            in; otherwise the inputs pass through unchanged.
+            found, its mission replaces the passed one. If no ``client_id`` was
+            supplied, ``resolved_client_id`` is filled in from the brand;
+            otherwise the supplied ``client_id`` is preserved. If no stored brand
+            is found, the inputs pass through unchanged.
         """
         resolved_client_id: Optional[str] = client_id
         if store and brand_id:
