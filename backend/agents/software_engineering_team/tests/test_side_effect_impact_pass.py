@@ -3,11 +3,17 @@
 This pass is purely additive (it can only ADD findings on top of what the map
 phase, false-positive filter, and architecture-consistency pass already
 produced) and fail-safe (any setup or LLM failure yields no additional
-findings, never an exception). Style mirrors
-``test_architecture_consistency_pass.py``: the LLM seam is exercised with
-``DummyLLMClient`` subclasses that pattern-match on the user prompt (never the
-system prompt) so one scripted client can serve both the chunk-review call and
-this pass's call in an end-to-end ``run_coordinator`` run.
+findings, never an exception). The standalone module remains the Temporal
+activity path; the in-process coordinator routes architecture + side-effect
+through ``merged_architecture_side_effect_pass`` instead.
+
+Style mirrors ``test_architecture_consistency_pass.py``: the LLM seam is
+exercised with ``DummyLLMClient`` subclasses that pattern-match on the user
+prompt (never the system prompt). Direct unit tests of
+``find_side_effect_impact_issues`` match this pass's prompt anchor; end-to-end
+``run_coordinator`` tests match the merged-pass prompt anchor so one scripted
+client can serve the chunk-review call and the merged pass's side-effect
+findings in a single run.
 """
 
 from __future__ import annotations
