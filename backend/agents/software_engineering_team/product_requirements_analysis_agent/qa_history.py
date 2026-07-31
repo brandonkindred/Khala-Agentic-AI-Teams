@@ -355,7 +355,10 @@ def extract_answer_from_qa_history(
 ) -> Optional[AnsweredQuestion]:
     """Extract a previously recorded answer from qa_history.md for a duplicate question.
 
-    Parses the qa_history.md markdown format to find the best matching Q&A pair.
+    Uses :func:`parse_qa_history_blocks` to locate Q&A blocks (so a leading
+    ``###`` header with no file preamble is not discarded), then scores each
+    recorded question against ``question`` and rebuilds the matched block body
+    via :func:`_consume_block_body`.
 
     Args:
         question: The duplicate question to find an answer for.
@@ -386,8 +389,10 @@ def extract_answer_from_qa_history(
     if not key_words:
         return None
 
-    # Parse qa_history.md sections - format is (fields may span continuation lines
-    # until the next known marker / column-0 section boundary):
+    # Parse qa_history.md via parse_qa_history_blocks so column-0 ### / ## Iteration
+    # boundaries (including a leading ### with no file preamble) are handled the
+    # same way as pruning/rewriting. Format per block (fields may span continuation
+    # lines until the next known marker / column-0 section boundary):
     # ### Question text
     # **Answer:** First line
     # second line
@@ -396,17 +401,11 @@ def extract_answer_from_qa_history(
     # *Auto-answered with 80% confidence*
     #   or *(Default applied)*
 
-    # Split into Q&A blocks by "### " headers
-    blocks = re.split(r"\n###\s+", qa_history)
-
     best_match: Optional[tuple[float, str, _ParsedBlockBody]] = None  # (score, question, parsed)
 
-    for block in blocks[1:]:  # Skip first block (header)
-        lines = block.strip().split("\n")
-        if not lines:
-            continue
-
-        recorded_question = lines[0].strip()
+    for _iteration, recorded_question, _answer, full_block_text in parse_qa_history_blocks(
+        qa_history
+    ):
         recorded_question_lower = recorded_question.lower()
 
         # Calculate match score
@@ -416,7 +415,8 @@ def extract_answer_from_qa_history(
         if (
             match_ratio >= _QUESTION_MATCH_THRESHOLD
         ):  # Good enough match based on extract_answer keyword coverage
-            parsed = _consume_block_body(lines[1:])
+            # Reconstruct body lines from the verbatim block (header is line 0).
+            parsed = _consume_block_body(full_block_text.split("\n")[1:])
 
             # >= so equal scores prefer the later (more recent) block
             if parsed.answer and (best_match is None or match_ratio >= best_match[0]):
