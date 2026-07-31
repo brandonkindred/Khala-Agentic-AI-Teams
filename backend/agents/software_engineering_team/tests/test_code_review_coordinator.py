@@ -1504,6 +1504,17 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     assert _is_content_failure(TypeError("bug")) is False
 
 
+def test_chain_has_empty_types_returns_false_without_raising() -> None:
+    """Empty ``types`` must return False (never raise); non-empty still matches the chain."""
+    from code_review_agent.mapping import _chain_has
+
+    assert _chain_has(ValueError("x"), ()) is False
+    assert _chain_has(ValueError("x"), (ValueError,)) is True
+    wrapped = RuntimeError("outer")
+    wrapped.__cause__ = TypeError("inner")
+    assert _chain_has(wrapped, (TypeError,)) is True
+
+
 def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
     """A raw ``json.JSONDecodeError`` in the exception chain (e.g. wrapped by
     the injected client or a lower layer, rather than the client's own

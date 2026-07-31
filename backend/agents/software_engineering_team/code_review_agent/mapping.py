@@ -345,21 +345,19 @@ def _thinking_off_retry_enabled() -> bool:
 def _chain_has(exc: BaseException, types: Tuple[type, ...]) -> bool:
     """Whether ``exc`` or its cause/context chain contains one of ``types``.
 
+    Preconditions:
+        - ``types`` may be empty; an empty tuple means no type can match.
+
     Postconditions:
-        - Walks the ``__cause__``/``__context__`` chain up to a bounded depth
-          (strands may wrap the client error) and returns True on the first match.
+        - Walks the ``__cause__``/``__context__`` chain via ``_exception_chain``
+          and returns True on the first match. Empty ``types`` returns False.
           Never raises. Mirrors the traversal in ``_is_content_failure`` for a
           narrower type check (used to gate the thinking-off retry to the failures
           it can actually fix).
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
-        if isinstance(current, types):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    if not types:
+        return False
+    return any(isinstance(c, types) for c in _exception_chain(exc))
 
 
 def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _ChunkOutcome:
