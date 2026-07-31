@@ -228,7 +228,7 @@ def _mock_graph_result(phases_to_include: list[str]):
 
 
 def _patch_graph_invoke(phases_to_include: list[str]):
-    """Return a context manager that patches graph.invoke_async."""
+    """Return a context manager that patches ``branding_team.orchestrator.build_branding_graph`` so the returned graph's ``invoke_async`` yields a canned result."""
     mock_result = _mock_graph_result(phases_to_include)
 
     async def mock_invoke_async(task, **kwargs):
