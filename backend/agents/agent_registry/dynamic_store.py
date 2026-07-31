@@ -112,6 +112,21 @@ _schema_ensured = False
 _schema_ensure_lock = threading.Lock()
 
 
+def _apply_schema_statements(cur) -> None:
+    """Run this store's idempotent DDL on an open cursor.
+
+    Preconditions: ``cur`` is a live cursor on a writable connection.
+    Postconditions: every ``SCHEMA.statements`` entry has been executed
+        (``CREATE … IF NOT EXISTS`` / equivalent). Does not flip
+        :data:`_schema_ensured` — callers that may still roll back their
+        transaction must leave the guard unset so a later attempt can retry.
+    """
+    from . import postgres as _pg_schema
+
+    for statement in _pg_schema.SCHEMA.statements:
+        cur.execute(statement)
+
+
 def _ensure_schema() -> None:
     """Idempotently create this store's table before a write, once per process.
 
@@ -132,6 +147,12 @@ def _ensure_schema() -> None:
           subsequent writes skip the DDL. A failure leaves the guard unset (the
           next write retries) and propagates, so the caller still degrades to
           local exactly as before.
+
+    Do **not** call this while holding another pooled connection (e.g. the
+    chat-save roster ``conn``): ``register_team_schemas`` opens its own
+    ``get_conn()`` and will deadlock under ``POSTGRES_POOL_MAX_SIZE=1``. Shared-
+    connection writers use :func:`_apply_schema_statements` on that ``conn``
+    instead.
     """
     global _schema_ensured
     if _schema_ensured:
@@ -250,7 +271,10 @@ def replace_manifests(
           or is marked failed for the caller (shared); the exception propagates.
           Clears the ``all()`` micro-cache on success. Standalone path retries
           once on transient failure; shared-``conn`` path does not retry (a
-          mid-batch failure would leave the caller's txn aborted).
+          mid-batch failure would leave the caller's txn aborted). Shared-``conn``
+          path never opens a nested pool connection for DDL (applies
+          ``IF NOT EXISTS`` statements on ``conn`` when the process guard is
+          unset) so ``POSTGRES_POOL_MAX_SIZE=1`` cannot deadlock.
     """
     from shared.postgres import Json, get_conn
     from shared.postgres.metrics import timed_query
@@ -280,12 +304,19 @@ def replace_manifests(
         for agent_id in delete_ids:
             cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
 
-    _ensure_schema()
     if conn is not None:
+        # Hold no second pool checkout while the caller already owns ``conn``
+        # (deadlock under pool max size 1). Apply DDL on ``conn`` when needed
+        # without flipping ``_schema_ensured`` — the outer txn may still roll back.
+        if not _schema_ensured:
+            with conn.cursor() as cur:
+                _apply_schema_statements(cur)
         with conn.cursor() as cur:
             _execute(cur)
         clear_cache()
         return
+
+    _ensure_schema()
 
     @timed_query(store=_STORE, op="replace_manifests")
     def _do() -> None:

@@ -261,6 +261,41 @@ def test_upsert_rejects_empty_id() -> None:
         upsert(_manifest(""))
 
 
+def test_replace_manifests_shared_conn_avoids_nested_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-conn path must not call _ensure_schema (nested get_conn deadlock)."""
+    from agent_registry import dynamic_store as ds
+
+    monkeypatch.setattr(ds, "_schema_ensured", False)
+
+    def _boom_ensure() -> None:
+        raise AssertionError("nested _ensure_schema / pool checkout")
+
+    monkeypatch.setattr(ds, "_ensure_schema", _boom_ensure)
+
+    executed: list[str] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            executed.append(sql if isinstance(sql, str) else str(sql))
+
+    class _Conn:
+        def cursor(self, *args, **kwargs):
+            return _Cur()
+
+    ds.replace_manifests([_manifest("agent_studio.shared-1")], [], conn=_Conn())
+    # DDL + upsert ran on the shared conn; _ensure_schema was never entered.
+    assert any("CREATE TABLE" in s or "agent_registry_dynamic" in s for s in executed)
+    assert any("INSERT INTO" in s for s in executed)
+
+
 def test_manifests_with_id_prefix_require_store_propagates(
     fake_store: _FakeStore,
 ) -> None:
