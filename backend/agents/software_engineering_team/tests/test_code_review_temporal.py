@@ -862,14 +862,30 @@ def test_reports_review_unavailable_walks_cause_chain() -> None:
 def test_reports_review_unavailable_terminates_on_cyclic_chain() -> None:
     from code_review_agent.agent import _reports_review_unavailable
 
-    # A pathological cyclic cause chain must not hang the walk: the ``seen`` set
-    # (and depth bound) terminate it. Neither node carries the marker, so the
+    # The ``seen`` set terminates cyclic cause chains; this test verifies it
+    # returns for a 2-node cycle. Neither node carries the marker, so the
     # result is False — the point is that it returns at all.
     a = RuntimeError("a")
     b = RuntimeError("b")
     a.__cause__ = b
     b.__cause__ = a
     assert _reports_review_unavailable(a, "CodeReviewUnavailableError") is False
+
+
+def test_reports_review_unavailable_terminates_on_depth_bound() -> None:
+    from code_review_agent.agent import _MAX_CAUSE_DEPTH, _reports_review_unavailable
+    from temporalio.exceptions import ApplicationError
+
+    marker = "CodeReviewUnavailableError"
+    # Acyclic chain longer than ``_MAX_CAUSE_DEPTH`` with the marker only past
+    # the bound — this exercises the depth limit (not ``seen``). The walk
+    # visits the wrappers and stops before reaching the marker.
+    node: BaseException = ApplicationError("m", type=marker)
+    for i in range(_MAX_CAUSE_DEPTH):
+        wrapper = RuntimeError(f"wrap-{i}")
+        wrapper.__cause__ = node
+        node = wrapper
+    assert _reports_review_unavailable(node, marker) is False
 
 
 def test_reports_review_unavailable_matches_by_class_name() -> None:
