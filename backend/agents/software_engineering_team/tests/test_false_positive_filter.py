@@ -979,6 +979,34 @@ def test_resolve_path_exact_suffix_and_misses() -> None:
     )
 
 
+def test_resolve_dot_slash_prefers_exact_normalized_over_nested_suffix() -> None:
+    """A ``./``-prefixed citation must prefer the exact normalized path before suffix matching.
+
+    Preconditions:
+        - Index contains both ``app/main.py`` and a nested ``src/app/main.py``.
+
+    Postconditions:
+        - ``./app/main.py`` resolves to ``app/main.py`` (exact after stripping ``./``).
+        - Bare ``main.py`` remains ambiguous (``None``).
+    """
+    idx = CodebaseIndex(files={"app/main.py": "A", "src/app/main.py": "B"})
+    assert idx.resolve_path("./app/main.py") == "app/main.py"
+    assert idx.resolve_path("main.py") is None
+
+
+def test_resolve_does_not_strip_parent_directory_prefix() -> None:
+    """A ``../`` citation must not resolve by treating parent dots as a ``./`` strip.
+
+    Preconditions:
+        - Index contains only ``config.py``.
+
+    Postconditions:
+        - ``../config.py`` returns ``None`` (not ``config.py``).
+    """
+    idx = CodebaseIndex(files={"config.py": "x"})
+    assert idx.resolve_path("../config.py") is None
+
+
 def test_resolve_preserves_hidden_file_basename() -> None:
     """Bare-name normalization must not strip the leading dot from ``.env``."""
     idx = CodebaseIndex(files={"config/.env": "SECRET=1\n"})
