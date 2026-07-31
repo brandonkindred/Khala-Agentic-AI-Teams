@@ -707,8 +707,8 @@ def resolve_model_for_provider(
     Preconditions: ``provider`` is the already-resolved active provider id, or
         ``None`` to resolve it here (a caller that already has it passes it to
         avoid a redundant :func:`resolve_provider` lock acquisition).
-    Postconditions: returns a non-empty model id appropriate for
-        :func:`resolve_provider`. Never raises.
+    Postconditions: returns a non-empty model id appropriate for the
+        active provider. Never raises.
     """
     active = provider or resolve_provider()
     if active == "claude":
