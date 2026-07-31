@@ -1015,6 +1015,14 @@ def test_resolve_preserves_hidden_file_basename() -> None:
     assert idx.read_file(".env") == "SECRET=1\n"
 
 
+def test_resolve_does_not_strip_parent_directory_prefix() -> None:
+    """``../`` must not be treated as a strippable ``./`` / ``/`` prefix."""
+    idx = CodebaseIndex(files={"main.py": "ROOT"})
+    assert CodebaseIndex._normalize_leading("../main.py") == "../main.py"
+    assert idx.resolve_path("../main.py") is None
+    assert idx.resolve_path("./main.py") == "main.py"
+
+
 def test_resolve_preserves_stored_leading_dot_slash_and_absolute_prefix() -> None:
     """Bare-name and slash-suffix resolution ignore stored leading ``./`` and ``/``."""
     idx = CodebaseIndex(files={"./main.py": "BODY"})
