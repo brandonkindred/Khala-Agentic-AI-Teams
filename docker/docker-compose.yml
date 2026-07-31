@@ -98,9 +98,9 @@ services:
         ipv4_address: 172.28.0.2
 
   # Neo4j backs the Graphiti knowledge-graph layer over Agent Cognition. Graphiti
-  # requires Neo4j >= 5.26, so it is mandatory infrastructure for the stack (not an
-  # optional service) — the unified API ingests agent memories into it and reads
-  # recency-ranked related knowledge back out, partitioned per agent by group_id.
+  # requires Neo4j >= 5.26, so it is mandatory stack infrastructure for agents
+  # (not an optional service). The unified API (khala) does not consume Neo4j by
+  # default — set NEO4J_BOLT_URL on a process that needs Graphiti client/sync.
   neo4j:
     image: neo4j:5.26
     container_name: khala-stack-neo4j
@@ -851,7 +851,6 @@ services:
       user-agent-founder-service: { condition: service_healthy }
       deepthought-service: { condition: service_healthy }
       job-matching-service: { condition: service_healthy }
-      neo4j: { condition: service_healthy }
     volumes:
       - agents_workspace:/workspace
       - agents_data:/data/agents
@@ -880,8 +879,11 @@ services:
       # No OTEL_EXPORTER_OTLP_ENDPOINT: the unified API is a thin proxy. Trace
       # export is limited to se-service / investment-service / branding-service.
       # Knowledge-graph layer (Graphiti + Neo4j). NEO4J_BOLT_URL is the enablement
-      # gate; it is always set in the stack so the graph layer is live.
-      NEO4J_BOLT_URL: bolt://neo4j:7687
+      # gate for Graphiti inside this process. Left unset by default so khala stays
+      # a thin reverse proxy without Graphiti driver/sync overhead; Neo4j still
+      # runs for agents. Opt in with NEO4J_BOLT_URL=bolt://neo4j:7687 (extra
+      # memory/CPU for the client + background sync worker).
+      NEO4J_BOLT_URL: ${NEO4J_BOLT_URL:-}
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-please-change-me}
       NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}

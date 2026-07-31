@@ -12,11 +12,12 @@ temporal episodes and extracts entities/relationships with bi-temporal
 
 `is_neo4j_enabled()` returns `True` only when `NEO4J_BOLT_URL` is set.
 
-A real deployment **always** runs Neo4j as required infrastructure — Graphiti depends
-on it, so it is not an optional feature flag. The disabled path exists **only** so the
-unit-test suite can run against a faked Graphiti without standing up a database,
-mirroring how `shared.postgres` runs without a live Postgres. Do not treat the unset
-state as a supported production configuration.
+Neo4j is required stack infrastructure for agents (Graphiti depends on Neo4j ≥ 5.26).
+Setting `NEO4J_BOLT_URL` is a **per-process** choice: leave it unset on processes that
+should not open a Graphiti client or run background graph sync (compose leaves it
+unset on the unified API / `khala` by default). The disabled path is also how the
+unit-test suite runs against a faked Graphiti without standing up a database,
+mirroring how `shared.postgres` runs without a live Postgres.
 
 ## Usage
 
@@ -43,7 +44,7 @@ lint run or an unrelated unit test never requires the dependency to be installed
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `NEO4J_BOLT_URL` | (unset) | **Enablement gate.** Bolt URL of the Neo4j server, e.g. `bolt://neo4j:7687`. |
+| `NEO4J_BOLT_URL` | (unset) | **Per-process enablement gate.** Bolt URL of the Neo4j server, e.g. `bolt://neo4j:7687`. Unset = no Graphiti client/sync in this process. |
 | `NEO4J_USER` | `neo4j` | Neo4j username. |
 | `NEO4J_PASSWORD` | (empty) | Neo4j password. |
 | `NEO4J_DATABASE` | `neo4j` | Neo4j database name. |
