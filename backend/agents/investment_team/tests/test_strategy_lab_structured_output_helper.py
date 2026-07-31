@@ -32,6 +32,19 @@ class _FakeModel:
         self.client = client
 
 
+def test_structured_output_available_reflects_provider_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(so_mod, "resolve_provider", lambda: "openai")
+    monkeypatch.setattr(
+        so_mod, "provider_supports_structured_output", lambda provider: provider == "openai"
+    )
+    assert so_mod.structured_output_available() is True
+
+    monkeypatch.setattr(so_mod, "provider_supports_structured_output", lambda _provider: False)
+    assert so_mod.structured_output_available() is False
+
+
 def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Happy path: structured output is available and we get the stubbed JSON."""
     client = _StubClient({"ready": True, "rationale": "ok", "issues": []})
