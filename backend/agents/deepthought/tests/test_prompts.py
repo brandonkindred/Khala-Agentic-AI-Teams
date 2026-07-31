@@ -5,14 +5,12 @@ Preconditions:
 
 Postconditions:
     - Assertions document call-site expectations for prompt shape (prose vs JSON)
-      and specialist-result truncation.
+      and full specialist-result formatting (no truncation).
 """
 
 from __future__ import annotations
 
 from deepthought.prompts import DELIBERATION_SYSTEM_PROMPT, format_specialist_results
-
-_TRUNCATION_SUFFIX = "\n\n[truncated]"
 
 
 def _result(
@@ -52,43 +50,28 @@ def test_deliberation_system_prompt_asks_for_structured_prose_not_json():
         assert topic in DELIBERATION_SYSTEM_PROMPT
 
 
-def test_format_specialist_results_truncates_long_answer():
-    max_chars = 50
-    long_answer = "A" * (max_chars + 100)
-    out = format_specialist_results([_result(answer=long_answer)], max_chars_per_result=max_chars)
+def test_format_specialist_results_preserves_long_answer_verbatim() -> None:
+    long_answer = "A" * 5000
+    out = format_specialist_results([_result(answer=long_answer)])
 
-    assert long_answer not in out
-    assert "[truncated]" in out
-    expected_body = long_answer[:max_chars] + _TRUNCATION_SUFFIX
-    assert expected_body in out
-    assert len(expected_body) == max_chars + len(_TRUNCATION_SUFFIX)
-
-
-def test_format_specialist_results_leaves_short_answer():
-    max_chars = 50
-    short_answer = "Short enough"
-    exact_answer = "B" * max_chars
-    out = format_specialist_results(
-        [_result(answer=short_answer), _result(answer=exact_answer, agent_name="exact")],
-        max_chars_per_result=max_chars,
-    )
-
-    assert short_answer in out
-    assert exact_answer in out
+    assert long_answer in out
     assert "[truncated]" not in out
+    assert " ..." not in out
+    assert "### Specialist 1: analyst" in out
+    assert "**Focus:** What happened?" in out
+    assert "**Confidence:** 80%" in out
 
 
-def test_format_specialist_results_truncates_each_result_independently():
-    max_chars = 40
-    a = "X" * (max_chars + 20)
-    b = "Y" * (max_chars + 30)
+def test_format_specialist_results_preserves_each_result_independently() -> None:
+    a = "X" * 4000
+    b = "Y" * 4500
     out = format_specialist_results(
         [_result(answer=a, agent_name="one"), _result(answer=b, agent_name="two")],
-        max_chars_per_result=max_chars,
     )
 
-    assert a not in out
-    assert b not in out
-    assert out.count("[truncated]") == 2
-    assert (a[:max_chars] + _TRUNCATION_SUFFIX) in out
-    assert (b[:max_chars] + _TRUNCATION_SUFFIX) in out
+    assert a in out
+    assert b in out
+    assert "\n\n---\n\n" in out
+    assert "### Specialist 1: one" in out
+    assert "### Specialist 2: two" in out
+    assert "[truncated]" not in out
