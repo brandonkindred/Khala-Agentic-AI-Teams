@@ -455,19 +455,35 @@ def synthesize_findings_activity(
           on any failure (so the workflow falls back to deterministic
           concatenation). Wraps ``synthesis.synthesize_review_findings``, which
           never raises and never touches the verdict.
+        - Never raises: this activity as a whole is fail-safe, including
+          ``_resolve_llm()`` itself. Resolving the LLM client happens before
+          (and outside) the wrapped function's own failure handling, so without
+          this activity's own try/except a client-resolution failure (e.g. no
+          LLM provider configured) would raise instead of returning ``None`` and
+          letting the workflow fall back to deterministic concatenation. An
+          activity failure here would only ever be an unexpected defect, not an
+          expected outcome.
     """
     from ..models import CodeReviewInput, CodeReviewIssue
     from ..synthesis import synthesize_review_findings
 
-    input_data = CodeReviewInput.model_validate(review_input)
-    result = synthesize_review_findings(
-        _resolve_llm(),
-        input_data=input_data,
-        approved=approved,
-        issues=[CodeReviewIssue.model_validate(i) for i in issues],
-        chunk_summaries=chunk_summaries,
-        chunk_spec_notes=chunk_spec_notes,
-    )
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        result = synthesize_review_findings(
+            _resolve_llm(),
+            input_data=input_data,
+            approved=approved,
+            issues=[CodeReviewIssue.model_validate(i) for i in issues],
+            chunk_summaries=chunk_summaries,
+            chunk_spec_notes=chunk_spec_notes,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: synthesis must never break the review
+        logger.warning(
+            "SynthesizeFindings: activity failed (%s: %s); returning None",
+            type(exc).__name__,
+            exc,
+        )
+        return None
     if result is None:
         return None
     return {"summary": result.summary, "spec_compliance_notes": result.spec_compliance_notes}
