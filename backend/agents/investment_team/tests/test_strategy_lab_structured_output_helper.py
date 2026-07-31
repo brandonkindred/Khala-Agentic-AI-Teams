@@ -350,7 +350,10 @@ def test_invoke_structured_with_schema_requires_availability(
         )
 
 
-@pytest.mark.parametrize("field", ["agent_key", "system_prompt", "user_prompt"])
+@pytest.mark.parametrize(
+    "field",
+    ["agent_key", "system_prompt", "user_prompt", "phase", "objective"],
+)
 def test_invoke_structured_with_schema_rejects_empty_inputs(
     monkeypatch: pytest.MonkeyPatch,
     field: str,
