@@ -66,9 +66,11 @@ ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER = "LLM_RATE_LIMIT_HONOR_RETRY_AFTER"
 # next instead of burning the slow LLM_RATE_LIMIT_* backoff in place. FAST_429 (default
 # on) makes the failover-chain clients raise the 429 immediately (zero in-place
 # rate-limit retries) so the hand-off isn't delayed by minutes. The *_WINDOW_S vars are
-# the fallback reset windows used to compute reset_at when a 429 carries no Retry-After.
+# fallback reset windows (session/weekly are fixed from the error; rate uses
+# Retry-After when present).
 ENV_LLM_FAILOVER_FAST_429 = "LLM_FAILOVER_FAST_429"
 ENV_LLM_FAILOVER_RATE_WINDOW_S = "LLM_FAILOVER_RATE_WINDOW_S"
+ENV_LLM_FAILOVER_SESSION_WINDOW_S = "LLM_FAILOVER_SESSION_WINDOW_S"
 ENV_LLM_FAILOVER_WEEKLY_WINDOW_S = "LLM_FAILOVER_WEEKLY_WINDOW_S"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
@@ -462,10 +464,13 @@ def resolve_max_output_tokens() -> int:
     return val if val > 0 else 0
 
 
-# Fallback reset windows (seconds) when a 429 carries no Retry-After. Weekly is
-# long so a weekly-exhausted provider isn't retried hourly; rate is ~5m.
+# Fallback reset windows (seconds). Session/weekly Cloud caps ignore Retry-After
+# and use these fixed windows from the error time; rate uses Retry-After when
+# present, else the short rate window (~5m). Weekly defaults to 24h because
+# Ollama Cloud weekly 429 bodies do not include a reset timestamp.
 _DEFAULT_FAILOVER_RATE_WINDOW_S = 300.0
-_DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 7 * 24 * 3600.0
+_DEFAULT_FAILOVER_SESSION_WINDOW_S = 5 * 3600.0
+_DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 24 * 3600.0
 
 
 def failover_fast_429_enabled() -> bool:
@@ -492,15 +497,31 @@ def _resolve_positive_window(env_name: str, default: float) -> float:
 
 
 def failover_rate_window_seconds() -> float:
-    """Fallback reset window for a non-weekly 429 with no Retry-After (default 5m).
+    """Fallback reset window for a rate 429 with no Retry-After (default 5m).
 
     Postconditions: returns ``> 0`` seconds. Never raises.
     """
     return _resolve_positive_window(ENV_LLM_FAILOVER_RATE_WINDOW_S, _DEFAULT_FAILOVER_RATE_WINDOW_S)
 
 
+def failover_session_window_seconds() -> float:
+    """Fixed reset window for a session-limit 429 (default 5h).
+
+    Session/weekly classifications ignore ``Retry-After``; this window is measured
+    from the error time.
+
+    Postconditions: returns ``> 0`` seconds. Never raises.
+    """
+    return _resolve_positive_window(
+        ENV_LLM_FAILOVER_SESSION_WINDOW_S, _DEFAULT_FAILOVER_SESSION_WINDOW_S
+    )
+
+
 def failover_weekly_window_seconds() -> float:
-    """Fallback reset window for a weekly-limit 429 with no Retry-After (default 7d).
+    """Fixed reset window for a weekly-limit 429 (default 24h).
+
+    Session/weekly classifications ignore ``Retry-After``; this window is measured
+    from the error time (Ollama Cloud weekly bodies omit a reset timestamp).
 
     Postconditions: returns ``> 0`` seconds. Never raises.
     """

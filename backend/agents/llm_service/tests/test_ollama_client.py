@@ -334,6 +334,61 @@ def test_ollama_complete_json_429_raises_rate_limit(monkeypatch: pytest.MonkeyPa
         with pytest.raises(LLMRateLimitError) as exc_info:
             client.complete_json("hello", objective="test", temperature=0)
         assert exc_info.value.status_code == 429
+        assert exc_info.value.limit_kind == "rate"
+
+
+@pytest.mark.parametrize(
+    "body,expected_kind",
+    [
+        (
+            "you (user) have reached your session usage limit, upgrade for higher limits",
+            "session",
+        ),
+        (
+            '{"error":"you (user) have reached your weekly usage limit, upgrade"}',
+            "weekly",
+        ),
+    ],
+)
+def test_ollama_429_classifies_session_and_weekly_bodies(
+    monkeypatch: pytest.MonkeyPatch, body: str, expected_kind: str
+) -> None:
+    """Streaming 429 bodies set limit_kind from Ollama Cloud usage-limit phrases."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "0")
+    cms = [_stream_cm(429, body_text=body)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMRateLimitError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.limit_kind == expected_kind
+    assert expected_kind in str(exc_info.value)
+    assert "usage limit" in str(exc_info.value).lower() or "weekly" in body or "session" in body
+
+
+def test_ollama_httpstatuserror_429_classifies_session_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTPStatusError 429 path classifies session usage limit from response text."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "0")
+    body = "you (acct) have reached your session usage limit, upgrade for higher limits"
+    req = httpx.Request("POST", "http://localhost:9999/v1/chat/completions")
+    resp = httpx.Response(429, request=req, text=body)
+    err = httpx.HTTPStatusError("429", request=req, response=resp)
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.stream.side_effect = [err]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMRateLimitError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.limit_kind == "session"
+    assert "session usage limit" in str(exc_info.value).lower()
 
 
 # ---------------------------------------------------------------------------
