@@ -205,13 +205,15 @@ def test_review_prep_dto_fanout_width_round_trips() -> None:
 
 
 def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
-    """Drive the activities sequentially, in-process, to check coordinator parity.
+    """Drive the activities sequentially in-process to check coordinator parity.
 
-    Deliberately stays sequential (unlike ``CodeReviewWorkflow.run``, which now
-    schedules the three tail-pass activities concurrently via ``asyncio.gather``
-    -- see ``test_workflow_gathers_tail_pass_activities_concurrently`` below for
-    that property) since call order doesn't affect the merged verdict this
-    helper checks against ``run_coordinator``.
+    Synchronous approximation of ``CodeReviewWorkflow.run`` used only to assert
+    that the activity pipeline matches ``run_coordinator``'s final verdict. It
+    does NOT replicate the workflow's concurrent tail-pass ``asyncio.gather``
+    or its deterministic ``return_exceptions`` error precedence — see
+    ``test_gather_return_exceptions_reproduces_sequential_error_precedence``
+    and ``test_workflow_gathers_tail_pass_activities_concurrently`` for those
+    properties. Call order here does not affect the merged verdict.
     """
     from code_review_agent.models import CodeReviewIssue
     from code_review_agent.temporal import activities as A
