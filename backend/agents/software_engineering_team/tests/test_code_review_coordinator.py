@@ -16,7 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
+from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
@@ -35,6 +35,7 @@ from code_review_agent.coordinator import (
     run_coordinator,
     split_block_into_segments,
 )
+from code_review_agent.mapping import _bisect_halves_run_sequentially
 from code_review_agent.models import (
     ChunkReviewOutput,
     CodeReviewInput,
@@ -1150,6 +1151,88 @@ class _FailNTimes(DummyLLMClient):
         return super().complete_json(prompt, **kwargs)
 
 
+class _HalfTimingDummyDelegate:
+    """Inner delegate for a non-``DummyLLMClient`` stand-in (see
+    ``_NonDummyLLMClient`` further below in this file): forces the combined
+    a.py+b.py chunk review to fail (triggering bisection), returns a distinct
+    low-severity issue per single-file chunk-review half (so a test can
+    inspect merge order), and records each half's call interval — sleeping
+    first if a delay was configured for that half — so a test can prove or
+    control relative timing. Every other prompt (the tail passes) is
+    delegated to a real ``DummyLLMClient``.
+    """
+
+    def __init__(self, delays: dict[str, float] | None = None) -> None:
+        self._inner = DummyLLMClient()
+        self.delays = delays or {}
+        self._lock = threading.Lock()
+        self.intervals: dict[str, tuple[float, float]] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward anything not overridden below (get_max_context_tokens,
+        # update_config, get_config, structured_output, stream, chat, ...) to
+        # the real DummyLLMClient — _NonDummyLLMClient calls those directly.
+        return getattr(self._inner, name)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
+        if is_chunk_review and has_a and has_b:
+            raise _bisecting_failure("no content")  # force bisection
+        if is_chunk_review and (has_a or has_b):
+            key = "a" if has_a else "b"
+            start = time.monotonic()
+            time.sleep(self.delays.get(key, 0.0))
+            end = time.monotonic()
+            with self._lock:
+                self.intervals[key] = (start, end)
+            return {
+                "approved": True,
+                "issues": [
+                    {
+                        "severity": "low",
+                        "category": "general",
+                        "file_path": f"{key}.py",
+                        "line": 1,
+                        "description": f"finding-{key}",
+                        "suggestion": "n/a",
+                    }
+                ],
+                "summary": f"summary-{key}",
+                "spec_compliance_notes": "",
+            }
+        return self._inner.complete_json(prompt, **kwargs)
+
+
+class _TimedDummyHalfClient(DummyLLMClient):
+    """``DummyLLMClient`` subclass with the same combined-fails/per-half-timing
+    behavior as ``_HalfTimingDummyDelegate``, but reached as a bare
+    ``DummyLLMClient`` instance (not wrapped) — used to prove the two halves
+    still run strictly sequentially for a scripted double, exactly as before
+    this fan-out existed.
+    """
+
+    def __init__(self, delay: float = 0.0) -> None:
+        super().__init__()
+        self.delay = delay
+        self._lock = threading.Lock()
+        self.intervals: dict[str, tuple[float, float]] = {}
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
+        if is_chunk_review and has_a and has_b:
+            raise _bisecting_failure("no content")
+        if is_chunk_review and (has_a or has_b):
+            key = "a" if has_a else "b"
+            start = time.monotonic()
+            time.sleep(self.delay)
+            end = time.monotonic()
+            with self._lock:
+                self.intervals[key] = (start, end)
+        return super().complete_json(prompt, **kwargs)
+
+
 def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
     """A chunk whose combined review fails is bisected per segment; both halves
     succeed individually, so the review completes normally."""
@@ -1238,6 +1321,84 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
     # both files together, so it hits the same combined-fail branch and fails
     # safe).
     assert client.calls == 6
+
+
+def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:
+    """Mirrors ``_tail_passes_run_sequentially``: True for a bare
+    ``DummyLLMClient`` and for a wrapper exposing a ``.client`` attribute
+    pointing at one; False for anything else."""
+    assert _bisect_halves_run_sequentially(DummyLLMClient()) is True
+    assert _bisect_halves_run_sequentially(MagicMock()) is False
+
+    class _Wrapper:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+
+    assert _bisect_halves_run_sequentially(_Wrapper(DummyLLMClient())) is True
+    assert _bisect_halves_run_sequentially(_Wrapper(MagicMock())) is False
+
+
+def test_bisected_halves_reviewed_concurrently_for_non_dummy_client() -> None:
+    """When the LLM is not a scripted ``DummyLLMClient`` double, the two
+    bisected halves are reviewed concurrently instead of strictly
+    sequentially: each half's call sleeps briefly, and their recorded
+    intervals must overlap — sequential calls could never produce that."""
+    delegate = _HalfTimingDummyDelegate(delays={"a": 0.05, "b": 0.05})
+    stand_in = _NonDummyLLMClient(delegate)
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    assert result.approved is True
+    a_start, a_end = delegate.intervals["a"]
+    b_start, b_end = delegate.intervals["b"]
+    assert a_start < b_end and b_start < a_end
+
+
+def test_bisected_halves_stay_sequential_for_dummy_llm_client() -> None:
+    """Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe
+    response index, so the two bisected halves must still run one at a
+    time for them: each half's call sleeps briefly, and their recorded
+    intervals must NOT overlap."""
+    client = _TimedDummyHalfClient(delay=0.05)
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    assert result.approved is True
+    a_start, a_end = client.intervals["a"]
+    b_start, b_end = client.intervals["b"]
+    assert a_end <= b_start or b_end <= a_start
+
+
+def test_bisection_absorb_preserves_halves_order_regardless_of_completion_order() -> None:
+    """halves[1] (b.py) finishes first — its call has no delay while halves[0]
+    (a.py) sleeps — but the merged outcome must still list a.py's finding
+    before b.py's: ``.absorb()`` merge order is fixed by input order, not by
+    which concurrent branch actually completes first."""
+    delegate = _HalfTimingDummyDelegate(delays={"a": 0.08, "b": 0.0})
+    stand_in = _NonDummyLLMClient(delegate)
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    a_start, a_end = delegate.intervals["a"]
+    b_start, b_end = delegate.intervals["b"]
+    assert b_end <= a_end  # sanity check: b genuinely finished first
+    findings = [i.description for i in result.issues if i.description.startswith("finding-")]
+    assert findings == ["finding-a", "finding-b"]
 
 
 def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> None:

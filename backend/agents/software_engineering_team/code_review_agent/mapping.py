@@ -52,7 +52,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 from llm_service import (
     LLMClient,
@@ -469,6 +469,25 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
     return _ChunkOutcome(not_reviewed_issues=issues)
 
 
+def _bisect_halves_run_sequentially(llm: LLMClient) -> bool:
+    """True when a bisected chunk's two halves must be reviewed one at a time.
+
+    Mirrors ``coordinator._tail_passes_run_sequentially``: scripted
+    ``DummyLLMClient`` doubles use a shared non-thread-safe response index, so
+    fanning the halves out concurrently would corrupt scripted call order/count.
+    Duplicated locally rather than imported — ``coordinator`` imports from this
+    module, so the reverse import would be circular.
+
+    Postconditions: returns ``True`` iff ``llm`` is (or wraps) a
+    ``DummyLLMClient``. Pure.
+    """
+    from llm_service.clients.dummy import DummyLLMClient
+
+    if isinstance(llm, DummyLLMClient):
+        return True
+    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+
+
 def _review_chunk_with_recovery(
     reviewer: ChunkReviewAgent,
     chunk: ReviewChunk,
@@ -501,8 +520,14 @@ def _review_chunk_with_recovery(
           — e.g. a ``KeyError``/``TypeError`` from a reviewer bug) propagate
           unchanged: they fail closed so the defect surfaces, rather than being
           masked as a not-reviewed finding.
-        - Known content failures bisect up to the depth cap; any chunk that
-          cannot bisect further — the original or a bisected child — gets
+        - Known content failures bisect up to the depth cap; the two halves are
+          reviewed concurrently (via ``parallel_map``) unless ``reviewer.llm`` is
+          a scripted ``DummyLLMClient`` double or ``_map_parallelism() <= 1``, in
+          which case they run sequentially exactly as before — see
+          ``_bisect_halves_run_sequentially``. Either way, results merge via
+          ``_ChunkOutcome.absorb()`` in a fixed halves[0]-then-halves[1] order,
+          independent of which half's call actually finishes first. Any chunk
+          that cannot bisect further — the original or a bisected child — gets
           exactly one same-input retry, EXCEPT a ladder-spent reasoning-loop
           semantic exhaustion (``finish_reason != "length"`` with
           ``retry_thinking_level`` set): that skips both the line-split and the
@@ -602,24 +627,37 @@ def _review_chunk_with_recovery(
         # the other half's files, so those files become genuine siblings whose
         # surface it should see (when surface_by_path is unavailable — a direct
         # caller passed None — the parent's surface rides along unchanged).
-        outcome = _review_chunk_with_recovery(
-            reviewer,
-            halves[0],
-            base_input,
-            _half_sibling_surface(halves[0], surface_by_path, sibling_surface),
-            surface_by_path,
-            depth + 1,
-        )
-        outcome.absorb(
-            _review_chunk_with_recovery(
+        branches: List[Callable[[], _ChunkOutcome]] = [
+            lambda half=halves[0]: _review_chunk_with_recovery(
                 reviewer,
-                halves[1],
+                half,
                 base_input,
-                _half_sibling_surface(halves[1], surface_by_path, sibling_surface),
+                _half_sibling_surface(half, surface_by_path, sibling_surface),
                 surface_by_path,
                 depth + 1,
-            )
-        )
+            ),
+            lambda half=halves[1]: _review_chunk_with_recovery(
+                reviewer,
+                half,
+                base_input,
+                _half_sibling_surface(half, surface_by_path, sibling_surface),
+                surface_by_path,
+                depth + 1,
+            ),
+        ]
+        # Each half is a fully independent recursive call (no shared mutable
+        # state), so they fan out concurrently — unless the LLM double can't
+        # tolerate it or the operator has capped parallelism to 1. Either way,
+        # ``results[0]``/``results[1]`` preserve halves[0]/halves[1] order (see
+        # ``parallel_map``'s ``preserve_order`` default), so the merge below is
+        # identical to the sequential path regardless of completion order.
+        if _bisect_halves_run_sequentially(reviewer.llm) or _map_parallelism() <= 1:
+            outcome = branches[0]()
+            outcome.absorb(branches[1]())
+        else:
+            results = parallel_map(branches, lambda fn: fn(), max_workers=2, skip_none=False)
+            outcome = results[0]
+            outcome.absorb(results[1])
         return outcome
     # A same-input retry is worthwhile unless it is futile: a ladder-spent
     # reasoning-loop exhaustion (``skip_retry``) would only re-run the model's
