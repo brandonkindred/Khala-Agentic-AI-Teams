@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from typing import NamedTuple
 
 from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
 from agentic_team_provisioning.agent_env_provisioning import _slug
@@ -169,7 +170,22 @@ def is_generated_manifest(manifest: AgentManifest) -> bool:
     return "generated" in manifest.tags
 
 
-def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> list[AgentManifest]:
+class ManifestRegistrationResult(NamedTuple):
+    """Outcome of :func:`register_team_manifests`.
+
+    Supports both attribute access (``result.manifests``) and positional
+    unpacking (``manifests, registered = register_team_manifests(...)``), so a
+    caller can observe whether the registry update actually succeeded instead
+    of only ever seeing the built manifests, as if registration always worked.
+    """
+
+    manifests: list[AgentManifest]
+    registered: bool
+
+
+def register_team_manifests(
+    team_id: str, agents: list[AgenticTeamAgent]
+) -> ManifestRegistrationResult:
     """Build and install the live registry entries for a team's roster.
 
     Generated agents are not discovered from disk, so they are registered into the
@@ -188,16 +204,23 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     Preconditions:
         * ``team_id`` is non-empty.
     Postconditions:
-        * Returns one validated manifest per **generated** roster agent (registry-
-          source agents are skipped — they're already in the registry), each
-          registered (``get_registry().get(m.id)`` returns it). Acts as a full
-          replace for the
-          team: previously-registered generated manifests for ``team_id`` that are
-          absent from this roster are unregistered, so removed/renamed agents stop
-          appearing in the catalog. Idempotent; persisted to the dynamic store
-          when one is active, in-memory-only otherwise (see Scope above).
-          Best-effort — a registry failure is logged, never raised, so
-          generation still succeeds.
+        * Returns a :class:`ManifestRegistrationResult` whose ``manifests`` holds
+          one validated manifest per **generated** roster agent (registry-source
+          agents are skipped — they're already in the registry). When
+          ``registered`` is ``True``, every one of those manifests is registered
+          (``get_registry().get(m.id)`` returns it) and this call acted as a full
+          replace for the team: previously-registered generated manifests for
+          ``team_id`` that are absent from this roster were unregistered, so
+          removed/renamed agents stop appearing in the catalog. Idempotent;
+          persisted to the dynamic store when one is active, in-memory-only
+          otherwise (see Scope above).
+          Best-effort — a registry failure (import, stale-cleanup scan, register,
+          or unregister) is logged and never raised, so manifest generation still
+          succeeds; ``registered`` is ``False`` in that case and ``manifests`` may
+          reflect a partial (or no) registry update. Callers that only need the
+          built manifests can keep destructuring ``result.manifests``; callers
+          that need to detect a registry failure (e.g. to retry or surface it)
+          should check ``result.registered``.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -235,4 +258,5 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
             registry.register(manifest)
     except Exception:
         logger.warning("Could not register generated manifests for team %s", team_id, exc_info=True)
-    return manifests
+        return ManifestRegistrationResult(manifests=manifests, registered=False)
+    return ManifestRegistrationResult(manifests=manifests, registered=True)
