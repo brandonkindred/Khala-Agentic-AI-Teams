@@ -498,6 +498,79 @@ def test_pending_amend_with_omitted_mode_and_priority_not_deduped_against_differ
     assert created[0].proposed_rule["priority"] == 5
 
 
+def test_dedupe_key_distinguishes_explicit_null_priority_from_omitted() -> None:
+    # An explicit "priority": null in a stored proposed_rule is unapprovable
+    # (store._build_rule_from_spec does int(spec.get("priority", 0)); a present
+    # null makes int(None) raise, unlike a truly absent key which defaults to
+    # 0) — its dedupe key must not collapse onto a real, approvable priority=0
+    # proposal, or the valid one would be silently suppressed as a "duplicate".
+    omitted = reflection._build_proposal(
+        "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": "be kind"}
+    )
+    explicit_null = reflection._build_proposal(
+        "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": "be kind", "priority": None}
+    )
+    valid_zero = reflection._build_proposal(
+        "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": "be kind", "priority": 0}
+    )
+    assert reflection._dedupe_key_of(omitted)[-1] == 0
+    assert reflection._dedupe_key_of(valid_zero)[-1] == 0
+    assert reflection._dedupe_key_of(explicit_null)[-1] is None
+    assert reflection._dedupe_key_of(explicit_null) != reflection._dedupe_key_of(valid_zero)
+
+
+def test_pending_amend_with_explicit_null_priority_not_deduped_against_valid_zero_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A pending row that stores "priority": null (as opposed to omitting the
+    # key) is unapprovable, but must still not collide with — and suppress — a
+    # distinct, legitimately materialized priority=0 proposal for the same text.
+    target = _rule(rid="r1", text="be kind to users", mode=RuleMode.ADVISORY, priority=9)
+    unapprovable_pending = RuleProposal(
+        id=str(uuid4()),
+        agent_id="a",
+        action=ProposalAction.AMEND,
+        target_rule_id="r1",
+        proposed_rule={"text": "be kind to users, always", "priority": None},
+        evidence=[],
+        stale_evidence=False,
+        status=ProposalStatus.PENDING,
+        created_at=_NOW,
+    )
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[
+            {
+                "action": "amend",
+                "target_rule_id": "r1",
+                "text": "be kind to users, always",
+                "priority": 0,
+            }
+        ],
+        rules=[target],
+        pending=[unapprovable_pending],
+    )
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 1 and report.deduped == 0 and len(created) == 1
+    assert created[0].proposed_rule["priority"] == 0
+
+
+def test_noop_amend_not_falsely_matched_when_priority_explicitly_null() -> None:
+    # A stored "priority": null is unapprovable and must not be compared as if
+    # it equalled the target's current priority (which would wrongly classify
+    # it as a no-op and drop it via a different path than an actual rejection).
+    target = _rule(rid="r1", text="be kind", priority=0)
+    proposal = reflection._build_proposal(
+        "a",
+        ProposalAction.AMEND,
+        [],
+        _NOW,
+        target_rule_id="r1",
+        proposed_rule={"text": "be kind", "priority": None},
+    )
+    assert reflection._is_noop_amend(proposal, {"r1": target}) is False
+
+
 def test_render_rules_shows_enforced_predicate_only() -> None:
     advisory = _rule(rid="r1", text="be kind")
     enforced = _rule(rid="r2", text="validate x", mode=RuleMode.ENFORCED, predicate=_GOOD_PREDICATE)
