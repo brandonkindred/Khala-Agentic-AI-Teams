@@ -385,7 +385,7 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
     #    content (text/mode/predicate, priority-independent) so approval can't
     #    activate a duplicate guardrail; re-prioritizing an existing rule is an
     #    amend, never a duplicate add.
-    seen = {_dedupe_key_of(p, active_by_id) for p in fresh_pending}
+    seen = {_dedupe_key_of(p) for p in fresh_pending}
     active_content = {_rule_content_id(r) for r in active_rules}
     cap = _max_proposals()
 
@@ -400,7 +400,7 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
         if proposal is None:
             report.dropped_invalid += 1
             continue
-        key = _dedupe_key_of(proposal, active_by_id)
+        key = _dedupe_key_of(proposal)
         if (
             key in seen
             or _restates_active_rule(proposal, active_content)
@@ -651,17 +651,31 @@ def _is_active_target(target_rule_id: str | None, active_by_id: dict[str, Rule])
 def _resolve_mode_and_priority(
     raw_mode: str | None, raw_priority: Any, target_rule: Rule | None
 ) -> tuple[str, Any]:
-    """Resolve an add/amend's effective ``mode``/``priority``.
+    """Resolve an effective ``mode``/``priority`` from a raw (possibly omitted) pair.
 
-    Preconditions: ``target_rule`` is the proposal's active target for an amend,
-    ``None`` for an add.
-    Postconditions: an explicit (non-``None``) raw value wins; otherwise an amend
-    inherits ``target_rule``'s value; otherwise (add, or no resolvable target)
-    defaults to ``(advisory, 0)``. Neither value is validated here (mode is not
-    yet checked against :class:`RuleMode`; priority is not yet type/range
-    checked) — that stays the caller's job. Shared by ``_build_proposed_rule``
-    (persists), ``_dedupe_key_of`` (keys), and ``_is_noop_amend`` (compares) so
-    the three can never diverge on what "unspecified" resolves to.
+    Preconditions: ``target_rule`` is the proposal's active target when the
+    caller wants amend-style inheritance for an omitted field, ``None`` when
+    the caller wants plain (advisory/0) defaulting instead.
+    Postconditions: an explicit (non-``None``) raw value always wins; otherwise
+    ``target_rule`` (when given) supplies its value; otherwise defaults to
+    ``(advisory, 0)``. Neither value is validated here (mode is not yet checked
+    against :class:`RuleMode`; priority is not yet type/range checked) — that
+    stays the caller's job.
+
+    Two distinct callers, two distinct intents — both share this function so
+    the "unspecified" branch can't drift out of sync between them:
+      * ``_build_proposed_rule`` passes the active target so an ordinary text
+        amend inherits the rule it's amending (the model's likely intent).
+      * ``_dedupe_key_of``/``_is_noop_amend`` pass ``None`` — they must key/compare
+        a *stored* ``proposed_rule`` exactly as the store's ``_build_rule_from_spec``
+        (the approval path) will actually interpret it, and that path defaults a
+        missing field to advisory/0 with **no target inheritance at all** (it is
+        handed only ``proposal.proposed_rule``, never the target). Passing the
+        target here would make dedupe/no-op believe a malformed or hand-authored
+        proposal resolves to the target's current values when approving it would
+        really persist advisory/0 — silently suppressing a distinct, correctly
+        resolved proposal as a "duplicate" of one that approves to different
+        content.
     """
     mode = (
         raw_mode
@@ -781,7 +795,7 @@ _DedupeKey = tuple[str, str | None, str | None, str | None, str | None, int | No
 _ContentId = tuple[str, str, str | None]
 
 
-def _dedupe_key_of(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> _DedupeKey:
+def _dedupe_key_of(proposal: RuleProposal) -> _DedupeKey:
     """Identity used to suppress re-proposing the same change.
 
     Two proposals collide when they share an action, a target rule, and — for
@@ -793,11 +807,12 @@ def _dedupe_key_of(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> _De
     change that must still reach review. Retire proposals carry no rule body, so
     they collide on ``(action, target, None, None, None, None)``.
 
-    An amend's ``mode``/``priority`` are resolved via :func:`_resolve_mode_and_priority`
-    against ``active_by_id`` — the same inheritance ``_build_proposed_rule`` applies —
-    so a proposal whose stored ``proposed_rule`` physically omits an inherited field
-    (e.g. a legacy or hand-authored pending row) still keys identically to one that
-    spells the inherited value out.
+    ``mode``/``priority`` default via :func:`_resolve_mode_and_priority` with no
+    target (advisory/0 on omission) — deliberately mirroring the store's
+    ``_build_rule_from_spec``, which is handed only ``proposed_rule`` on approval
+    and never consults the target. Keying against a target-inherited value here
+    would suppress a distinct, correctly resolved proposal as a "duplicate" of a
+    stored ``proposed_rule`` that would actually approve to different content.
     """
     text: str | None = None
     mode: str | None = None
@@ -807,13 +822,8 @@ def _dedupe_key_of(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> _De
         candidate = proposal.proposed_rule.get("text")
         if isinstance(candidate, str):
             text = _normalize_text(candidate)
-        target = (
-            active_by_id.get(proposal.target_rule_id)
-            if proposal.action == ProposalAction.AMEND
-            else None
-        )
         mode, priority = _resolve_mode_and_priority(
-            proposal.proposed_rule.get("mode"), proposal.proposed_rule.get("priority"), target
+            proposal.proposed_rule.get("mode"), proposal.proposed_rule.get("priority"), None
         )
         predicate_fp = _predicate_fingerprint(proposal.proposed_rule.get("predicate"))
     return (proposal.action.value, proposal.target_rule_id, text, mode, predicate_fp, priority)
@@ -851,10 +861,14 @@ def _is_noop_amend(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> boo
     approving it would retire the rule and insert an identical replacement —
     needless churn and lineage/evidence change for no behavior change. Such a
     no-op is suppressed (counted ``deduped``) before it reaches the queue.
-    ``mode``/``priority`` are resolved via :func:`_resolve_mode_and_priority` (the
-    same inheritance ``_build_proposed_rule`` applies) so an amend that omits an
-    inherited field is compared against its actual effective value, not a raw
-    (possibly absent) one.
+
+    The proposal's own ``mode``/``priority`` default via
+    :func:`_resolve_mode_and_priority` with no target (advisory/0 on omission),
+    matching what the store's ``_build_rule_from_spec`` would actually persist on
+    approval — an omitted field is compared as the value approval will give it,
+    never as an inherited target value it will never receive. ``target`` here is
+    only the *comparison* baseline (the active rule's current fields), which is
+    an independent use from the resolver's inheritance parameter.
     """
     if proposal.action != ProposalAction.AMEND or not isinstance(proposal.proposed_rule, dict):
         return False
@@ -862,7 +876,7 @@ def _is_noop_amend(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> boo
     if target is None:
         return False
     pr = proposal.proposed_rule
-    mode, priority = _resolve_mode_and_priority(pr.get("mode"), pr.get("priority"), target)
+    mode, priority = _resolve_mode_and_priority(pr.get("mode"), pr.get("priority"), None)
     return (
         _normalize_text(pr.get("text") or "") == _normalize_text(target.text)
         and mode == target.mode.value

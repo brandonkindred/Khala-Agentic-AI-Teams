@@ -417,24 +417,27 @@ def test_noop_amend_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report.proposed == 0 and report.deduped == 1 and created == []
 
 
-def test_noop_amend_dropped_when_priority_omitted() -> None:
-    # Amend restates the target's text/mode/predicate and omits priority entirely
-    # (relying on inheritance) rather than spelling out the current value — the
-    # resolved priority still equals the target's, so this is still a no-op.
+def test_noop_amend_not_falsely_matched_when_priority_omitted() -> None:
+    # A stored proposed_rule that omits priority approves to priority 0 (the
+    # store's _build_rule_from_spec default — it never consults the target), NOT
+    # the target's current priority. Against a priority=5 target this is a real
+    # (if silent) downgrade to 0, so it must NOT be treated as a no-op — a
+    # target-inheriting comparison would wrongly suppress it before review.
     target = _rule(rid="r1", text="be kind", priority=5)
     proposal = reflection._build_proposal(
         "a", ProposalAction.AMEND, [], _NOW, target_rule_id="r1", proposed_rule={"text": "be kind"}
     )
-    assert reflection._is_noop_amend(proposal, {"r1": target}) is True
+    assert reflection._is_noop_amend(proposal, {"r1": target}) is False
 
 
-def test_pending_amend_with_omitted_priority_dedupes_against_inherited_value(
+def test_pending_amend_with_omitted_priority_not_deduped_against_differently_resolved_proposal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # An advisory target with a non-default priority isolates the priority gap
-    # from mode/predicate concerns: a pending row whose proposed_rule physically
-    # omits priority (legacy/partial data) must still key identically to a fresh
-    # proposal that inherits the same value from the active target.
+    # A pending row whose proposed_rule physically omits priority approves to
+    # priority 0 (store default, no target consulted) — a materially different
+    # rule than a freshly materialized proposal that inherits priority=5 from
+    # the active target. They must NOT dedupe against each other: doing so would
+    # silently drop the correct proposal in favor of one that approves wrong.
     target = _rule(rid="r1", text="be kind to users", mode=RuleMode.ADVISORY, priority=5)
     legacy_pending = RuleProposal(
         id=str(uuid4()),
@@ -454,19 +457,21 @@ def test_pending_amend_with_omitted_priority_dedupes_against_inherited_value(
         pending=[legacy_pending],
     )
     report = reflection.reflect("a", _NOW)
-    # Both resolve (inherited from r1) to priority=5 → same identity → deduped.
-    assert report.proposed == 0 and report.deduped == 1 and created == []
+    # legacy_pending keys as priority=0 (store default); the fresh proposal keys
+    # as priority=5 (real target inheritance, baked in by _build_proposed_rule).
+    assert report.proposed == 1 and report.deduped == 0 and len(created) == 1
+    assert created[0].proposed_rule["priority"] == 5
 
 
-def test_pending_amend_with_omitted_mode_and_priority_dedupes_against_inherited_values(
+def test_pending_amend_with_omitted_mode_and_priority_not_deduped_against_differently_resolved_proposal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The exact scenario from the reported defect: an enforced target with a
-    # non-default priority, and a pending row whose proposed_rule omits mode and
-    # priority (legacy/partial data) but carries the correct inherited predicate.
-    # A fresh amend proposing the same text and also omitting mode/priority must
-    # still be recognized as a duplicate, since both resolve identically via
-    # target inheritance.
+    # A pending row whose proposed_rule omits mode/priority (legacy/hand-authored
+    # data) approves to advisory/0 (the store's plain default — it is handed only
+    # proposed_rule, never the target). A freshly materialized amend that also
+    # omits mode/priority instead inherits enforced/priority=5 from the active
+    # target (real _build_proposed_rule behavior). Approving each produces a
+    # materially different rule, so dedupe must not conflate them.
     target = _rule(
         rid="r1", text="validate x", mode=RuleMode.ENFORCED, priority=5, predicate=_GOOD_PREDICATE
     )
@@ -488,7 +493,9 @@ def test_pending_amend_with_omitted_mode_and_priority_dedupes_against_inherited_
         pending=[legacy_pending],
     )
     report = reflection.reflect("a", _NOW)
-    assert report.proposed == 0 and report.deduped == 1 and created == []
+    assert report.proposed == 1 and report.deduped == 0 and len(created) == 1
+    assert created[0].proposed_rule["mode"] == "enforced"
+    assert created[0].proposed_rule["priority"] == 5
 
 
 def test_render_rules_shows_enforced_predicate_only() -> None:
@@ -976,13 +983,14 @@ def test_dedupe_key_normalizes_text_mode_and_handles_retire() -> None:
         proposed_rule={"text": "be kind", "mode": "enforced", "predicate": _GOOD_PREDICATE},
     )
     retire = reflection._build_proposal("a", ProposalAction.RETIRE, [], _NOW, target_rule_id="r1")
-    # add (no target → advisory/0 defaults, matching _build_proposed_rule): mode
-    # and priority folded in, no predicate fingerprint.
-    assert reflection._dedupe_key_of(add, {}) == ("add", None, "be kind", "advisory", None, 0)
+    # add (omitted mode/priority default to advisory/0, matching the store's
+    # _build_rule_from_spec approval default): mode/priority folded in, no
+    # predicate fingerprint.
+    assert reflection._dedupe_key_of(add) == ("add", None, "be kind", "advisory", None, 0)
     # same text but enforced + predicate → a distinct key (not a duplicate of add).
-    assert reflection._dedupe_key_of(enforced, {}) != reflection._dedupe_key_of(add, {})
-    assert reflection._dedupe_key_of(enforced, {})[3] == "enforced"
-    assert reflection._dedupe_key_of(retire, {}) == ("retire", "r1", None, None, None, None)
+    assert reflection._dedupe_key_of(enforced) != reflection._dedupe_key_of(add)
+    assert reflection._dedupe_key_of(enforced)[3] == "enforced"
+    assert reflection._dedupe_key_of(retire) == ("retire", "r1", None, None, None, None)
 
 
 def test_restates_active_rule_matches_add_content_only() -> None:
