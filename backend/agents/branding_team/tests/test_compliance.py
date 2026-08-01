@@ -43,3 +43,22 @@ def test_on_brand_when_multiple_whole_words_match() -> None:
 def test_empty_checks_returns_empty() -> None:
     agent = BrandComplianceAgent()
     assert agent.evaluate([], make_mission()) == []
+
+
+def test_duplicate_keyword_across_mission_fields_not_double_counted() -> None:
+    """A keyword repeated across mission fields (e.g. also listed as a
+    differentiator) must count once, not twice, toward the on-brand
+    threshold of two distinct matched keywords."""
+    agent = BrandComplianceAgent()
+    mission = make_mission(values=["trust"], differentiators=["trust"])
+    checks = [
+        BrandCheckRequest(
+            asset_name="Homepage",
+            asset_description="Built on trust for our customers",
+        )
+    ]
+    (result,) = agent.evaluate(checks, mission)
+    # Only one distinct keyword ("trust") actually matches the text, so this
+    # must not be classified as on-brand.
+    assert result.is_on_brand is False
+    assert result.revision_suggestions
