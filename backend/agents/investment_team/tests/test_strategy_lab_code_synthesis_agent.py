@@ -82,11 +82,11 @@ def _patch_synthesis(
 ) -> Any:
     agent: Any = _RaisingAgent() if raise_ else _ReturningAgent(payload or "")
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.code_synthesis.Agent",
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
         lambda **_kwargs: agent,
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.code_synthesis.get_strands_model",
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda role, **_kwargs: object(),
     )
     return agent

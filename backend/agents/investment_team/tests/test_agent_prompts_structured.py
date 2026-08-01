@@ -162,12 +162,15 @@ def _patch_refinement(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
 
 
 def _patch_zero_trade_repair(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
+    # ZeroTradeRepairAgent.run delegates to _agent_runner.run_single_shot_agent,
+    # which builds its Agent using that module's own Agent/get_strands_model
+    # names, not zero_trade_repair.py's — patch those.
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.zero_trade_repair.Agent",
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
         lambda **kwargs: _FakeStrandsAgentReturning(payload),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.zero_trade_repair.get_strands_model",
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda *_a, **_k: object(),
     )
 
@@ -179,11 +182,11 @@ def test_zero_trade_repair_agent_key_is_not_ideation(monkeypatch: pytest.MonkeyP
     routing is not mis-attributed."""
     model_keys: list = []
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.zero_trade_repair.Agent",
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
         lambda **kwargs: _FakeStrandsAgentReturning(_zero_trade_payload()),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.zero_trade_repair.get_strands_model",
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda key, *_a, **_k: model_keys.append(key) or object(),
     )
 
