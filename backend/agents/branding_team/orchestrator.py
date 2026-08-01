@@ -128,7 +128,13 @@ async def _gather_integrations(
 
         try:
             return await request_market_research_async(mission)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Market research request failed for %s: %s",
+                mission.company_name,
+                exc,
+                exc_info=True,
+            )
             return None
 
     async def _design_assets():
