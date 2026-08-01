@@ -1,4 +1,6 @@
-# Unified API server image. Matches backend Makefile: same deps, same run as `make deploy`.
+# Unified API server image. Installs the slim runtime dependency set
+# (requirements-unified-api.txt) audited in docs/UNIFIED_API_DEPENDENCY_AUDIT.md;
+# same run as `make deploy`.
 # Build from repo root: docker build -f backend/Dockerfile backend
 # Or from backend: docker build -t khala-unified-api .
 
@@ -14,9 +16,11 @@ ENV PYTHONPATH=/app:/app/agents
 
 WORKDIR /app
 
-# Install deps (same as make install: agents/requirements.txt)
-COPY agents/requirements.txt /app/agents/requirements.txt
-RUN pip install --no-cache-dir -r /app/agents/requirements.txt
+# Install deps: slim subset of agents/requirements.txt, audited in
+# docs/UNIFIED_API_DEPENDENCY_AUDIT.md (every team container installs the
+# full agents/requirements.txt; unified-api only needs this narrower set).
+COPY requirements-unified-api.txt /app/requirements-unified-api.txt
+RUN pip install --no-cache-dir -r /app/requirements-unified-api.txt
 
 # Application: unified API + all agent teams
 COPY agents /app/agents
