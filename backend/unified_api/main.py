@@ -16,6 +16,7 @@ import os
 import sys
 from concurrent import futures
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,26 @@ TEAM_SERVICE_URL_ENVS: dict[str, str] = {
     "deepthought": "DEEPTHOUGHT_SERVICE_URL",
     "job_matching": "JOB_MATCHING_SERVICE_URL",
 }
+
+
+@dataclass(frozen=True)
+class AssistantMountSpec:
+    """Everything needed to mount one team's assistant sub-app, deferred.
+
+    Built by ``_build_assistant_registry`` without ever constructing the
+    FastAPI sub-app or calling ``app.mount`` — that step (``mount_assistant_app``)
+    is invoked later, on demand, once the request-path lazy-mount hook exists.
+    """
+
+    team_key: str
+    mount_path: str
+    assistant_config: Any
+
+
+# Registry of assistant mount specs, keyed by team_key. Populated at startup
+# by _maybe_register_team_assistants (registration only — no sub-app is
+# constructed or mounted here); consumed by a future first-request mount hook.
+_ASSISTANT_REGISTRY: dict[str, AssistantMountSpec] = {}
 
 # Track which teams were successfully registered (for health endpoint).
 _registered_teams: dict[str, bool] = {}
@@ -266,55 +287,81 @@ async def _maybe_start_sandbox_reaper() -> asyncio.Task | None:
         return None
 
 
-def _mount_team_assistants(app: FastAPI) -> int:
-    """Mount team assistant conversational sub-apps for every configured team.
+def _build_assistant_registry() -> dict[str, AssistantMountSpec]:
+    """Build assistant mount specs for every configured team, without
+    constructing or mounting any sub-app.
 
     Preconditions:
         * None.
     Postconditions:
-        * Returns the number of assistant sub-apps mounted.
+        * Returns one AssistantMountSpec per team_key present in both
+          TEAM_ASSISTANT_CONFIGS and TEAM_CONFIGS. No FastAPI sub-app is
+          created and app.mount is never called — this is registration
+          only; a future first-request hook (mount_assistant_app) does the
+          actual mount.
     """
-    from team_assistant.api import create_assistant_app
     from team_assistant.config import TEAM_ASSISTANT_CONFIGS
 
-    assistant_count = 0
+    registry: dict[str, AssistantMountSpec] = {}
     for team_key, assistant_config in TEAM_ASSISTANT_CONFIGS.items():
         team_cfg = TEAM_CONFIGS.get(team_key)
         if team_cfg:
-            assistant_app = create_assistant_app(assistant_config)
-            assistant_app.add_middleware(
-                CORSMiddleware,
-                allow_origins=["*"],
-                allow_credentials=True,
-                allow_methods=["*"],
-                allow_headers=["*"],
+            registry[team_key] = AssistantMountSpec(
+                team_key=team_key,
+                mount_path=f"{team_cfg.prefix}/assistant",
+                assistant_config=assistant_config,
             )
-            app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
-            assistant_count += 1
-    return assistant_count
+    return registry
 
 
-def _maybe_mount_team_assistants(app: FastAPI) -> int:
-    """Mount team assistant sub-apps unless disabled via
+def mount_assistant_app(app: FastAPI, spec: AssistantMountSpec) -> None:
+    """Construct and mount one team's assistant sub-app from its registry spec.
+
+    Preconditions:
+        * spec came from _ASSISTANT_REGISTRY (or _build_assistant_registry).
+    Postconditions:
+        * The assistant sub-app for spec.team_key is mounted at
+          spec.mount_path with the standard permissive CORS middleware.
+
+    Not called from lifespan today — kept as a ready-made unit for the
+    first-request lazy-mount hook to call.
+    """
+    from team_assistant.api import create_assistant_app
+
+    assistant_app = create_assistant_app(spec.assistant_config)
+    assistant_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.mount(spec.mount_path, assistant_app)
+
+
+def _maybe_register_team_assistants() -> int:
+    """Register team assistant mount specs unless disabled via
     UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
 
     Preconditions:
         * None.
     Postconditions:
-        * Returns the number of assistant sub-apps mounted: 0 when the flag
-          is false, or when _mount_team_assistants raises (logged as a
-          warning; startup is not aborted, matching every other lifespan
-          startup step).
+        * Populates _ASSISTANT_REGISTRY (cleared first) and returns its
+          size: 0 when the flag is false, or when _build_assistant_registry
+          raises (logged as a warning; startup is not aborted, matching
+          every other lifespan startup step). No sub-app is constructed or
+          mounted — that happens later, on demand.
     """
+    _ASSISTANT_REGISTRY.clear()
     if not UNIFIED_API_TEAM_ASSISTANTS_ENABLED:
-        logger.info("Team assistant sub-apps disabled (UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false)")
+        logger.info("Team assistant registration disabled (UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false)")
         return 0
     try:
-        count = _mount_team_assistants(app)
-        logger.info("Mounted %d team assistant sub-apps", count)
-        return count
+        _ASSISTANT_REGISTRY.update(_build_assistant_registry())
+        logger.info("Registered %d team assistant mount specs (not yet mounted)", len(_ASSISTANT_REGISTRY))
+        return len(_ASSISTANT_REGISTRY)
     except Exception:
-        logger.warning("Could not mount team assistant sub-apps", exc_info=True)
+        logger.warning("Could not register team assistant mount specs", exc_info=True)
         return 0
 
 
@@ -473,11 +520,8 @@ def _start_agent_studio_temporal_worker() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot
-    """Application lifespan: register own Postgres schemas, mount assistant sub-apps,
-    then register proxy routes.
-
-    Order matters: assistant sub-apps must be mounted before proxy catch-all routes,
-    otherwise the proxy's ``/{path:path}`` pattern swallows assistant requests.
+    """Application lifespan: register own Postgres schemas, register assistant
+    mount specs (no sub-apps mounted yet), then register proxy routes.
     """
     global _registered_teams
     logger.info("Starting Unified API Server...")
@@ -584,11 +628,12 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
             logger.exception("product_delivery postgres schema registration failed")
             _in_process_schema_failures.add("product_delivery")
 
-    # 1. Mount team assistant conversational sub-apps (before proxy routes),
-    #    unless disabled via UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
-    _maybe_mount_team_assistants(app)
+    # 1. Register team assistant mount specs (no sub-apps constructed or
+    #    mounted yet — see _ASSISTANT_REGISTRY), unless disabled via
+    #    UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
+    _maybe_register_team_assistants()
 
-    # 2. Register proxy routes for all team containers (after assistant mounts).
+    # 2. Register proxy routes for all team containers.
     _registered_teams = _register_proxy_routes(app)
     ok = sum(1 for v in _registered_teams.values() if v)
     total = len(get_enabled_teams())
