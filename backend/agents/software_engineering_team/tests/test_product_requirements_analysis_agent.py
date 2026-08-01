@@ -3828,6 +3828,36 @@ def test_filter_duplicate_questions_matches_long_silent_e_ches() -> None:
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_preserves_complete_anch_bases() -> None:
+    """branch/ranch exact-match branches/ranches; avalanche/tranche still restore via silent-e."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which branch ranch avalanche tranche applies?")
+    ]
+    qa_history = (
+        "Q: Which branches ranches avalanches tranches apply to this release?\n"
+        "A: Documented branches ranches avalanches tranches apply to this release."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_preserves_complete_s_ses_bases() -> None:
+    """bias exact-matches biases; cases/promises still need silent-e restoration."""
+    questions = [OpenQuestion(id="q1", question_text="Which bias case promise applies?")]
+    qa_history = (
+        "Q: Which biases cases promises apply to this model?\n"
+        "A: Documented biases cases promises apply to this model."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_keeps_non_duplicate() -> None:
     """A question with no overlapping stems in qa_history is not filtered out."""
     questions = [OpenQuestion(id="q1", question_text="Which cloud provider should we use?")]

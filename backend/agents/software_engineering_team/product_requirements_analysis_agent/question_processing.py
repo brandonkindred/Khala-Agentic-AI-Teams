@@ -149,7 +149,7 @@ _LEXICAL_TT = frozenset(
         "watt",
     }
 )
-_COMPLETE_SES_BASES = frozenset({"bus", "gas"})
+_COMPLETE_SES_BASES = frozenset({"bus", "gas", "bias"})
 _INSERT_K_STEMS = frozenset(
     {
         "frolick",
@@ -176,6 +176,8 @@ _COMPLETE_VOWEL_CH = frozenset(
         "teach",
     }
 )
+# Complete -anch singulars that must not take silent-e restoration (unlike avalanche/tranche).
+_COMPLETE_ANCH_BASES = frozenset({"branch", "ranch"})
 
 
 def _undouble_inflectional(base: str) -> str:
@@ -287,7 +289,7 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         return base, True, False, False
     if w.endswith("ches") and len(w) > 4:
         base = w[:-2]
-        if base.endswith("tch") or base in _COMPLETE_VOWEL_CH:
+        if base.endswith("tch") or base in _COMPLETE_VOWEL_CH or base in _COMPLETE_ANCH_BASES:
             return base, False, False, True
         # Silent-e: *ache/*anche/*iche and short vowel+ch (cache); else exact (arch).
         if (
