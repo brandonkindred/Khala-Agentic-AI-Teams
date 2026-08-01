@@ -318,6 +318,14 @@ and small payloads are nowhere near the warning threshold anyway).
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
+### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
+Agent Console sandbox reaper/worker toggle (default: true). When true, the
+unified-api `lifespan` starts the Agent Console sandbox idle reaper — a
+durable `SandboxReaperWorkflow` served by this process's own sandbox-only
+Temporal worker thread when Temporal is enabled, or an in-process asyncio
+task otherwise. Set to `false`/`0`/`no` to run unified-api without starting
+the sandbox reaper or its Temporal worker thread at all.
+
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
 

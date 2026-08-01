@@ -34,7 +34,7 @@ if str(_project_root) not in sys.path:
 
 from shared.env_config import env_float
 from unified_api.bounded_executor import get_or_recreate_executor
-from unified_api.config import TEAM_CONFIGS, get_enabled_teams
+from unified_api.config import TEAM_CONFIGS, UNIFIED_API_SANDBOX_TEMPORAL_WORKER, get_enabled_teams
 
 logging.basicConfig(
     level=logging.INFO,
@@ -234,6 +234,30 @@ async def _start_sandbox_reaper_task() -> asyncio.Task:
 
     logger.info("Started Agent Console sandbox idle reaper (in-process)")
     return asyncio.create_task(run_idle_reaper())
+
+
+async def _maybe_start_sandbox_reaper() -> asyncio.Task | None:
+    """Start the Agent Console sandbox idle reaper, unless disabled via
+    UNIFIED_API_SANDBOX_TEMPORAL_WORKER.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns the background asyncio.Task when
+          UNIFIED_API_SANDBOX_TEMPORAL_WORKER is true (default) and startup
+          succeeds.
+        * Returns None when the flag is false, or when
+          _start_sandbox_reaper_task raises (logged as a warning; startup is
+          not aborted, matching every other lifespan startup step).
+    """
+    if not UNIFIED_API_SANDBOX_TEMPORAL_WORKER:
+        logger.info("Agent Console sandbox reaper disabled (UNIFIED_API_SANDBOX_TEMPORAL_WORKER=false)")
+        return None
+    try:
+        return await _start_sandbox_reaper_task()
+    except Exception:
+        logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
+        return None
 
 
 async def _health_check_loop() -> None:
@@ -529,8 +553,9 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     health_task = asyncio.create_task(_health_check_loop())
     logger.info("Started background health checker (interval=%ds)", _HEALTH_CHECK_INTERVAL)
 
-    # 4. Start the Agent Console sandbox idle reaper. When Temporal is enabled it
-    #    runs as a durable, single-instance SandboxReaperWorkflow served by this
+    # 4. Start the Agent Console sandbox idle reaper, unless disabled via
+    #    UNIFIED_API_SANDBOX_TEMPORAL_WORKER. When Temporal is enabled it runs
+    #    as a durable, single-instance SandboxReaperWorkflow served by this
     #    process's own sandbox-only Temporal worker (survives restarts);
     #    otherwise it's an in-process asyncio task (thread mode). The Temporal
     #    branch is a background retry loop, not a single blocking attempt: the
@@ -539,11 +564,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     #    not mean the reaper never starts for the life of the process. See
     #    _start_sandbox_reaper_task's docstring for why the sandbox worker must
     #    be booted here rather than shared with this team's general worker.
-    sandbox_reaper_task: asyncio.Task | None = None
-    try:
-        sandbox_reaper_task = await _start_sandbox_reaper_task()
-    except Exception:
-        logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
+    sandbox_reaper_task = await _maybe_start_sandbox_reaper()
 
     # 5. Start the Agent Console run pruner (Phase 3).
     run_pruner_task: asyncio.Task | None = None
