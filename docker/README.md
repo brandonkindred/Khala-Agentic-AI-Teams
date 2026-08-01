@@ -123,6 +123,26 @@ docker compose -f docker/docker-compose.yml --env-file docker/.env up -d khala
 
 On **macOS** with Docker Desktop, container memory is capped by the VM's memory limit (Docker Desktop → Settings → Resources). If 2G is not applied, raise the VM limit and restart Docker.
 
+## Unified API image (slim dependencies)
+
+The **khala** (Unified API) image is mostly a reverse proxy: of the teams
+configured in `TEAM_CONFIGS` (`backend/unified_api/config.py`), all but a
+handful (`in_process=True` — `user_profile`, `product_delivery`,
+`agent_studio`, plus platform modules `agent_console`, `agent_registry`,
+`agent_cognition`, `team_assistant`) are proxied over HTTP via
+`unified_api/team_proxy.py` to their own per-team container and never
+imported by this process. `backend/Dockerfile` reflects that: it installs
+`backend/requirements-unified-api.txt`, an audited minimal dependency set for
+the proxy process's own cold path, instead of the full
+`backend/agents/requirements.txt` every per-team container installs.
+
+| Image | Requirements file | Scope |
+|---|---|---|
+| `khala` (Unified API) | `backend/requirements-unified-api.txt` | Slim — only what the proxy process itself imports at startup or during an always-mounted in-process route. |
+| `team_service`, `blogging_service`, `job_service`, `agent_sandbox_image` (and per-team Dockerfiles) | `backend/agents/requirements.txt` (or a per-team file) | Full — every team's agent/tool code actually runs here, including heavy per-team packages (e.g. `strands-agents` across most teams, `pandas`/`numpy`/`pyarrow` for `investment_team`). |
+
+See [`docs/UNIFIED_API_DEPENDENCY_AUDIT.md`](../docs/UNIFIED_API_DEPENDENCY_AUDIT.md) for the full package-by-package audit behind this split.
+
 ## Agents and Postgres
 
 When running in this stack, the **khala** service uses the **stack’s Postgres** (database `khala`, user `khala`) via **POSTGRES_HOST=postgres**. The container does not start its own PostgreSQL. The init script in `docker/postgres/init/` creates the `khala` database and user on first run.
@@ -174,7 +194,7 @@ After starting the stack:
 
 1. **Compose up** – `docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build` should bring up all services without errors.
 2. **Temporal UI** – Open http://localhost:8080 and confirm the Temporal Web UI loads.
-3. **Agents** – `curl http://localhost:8888/health` should return `{"status":"ok"}` (agents use stack Postgres and Ollama Cloud when configured).
+3. **Agents** – `curl http://localhost:8888/health` should return HTTP 200 with a body like `{"status": "healthy", "version": "1.0.0", "teams": [...]}` (agents use stack Postgres and Ollama Cloud when configured). `status` is `"degraded"` rather than `"healthy"` if any enabled proxy team is missing its `*_SERVICE_URL`, or `"unhealthy"` if an in-process team's Postgres schema registration failed — check the per-team `teams[]` entries to see which one.
 4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
 5. **Metrics endpoints** – `curl -sf http://localhost:8888/metrics | head` and the same on `:8585` (job service) and `:8090`–`:8110` (team services) should return Prometheus text-format output (`# HELP ...`).
 6. **Prometheus targets** – Open http://localhost:9090/targets; all rows should be green (`UP`). Or run `curl -s 'http://localhost:9090/api/v1/query?query=up' | jq '.data.result[] | {service:.metric.service, up:.value[1]}'`.
