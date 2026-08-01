@@ -334,6 +334,13 @@ mount loop entirely (zero assistant sub-apps mounted) — team proxy routes and
 health checks are unaffected. Lazy mount-on-first-request when enabled is
 tracked separately.
 
+### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
+Agent Studio Temporal worker toggle (default: true). When true, the
+unified-api `lifespan` starts the in-process Agent Studio Temporal worker
+thread (Agent Studio is Temporal-only; the team's requests fail without it).
+Set to `false`/`0`/`no` to run unified-api without booting this worker
+thread, e.g. when Agent Studio is unused.
+
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
 

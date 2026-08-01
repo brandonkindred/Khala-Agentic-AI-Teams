@@ -36,6 +36,7 @@ from shared.env_config import env_float
 from unified_api.bounded_executor import get_or_recreate_executor
 from unified_api.config import (
     TEAM_CONFIGS,
+    UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER,
     UNIFIED_API_SANDBOX_TEMPORAL_WORKER,
     UNIFIED_API_TEAM_ASSISTANTS_ENABLED,
     get_enabled_teams,
@@ -434,18 +435,24 @@ def _start_agent_studio_temporal_worker() -> None:
 
     Agent Studio is an in-process team (mounted on this app, not a separate
     ``team_service`` container), so its worker runs here and its activity threads
-    share this process's :class:`AgentStudioService` singleton. Gated only on the team
-    being enabled — Agent Studio assumes Temporal is always configured. The worker is a
-    daemon thread (no shutdown handle needed); log-and-continue on failure, matching
+    share this process's :class:`AgentStudioService` singleton. Gated on
+    ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled —
+    Agent Studio assumes Temporal is always configured. The worker is a daemon
+    thread (no shutdown handle needed); log-and-continue on failure, matching
     the other lifespan startup steps.
 
     Postconditions:
+        - Logs at INFO and returns without starting a worker when
+          ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
         - Logs at INFO only when a worker actually started; when ``start_team_worker``
           returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker), logs a WARNING
           instead of a misleading success line, since Agent Studio is Temporal-only and
           its requests will fail until Temporal is configured. Startup is not aborted
           (that would take down every other team for one in-process team's config).
     """
+    if not UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER:
+        logger.info("Agent Studio Temporal worker disabled (UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false)")
+        return
     if not TEAM_CONFIGS["agent_studio"].enabled:
         return
     try:
