@@ -30,7 +30,7 @@ from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient, LLMClientModel
-from llm_service.config import resolve_max_tokens
+from llm_service.config import resolve_max_output_tokens
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import (
     CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
@@ -353,15 +353,16 @@ def _with_merged_pass_output_budget(
     Postconditions:
         - When ``model`` is an ``LLMClientModel``, clones with
           ``max_tokens=response_tokens`` whenever the effective cap (model pin
-          first, else ``LLM_MAX_TOKENS``, else unset ``0``) differs from that
+          first, else ``LLM_MAX_OUTPUT_TOKENS``, else unset ``0``) differs from that
           reserve — raising tight caps and clamping oversized / unset provider
           defaults so the completion cannot exceed the input budget.
         - Injected non-``LLMClientModel`` test models are returned unchanged.
         - Never mutates ``model``.
     """
+    assert response_tokens >= 1024, "response_tokens must be >= 1024"
     if not isinstance(model, LLMClientModel):
         return model
-    configured = resolve_max_tokens()
+    configured = resolve_max_output_tokens()
     pinned = model.get_config().get("max_tokens")
     pinned_int = pinned if isinstance(pinned, int) and pinned > 0 else 0
     # Match provider precedence: an explicit model pin wins over the env cap.
@@ -554,9 +555,7 @@ def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
 
         line_cost = len(path) + 1
         omitted_after = len(paths) - (shown + 1)
-        room_for_note = (
-            len(_overflow_manifest_note(omitted_after)) + 1 if omitted_after > 0 else 0
-        )
+        room_for_note = len(_overflow_manifest_note(omitted_after)) + 1 if omitted_after > 0 else 0
         if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
             lines.append(_overflow_manifest_note(len(paths) - shown))
             break

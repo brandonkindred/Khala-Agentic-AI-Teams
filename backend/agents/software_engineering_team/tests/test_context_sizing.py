@@ -10,6 +10,8 @@ combination overflowed the window.
 
 from __future__ import annotations
 
+import pytest
+
 from software_engineering_team.shared.context_sizing import (
     CHARS_PER_TOKEN,
     CODE_REVIEW_ABS_CHUNK_CHARS,
@@ -26,6 +28,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_existing_code_chars,
     compute_max_chunk_chars,
     compute_spec_content_chars,
+    parse_env_int,
 )
 
 
@@ -98,8 +101,6 @@ def test_map_chunk_cap_is_env_overridable(monkeypatch) -> None:
 
 
 def test_parse_env_int_defensive_parsing(monkeypatch) -> None:
-    from software_engineering_team.shared.context_sizing import parse_env_int
-
     monkeypatch.delenv("SOME_KNOB", raising=False)
     assert parse_env_int("SOME_KNOB", 7, 1) == 7
     monkeypatch.setenv("SOME_KNOB", " 42 ")
@@ -113,10 +114,6 @@ def test_parse_env_int_defensive_parsing(monkeypatch) -> None:
 def test_parse_env_int_rejects_default_below_floor() -> None:
     """Precondition (default >= floor) is enforced with an explicit ValueError
     so the check survives ``python -O`` (assert would be stripped)."""
-    import pytest
-
-    from software_engineering_team.shared.context_sizing import parse_env_int
-
     with pytest.raises(ValueError):
         parse_env_int("SOME_KNOB", 1, 5)
 

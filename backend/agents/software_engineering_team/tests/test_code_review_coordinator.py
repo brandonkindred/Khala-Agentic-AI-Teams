@@ -2453,7 +2453,7 @@ def test_coerce_bool_recognizes_truthy_tokens_only() -> None:
     assert _coerce_bool("true") is True
     assert _coerce_bool("YES") is True
     assert _coerce_bool("1") is True
-    # Falsey / unrecognized string tokens (note: bare bool("false") would be True).
+    # Falsy / unrecognized string tokens (note: bare bool("false") would be True).
     assert _coerce_bool("false") is False
     assert _coerce_bool("no") is False
     assert _coerce_bool("") is False
@@ -2685,7 +2685,9 @@ def test_coordinator_single_chunk_propagates_notes() -> None:
     )
     result = run_coordinator(
         client,
-        CodeReviewInput(code="### a.py ###\ndef a(): pass", task_description="t"),
+        CodeReviewInput(
+            code="### a.py ###\ndef a(): pass", task_description="t", language="python"
+        ),
     )
     assert result.spec_compliance_notes == "Meets all acceptance criteria."
 
@@ -2713,7 +2715,9 @@ def test_coordinator_multi_chunk_synthesizes_notes() -> None:
             }
         ]
     )
-    result = run_coordinator(client, CodeReviewInput(files=files, task_description="t"))
+    result = run_coordinator(
+        client, CodeReviewInput(files=files, task_description="t", language="python")
+    )
     assert result.approved is True
     assert result.spec_compliance_notes == "chunk notes"
 

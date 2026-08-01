@@ -450,8 +450,7 @@ def consolidate_side_effect_issues_activity(
         consolidated = consolidate_side_effect_issues(parsed_issues, index)
     except Exception as exc:  # noqa: BLE001 - fail-safe: keep unconsolidated issues
         logger.warning(
-            "SideEffectConsolidation: activity failed (%s: %s); "
-            "using unconsolidated issues",
+            "SideEffectConsolidation: activity failed (%s: %s); using unconsolidated issues",
             type(exc).__name__,
             exc,
         )

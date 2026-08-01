@@ -584,9 +584,7 @@ def test_consolidation_activity_disabled_passthrough_and_fails_safe(
     def _boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("index boom")
 
-    monkeypatch.setattr(
-        "code_review_agent.false_positive_filter.CodebaseIndex.from_input", _boom
-    )
+    monkeypatch.setattr("code_review_agent.false_positive_filter.CodebaseIndex.from_input", _boom)
     assert A.consolidate_side_effect_issues_activity(payload, issues) == issues
 
 
@@ -1562,9 +1560,13 @@ async def test_workflow_fails_on_verify_failure_without_leaking_sibling_passes(
 
     monkeypatch.setattr(false_positive_filter, "filter_false_positives", _boom)
     monkeypatch.setattr(
-        architecture_consistency_pass, "find_architecture_and_redundancy_issues", _tracked_architecture
+        architecture_consistency_pass,
+        "find_architecture_and_redundancy_issues",
+        _tracked_architecture,
     )
-    monkeypatch.setattr(side_effect_impact_pass, "find_side_effect_impact_issues", _tracked_side_effect)
+    monkeypatch.setattr(
+        side_effect_impact_pass, "find_side_effect_impact_issues", _tracked_side_effect
+    )
 
     review_input = _input()
 
@@ -1624,7 +1626,9 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         completed.add("side_effect")
         return result
 
-    monkeypatch.setattr(side_effect_impact_pass, "find_side_effect_impact_issues", _tracked_side_effect)
+    monkeypatch.setattr(
+        side_effect_impact_pass, "find_side_effect_impact_issues", _tracked_side_effect
+    )
 
     @activity_module.defn(name="code_review_architecture_consistency")
     def _raising_architecture_activity(review_input: Dict[str, Any]) -> Any:
@@ -2100,8 +2104,7 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
     # Confirm forced out-of-order completion; without this assertion the test
     # could pass even if the merge regressed.
     assert completion_order == expected_completion_order, (
-        "expected deterministic out-of-order completion via event handoffs; "
-        f"got {completion_order}"
+        f"expected deterministic out-of-order completion via event handoffs; got {completion_order}"
     )
 
     # Disable barrier + handoff waits for the sequential pipeline below;

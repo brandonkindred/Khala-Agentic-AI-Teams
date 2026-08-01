@@ -467,7 +467,7 @@ def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) 
 def test_raises_tight_output_cap_for_dual_finding_arrays(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When LLM_MAX_TOKENS is set near a single-pass sizing (e.g. 4096), the
+    """When LLM_MAX_OUTPUT_TOKENS is set near a single-pass sizing (e.g. 4096), the
     production LLMClientModel path must raise the merged call to the dual-array
     floor so both finding lists can fit in one completion."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
@@ -477,7 +477,7 @@ def test_raises_tight_output_cap_for_dual_finding_arrays(
         CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     )
 
-    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "4096")
     clones: list = []
 
     class _Empty(DummyLLMClient):
@@ -507,7 +507,7 @@ def test_raises_tight_output_cap_for_dual_finding_arrays(
 def test_model_pin_takes_precedence_over_env_max_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pinned max_tokens of 4096 must be raised even when LLM_MAX_TOKENS is
+    """A pinned max_tokens of 4096 must be raised even when LLM_MAX_OUTPUT_TOKENS is
     already generous — the pin is what the adapter actually sends."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
 
@@ -516,7 +516,7 @@ def test_model_pin_takes_precedence_over_env_max_tokens(
         CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     )
 
-    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
     clones: list = []
 
     class _Empty(DummyLLMClient):
@@ -545,7 +545,7 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the response reserve shrinks for a small context, an oversized
-    LLM_MAX_TOKENS must be clamped down to that reserve."""
+    LLM_MAX_OUTPUT_TOKENS must be clamped down to that reserve."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
 
     from llm_service import LLMClientModel
@@ -554,7 +554,7 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
         CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     )
 
-    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
     clones: list = []
 
     class _SmallCtx(DummyLLMClient):
@@ -586,7 +586,7 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
 def test_clamps_oversized_cap_to_full_dual_array_reserve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Even when the dual-array floor is selected, an oversized LLM_MAX_TOKENS
+    """Even when the dual-array floor is selected, an oversized LLM_MAX_OUTPUT_TOKENS
     must still be clamped to that reserved response budget."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
 
@@ -595,7 +595,7 @@ def test_clamps_oversized_cap_to_full_dual_array_reserve(
         CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     )
 
-    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
     clones: list = []
 
     class _Empty(DummyLLMClient):

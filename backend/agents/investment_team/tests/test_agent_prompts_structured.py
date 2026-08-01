@@ -358,7 +358,10 @@ def test_design_rejects_invalid_structured_indicator(
         "kind": "entry",
         "side": "long",
         "when": {
-            "lhs": {"kind": "ema", "period": 1},  # indicator uses 'kind' instead of 'name'; also period < 2 if it parsed
+            "lhs": {
+                "kind": "ema",
+                "period": 1,
+            },  # indicator uses 'kind' instead of 'name'; also period < 2 if it parsed
             "op": "lt",
             "rhs": {"kind": "const", "value": 30},
         },
