@@ -326,6 +326,14 @@ Temporal worker thread when Temporal is enabled, or an in-process asyncio
 task otherwise. Set to `false`/`0`/`no` to run unified-api without starting
 the sandbox reaper or its Temporal worker thread at all.
 
+### UNIFIED_API_TEAM_ASSISTANTS_ENABLED
+Team-assistant conversational sub-app mount toggle (default: true). When
+true, the unified-api `lifespan` mounts every team's assistant chat sub-app
+(`<team-prefix>/assistant`) at startup. Set to `false`/`0`/`no` to skip the
+mount loop entirely (zero assistant sub-apps mounted) — team proxy routes and
+health checks are unaffected. Lazy mount-on-first-request when enabled is
+tracked separately.
+
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
 Agent Studio Temporal worker toggle (default: true). When true, the
 unified-api `lifespan` starts the in-process Agent Studio Temporal worker

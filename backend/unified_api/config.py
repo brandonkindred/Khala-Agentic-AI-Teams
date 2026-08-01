@@ -45,6 +45,16 @@ UNIFIED_API_SANDBOX_TEMPORAL_WORKER = os.getenv("UNIFIED_API_SANDBOX_TEMPORAL_WO
     "yes",
 )
 
+# Team-assistant conversational sub-apps: when True (default), unified-api
+# mounts every TEAM_ASSISTANT_CONFIGS sub-app at startup. Set false to skip
+# the mount loop entirely (zero assistant sub-apps mounted); team proxy
+# routes and health checks are unaffected.
+UNIFIED_API_TEAM_ASSISTANTS_ENABLED = os.getenv("UNIFIED_API_TEAM_ASSISTANTS_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 # Agent Studio Temporal worker: when True (default), the lifespan starts this
 # process's in-process Agent Studio Temporal worker thread (Agent Studio is
 # Temporal-only). Set false to run unified-api without booting it.
