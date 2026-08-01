@@ -34,7 +34,12 @@ if str(_project_root) not in sys.path:
 
 from shared.env_config import env_float
 from unified_api.bounded_executor import get_or_recreate_executor
-from unified_api.config import TEAM_CONFIGS, UNIFIED_API_SANDBOX_TEMPORAL_WORKER, get_enabled_teams
+from unified_api.config import (
+    TEAM_CONFIGS,
+    UNIFIED_API_SANDBOX_TEMPORAL_WORKER,
+    UNIFIED_API_TEAM_ASSISTANTS_ENABLED,
+    get_enabled_teams,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,6 +263,58 @@ async def _maybe_start_sandbox_reaper() -> asyncio.Task | None:
     except Exception:
         logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
         return None
+
+
+def _mount_team_assistants(app: FastAPI) -> int:
+    """Mount team assistant conversational sub-apps for every configured team.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns the number of assistant sub-apps mounted.
+    """
+    from team_assistant.api import create_assistant_app
+    from team_assistant.config import TEAM_ASSISTANT_CONFIGS
+
+    assistant_count = 0
+    for team_key, assistant_config in TEAM_ASSISTANT_CONFIGS.items():
+        team_cfg = TEAM_CONFIGS.get(team_key)
+        if team_cfg:
+            assistant_app = create_assistant_app(assistant_config)
+            assistant_app.add_middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+            app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
+            assistant_count += 1
+    return assistant_count
+
+
+def _maybe_mount_team_assistants(app: FastAPI) -> int:
+    """Mount team assistant sub-apps unless disabled via
+    UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns the number of assistant sub-apps mounted: 0 when the flag
+          is false, or when _mount_team_assistants raises (logged as a
+          warning; startup is not aborted, matching every other lifespan
+          startup step).
+    """
+    if not UNIFIED_API_TEAM_ASSISTANTS_ENABLED:
+        logger.info("Team assistant sub-apps disabled (UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false)")
+        return 0
+    try:
+        count = _mount_team_assistants(app)
+        logger.info("Mounted %d team assistant sub-apps", count)
+        return count
+    except Exception:
+        logger.warning("Could not mount team assistant sub-apps", exc_info=True)
+        return 0
 
 
 async def _health_check_loop() -> None:
@@ -520,28 +577,9 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
             logger.exception("product_delivery postgres schema registration failed")
             _in_process_schema_failures.add("product_delivery")
 
-    # 1. Mount team assistant conversational sub-apps (before proxy routes).
-    try:
-        from team_assistant.api import create_assistant_app
-        from team_assistant.config import TEAM_ASSISTANT_CONFIGS
-
-        assistant_count = 0
-        for team_key, assistant_config in TEAM_ASSISTANT_CONFIGS.items():
-            team_cfg = TEAM_CONFIGS.get(team_key)
-            if team_cfg:
-                assistant_app = create_assistant_app(assistant_config)
-                assistant_app.add_middleware(
-                    CORSMiddleware,
-                    allow_origins=["*"],
-                    allow_credentials=True,
-                    allow_methods=["*"],
-                    allow_headers=["*"],
-                )
-                app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
-                assistant_count += 1
-        logger.info("Mounted %d team assistant sub-apps", assistant_count)
-    except Exception:
-        logger.warning("Could not mount team assistant sub-apps", exc_info=True)
+    # 1. Mount team assistant conversational sub-apps (before proxy routes),
+    #    unless disabled via UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
+    _maybe_mount_team_assistants(app)
 
     # 2. Register proxy routes for all team containers (after assistant mounts).
     _registered_teams = _register_proxy_routes(app)

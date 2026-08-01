@@ -45,6 +45,16 @@ UNIFIED_API_SANDBOX_TEMPORAL_WORKER = os.getenv("UNIFIED_API_SANDBOX_TEMPORAL_WO
     "yes",
 )
 
+# Team-assistant conversational sub-apps: when True (default), unified-api
+# mounts every TEAM_ASSISTANT_CONFIGS sub-app at startup. Set false to skip
+# the mount loop entirely (zero assistant sub-apps mounted); team proxy
+# routes and health checks are unaffected.
+UNIFIED_API_TEAM_ASSISTANTS_ENABLED = os.getenv("UNIFIED_API_TEAM_ASSISTANTS_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 # Temporal (software engineering team workflows). When TEMPORAL_ADDRESS is set, SE team uses Temporal instead of threads.
 TEMPORAL_ADDRESS = os.getenv("TEMPORAL_ADDRESS", "").strip() or None
 TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default").strip()
