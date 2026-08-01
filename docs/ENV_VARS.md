@@ -326,6 +326,13 @@ Temporal worker thread when Temporal is enabled, or an in-process asyncio
 task otherwise. Set to `false`/`0`/`no` to run unified-api without starting
 the sandbox reaper or its Temporal worker thread at all.
 
+### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
+Agent Studio Temporal worker toggle (default: true). When true, the
+unified-api `lifespan` starts the in-process Agent Studio Temporal worker
+thread (Agent Studio is Temporal-only; the team's requests fail without it).
+Set to `false`/`0`/`no` to run unified-api without booting this worker
+thread, e.g. when Agent Studio is unused.
+
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
 
