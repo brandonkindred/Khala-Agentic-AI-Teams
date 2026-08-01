@@ -1,15 +1,15 @@
 # Unified API Dependency Audit
 
-Audit deliverable for **#3824** (sub-issue of parent **#3808**, "unified-api: slim
-Docker image and dependency set for the proxy process"). This document is the
-agreed allow/deny list referenced by the sibling issues:
+Audit deliverable for the unified-api slim Docker image and dependency set
+initiative. This document is the agreed allow/deny list referenced by the
+follow-up work:
 
-- **#3825** — creates `requirements-unified-api.txt` from the allow-list below.
-- **#3826** — points `backend/Dockerfile` at that slim file.
-- **#3827** — smoke-verifies the slim image and documents the split in `docker/README.md`.
+- A follow-up creates `requirements-unified-api.txt` from the allow-list below.
+- A follow-up points `backend/Dockerfile` at that slim file.
+- A follow-up smoke-verifies the slim image and documents the split in `docker/README.md`.
 
 This document makes no code changes. Editing the Dockerfile or creating the slim
-requirements file is explicitly out of scope here (see #3824's issue body).
+requirements file is explicitly out of scope here.
 
 ## Method
 
@@ -63,10 +63,10 @@ of those modules import any heavy package.
 ## Allow/deny table
 
 Verdicts below apply to what should be installed for the **unified-api container
-specifically**. "Keep" means #3825's slim file should include it; "Drop" means it
-should be omitted (left to team-specific requirements files); "Needs decision"
-means the audit found a real gap that #3825/#3826 need to resolve explicitly
-rather than silently drop or silently keep.
+specifically**. "Keep" means the slim requirements file should include it; "Drop"
+means it should be omitted (left to team-specific requirements files); "Needs
+decision" means the audit found a real gap that the follow-up work needs to
+resolve explicitly rather than silently drop or silently keep.
 
 | Package | Verdict | Justification |
 |---|---|---|
@@ -80,18 +80,18 @@ rather than silently drop or silently keep.
 | `APScheduler`, `pytz` | **Keep** | Scheduling primitives used by in-process modules (e.g. sandbox reaper, cognition scheduler). |
 | `fastapi`, `uvicorn[standard]`, `pydantic`, `httpx`, `PyYAML`, `json-repair`, `jsonschema`, `python-multipart` | **Keep** | Core web-framework / serialization / validation stack; all lightweight and directly required by `unified_api/main.py` and its always-mounted routes (`jsonschema` specifically: `agent_registry.models` validates `IOSchema.inline_schema` at module load). |
 | `prometheus-fastapi-instrumentator`, `opentelemetry-*` (api, sdk, otlp exporters, fastapi/httpx/logging instrumentation) | **Keep** | Observability wiring, imported (try/except-guarded) at unified-api startup for `/metrics` and tracing; moderate weight but not "heavy scientific stack" and directly wired into `main.py`. |
-| `pytest`, `pytest-asyncio`, `pytest-cov`, `pytest-xdist` | **Drop from prod image** | Test-only tooling; not a "heavy" package per se, but has no place in the runtime image regardless of team scoping. Flagged here since it's currently in `agents/requirements.txt`, but the actual removal belongs to #3825 (or a separate test/prod split, if the team wants to keep discussing that under a different issue). |
+| `pytest`, `pytest-asyncio`, `pytest-cov`, `pytest-xdist` | **Drop from prod image** | Test-only tooling; not a "heavy" package per se, but has no place in the runtime image regardless of team scoping. Flagged here since it's currently in `agents/requirements.txt`, but the actual removal belongs to the slim-requirements follow-up (or a separate test/prod split, if the team wants to keep discussing that separately). |
 | `pandas` | **Drop** | Confirmed zero import sites anywhere under `backend/unified_api/`. All usage is `investment_team/strategy_lab/**` and `investment_team/execution/metrics.py` — a proxied team, never imported in-process. |
 | `numpy` | **Drop** | Same footprint as `pandas` — `investment_team` only (`strategy_lab/executor/indicators.py`, `execution/metrics.py`, `trading_service/service.py`), zero reach from unified-api. |
-| `pyarrow` | **Drop** | Only used by `investment_team/market_data_cache/store.py`. The comment currently justifying its presence in `agents/requirements.txt` cites `shared.postgres.register_all_team_schemas`, but that function's own docstring (`shared/postgres/registry.py`) states it is **not** wired into the unified-api lifespan ("teams run in their own containers and register themselves") — the existing justification is stale and should be corrected when #3825 drops the pin. |
+| `pyarrow` | **Drop** | Only used by `investment_team/market_data_cache/store.py`. The comment currently justifying its presence in `agents/requirements.txt` cites `shared.postgres.register_all_team_schemas`, but that function's own docstring (`shared/postgres/registry.py`) states it is **not** wired into the unified-api lifespan ("teams run in their own containers and register themselves") — the existing justification is stale and should be corrected when the slim-requirements follow-up drops the pin. |
 | `beautifulsoup4` | **Drop** | Only used by `job_matching_team/tools/web_fetch.py`, `blogging/blog_research_agent/tools/web_fetch.py`, and `blogging/blog_medium_stats_agent/scraper.py` — all proxied-team code, zero reach from unified-api. |
-| `ollama` (PyPI package) | **Drop — likely dead weight entirely** | Repo-wide search found no `import ollama` anywhere in `backend/`. `OllamaLLMClient` (`llm_service/clients/ollama.py`) talks to the Ollama REST API directly via `httpx`, not the `ollama` package. This isn't just an unified-api-scoping question — the package may be unused across the whole repo and worth a separate removal PR outside #3808's scope; #3825 should at minimum not carry it forward into the slim file. |
+| `ollama` (PyPI package) | **Drop — likely dead weight entirely** | Repo-wide search found no `import ollama` anywhere in `backend/`. `OllamaLLMClient` (`llm_service/clients/ollama.py`) talks to the Ollama REST API directly via `httpx`, not the `ollama` package. This isn't just an unified-api-scoping question — the package may be unused across the whole repo and worth a separate removal PR outside this initiative's scope; the slim requirements file should at minimum not carry it forward. |
 | `jinja2`, `python-dotenv`, `playwright`, `yfinance` | **N/A — already excluded** | None of these appear in `backend/agents/requirements.txt` (the file the Dockerfile actually installs) today; they only live in `backend/requirements.txt` (local dev/CI) or per-team requirements files. No action needed for the unified-api image on these — see the `playwright` gap below, though. |
 
 ## Flagged gaps requiring an explicit decision
 
 These aren't simple keep/drop calls — they're pre-existing inconsistencies the
-audit surfaced that #3825/#3826 (or a follow-up issue) need to resolve deliberately:
+audit surfaced that the follow-up work needs to resolve deliberately:
 
 1. **`playwright` / Medium browser login.** `unified_api/medium_browser_login.py`
    implements a real, documented feature (env vars `MEDIUM_BROWSER_HEADLESS` /
@@ -101,18 +101,19 @@ audit surfaced that #3825/#3826 (or a follow-up issue) need to resolve deliberat
    `backend/agents/requirements.txt` — the file the production Dockerfile installs
    today. This means the Medium auto-login endpoint would raise `ImportError` in
    the currently-deployed unified-api container, independent of any slimming work.
-   This audit did not introduce the gap; #3825/#3826 (or the repo owner) need to
-   choose: (a) add `playwright` to the new slim requirements file so this feature
-   works in production, or (b) explicitly document that this endpoint is
+   This audit did not introduce the gap; the follow-up work (or the repo owner)
+   needs to choose: (a) add `playwright` to the new slim requirements file so
+   this feature works in production, or (b) explicitly document that this endpoint is
    local-dev-only / best-effort in its current state.
 2. **`ollama` package removal.** As noted above, this looks like an entirely
-   unused pin. Since #3808's scope is unified-api-specific slimming, the cleanest
-   path is for #3825 to simply not include it in the new file; whether to also
-   remove it from `backend/requirements.txt`/`backend/agents/requirements.txt`
-   repo-wide is a separate, smaller cleanup that can be raised independently.
+   unused pin. Since this initiative's scope is unified-api-specific slimming,
+   the cleanest path is for the slim requirements file to simply not include
+   it; whether to also remove it from
+   `backend/requirements.txt`/`backend/agents/requirements.txt` repo-wide is a
+   separate, smaller cleanup that can be raised independently.
 
 ## Non-goals
 
-- This document does not create `requirements-unified-api.txt` (#3825).
-- This document does not modify `backend/Dockerfile` (#3826).
-- This document does not perform the smoke-verification or docker README update (#3827).
+- This document does not create `requirements-unified-api.txt`.
+- This document does not modify `backend/Dockerfile`.
+- This document does not perform the smoke-verification or docker README update.
