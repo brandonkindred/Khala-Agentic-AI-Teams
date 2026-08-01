@@ -164,6 +164,26 @@ def test_extract_answer_empty_input_returns_none() -> None:
     assert extract_answer_from_qa_history(question, "   \n  ") is None
 
 
+def test_extract_answer_finds_block_when_file_starts_with_question_header() -> None:
+    """A qa_history that begins with '### question' (no file preamble) still extracts the answer.
+
+    The old re.split + blocks[1:] path discarded the first split piece as a
+    presumed file header, so a leading ### block was silently skipped.
+    """
+    qa_history = (
+        "### Which caching library should the session store use?\n"
+        "**Answer:** Redis with TTL eviction.\n"
+        "**Rationale:** Matches existing infra.\n"
+    )
+    question = _open_question("Which caching library should the session store use?")
+
+    result = extract_answer_from_qa_history(question, qa_history)
+
+    assert result is not None
+    assert result.selected_answer == "Redis with TTL eviction."
+    assert result.rationale == "Matches existing infra."
+
+
 def test_extract_answer_preserves_answer_line_matching_question_header(tmp_path: Path) -> None:
     """A continuation line that looks like a '### question' header is escaped and preserved."""
     question_text = "What approach should we use for structuring the docs?"

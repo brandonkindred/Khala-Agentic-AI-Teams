@@ -1,11 +1,13 @@
-"""Validation tests for the Phase 1 structured-output wrapper models.
+"""Validation tests for the Phase 1 and Phase 2 structured-output wrapper models.
 
 These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
 ``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
-``PositioningOutput``) must reject empty/omitted content so Strands'
-structured-output tool retries the LLM instead of silently accepting a blank
-or under-cardinality response (see ``structured_output_tool.py``: a
-``ValidationError`` becomes a tool error the model is asked to fix).
+``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
+``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``,
+``PersonaProfilesOutput``, ``WritingGuidelinesOutput``) must reject empty/omitted
+content so Strands' structured-output tool retries the LLM instead of silently
+accepting a blank or under-cardinality response (see ``structured_output_tool.py``:
+a ``ValidationError`` becomes a tool error the model is asked to fix).
 """
 
 from __future__ import annotations
@@ -14,15 +16,27 @@ import pytest
 from pydantic import ValidationError
 
 from branding_team.models import (
+    AudienceMessageMap,
     AudienceSegment,
     AudienceSegmentsOutput,
+    BrandArchetype,
+    BrandArchetypesOutput,
     BrandDiscoveryAuditOutput,
+    BrandStoryOutput,
     CoreValue,
     CoreValuesOutput,
     DifferentiationPillar,
     DifferentiationPillarsOutput,
+    ElevatorPitch,
+    MessagingFrameworkOutput,
+    MessagingPillar,
+    PersonaProfile,
+    PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
+    TaglineOutput,
+    WritingGuidelinesBody,
+    WritingGuidelinesOutput,
 )
 
 _DISCOVERY_KWARGS = dict(
@@ -102,3 +116,146 @@ def test_differentiation_pillars_output_enforces_stated_cardinality() -> None:
 
     output = DifferentiationPillarsOutput(differentiation_pillars=[pillar] * 2)
     assert len(output.differentiation_pillars) == 2
+
+
+def test_brand_story_output_rejects_missing_and_enforces_cardinality() -> None:
+    """Prompt asks for 3 boilerplate variants (short/medium/long)."""
+    with pytest.raises(ValidationError):
+        BrandStoryOutput()
+    with pytest.raises(ValidationError):
+        BrandStoryOutput(brand_story="", hero_narrative="x", boilerplate_variants=["a", "b", "c"])
+    with pytest.raises(ValidationError):
+        BrandStoryOutput(brand_story="a", hero_narrative="b", boilerplate_variants=["a", "b"])
+
+    output = BrandStoryOutput(
+        brand_story="Origin story.",
+        hero_narrative="Punchy hero.",
+        boilerplate_variants=["short", "medium", "long"],
+    )
+    assert output.hero_narrative == "Punchy hero."
+
+
+_STORY = dict(
+    brand_story="Origin story.",
+    hero_narrative="Punchy hero.",
+    boilerplate_variants=["short", "medium", "long"],
+)
+_ARCHETYPE = BrandArchetype(archetype="The Creator")
+_PITCHES = [
+    ElevatorPitch(tier="5-second", pitch="a"),
+    ElevatorPitch(tier="30-second", pitch="b"),
+    ElevatorPitch(tier="2-minute", pitch="c"),
+]
+_PILLAR = MessagingPillar(pillar="Cohesion")
+_AUDIENCE = AudienceMessageMap(audience_segment="Enterprise leaders")
+_PERSONA = PersonaProfile(name="Alex")
+_GUIDELINES = WritingGuidelinesBody(
+    voice_principles=["a", "b", "c"],
+    style_dos=["a", "b", "c"],
+    style_donts=["a", "b", "c"],
+    editorial_quality_bar=["a", "b", "c"],
+)
+
+
+def test_brand_archetypes_output_enforces_stated_cardinality() -> None:
+    """Prompt asks for "1-2 brand archetypes"; inherits Storyteller fields."""
+    with pytest.raises(ValidationError):
+        BrandArchetypesOutput(**_STORY, brand_archetypes=[])
+    with pytest.raises(ValidationError):
+        BrandArchetypesOutput(**_STORY, brand_archetypes=[_ARCHETYPE] * 3)
+
+    output = BrandArchetypesOutput(**_STORY, brand_archetypes=[_ARCHETYPE])
+    assert len(output.brand_archetypes) == 1
+    assert output.brand_story == "Origin story."
+
+
+def test_tagline_output_rejects_missing_and_enforces_cardinality() -> None:
+    """Prompt asks for three elevator pitch tiers; inherits prior narrative."""
+    base = {**_STORY, "brand_archetypes": [_ARCHETYPE]}
+    with pytest.raises(ValidationError):
+        TaglineOutput(**base, tagline="", tagline_rationale="x", elevator_pitches=_PITCHES)
+    with pytest.raises(ValidationError):
+        TaglineOutput(**base, tagline="x", tagline_rationale="y", elevator_pitches=_PITCHES[:2])
+
+    output = TaglineOutput(
+        **base, tagline="Ship brand", tagline_rationale="Clear", elevator_pitches=_PITCHES
+    )
+    assert output.tagline == "Ship brand"
+    assert output.brand_archetypes[0].archetype == "The Creator"
+
+
+def test_messaging_framework_output_enforces_stated_cardinality() -> None:
+    """Prompt asks for "3-4 messaging pillars" and at least one audience map."""
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+        "elevator_pitches": _PITCHES,
+    }
+    with pytest.raises(ValidationError):
+        MessagingFrameworkOutput(
+            **base, messaging_framework=[_PILLAR, _PILLAR], audience_message_maps=[_AUDIENCE]
+        )
+    with pytest.raises(ValidationError):
+        MessagingFrameworkOutput(
+            **base, messaging_framework=[_PILLAR] * 5, audience_message_maps=[_AUDIENCE]
+        )
+    with pytest.raises(ValidationError):
+        MessagingFrameworkOutput(
+            **base, messaging_framework=[_PILLAR] * 3, audience_message_maps=[]
+        )
+
+    output = MessagingFrameworkOutput(
+        **base, messaging_framework=[_PILLAR] * 3, audience_message_maps=[_AUDIENCE]
+    )
+    assert len(output.messaging_framework) == 3
+
+
+def test_persona_profiles_output_enforces_stated_cardinality() -> None:
+    """Prompt asks for "2-3 persona profiles"."""
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+        "elevator_pitches": _PITCHES,
+        "messaging_framework": [_PILLAR] * 3,
+        "audience_message_maps": [_AUDIENCE],
+    }
+    with pytest.raises(ValidationError):
+        PersonaProfilesOutput(**base, persona_profiles=[_PERSONA])
+    with pytest.raises(ValidationError):
+        PersonaProfilesOutput(**base, persona_profiles=[_PERSONA] * 4)
+
+    output = PersonaProfilesOutput(**base, persona_profiles=[_PERSONA, _PERSONA])
+    assert len(output.persona_profiles) == 2
+
+
+def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() -> None:
+    """Voice agent requires full carry-forward plus nested writing_guidelines."""
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+        "elevator_pitches": _PITCHES,
+        "messaging_framework": [_PILLAR] * 3,
+        "audience_message_maps": [_AUDIENCE],
+        "persona_profiles": [_PERSONA, _PERSONA],
+    }
+    with pytest.raises(ValidationError):
+        WritingGuidelinesOutput(**base)
+    with pytest.raises(ValidationError):
+        WritingGuidelinesOutput(
+            **base,
+            writing_guidelines=WritingGuidelinesBody(
+                voice_principles=["a", "b"],
+                style_dos=["a", "b", "c"],
+                style_donts=["a", "b", "c"],
+                editorial_quality_bar=["a", "b", "c"],
+            ),
+        )
+
+    output = WritingGuidelinesOutput(**base, writing_guidelines=_GUIDELINES)
+    assert len(output.writing_guidelines.voice_principles) == 3

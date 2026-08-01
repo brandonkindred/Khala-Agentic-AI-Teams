@@ -45,7 +45,6 @@ from deepthought.prompts import (
 from deepthought.reasoning import (
     ANALYSIS_KB_SUMMARY_CHARS,
     DIRECT_KB_SUMMARY_CHARS,
-    MAX_CHARS_PER_CHILD_ANSWER,
     MAX_CHILDREN_PER_AGENT,
     build_child_specs,
     build_finding_entry,
@@ -397,9 +396,7 @@ class DeepthoughtAgent:
         user = DELIBERATION_USER_PROMPT.format(
             question=self.spec.focus_question,
             original_query=self.original_query,
-            specialist_results=format_specialist_results(
-                specialist_dicts, max_chars_per_result=MAX_CHARS_PER_CHILD_ANSWER
-            ),
+            specialist_results=format_specialist_results(specialist_dicts),
         )
 
         try:
@@ -429,9 +426,7 @@ class DeepthoughtAgent:
         specialist_dicts = self._results_to_dicts(child_results)
         user = SYNTHESIS_USER_PROMPT.format(
             question=self.spec.focus_question,
-            specialist_results=format_specialist_results(
-                specialist_dicts, max_chars_per_result=MAX_CHARS_PER_CHILD_ANSWER
-            ),
+            specialist_results=format_specialist_results(specialist_dicts),
         )
 
         try:

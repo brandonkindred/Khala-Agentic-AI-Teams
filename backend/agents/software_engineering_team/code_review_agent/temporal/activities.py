@@ -16,6 +16,10 @@ phase, with independent retries and resumability:
 - :func:`find_side_effect_impact_activity` — once-per-submission side-effect /
   blast-radius pass (wraps
   ``side_effect_impact_pass.find_side_effect_impact_issues``).
+- :func:`consolidate_side_effect_issues_activity` — optional merge of related
+  ``side-effects`` findings after the three tail passes (wraps
+  ``side_effect_consolidation.consolidate_side_effect_issues``; gated by
+  ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``, fail-safe on error).
 - :func:`finalize_review_activity` — deterministic reduce gate: dedupe +
   approval reconciliation (wraps ``coordinator._dedupe_issues`` /
   ``_reconcile_approval``).
@@ -396,6 +400,65 @@ def find_side_effect_impact_activity(
     return [i.model_dump(mode="json") for i in findings]
 
 
+@activity.defn(name="code_review_side_effect_consolidation")
+def consolidate_side_effect_issues_activity(
+    review_input: Dict[str, Any],
+    issues: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge related ``side-effects`` findings before the final dedupe/gate.
+
+    Called after the false-positive, architecture, and side-effect tail passes
+    have contributed their findings, and before ``finalize_review_activity``
+    applies the exact-match dedupe and approval reconciliation.
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict.
+        - ``issues`` is the post-tail-pass issue list (each a
+          ``CodeReviewIssue.model_dump(mode="json")`` dict), already including
+          any architecture / side-effect additions.
+
+    Postconditions:
+        - When ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` is disabled, returns
+          ``issues`` unchanged (same length and content).
+        - When enabled, returns the consolidated issue list from
+          ``consolidate_side_effect_issues`` (related ``side-effects`` findings
+          merged; every other category passes through untouched), serialized as
+          ``model_dump(mode="json")`` dicts.
+        - Never raises: any reconstruction / index / consolidation failure
+          logs a warning and returns the original ``issues`` unchanged
+          (fail-safe), matching the in-process coordinator's try/except around
+          the same step.
+    """
+    from shared.env import env_flag_enabled
+
+    from ..false_positive_filter import CodebaseIndex
+    from ..models import CodeReviewInput, CodeReviewIssue
+    from ..side_effect_consolidation import (
+        SIDE_EFFECT_CONSOLIDATION_ENV,
+        consolidate_side_effect_issues,
+    )
+
+    if not env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV):
+        return issues
+
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        parsed_issues = [CodeReviewIssue.model_validate(i) for i in issues]
+        index = CodebaseIndex.from_input(
+            input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+        consolidated = consolidate_side_effect_issues(parsed_issues, index)
+    except Exception as exc:  # noqa: BLE001 - fail-safe: keep unconsolidated issues
+        logger.warning(
+            "SideEffectConsolidation: activity failed (%s: %s); "
+            "using unconsolidated issues",
+            type(exc).__name__,
+            exc,
+        )
+        return issues
+    return [i.model_dump(mode="json") for i in consolidated]
+
+
 @activity.defn(name="code_review_finalize")
 def finalize_review_activity(
     verified_issues: List[Dict[str, Any]],
@@ -403,7 +466,7 @@ def finalize_review_activity(
     skipped_issues: List[Dict[str, Any]],
     approved_flags: List[bool],
 ) -> Dict[str, Any]:
-    """Deterministic reduce gate: dedupe the merged findings and reconcile approval.
+    """Deterministic reduce gate: dedupe, cap, and reconcile approval.
 
     Preconditions:
         - ``verified_issues`` are the post-false-positive genuine findings,
@@ -416,12 +479,13 @@ def finalize_review_activity(
 
     Postconditions:
         - Returns ``{"approved": bool, "issues": [issue dicts]}`` computed by
-          ``coordinator._dedupe_issues`` over the merged findings and
-          ``coordinator._reconcile_approval`` with the anti-loop safety nets — the
-          identical deterministic gate ``run_coordinator`` applies, so the verdict
-          matches thread mode.
+          ``coordinator._dedupe_issues`` over the merged findings,
+          ``coordinator._cap_issues`` (severity-first, at most
+          ``MAX_CODE_REVIEW_ISSUES``), and ``coordinator._reconcile_approval``
+          with the anti-loop safety nets — the identical deterministic gate
+          ``run_coordinator`` applies, so the verdict matches thread mode.
     """
-    from ..coordinator import _dedupe_issues, _reconcile_approval
+    from ..coordinator import _cap_issues, _dedupe_issues, _reconcile_approval
     from ..models import CodeReviewIssue
 
     verified = [CodeReviewIssue.model_validate(i) for i in verified_issues]
@@ -429,6 +493,7 @@ def finalize_review_activity(
     skipped = [CodeReviewIssue.model_validate(i) for i in skipped_issues]
 
     deduped = _dedupe_issues([*verified, *not_reviewed, *skipped])
+    deduped = _cap_issues(deduped)
     assert approved_flags, "unreachable: workflow raises before calling this activity when empty"
     all_llm_approved = all(approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
@@ -455,19 +520,35 @@ def synthesize_findings_activity(
           on any failure (so the workflow falls back to deterministic
           concatenation). Wraps ``synthesis.synthesize_review_findings``, which
           never raises and never touches the verdict.
+        - Never raises: this activity as a whole is fail-safe, including
+          ``_resolve_llm()`` itself. Resolving the LLM client happens before
+          (and outside) the wrapped function's own failure handling, so without
+          this activity's own try/except a client-resolution failure (e.g. no
+          LLM provider configured) would raise instead of returning ``None`` and
+          letting the workflow fall back to deterministic concatenation. An
+          activity failure here would only ever be an unexpected defect, not an
+          expected outcome.
     """
     from ..models import CodeReviewInput, CodeReviewIssue
     from ..synthesis import synthesize_review_findings
 
-    input_data = CodeReviewInput.model_validate(review_input)
-    result = synthesize_review_findings(
-        _resolve_llm(),
-        input_data=input_data,
-        approved=approved,
-        issues=[CodeReviewIssue.model_validate(i) for i in issues],
-        chunk_summaries=chunk_summaries,
-        chunk_spec_notes=chunk_spec_notes,
-    )
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        result = synthesize_review_findings(
+            _resolve_llm(),
+            input_data=input_data,
+            approved=approved,
+            issues=[CodeReviewIssue.model_validate(i) for i in issues],
+            chunk_summaries=chunk_summaries,
+            chunk_spec_notes=chunk_spec_notes,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: synthesis must never break the review
+        logger.warning(
+            "SynthesizeFindings: activity failed (%s: %s); returning None",
+            type(exc).__name__,
+            exc,
+        )
+        return None
     if result is None:
         return None
     return {"summary": result.summary, "spec_compliance_notes": result.spec_compliance_notes}

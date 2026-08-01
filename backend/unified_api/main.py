@@ -34,7 +34,13 @@ if str(_project_root) not in sys.path:
 
 from shared.env_config import env_float
 from unified_api.bounded_executor import get_or_recreate_executor
-from unified_api.config import TEAM_CONFIGS, get_enabled_teams
+from unified_api.config import (
+    TEAM_CONFIGS,
+    UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER,
+    UNIFIED_API_SANDBOX_TEMPORAL_WORKER,
+    UNIFIED_API_TEAM_ASSISTANTS_ENABLED,
+    get_enabled_teams,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -236,6 +242,82 @@ async def _start_sandbox_reaper_task() -> asyncio.Task:
     return asyncio.create_task(run_idle_reaper())
 
 
+async def _maybe_start_sandbox_reaper() -> asyncio.Task | None:
+    """Start the Agent Console sandbox idle reaper, unless disabled via
+    UNIFIED_API_SANDBOX_TEMPORAL_WORKER.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns the background asyncio.Task when
+          UNIFIED_API_SANDBOX_TEMPORAL_WORKER is true (default) and startup
+          succeeds.
+        * Returns None when the flag is false, or when
+          _start_sandbox_reaper_task raises (logged as a warning; startup is
+          not aborted, matching every other lifespan startup step).
+    """
+    if not UNIFIED_API_SANDBOX_TEMPORAL_WORKER:
+        logger.info("Agent Console sandbox reaper disabled (UNIFIED_API_SANDBOX_TEMPORAL_WORKER=false)")
+        return None
+    try:
+        return await _start_sandbox_reaper_task()
+    except Exception:
+        logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
+        return None
+
+
+def _mount_team_assistants(app: FastAPI) -> int:
+    """Mount team assistant conversational sub-apps for every configured team.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns the number of assistant sub-apps mounted.
+    """
+    from team_assistant.api import create_assistant_app
+    from team_assistant.config import TEAM_ASSISTANT_CONFIGS
+
+    assistant_count = 0
+    for team_key, assistant_config in TEAM_ASSISTANT_CONFIGS.items():
+        team_cfg = TEAM_CONFIGS.get(team_key)
+        if team_cfg:
+            assistant_app = create_assistant_app(assistant_config)
+            assistant_app.add_middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+            app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
+            assistant_count += 1
+    return assistant_count
+
+
+def _maybe_mount_team_assistants(app: FastAPI) -> int:
+    """Mount team assistant sub-apps unless disabled via
+    UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns the number of assistant sub-apps mounted: 0 when the flag
+          is false, or when _mount_team_assistants raises (logged as a
+          warning; startup is not aborted, matching every other lifespan
+          startup step).
+    """
+    if not UNIFIED_API_TEAM_ASSISTANTS_ENABLED:
+        logger.info("Team assistant sub-apps disabled (UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false)")
+        return 0
+    try:
+        count = _mount_team_assistants(app)
+        logger.info("Mounted %d team assistant sub-apps", count)
+        return count
+    except Exception:
+        logger.warning("Could not mount team assistant sub-apps", exc_info=True)
+        return 0
+
+
 async def _health_check_loop() -> None:
     """Periodically probe all registered teams' health endpoints.
 
@@ -353,18 +435,24 @@ def _start_agent_studio_temporal_worker() -> None:
 
     Agent Studio is an in-process team (mounted on this app, not a separate
     ``team_service`` container), so its worker runs here and its activity threads
-    share this process's :class:`AgentStudioService` singleton. Gated only on the team
-    being enabled — Agent Studio assumes Temporal is always configured. The worker is a
-    daemon thread (no shutdown handle needed); log-and-continue on failure, matching
+    share this process's :class:`AgentStudioService` singleton. Gated on
+    ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled —
+    Agent Studio assumes Temporal is always configured. The worker is a daemon
+    thread (no shutdown handle needed); log-and-continue on failure, matching
     the other lifespan startup steps.
 
     Postconditions:
+        - Logs at INFO and returns without starting a worker when
+          ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
         - Logs at INFO only when a worker actually started; when ``start_team_worker``
           returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker), logs a WARNING
           instead of a misleading success line, since Agent Studio is Temporal-only and
           its requests will fail until Temporal is configured. Startup is not aborted
           (that would take down every other team for one in-process team's config).
     """
+    if not UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER:
+        logger.info("Agent Studio Temporal worker disabled (UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false)")
+        return
     if not TEAM_CONFIGS["agent_studio"].enabled:
         return
     try:
@@ -496,28 +584,9 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
             logger.exception("product_delivery postgres schema registration failed")
             _in_process_schema_failures.add("product_delivery")
 
-    # 1. Mount team assistant conversational sub-apps (before proxy routes).
-    try:
-        from team_assistant.api import create_assistant_app
-        from team_assistant.config import TEAM_ASSISTANT_CONFIGS
-
-        assistant_count = 0
-        for team_key, assistant_config in TEAM_ASSISTANT_CONFIGS.items():
-            team_cfg = TEAM_CONFIGS.get(team_key)
-            if team_cfg:
-                assistant_app = create_assistant_app(assistant_config)
-                assistant_app.add_middleware(
-                    CORSMiddleware,
-                    allow_origins=["*"],
-                    allow_credentials=True,
-                    allow_methods=["*"],
-                    allow_headers=["*"],
-                )
-                app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
-                assistant_count += 1
-        logger.info("Mounted %d team assistant sub-apps", assistant_count)
-    except Exception:
-        logger.warning("Could not mount team assistant sub-apps", exc_info=True)
+    # 1. Mount team assistant conversational sub-apps (before proxy routes),
+    #    unless disabled via UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
+    _maybe_mount_team_assistants(app)
 
     # 2. Register proxy routes for all team containers (after assistant mounts).
     _registered_teams = _register_proxy_routes(app)
@@ -529,8 +598,9 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     health_task = asyncio.create_task(_health_check_loop())
     logger.info("Started background health checker (interval=%ds)", _HEALTH_CHECK_INTERVAL)
 
-    # 4. Start the Agent Console sandbox idle reaper. When Temporal is enabled it
-    #    runs as a durable, single-instance SandboxReaperWorkflow served by this
+    # 4. Start the Agent Console sandbox idle reaper, unless disabled via
+    #    UNIFIED_API_SANDBOX_TEMPORAL_WORKER. When Temporal is enabled it runs
+    #    as a durable, single-instance SandboxReaperWorkflow served by this
     #    process's own sandbox-only Temporal worker (survives restarts);
     #    otherwise it's an in-process asyncio task (thread mode). The Temporal
     #    branch is a background retry loop, not a single blocking attempt: the
@@ -539,11 +609,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     #    not mean the reaper never starts for the life of the process. See
     #    _start_sandbox_reaper_task's docstring for why the sandbox worker must
     #    be booted here rather than shared with this team's general worker.
-    sandbox_reaper_task: asyncio.Task | None = None
-    try:
-        sandbox_reaper_task = await _start_sandbox_reaper_task()
-    except Exception:
-        logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
+    sandbox_reaper_task = await _maybe_start_sandbox_reaper()
 
     # 5. Start the Agent Console run pruner (Phase 3).
     run_pruner_task: asyncio.Task | None = None

@@ -19,13 +19,7 @@ import pytest
 
 import branding_team.api.main as main
 from branding_team.models import BrandPhase, TeamOutput, WorkflowStatus
-from branding_team.tests._fake_postgres import install_fake_postgres
 from branding_team.tests.conftest import make_mission
-
-
-@pytest.fixture(autouse=True)
-def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
-    return install_fake_postgres(monkeypatch)
 
 
 def _ready_mission():

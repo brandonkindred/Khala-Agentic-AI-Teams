@@ -6,14 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any, List, Optional
 
-from strands import Agent
-
 from ...models import WINNING_THRESHOLD, BacktestResult, StrategySpec, TradeRecord
-from ._llm_envelope import run_structured_agent
-from ._parse_helpers import extract_json_object
+from ._agent_runner import run_single_shot_agent
 from ._prompt_context import spec_prompt_fields
 from .alignment import TradeAlignmentReport
-from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -196,24 +192,23 @@ class AnalysisAgent:
             robustness_caveats_section=caveats_section,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_analysis"), system_prompt=system_prompt, tools=[]
-        )
-
-        try:
-            draft_parsed = run_structured_agent(
-                agent,
-                draft_prompt,
-                agent_key="strategy_analysis",
-                phase="analysis_draft",
-                parse=extract_json_object,
-                charge=False,
-                logger=logger,
-            )
-            draft_narrative = draft_parsed.get("draft_narrative", "")
-        except Exception:
+        def _on_draft_failure(exc: Exception) -> str:
             logger.exception("Draft analysis failed")
             return _fallback_narrative(spec, metrics, is_winning, alignment_report)
+
+        ok, draft_parsed = run_single_shot_agent(
+            agent_key="strategy_analysis",
+            phase="analysis_draft",
+            system_prompt=system_prompt,
+            user_prompt=draft_prompt,
+            charge=False,
+            guard_design_budget=False,
+            logger=logger,
+            on_failure=_on_draft_failure,
+        )
+        if not ok:
+            return draft_parsed
+        draft_narrative = draft_parsed.get("draft_narrative", "")
 
         if not draft_narrative:
             return _fallback_narrative(spec, metrics, is_winning, alignment_report)
@@ -248,25 +243,24 @@ class AnalysisAgent:
             "\n\n" + _STOP_ORDER_SEMANTICS
         )
 
-        review_agent = Agent(
-            model=get_strands_model("strategy_analysis"), system_prompt=review_system, tools=[]
-        )
+        def _on_review_failure(exc: Exception) -> None:
+            logger.exception("Self-review failed, using draft")
+            return None
 
-        try:
-            review_parsed = run_structured_agent(
-                review_agent,
-                review_prompt,
-                agent_key="strategy_analysis",
-                phase="analysis_review",
-                parse=extract_json_object,
-                charge=False,
-                logger=logger,
-            )
+        ok, review_parsed = run_single_shot_agent(
+            agent_key="strategy_analysis",
+            phase="analysis_review",
+            system_prompt=review_system,
+            user_prompt=review_prompt,
+            charge=False,
+            guard_design_budget=False,
+            logger=logger,
+            on_failure=_on_review_failure,
+        )
+        if ok:
             revised = review_parsed.get("revised_narrative", "")
             if revised:
                 return _ensure_misalignment_disclaimer(revised, alignment_report)
-        except Exception:
-            logger.exception("Self-review failed, using draft")
 
         return _ensure_misalignment_disclaimer(draft_narrative, alignment_report)
 

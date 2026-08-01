@@ -225,11 +225,45 @@ def test_parse_json_with_recovery_no_chunks_path(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_returns_none_on_exception(monkeypatch) -> None:
-    """parse_json_with_recovery returns None (does not raise) when the underlying completion call raises."""
+    """parse_json_with_recovery returns None when completion raises LLMJsonParseError."""
+    from llm_service import LLMJsonParseError
     from software_engineering_team.shared import json_utils
 
     def boom(*a, **kw):
-        raise RuntimeError("network")
+        raise LLMJsonParseError("bad json")
+
+    monkeypatch.setattr(
+        "software_engineering_team.shared.llm.complete_json_with_continuation", boom
+    )
+    out = json_utils.parse_json_with_recovery(MagicMock(), "p", agent_name="A")
+    assert out is None
+
+
+def test_parse_json_with_recovery_propagates_non_recovery_exception(monkeypatch) -> None:
+    """Non-recovery exceptions from completion must propagate, not become None."""
+    from software_engineering_team.shared import json_utils
+
+    def boom(*a, **kw):
+        raise ValueError("programming bug")
+
+    monkeypatch.setattr(
+        "software_engineering_team.shared.llm.complete_json_with_continuation", boom
+    )
+    try:
+        json_utils.parse_json_with_recovery(MagicMock(), "p", agent_name="A")
+    except ValueError as e:
+        assert str(e) == "programming bug"
+    else:
+        raise AssertionError("expected ValueError to propagate")
+
+
+def test_parse_json_with_recovery_returns_none_on_transient_llm_error(monkeypatch) -> None:
+    """parse_json_with_recovery returns None when completion raises a transient LLM error."""
+    from llm_service import LLMTemporaryError
+    from software_engineering_team.shared import json_utils
+
+    def boom(*a, **kw):
+        raise LLMTemporaryError("provider exhausted")
 
     monkeypatch.setattr(
         "software_engineering_team.shared.llm.complete_json_with_continuation", boom
@@ -287,11 +321,12 @@ def test_parse_json_with_recovery_chunked_empty(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_chunked_failure(monkeypatch) -> None:
-    """parse_json_with_recovery returns None when a chunk completion raises mid-recovery."""
+    """parse_json_with_recovery returns None when a chunk completion raises LLMJsonParseError."""
+    from llm_service import LLMJsonParseError
     from software_engineering_team.shared import json_utils
 
     def boom(*a, **kw):
-        raise RuntimeError("chunk failed")
+        raise LLMJsonParseError("chunk failed")
 
     monkeypatch.setattr(
         "software_engineering_team.shared.llm.complete_json_with_continuation", boom
