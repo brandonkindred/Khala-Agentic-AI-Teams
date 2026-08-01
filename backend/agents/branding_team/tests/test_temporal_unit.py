@@ -652,7 +652,11 @@ def test_run_single_phase_extracts_output_and_injects_context(monkeypatch) -> No
     monkeypatch.setitem(
         orch_mod._PHASE_SPEC,
         BrandPhase.NARRATIVE_MESSAGING,
-        (lambda: MagicMock(), "phase2_narrative", NarrativeMessagingOutput),
+        orch_mod._PhaseSpec(
+            builder_fn=lambda: MagicMock(),
+            node_id="phase2_narrative",
+            model_cls=NarrativeMessagingOutput,
+        ),
     )
 
     mission = make_mission()
@@ -693,7 +697,11 @@ def test_run_single_phase_uses_shared_graph_timeouts(monkeypatch) -> None:
     monkeypatch.setitem(
         orch_mod._PHASE_SPEC,
         BrandPhase.NARRATIVE_MESSAGING,
-        (lambda: MagicMock(), "phase2_narrative", NarrativeMessagingOutput),
+        orch_mod._PhaseSpec(
+            builder_fn=lambda: MagicMock(),
+            node_id="phase2_narrative",
+            model_cls=NarrativeMessagingOutput,
+        ),
     )
 
     orch_mod.BrandingTeamOrchestrator().run_single_phase(
