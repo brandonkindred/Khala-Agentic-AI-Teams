@@ -417,6 +417,80 @@ def test_noop_amend_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report.proposed == 0 and report.deduped == 1 and created == []
 
 
+def test_noop_amend_dropped_when_priority_omitted() -> None:
+    # Amend restates the target's text/mode/predicate and omits priority entirely
+    # (relying on inheritance) rather than spelling out the current value — the
+    # resolved priority still equals the target's, so this is still a no-op.
+    target = _rule(rid="r1", text="be kind", priority=5)
+    proposal = reflection._build_proposal(
+        "a", ProposalAction.AMEND, [], _NOW, target_rule_id="r1", proposed_rule={"text": "be kind"}
+    )
+    assert reflection._is_noop_amend(proposal, {"r1": target}) is True
+
+
+def test_pending_amend_with_omitted_priority_dedupes_against_inherited_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An advisory target with a non-default priority isolates the priority gap
+    # from mode/predicate concerns: a pending row whose proposed_rule physically
+    # omits priority (legacy/partial data) must still key identically to a fresh
+    # proposal that inherits the same value from the active target.
+    target = _rule(rid="r1", text="be kind to users", mode=RuleMode.ADVISORY, priority=5)
+    legacy_pending = RuleProposal(
+        id=str(uuid4()),
+        agent_id="a",
+        action=ProposalAction.AMEND,
+        target_rule_id="r1",
+        proposed_rule={"text": "be kind to users, always"},  # priority omitted
+        evidence=[],
+        stale_evidence=False,
+        status=ProposalStatus.PENDING,
+        created_at=_NOW,
+    )
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "amend", "target_rule_id": "r1", "text": "be kind to users, always"}],
+        rules=[target],
+        pending=[legacy_pending],
+    )
+    report = reflection.reflect("a", _NOW)
+    # Both resolve (inherited from r1) to priority=5 → same identity → deduped.
+    assert report.proposed == 0 and report.deduped == 1 and created == []
+
+
+def test_pending_amend_with_omitted_mode_and_priority_dedupes_against_inherited_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The exact scenario from the reported defect: an enforced target with a
+    # non-default priority, and a pending row whose proposed_rule omits mode and
+    # priority (legacy/partial data) but carries the correct inherited predicate.
+    # A fresh amend proposing the same text and also omitting mode/priority must
+    # still be recognized as a duplicate, since both resolve identically via
+    # target inheritance.
+    target = _rule(
+        rid="r1", text="validate x", mode=RuleMode.ENFORCED, priority=5, predicate=_GOOD_PREDICATE
+    )
+    legacy_pending = RuleProposal(
+        id=str(uuid4()),
+        agent_id="a",
+        action=ProposalAction.AMEND,
+        target_rule_id="r1",
+        proposed_rule={"text": "validate x carefully", "predicate": _GOOD_PREDICATE},
+        evidence=[],
+        stale_evidence=False,
+        status=ProposalStatus.PENDING,
+        created_at=_NOW,
+    )
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "amend", "target_rule_id": "r1", "text": "validate x carefully"}],
+        rules=[target],
+        pending=[legacy_pending],
+    )
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 0 and report.deduped == 1 and created == []
+
+
 def test_render_rules_shows_enforced_predicate_only() -> None:
     advisory = _rule(rid="r1", text="be kind")
     enforced = _rule(rid="r2", text="validate x", mode=RuleMode.ENFORCED, predicate=_GOOD_PREDICATE)
@@ -902,12 +976,13 @@ def test_dedupe_key_normalizes_text_mode_and_handles_retire() -> None:
         proposed_rule={"text": "be kind", "mode": "enforced", "predicate": _GOOD_PREDICATE},
     )
     retire = reflection._build_proposal("a", ProposalAction.RETIRE, [], _NOW, target_rule_id="r1")
-    # add (advisory default): mode folded in, no predicate fingerprint.
-    assert reflection._dedupe_key_of(add) == ("add", None, "be kind", "advisory", None, None)
+    # add (no target → advisory/0 defaults, matching _build_proposed_rule): mode
+    # and priority folded in, no predicate fingerprint.
+    assert reflection._dedupe_key_of(add, {}) == ("add", None, "be kind", "advisory", None, 0)
     # same text but enforced + predicate → a distinct key (not a duplicate of add).
-    assert reflection._dedupe_key_of(enforced) != reflection._dedupe_key_of(add)
-    assert reflection._dedupe_key_of(enforced)[3] == "enforced"
-    assert reflection._dedupe_key_of(retire) == ("retire", "r1", None, None, None, None)
+    assert reflection._dedupe_key_of(enforced, {}) != reflection._dedupe_key_of(add, {})
+    assert reflection._dedupe_key_of(enforced, {})[3] == "enforced"
+    assert reflection._dedupe_key_of(retire, {}) == ("retire", "r1", None, None, None, None)
 
 
 def test_restates_active_rule_matches_add_content_only() -> None:
