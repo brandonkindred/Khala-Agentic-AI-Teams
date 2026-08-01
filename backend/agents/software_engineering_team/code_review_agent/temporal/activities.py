@@ -433,9 +433,12 @@ def consolidate_side_effect_issues_activity(
 
     from ..false_positive_filter import CodebaseIndex
     from ..models import CodeReviewInput, CodeReviewIssue
-    from ..side_effect_consolidation import consolidate_side_effect_issues
+    from ..side_effect_consolidation import (
+        SIDE_EFFECT_CONSOLIDATION_ENV,
+        consolidate_side_effect_issues,
+    )
 
-    if not env_flag_enabled("CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"):
+    if not env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV):
         return issues
 
     try:

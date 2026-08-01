@@ -94,6 +94,7 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
+from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -915,9 +916,7 @@ def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str)
     """
     payload = input_data.model_dump(mode="json")
     payload["__model__"] = model_fingerprint
-    payload["__side_effect_consolidation__"] = env_flag_enabled(
-        "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
-    )
+    payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
     return _stable_json_digest(payload)
 
 

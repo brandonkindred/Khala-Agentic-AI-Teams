@@ -39,6 +39,14 @@ from .models import CodeReviewIssue
 
 _SIDE_EFFECT_CATEGORY = "side-effects"
 
+# Default-on toggle: an explicit ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION=false``/
+# ``0``/``no`` disables merging of related "side-effects" findings (see
+# docs/ENV_VARS.md). Any other value (or unset) leaves consolidation enabled.
+# Single source of truth for the toggle's name — every caller (coordinator.py,
+# temporal/activities.py, mapping.py's cache fingerprint) imports this constant
+# rather than re-spelling the env var name, so a rename can't silently drift.
+SIDE_EFFECT_CONSOLIDATION_ENV = "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
+
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 # Extensions resolved via the AST-based enclosing_construct (exact ranges).
@@ -46,11 +54,27 @@ _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 # column-0 heuristic cannot distinguish indented methods and would false-merge.
 _PYTHON_EXTS = frozenset({".py", ".pyi"})
 
+# Conventional extensionless filenames a citation may reference (build/config
+# files have no ``.ext`` for the first alternative below to anchor on).
+_EXTENSIONLESS_NAMES = (
+    "Dockerfile",
+    "Makefile",
+    "Rakefile",
+    "Gemfile",
+    "Procfile",
+    "Jenkinsfile",
+    "Vagrantfile",
+    "LICENSE",
+)
+
 # Matches a "path:line" citation embedded in a finding's prose, e.g. the
-# side-effect prompt's expected "caller at foo/bar.py:42 assumes ..." phrasing.
-# Best-effort: a citation phrased without a literal ``path:line`` substring
-# (e.g. "line 42 of foo/bar.py") is not recognized.
-_CITATION_RE = re.compile(r"([\w./\\-]+\.\w+):(\d+)")
+# side-effect prompt's expected "caller at foo/bar.py:42 assumes ..." phrasing,
+# or a conventional extensionless file like "Dockerfile:12". Best-effort: a
+# citation phrased without a literal ``path:line`` substring (e.g. "line 42 of
+# foo/bar.py") is not recognized.
+_CITATION_RE = re.compile(
+    r"([\w./\\-]+\.\w+|\b(?:" + "|".join(_EXTENSIONLESS_NAMES) + r")\b):(\d+)"
+)
 
 _ConstructKey = Tuple[str, int]
 
@@ -65,15 +89,20 @@ class _UnionFind:
     """
 
     def __init__(self, n: int) -> None:
+        """Preconditions: ``n >= 0``. Postconditions: ``find(x) == x`` for every ``x in range(n)``."""
         self._parent = list(range(n))
 
     def find(self, x: int) -> int:
+        """Preconditions: ``x in range(n)`` (from ``__init__``). Postconditions: returns ``x``'s set
+        representative, path-compressing along the way; never raises for an in-range ``x``."""
         while self._parent[x] != x:
             self._parent[x] = self._parent[self._parent[x]]
             x = self._parent[x]
         return x
 
     def union(self, a: int, b: int) -> None:
+        """Preconditions: ``a`` and ``b`` are both in ``range(n)``. Postconditions:
+        ``find(a) == find(b)`` afterwards; a no-op when they were already in the same set."""
         ra, rb = self.find(a), self.find(b)
         if ra != rb:
             self._parent[rb] = ra
@@ -127,15 +156,17 @@ class _ConstructResolver:
         canonical = self._shared_index.resolve_path(file_path)
         if not canonical:
             return None
-        content = self._content(canonical)
-        if not content:
-            return None
-        stripped, physical, mapper = strip_numbered_prefixes(content, line)
         _, ext = os.path.splitext(canonical)
         if ext.lower() not in _PYTHON_EXTS:
             # Column-0 heuristics cannot tell indented methods apart; skip
             # same-construct grouping for non-Python rather than false-merge.
+            # Checked before reading/stripping content so non-Python files
+            # never pay for a scan whose result is discarded.
             return None
+        content = self._content(canonical)
+        if not content:
+            return None
+        stripped, physical, mapper = strip_numbered_prefixes(content, line)
         construct = enclosing_construct(
             stripped, physical, annotated_hunks=mapper is not None
         )
@@ -165,6 +196,12 @@ class _ConstructResolver:
 
 
 def _severity_rank(severity: str) -> int:
+    """Preconditions: ``severity`` is a string (may be blank/None-like via ``or ""``).
+
+    Postconditions: returns a lower rank for a more severe value (``critical`` < ``high`` <
+    ``medium`` < ``low`` < ``info``); an unrecognized or blank value ranks lowest (last).
+    Never raises.
+    """
     return _SEVERITY_RANK.get((severity or "").strip().lower(), len(_SEVERITY_RANK))
 
 
@@ -175,6 +212,13 @@ def _dedupe_exact(items: List[str]) -> List[str]:
     this keeps descriptions that differ only in a cited ``path:line`` — those
     caller-specific details are the blast-radius evidence the consolidated
     finding must surface.
+
+    Preconditions:
+        - ``items`` is a list of strings.
+
+    Postconditions:
+        - Returns a new list containing each distinct string from ``items``
+          exactly once, in first-occurrence order. Never raises.
     """
     seen: set[str] = set()
     unique: List[str] = []
@@ -263,18 +307,14 @@ def _merge_group(
     # merge doesn't collapse an already-multi-line member down to just its
     # end line. Compare on canonical paths so basename aliases contribute
     # their lines to the same span as the resolved key.
-    starts = [
-        issue.start_line if issue.start_line is not None else issue.line
+    majority_lines = [
+        issue
         for issue in group
         if _canonical_path(shared_index, issue.file_path or "") == majority_file
         and issue.line is not None
     ]
-    ends = [
-        issue.line
-        for issue in group
-        if _canonical_path(shared_index, issue.file_path or "") == majority_file
-        and issue.line is not None
-    ]
+    starts = [issue.start_line if issue.start_line is not None else issue.line for issue in majority_lines]
+    ends = [issue.line for issue in majority_lines]
     line = max(ends) if ends else None
     earliest_start = min(starts) if starts else None
     start_line = earliest_start if earliest_start is not None and earliest_start != line else None

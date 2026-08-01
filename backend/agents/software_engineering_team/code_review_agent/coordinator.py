@@ -147,7 +147,12 @@ from .models import (
     notify_review_progress,
 )
 from .repo_reader import RepoReader
-from .side_effect_consolidation import consolidate_side_effect_issues
+from .side_effect_consolidation import (
+    SIDE_EFFECT_CONSOLIDATION_ENV as _SIDE_EFFECT_CONSOLIDATION_ENV,
+)
+from .side_effect_consolidation import (
+    consolidate_side_effect_issues,
+)
 from .side_effect_impact_pass import find_side_effect_impact_issues
 from .synthesis import synthesize_review_findings
 
@@ -188,12 +193,6 @@ __all__ = [
     "_surface_by_path",
     "_symbol_surface",
 ]
-
-# Default-on toggle: an explicit ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION=false``/``0``/``no``
-# disables merging of related "side-effects" findings (see docs/ENV_VARS.md). Any other
-# value (or unset) leaves consolidation enabled.
-_SIDE_EFFECT_CONSOLIDATION_ENV = "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
-
 
 # Process-global submission-level short-circuit cache (see module docstring).
 # Bounded LRU mapping a whole-submission fingerprint -> the approved

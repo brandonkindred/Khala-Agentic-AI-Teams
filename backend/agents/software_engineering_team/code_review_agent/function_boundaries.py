@@ -222,6 +222,14 @@ def enclosing_construct(
     left alone — it is a valid Ellipsis statement in protocol/stub bodies,
     and splitting on it would incorrectly report those lines as module-level.
 
+    Behavior note: this intentionally resolves each hunk independently rather
+    than ``ast.parse``-ing the whole (possibly multi-hunk) content as one
+    blob. A line inside one hunk now still resolves even when a *different*
+    hunk in the same excerpt wouldn't parse standalone (e.g. an indented
+    continuation with no declaration in its own hunk) — a case the
+    single-parse approach this replaced would have reported as an unparseable
+    line for every hunk in that excerpt, including otherwise-valid ones.
+
     Preconditions:
         - ``content`` is a string (may be empty).
         - ``line_number`` >= 1.
