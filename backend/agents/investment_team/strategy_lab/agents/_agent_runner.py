@@ -62,10 +62,11 @@ Invariants:
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from strands import Agent
 
+from ._llm_budget import DesignBudgetExhausted
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
 from .model_factory import get_strands_model
@@ -153,4 +154,89 @@ def run_json_with_parse_retry(
     )
 
 
-__all__ = ["run_json_with_parse_retry"]
+def run_single_shot_agent(
+    *,
+    agent_key: str,
+    phase: str,
+    system_prompt: str,
+    user_prompt: str,
+    on_failure: Callable[[Exception], Any],
+    parse: Callable[[str], Any] = extract_json_object,
+    charge: bool = True,
+    max_attempts: Optional[int] = None,
+    guard_design_budget: bool = True,
+    model_kwargs: Optional[Dict[str, Any]] = None,
+    logger: logging.Logger,
+) -> Tuple[bool, Any]:
+    """Run the build-Agent → invoke → catch-and-wrap sequence shared by every
+    Strategy Lab non-retrying structured-output call.
+
+    Preconditions:
+      * ``agent_key`` / ``phase`` are non-empty diagnostic + model-routing
+        labels, forwarded to ``model_factory.get_strands_model`` and
+        ``run_structured_agent`` respectively.
+      * ``system_prompt`` / ``user_prompt`` are the (already fully rendered)
+        strings to build the ``Agent`` and invoke it with; neither is mutated
+        or retried by this driver — this is a single-shot call, not a retry
+        loop (see :func:`run_json_with_parse_retry` for that variant).
+      * ``on_failure`` is required and is called as ``on_failure(exc)``
+        exactly once, and only, when the invocation raises an exception this
+        driver does not itself propagate bare (see Postconditions). It may
+        raise (typically a caller-specific domain exception, chained via
+        ``from exc``) or return a fallback value.
+      * ``guard_design_budget`` controls whether ``DesignBudgetExhausted`` is
+        treated specially (re-raised bare, the default) or handed to
+        ``on_failure`` like any other exception — callers whose current
+        behavior has no ``DesignBudgetExhausted``-specific handling must pass
+        ``guard_design_budget=False`` to preserve that behavior unchanged.
+      * ``model_kwargs``, if given, is forwarded as ``**model_kwargs`` to
+        ``get_strands_model`` (e.g. ``{"response_format": "text"}``).
+
+    Postconditions:
+      * Returns ``(True, result)`` where ``result`` is whatever
+        ``run_structured_agent`` returned, on success.
+      * Returns ``(False, on_failure(exc))`` when the invocation raises and
+        ``on_failure`` returns a value instead of raising.
+      * If ``on_failure`` itself raises, that exception propagates
+        unmodified — this driver never returns in that case.
+      * When ``guard_design_budget`` is True (the default), a
+        ``DesignBudgetExhausted`` raised by the invocation propagates bare,
+        unmodified, without ever reaching ``on_failure``.
+
+    Invariants:
+      * ``on_failure(exc)`` is invoked synchronously, from within this
+        function's own ``except`` block — never deferred or stored for later
+        — so that an ``on_failure`` implementation calling
+        ``logger.exception(...)`` (relying on ambient ``sys.exc_info()``
+        rather than an explicit ``exc_info=`` argument) captures the correct
+        traceback.
+      * Exactly one ``Agent`` is built and invoked per call — no retry, no
+        history carryover (matches the "fresh Agent per attempt" invariant of
+        :func:`run_json_with_parse_retry`).
+    """
+    agent = Agent(
+        model=get_strands_model(agent_key, **(model_kwargs or {})),
+        system_prompt=system_prompt,
+        tools=[],
+    )
+    try:
+        result = run_structured_agent(
+            agent,
+            user_prompt,
+            agent_key=agent_key,
+            phase=phase,
+            parse=parse,
+            charge=charge,
+            max_attempts=max_attempts,
+            logger=logger,
+        )
+    except DesignBudgetExhausted as exc:
+        if guard_design_budget:
+            raise
+        return False, on_failure(exc)
+    except Exception as exc:  # noqa: BLE001 — caller-defined wrapping exception type
+        return False, on_failure(exc)
+    return True, result
+
+
+__all__ = ["run_json_with_parse_retry", "run_single_shot_agent"]

@@ -16,6 +16,7 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      UNIFIED_API_TEAM_ASSISTANTS_ENABLED: ${UNIFIED_API_TEAM_ASSISTANTS_ENABLED:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

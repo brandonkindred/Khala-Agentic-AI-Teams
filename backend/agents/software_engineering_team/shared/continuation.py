@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
 ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
-ENV_LLM_MAX_TOKENS = "LLM_MAX_TOKENS"
+ENV_LLM_MAX_OUTPUT_TOKENS = "LLM_MAX_OUTPUT_TOKENS"
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
 
@@ -128,7 +128,7 @@ class ResponseContinuator:
             timeout: Request timeout in seconds.
             max_cycles: Maximum number of continuation cycles.
             num_predict: Max tokens to generate per continuation turn. If None, uses
-                LLM_MAX_TOKENS env or DEFAULT_MAX_OUTPUT_TOKENS (32768) to match main LLM client.
+                LLM_MAX_OUTPUT_TOKENS env or DEFAULT_MAX_OUTPUT_TOKENS (32768) to match main LLM client.
 
         Preconditions:
             * `base_url` and `model` are expected to be non-empty; neither is
@@ -139,9 +139,9 @@ class ResponseContinuator:
               immediately returning `success=False` with `cycles_used=0`.
         Postconditions:
             * `self.num_predict` resolves in this order: the explicit
-              `num_predict` argument if not None, else the `LLM_MAX_TOKENS`
+              `num_predict` argument if not None, else the `LLM_MAX_OUTPUT_TOKENS`
               env var parsed as `int` if set, else `DEFAULT_MAX_OUTPUT_TOKENS`.
-            * If `LLM_MAX_TOKENS` is set but not parseable as `int`, this
+            * If `LLM_MAX_OUTPUT_TOKENS` is set but not parseable as `int`, this
               raises `ValueError` — that env var is not defensively parsed
               here (unlike the numeric-env-var convention described in the
               project docs for other settings).
@@ -150,7 +150,7 @@ class ResponseContinuator:
         self.model = model
         self.timeout = timeout
         self.max_cycles = max_cycles
-        env_max = os.environ.get(ENV_LLM_MAX_TOKENS)
+        env_max = os.environ.get(ENV_LLM_MAX_OUTPUT_TOKENS)
         self.num_predict = (
             num_predict
             if num_predict is not None

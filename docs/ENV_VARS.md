@@ -51,6 +51,19 @@ transient `/api/show` outage can no longer poison the process into silently trun
 for its whole lifetime. A successfully-resolved (or known/env) context size is still cached
 permanently. Negative floors to `0` (retry on next call).
 
+### LLM_CONTEXT_SIZE
+Optional global override for the model context window (tokens). When set to a valid integer,
+clamped to a floor of `2048` and used for both Ollama (`num_ctx`) and Claude input-window
+resolution ahead of the known-model tables / `/api/show`. Invalid values are ignored (fall
+through to known-model / provider discovery). Distinct from `LLM_MAX_OUTPUT_TOKENS`.
+
+### LLM_MAX_OUTPUT_TOKENS
+Optional cap on **output** tokens per completion (generation), for both Ollama and Claude.
+When unset, malformed, or non-positive, clients fall through to their provider defaults
+(typically `min(context, 32768)` for Ollama; Claude's default max-output constant). This is
+**not** the context window — use `LLM_CONTEXT_SIZE` for that. Formerly named `LLM_MAX_TOKENS`
+(hard rename; the old name is ignored).
+
 ### LLM_MAX_RETRIES / LLM_BACKOFF_BASE / LLM_BACKOFF_MAX
 **Transient** (5xx / connection / timeout) retry schedule for the central Ollama client — defaults
 `10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row),
@@ -129,7 +142,7 @@ additive-only, so it can never shorten the configured floor. Only the integer-se
 honored (HTTP-date / non-numeric / non-positive are ignored). Strands models (Strategy Lab) have no
 HTTP-level access to the header, so this applies only to the central client.
 
-### LLM_FAILOVER_FAST_429 / LLM_FAILOVER_RATE_WINDOW_S / LLM_FAILOVER_WEEKLY_WINDOW_S
+### LLM_FAILOVER_FAST_429 / LLM_FAILOVER_RATE_WINDOW_S / LLM_FAILOVER_SESSION_WINDOW_S / LLM_FAILOVER_WEEKLY_WINDOW_S
 Tune the **multi-provider fallback list** (the ordered providers configured in the LLM Provider
 settings UI / `POST /api/llm-config/providers`, stored in the `llm_provider_configs` table). When
 more than one provider is configured, a 429 on one provider marks it usage-limited (with a
@@ -138,10 +151,17 @@ reset and used again. `LLM_FAILOVER_FAST_429` (default **on**; `false`/`0`/`no` 
 non-last failover-chain clients with a **zero** in-place 429-retry budget so the hand-off isn't
 delayed by the slow `LLM_RATE_LIMIT_*` backoff above — the **last** provider in the chain keeps the
 configured backoff (nowhere left to fail over to), so a single-entry list behaves exactly as before.
-`LLM_FAILOVER_RATE_WINDOW_S` (default `300`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
-7 days) are the fallback reset windows used to compute `reset_at` only when the 429 carries no
-`Retry-After`; the weekly window is used when the error matches the Ollama weekly-limit message, the
-rate window otherwise. The provider list is the sole source of LLM resolution: with an empty list (or
+
+Ollama Cloud 429 bodies are classified into `session` / `weekly` / `rate` from phrases like
+`session usage limit` and `weekly usage limit`. Reset windows:
+
+| Kind | Env | Default | Notes |
+|---|---|---|---|
+| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `18000` (5h) | Fixed from error time; **ignores** `Retry-After` |
+| `weekly` | `LLM_FAILOVER_WEEKLY_WINDOW_S` | `86400` (24h) | Fixed from error time; **ignores** `Retry-After` (Cloud weekly bodies omit a reset timestamp) |
+| `rate` | `LLM_FAILOVER_RATE_WINDOW_S` | `300` (5m) | Used only when the 429 carries no `Retry-After`; otherwise `Retry-After` wins |
+
+The provider list is the sole source of LLM resolution: with an empty list (or
 `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError` (there
 is no single-provider env fallback).
 
@@ -213,8 +233,8 @@ the investment worker runs at once. A live paper-trading session
 (`run_paper_trading_activity`) can hold a worker thread for hours (up to
 `max_hours`), so this queue defaults above the shared framework's 4-thread cap
 to avoid a handful of concurrent sessions silently starving backtest dispatch.
-Parsed as a plain `int(...)` (unset → default `8`; garbage/unparseable →
-default `8`; parsed but `< 1` → floored to `1`). Only read by the investment
+Parsed defensively as an int (unset or unparseable → default `8`; value
+`< 1` → floored to `1`). Only read by the investment
 worker; mirrors `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`.
 
 ### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
@@ -223,8 +243,9 @@ Temporal worker runs at once. The sales pipeline fans each stage out into one
 activity per prospect, so this — not the old in-process
 `SalesPipelineConfig.pipeline_stage_workers` thread pool — bounds fan-out
 throughput; the default matches that pool's width (`8`) so wall-clock is
-preserved. Parsed via the shared `env_int` (unset/garbage/`≤0` → default, with a
-warning on a set-but-unparseable value). Only read by the sales worker.
+preserved. Parsed via the shared `env_int` (unset/garbage → default; a parsed value
+`≤0` is clamped up to the floor of 1, not reset to the default, with a warning
+logged only for the set-but-unparseable case). Only read by the sales worker.
 
 ### SALES_TEMPORAL_HEARTBEAT_INTERVAL_S
 Float seconds (default `30`, clamped to `[1, 60]`). How often each long sales
@@ -297,6 +318,29 @@ and small payloads are nowhere near the warning threshold anyway).
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
+### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
+Agent Console sandbox reaper/worker toggle (default: true). When true, the
+unified-api `lifespan` starts the Agent Console sandbox idle reaper — a
+durable `SandboxReaperWorkflow` served by this process's own sandbox-only
+Temporal worker thread when Temporal is enabled, or an in-process asyncio
+task otherwise. Set to `false`/`0`/`no` to run unified-api without starting
+the sandbox reaper or its Temporal worker thread at all.
+
+### UNIFIED_API_TEAM_ASSISTANTS_ENABLED
+Team-assistant conversational sub-app mount toggle (default: true). When
+true, the unified-api `lifespan` mounts every team's assistant chat sub-app
+(`<team-prefix>/assistant`) at startup. Set to `false`/`0`/`no` to skip the
+mount loop entirely (zero assistant sub-apps mounted) — team proxy routes and
+health checks are unaffected. Lazy mount-on-first-request when enabled is
+tracked separately.
+
+### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
+Agent Studio Temporal worker toggle (default: true). When true, the
+unified-api `lifespan` starts the in-process Agent Studio Temporal worker
+thread (Agent Studio is Temporal-only; the team's requests fail without it).
+Set to `false`/`0`/`no` to run unified-api without booting this worker
+thread, e.g. when Agent Studio is unused.
+
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
 
@@ -304,16 +348,21 @@ Exposes HTTP log endpoint.
 
 ## Observability (OpenTelemetry)
 
-Every team microservice, the unified API, the blogging service, and the job
-service bootstrap OpenTelemetry via `shared.observability.init_otel`. Metrics are
-collected by Prometheus scraping `/metrics`; traces are exported over OTLP. See
-`backend/shared/observability/README.md` for the full SDK-honored list.
+Every team microservice, the unified API, and the blogging service bootstrap
+OpenTelemetry via `shared.observability.init_otel`. Metrics are collected by
+Prometheus scraping `/metrics`; traces are exported over OTLP only when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. See `backend/shared/observability/README.md`
+for the full SDK-honored list.
 
 ### OTEL_EXPORTER_OTLP_ENDPOINT
 OTLP collector endpoint for trace (and, unless disabled, metric) export. When
-unset, no exporter is built and spans are created but not shipped. The docker
-stack defaults this to the in-stack Grafana Tempo backend (`http://tempo:4318`);
-point it at any external collector to override.
+unset, no exporter is built and spans are created but not shipped. In the docker
+stack this is set only on the services you are actively debugging — currently
+`se-service`, `investment-service`, and `branding-service` (via the compose
+`*team-otel-export` anchor, defaulting to the in-stack Grafana Tempo backend at
+`http://tempo:4318`). All other team containers, blogging, and the unified API
+leave it unset so they do not flood Tempo. Point it at any external collector to
+override on those opted-in services.
 
 ### OTEL_EXPORTER_OTLP_PROTOCOL
 `http/protobuf` (default) or `grpc`.
@@ -323,6 +372,14 @@ Standard OTel selector. Set to `none` to skip OTLP metric export while still
 exporting traces — the docker stack uses this so metrics stay on Prometheus
 scraping and aren't pushed at the traces-only Tempo backend. Any other value (or
 unset) leaves OTLP metric export gated on `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG
+Standard OpenTelemetry head-sampling knobs. The docker stack defaults to
+`parentbased_traceidratio` / `0.05` (5% of root traces; child spans follow the
+parent decision). The Python SDK's `TracerProvider` reads these when no explicit
+sampler is passed (see `shared.observability.otel.init_otel`). Raise the ratio
+toward `1.0` when you need denser traces on the opted-in services; leave unset
+services alone — without an endpoint they never export regardless of sampler.
 
 ### OTEL_EXPORTER_OTLP_TIMEOUT
 Standard OTel exporter timeout in seconds (SDK default 10). The docker stack sets
@@ -628,16 +685,19 @@ single verify activity — see `CODE_REVIEW_VERIFY_TIMEOUT_SECONDS` below), so
 this ceiling still bounds *verification* concurrency in all dispatch modes.
 
 ### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
-Int (default `300`, floor `1`). Per-group timeout for the false-positive
+Int (default `3600`, floor `1`). Per-group timeout for the false-positive
 verification phase's LLM calls (one call per cited file, fanned out across
 `CODE_REVIEW_MAP_PARALLELISM` worker threads when there is more than one
-group). A group whose verification call exceeds this timeout is treated the
-same as any other verification failure — fail-safe: its findings are kept
-and a warning is logged — rather than blocking the rest of the phase
-indefinitely. Unlike `CODE_REVIEW_MAP_PARALLELISM`'s map-phase restriction,
-this applies in **both** dispatch modes: the verification phase always runs
-its per-file calls via an in-process `ThreadPoolExecutor`, even under the
-default Temporal dispatch mode, where it executes inside the single
+group). The default matches the Temporal verify activity's 60-minute
+`start_to_close` budget so a tool-using verifier agent on a slow host is not
+cut off mid-call while the activity still has wall-clock left. A group whose
+verification call exceeds this timeout is treated the same as any other
+verification failure — fail-safe: its findings are kept and a warning is
+logged — rather than blocking the rest of the phase indefinitely. Unlike
+`CODE_REVIEW_MAP_PARALLELISM`'s map-phase restriction, this applies in
+**both** dispatch modes: the verification phase always runs its per-file
+calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
+dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
@@ -945,6 +1005,29 @@ findings, so a broken pass never blocks or changes the rest of the review. Set
 to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
 enabled).
 
+### CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION
+Default-on toggle for consolidating related `side-effects` findings from the
+pass above. Two (or more) `side-effects` issues are merged into one when they
+are anchored inside the same enclosing function/method/class, or when one
+finding's description/suggestion cites a `path:line` that falls inside another
+finding's own enclosing construct — grouping is transitive, so a chain of
+findings that each reference or share a construct with the next all collapse
+into a single issue. Every other category (including this same pass's own
+`documentation` findings) passes through unchanged. Runs after the side-effect
+pass and before the coordinator's exact-match dedupe, using the same
+`shared_index` (no extra LLM calls; pure source analysis — AST-based for
+Python only; non-Python files are not same-construct grouped, because the
+column-0 heuristic cannot distinguish indented methods and would false-merge
+independent findings). Path aliases such as bare basenames are canonicalized
+via `CodebaseIndex.resolve_path` before grouping so a citation of `foo.py`
+matches a finding keyed as `app/foo.py`. Set to `false`/`0`/`no` to
+disable consolidation (any other value, or unset, leaves it enabled) — this
+only turns off merging, the underlying findings are unaffected.
+
+Any setup failure is fail-safe: it is logged and the original `side-effects`
+findings pass through unchanged, so a broken consolidation step never blocks
+or changes the rest of the review.
+
 ---
 
 ## Shared Infrastructure and Storage
@@ -1146,12 +1229,15 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the layer's **enablement gate** (`shared.neo4j.is_neo4j_enabled()`): a
-real deployment always sets it (Neo4j is required infra — Graphiti runs on top of it), and an unset
-value is tolerated only so the unit-test suite can run against a faked Graphiti without a live
-database. The graph ingests agent memories as temporal episodes partitioned per agent
-(`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
-rule-proposal grounding.
+`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`).
+Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it), but processes
+that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this unset so
+they skip Graphiti client construction and the background graph sync worker (lifespan no-ops cleanly).
+Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set `NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that
+process into graph sync (extra memory/CPU for the driver + worker). An unset value is also how the
+unit-test suite runs against a faked Graphiti without a live database. When enabled, the graph
+ingests agent memories as temporal episodes partitioned per agent (`group_id = agent_id`) and serves
+recency-ranked related knowledge back for request context and rule-proposal grounding.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change

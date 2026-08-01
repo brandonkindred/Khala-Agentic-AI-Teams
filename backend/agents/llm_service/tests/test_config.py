@@ -47,7 +47,7 @@ def test_resolve_model_code_review_verify_agent_default(monkeypatch: pytest.Monk
     """code_review_verify has its own, genuinely lighter AGENT_DEFAULT_MODELS
     entry, independent of (and not affecting) code_review's.
 
-    llama3.1 is required here rather than a thinking-tier pin on the same model
+    qwen3.5:9b-mlx is required here rather than a thinking-tier pin on the same model
     as code_review: deepseek-v4-pro:cloud's reasoning_effort wire mapping collapses
     "low"/"medium" onto the same "high" tier code_review already pinned (see
     KNOWN_MODEL_THINKING_LEVELS), so that route could not be made genuinely
@@ -56,16 +56,16 @@ def test_resolve_model_code_review_verify_agent_default(monkeypatch: pytest.Monk
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
     monkeypatch.delenv("LLM_MODEL_code_review", raising=False)
-    assert config.resolve_model("code_review_verify") == "llama3.1"
+    assert config.resolve_model("code_review_verify") == "qwen3.5:9b-mlx"
     assert config.resolve_model("code_review") == "kimi-k2.7-code:cloud"
 
 
 def test_resolve_agent_default_think_code_review_verify_has_no_pin() -> None:
-    """code_review_verify's model (llama3.1) registers no thinking levels, so it
+    """code_review_verify's model (qwen3.5:9b-mlx) registers no thinking levels, so it
     has no AGENT_DEFAULT_THINK entry — the pin would be silently inert. code_review's
     own resolution is unaffected by the new key."""
     assert config.resolve_agent_default_think("code_review_verify") is None
-    assert "llama3.1" not in config.KNOWN_MODEL_THINKING_LEVELS
+    assert "qwen3.5:9b-mlx" not in config.KNOWN_MODEL_THINKING_LEVELS
     assert config.resolve_agent_default_think("code_review") == "high"
 
 
@@ -87,22 +87,34 @@ def test_resolve_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.resolve_timeout() == 3600.0
 
 
-def test_resolve_max_tokens_unset_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_max_output_tokens_unset_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_MAX_OUTPUT_TOKENS", raising=False)
     monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
-    assert config.resolve_max_tokens() == 0
+    assert config.resolve_max_output_tokens() == 0
 
 
-def test_resolve_max_tokens_valid_positive(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
-    assert config.resolve_max_tokens() == 4096
+def test_resolve_max_output_tokens_valid_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "4096")
+    assert config.resolve_max_output_tokens() == 4096
 
 
-def test_resolve_max_tokens_malformed_or_nonpositive_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_max_output_tokens_malformed_or_nonpositive_is_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Garbage, zero, and negative all collapse to the 0 'unset' sentinel so a
     client falls through to its provider default instead of a tiny/0 cap."""
     for raw in ("not-an-int", "0", "-5"):
-        monkeypatch.setenv("LLM_MAX_TOKENS", raw)
-        assert config.resolve_max_tokens() == 0
+        monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", raw)
+        assert config.resolve_max_output_tokens() == 0
+
+
+def test_resolve_max_output_tokens_ignores_legacy_env_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hard cutover: LLM_MAX_TOKENS must not be consulted."""
+    monkeypatch.delenv("LLM_MAX_OUTPUT_TOKENS", raising=False)
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    assert config.resolve_max_output_tokens() == 0
 
 
 def test_resolve_context_size_for_model_known(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +214,7 @@ def test_agent_pin_dropped_for_unregistered_model(clean_thinking_env) -> None:
     level: it falls back to that model's safe default (plain boolean think),
     instead of sending an unvalidated reasoning_effort guess."""
     with llm_attribution(agent_key="code_review"):
-        assert config.resolve_think_for_model("llama3.1", None) is True
+        assert config.resolve_think_for_model("qwen3.5:9b-mlx", None) is True
 
 
 def test_agent_pin_defers_to_enable_thinking_kill_switch(monkeypatch) -> None:

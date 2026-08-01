@@ -4,7 +4,9 @@
 * ``mark_all_running_jobs_failed`` (both success and failure paths)
 * ``_run_audit_job`` (thread-mode job runner, both branches)
 * ``_start_temporal_worker_backstop``
+* ``_start_stale_job_monitor`` / ``_on_startup`` (startup wiring)
 * the stale-job monitor threshold
+* import of ``api.main`` does not start the stale-job monitor
 
 (The job-store write-guard helpers (``_job_is_terminal`` /
 ``_update_job_terminal`` / ``_update_job_unless_terminal`` / ``_now``) now
@@ -15,6 +17,11 @@ live in ``job_store.py`` and are covered by ``test_job_store.py``. The
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+import sys
+import threading
+import unittest.mock as mock
 from typing import Any
 
 import pytest
@@ -162,6 +169,94 @@ def test_temporal_worker_backstop_swallows_errors(monkeypatch: pytest.MonkeyPatc
     with caplog.at_level("WARNING"):
         api_main._start_temporal_worker_backstop()
     assert any("backstop failed to start" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _start_stale_job_monitor / _on_startup
+# ---------------------------------------------------------------------------
+
+
+def test_start_stale_job_monitor_binds_stop_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup helper must call ``start_stale_job_monitor`` with the module
+    threshold and bind the returned stop Event on ``_stale_monitor_stop``."""
+    stop = threading.Event()
+    captured: dict[str, Any] = {}
+
+    def _fake_start(client, *, interval_seconds, stale_after_seconds, reason):
+        captured["client"] = client
+        captured["interval_seconds"] = interval_seconds
+        captured["stale_after_seconds"] = stale_after_seconds
+        captured["reason"] = reason
+        return stop
+
+    monkeypatch.setattr(api_main, "start_stale_job_monitor", _fake_start)
+    monkeypatch.setattr(api_main, "_stale_monitor_stop", None)
+
+    api_main._start_stale_job_monitor()
+
+    assert api_main._stale_monitor_stop is stop
+    assert captured["client"] is job_store._job_manager
+    assert captured["interval_seconds"] == 15.0
+    assert captured["stale_after_seconds"] == api_main._STALE_JOB_THRESHOLD_SECONDS
+    assert captured["reason"] == "Job heartbeat stale while pending/running"
+
+
+def test_on_startup_runs_backstop_then_stale_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_on_startup`` must invoke both the Temporal backstop and the stale
+    monitor (``create_team_app`` accepts only one ``on_startup`` callback)."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        api_main, "_start_temporal_worker_backstop", lambda: calls.append("backstop")
+    )
+    monkeypatch.setattr(api_main, "_start_stale_job_monitor", lambda: calls.append("stale"))
+
+    api_main._on_startup()
+
+    assert calls == ["backstop", "stale"]
+
+
+@contextlib.contextmanager
+def _purged(prefix: str):
+    """Temporarily evict modules under ``prefix`` from ``sys.modules``, then
+    restore the exact pre-purge module objects and parent-package attributes.
+
+    Mirrors the helper in ``test_temporal_bootstrap.py`` so a reimport during
+    this test cannot leave a distinct ``api.main`` module object in
+    ``sys.modules`` for the rest of the session.
+    """
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name == prefix or name.startswith(prefix + ".")
+    }
+    for name in saved:
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        for name in list(sys.modules):
+            if name == prefix or name.startswith(prefix + "."):
+                del sys.modules[name]
+        sys.modules.update(saved)
+        for name, mod in saved.items():
+            parent_name, _, leaf = name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, leaf, mod)
+
+
+def test_importing_api_main_does_not_start_stale_job_monitor() -> None:
+    """Loading ``api.main`` must not start the stale-job monitor; that belongs
+    exclusively to the FastAPI ``on_startup`` hook."""
+    import job_service_client
+
+    with _purged("soc2_compliance_team.api.main"):
+        with mock.patch.object(job_service_client, "start_stale_job_monitor") as monitor:
+            importlib.import_module("soc2_compliance_team.api.main")
+            assert monitor.call_count == 0, (
+                f"Module-level start_stale_job_monitor re-introduced "
+                f"(call count = {monitor.call_count})."
+            )
 
 
 # ---------------------------------------------------------------------------

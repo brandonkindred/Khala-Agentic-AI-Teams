@@ -199,8 +199,9 @@ class BrandDiscoveryAudit(BaseModel):
 
 
 class BrandDiscoveryAuditOutput(BaseModel):
-    """Agent-facing brand discovery schema (see ``PurposeVisionOutput`` on required fields).
+    """Agent-facing brand discovery schema.
 
+    Requires non-empty content so Strands retries blank structured_output.
     Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
     model so this one can require real content without breaking
     ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
@@ -231,8 +232,9 @@ class PurposeVisionOutput(BaseModel):
 
 
 class CoreValuesOutput(BaseModel):
-    """A set of brand core values (see ``PurposeVisionOutput`` on required fields).
+    """A set of brand core values.
 
+    Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
     """
 
@@ -240,8 +242,9 @@ class CoreValuesOutput(BaseModel):
 
 
 class AudienceSegmentsOutput(BaseModel):
-    """A set of target audience segments (see ``PurposeVisionOutput`` on required fields).
+    """A set of target audience segments.
 
+    Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
     """
 
@@ -249,8 +252,9 @@ class AudienceSegmentsOutput(BaseModel):
 
 
 class DifferentiationPillarsOutput(BaseModel):
-    """A set of competitive differentiation pillars (see ``PurposeVisionOutput`` on required fields).
+    """A set of competitive differentiation pillars.
 
+    Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
     """
 
@@ -258,7 +262,10 @@ class DifferentiationPillarsOutput(BaseModel):
 
 
 class PositioningOutput(BaseModel):
-    """Synthesised positioning statement and brand promise (see ``PurposeVisionOutput`` on required fields)."""
+    """Synthesised positioning statement and brand promise.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
 
     positioning_statement: str = Field(min_length=1)
     brand_promise: str = Field(min_length=1)
@@ -326,6 +333,78 @@ class PersonaProfile(BaseModel):
     frustrations: List[str] = Field(default_factory=list)
     media_habits: List[str] = Field(default_factory=list)
     jobs_to_be_done: List[str] = Field(default_factory=list)
+
+
+class BrandStoryOutput(BaseModel):
+    """Agent-facing brand story schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``boilerplate_variants`` cardinality encodes the prompt's stated "3 versions
+    (short/medium/long)".
+    """
+
+    brand_story: str = Field(min_length=1)
+    hero_narrative: str = Field(min_length=1)
+    boilerplate_variants: List[str] = Field(min_length=3, max_length=3)
+
+
+class BrandArchetypesOutput(BrandStoryOutput):
+    """Story carry-forward plus brand archetypes.
+
+    Inherits the Storyteller fields so a linear Graph predecessor's
+    ``structured_output`` already exposes the brand story to TaglineWriter
+    (Strands Graph node inputs only include direct dependency results, and
+    multi-in edges use OR-ready semantics so cumulative fan-in is unsafe).
+    """
+
+    brand_archetypes: List[BrandArchetype] = Field(min_length=1, max_length=2)
+
+
+class TaglineOutput(BrandArchetypesOutput):
+    """Prior narrative carry-forward plus tagline / elevator pitches."""
+
+    tagline: str = Field(min_length=1)
+    tagline_rationale: str = Field(min_length=1)
+    elevator_pitches: List[ElevatorPitch] = Field(min_length=3, max_length=3)
+
+
+class MessagingFrameworkOutput(TaglineOutput):
+    """Prior narrative carry-forward plus messaging framework / audience maps."""
+
+    messaging_framework: List[MessagingPillar] = Field(min_length=3, max_length=4)
+    audience_message_maps: List[AudienceMessageMap] = Field(min_length=1)
+
+
+class PersonaProfilesOutput(MessagingFrameworkOutput):
+    """Prior narrative carry-forward plus persona profiles."""
+
+    persona_profiles: List[PersonaProfile] = Field(min_length=2, max_length=3)
+
+
+class WritingGuidelinesBody(BaseModel):
+    """Strict writing-guidelines body nested under ``writing_guidelines``.
+
+    Field-for-field identical to ``WritingGuidelines`` — kept separate so this
+    one can require real content without breaking
+    ``NarrativeMessagingOutput.writing_guidelines``'s no-argument default.
+    Cardinalities encode the prompt's stated "3-4" for each list.
+    """
+
+    voice_principles: List[str] = Field(min_length=3, max_length=4)
+    style_dos: List[str] = Field(min_length=3, max_length=4)
+    style_donts: List[str] = Field(min_length=3, max_length=4)
+    editorial_quality_bar: List[str] = Field(min_length=3, max_length=4)
+
+
+class WritingGuidelinesOutput(PersonaProfilesOutput):
+    """Full Phase 2 carry-forward plus nested writing guidelines.
+
+    VoicePrinciplesDrafter is last in the linear Graph, so its payload must
+    include every upstream fragment plus ``writing_guidelines`` in the shape
+    ``NarrativeMessagingOutput`` expects (no nest-under remap needed).
+    """
+
+    writing_guidelines: WritingGuidelinesBody
 
 
 class NarrativeMessagingOutput(BaseModel):

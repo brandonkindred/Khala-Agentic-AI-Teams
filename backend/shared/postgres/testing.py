@@ -145,10 +145,11 @@ def _real_postgres_schema_body(schema: TeamSchema, *, worker_id: str = "master")
     behalf. Until a team actually needs that guarantee, tests sharing a
     schema under ``-n > 1`` should isolate via unique row identifiers instead
     (the existing convention — see
-    ``branding_team/tests/test_store_real_postgres.py``'s ``uuid4``-suffixed
-    data), not rely on inter-test truncation; expect rows to accumulate
-    across repeated ``-n > 1`` runs against a persistent local Postgres (a
-    non-issue in CI, where the Postgres container is thrown away per job).
+    ``branding_team/tests/test_conversation_store.py``'s ``_brand_id()`` /
+    ``uuid4``-suffixed data), not rely on inter-test truncation; expect rows
+    to accumulate across repeated ``-n > 1`` runs against a persistent local
+    Postgres (a non-issue in CI, where the Postgres container is thrown away
+    per job).
     """
     if not is_postgres_enabled():
         pytest.skip(f"real Postgres tests require POSTGRES_HOST (team={schema.team})")
@@ -224,8 +225,8 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module", autouse: 
 
     Drop-in replacement for the per-team hand-rolled skip/register/truncate
     pattern. ``branding_team`` already wires it in
-    ``tests/test_store.py`` (``scope="function"``) and
-    ``tests/test_store_real_postgres.py`` (default module scope); other teams
+    ``tests/test_store.py``, ``tests/test_conversation_store.py``, and
+    ``tests/test_session_store.py`` (``scope="function"``); other teams
     opt in the same way with ``_my_schema = real_postgres_schema(SCHEMA)``.
     """
     if scope not in _PYTEST_FIXTURE_SCOPES:

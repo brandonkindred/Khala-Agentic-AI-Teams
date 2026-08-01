@@ -8,12 +8,12 @@ re-raises the earliest-index exception; pre-migration histories keep the
 original unconstrained ``asyncio.gather`` without ``return_exceptions``) →
 three tail passes run concurrently via the same return_exceptions idiom
 (false-positive verify, architecture-consistency / redundancy, side-effect /
-blast-radius; scan order is verify → architecture → side-effect) →
-deterministic gate → (conditional) narrative synthesis — so a worker restart
-mid-review re-runs only the unfinished activities instead of re-reviewing the
-whole submission. New concurrent fan-outs await every sibling and re-raise in
-list order so completion-order races never pick the surfaced exception or
-abandon an activity.
+blast-radius; scan order is verify → architecture → side-effect) → optional
+side-effect consolidation → deterministic gate → (conditional) narrative
+synthesis — so a worker restart mid-review re-runs only the unfinished
+activities instead of re-reviewing the whole submission. New concurrent
+fan-outs await every sibling and re-raise in list order so completion-order
+races never pick the surfaced exception or abandon an activity.
 
 The tail passes have no cross-pass data dependency (each reads only
 ``review_input`` and/or the map phase's aggregated ``issues``, never another
@@ -26,7 +26,10 @@ verification is ``false_positive_filter.filter_false_positives``, the additive
 architecture pass is
 ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
 additive side-effect pass is
-``side_effect_impact_pass.find_side_effect_impact_issues``, the gate is
+``side_effect_impact_pass.find_side_effect_impact_issues``, optional
+consolidation of related ``side-effects`` findings is
+``side_effect_consolidation.consolidate_side_effect_issues`` (between the
+side-effect pass and finalize), the gate is
 ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
 ``synthesis.synthesize_review_findings`` with the same deterministic-concat
 fallback. The verdict is NOT identical to the default thread-mode
@@ -105,6 +108,17 @@ _ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
 # the Temporal UI), then deprecate the marker with
 # ``workflow.deprecate_patch(_SIDE_EFFECT_PASS_PATCH)`` before deleting it.
 _SIDE_EFFECT_PASS_PATCH = "code-review-side-effect-impact-pass"
+
+# Replay-compatibility gate for inserting the side-effect consolidation activity
+# between the three tail passes and finalization (see ``run``). Same rationale as
+# ``_ARCHITECTURE_PASS_PATCH``: a history recorded before this activity existed has
+# no marker for it, so ``workflow.patched`` returns False on replay and that
+# history's original finalize-next sequence is reproduced exactly.
+# TODO: Remove this gate (and always run consolidation unconditionally) once
+# no pre-migration CodeReviewWorkflow histories remain open (confirm via the
+# Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_SIDE_EFFECT_CONSOLIDATION_PATCH)`` before deleting it.
+_SIDE_EFFECT_CONSOLIDATION_PATCH = "code-review-side-effect-consolidation"
 
 # Replay-compatibility gate for bounding the map-phase fan-out by
 # ``prep["fanout_width"]`` (see ``run``) instead of scheduling every chunk's
@@ -310,7 +324,10 @@ class CodeReviewWorkflow:
                     bool(review_input.get("skip_false_positive_filter", False)),
                 ],
                 task_queue=TASK_QUEUE,
-                start_to_close_timeout=timedelta(minutes=30),
+                # Matches CODE_REVIEW_VERIFY_TIMEOUT_SECONDS default (60m) so a
+                # slow per-group tool-using verifier is not killed by the activity
+                # budget before its own fail-safe timeout can fire.
+                start_to_close_timeout=timedelta(minutes=60),
                 retry_policy=_LLM_RETRY,
             )
 
@@ -423,6 +440,21 @@ class CodeReviewWorkflow:
                 if side_effect_findings:
                     verified = [*verified, *side_effect_findings]
                     has_side_effect_findings = True
+
+        # Side-effect / blast-radius consolidation: merge near-duplicate findings
+        # that share the same root cause (same enclosing construct or a path:line
+        # cited inside another finding's construct). Pure source analysis, no LLM
+        # calls, gated independently of the side-effect pass itself. Runs after
+        # the concurrent tail-pass gather (it needs the merged verified list),
+        # so it is intentionally sequential — not part of that gather.
+        if workflow.patched(_SIDE_EFFECT_CONSOLIDATION_PATCH):
+            verified = await workflow.execute_activity(
+                A.consolidate_side_effect_issues_activity,
+                args=[review_input, verified],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=_DEFAULT_RETRY,
+            )
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(

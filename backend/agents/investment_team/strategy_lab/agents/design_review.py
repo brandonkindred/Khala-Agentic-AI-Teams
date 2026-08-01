@@ -13,6 +13,7 @@ so consumers import a single module (mirrors ``alignment.py``).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -42,16 +43,43 @@ from .model_factory import get_strands_model
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+
 # Shared stop-order semantics reference (stop-market / stop-limit / trailing
 # stop). Appended so the reviewer's risk-control check does not mislabel a
 # trailing stop's above-entry ratchet — the intended gain-locking behavior —
 # as a defect.
-_STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
-_SYSTEM_PROMPT = (
-    (_PROMPT_DIR / "design_review_system.md").read_text(encoding="utf-8")
-    + "\n\n"
-    + _STOP_ORDER_SEMANTICS
-)
+@functools.lru_cache(maxsize=None)
+def _get_stop_order_semantics() -> str:
+    """Load and cache shared stop-order semantics markdown.
+
+    Preconditions: ``_PROMPT_DIR / "_stop_order_semantics.md"`` exists and is
+    readable UTF-8 text when first invoked.
+    Postconditions: returns a non-empty ``str``; subsequent calls return the
+    same cached value without re-reading the file.
+    Invariants: module import does not invoke this helper.
+    """
+    text = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
+    if not text:
+        raise ValueError("_stop_order_semantics.md must be non-empty")
+    return text
+
+
+@functools.lru_cache(maxsize=None)
+def _get_system_prompt() -> str:
+    """Build and cache the design-review system prompt (body + stop-order block).
+
+    Preconditions: ``design_review_system.md`` and stop-order semantics file
+    exist when first invoked.
+    Postconditions: returned string contains both the design-review system body
+    and the stop-order semantics text, separated by a blank line; subsequent
+    calls return the same cached composed prompt without re-reading either file.
+    Invariants: module import does not invoke this helper.
+    """
+    body = (_PROMPT_DIR / "design_review_system.md").read_text(encoding="utf-8")
+    if not body:
+        raise ValueError("design_review_system.md must be non-empty")
+    return body + "\n\n" + _get_stop_order_semantics()
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
@@ -499,7 +527,7 @@ class DesignReviewAgent:
         def _invoke_legacy() -> Dict[str, Any]:
             agent = Agent(
                 model=get_strands_model("strategy_design_review"),
-                system_prompt=_SYSTEM_PROMPT,
+                system_prompt=_get_system_prompt(),
                 tools=[],
             )
             return run_structured_agent(
@@ -528,14 +556,16 @@ class DesignReviewAgent:
                 try:
                     parsed = so.invoke_structured_with_schema(
                         "strategy_design_review",
-                        _SYSTEM_PROMPT,
+                        _get_system_prompt(),
                         user_prompt,
                         phase="design_review_structured",
                         schema=CRITIQUE_SCHEMA,
                         charge=True,
                         objective="strategy design review (structured)",
                         logger=logger,
-                        reasoning_system_prompt=so.build_reasoning_system_prompt(_SYSTEM_PROMPT),
+                        reasoning_system_prompt=so.build_reasoning_system_prompt(
+                            _get_system_prompt()
+                        ),
                     )
                 except StrategyLabLLMError as exc:
                     cause = exc.cause

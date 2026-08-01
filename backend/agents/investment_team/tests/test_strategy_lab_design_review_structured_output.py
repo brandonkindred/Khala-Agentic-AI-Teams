@@ -195,7 +195,7 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     assert len(stub_client.calls) == 1
     call = stub_client.calls[0]
     assert call["schema"] == CRITIQUE_SCHEMA
-    assert call["system_prompt"] == design_review_mod._SYSTEM_PROMPT
+    assert call["system_prompt"] == design_review_mod._get_system_prompt()
     assert "Review the strategy specification below" in call["prompt"]
     # Formatting pass: thinking off, deterministic (temperature 0.0).
     assert call["think"] is False
@@ -213,7 +213,7 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     # JSON instead of prose, defeating the two-call split.
     assert (
         reasoning_call["system_prompt"]
-        == design_review_mod._SYSTEM_PROMPT + so_mod.REASONING_MODE_SUFFIX
+        == design_review_mod._get_system_prompt() + so_mod.REASONING_MODE_SUFFIX
     )
     assert reasoning_call["prompt"].endswith(so_mod._REASONING_USER_PROMPT_SUFFIX)
     # Reasoning pass: thinking on, with the (higher, more exploratory)
