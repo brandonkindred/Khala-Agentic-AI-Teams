@@ -11,8 +11,10 @@ and duplicated capabilities the per-chunk view cannot see — see
 ``architecture_consistency_pass``) → side-effect / blast-radius pass (a single
 additive, whole-repository check for behavior changes that break a caller
 elsewhere in the codebase, or ship undocumented — see
-``side_effect_impact_pass``) → deterministic merge (dedupe, severity gate,
-safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
+``side_effect_impact_pass``) → side-effect consolidation (merges related
+``side-effects`` findings that share an enclosing construct or cite one
+another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
+severity gate, safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
 after recovery (retry, bisection, and a last-resort thinking-off retry) degrades
@@ -91,6 +93,7 @@ from collections import OrderedDict
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
+from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
@@ -144,6 +147,12 @@ from .models import (
     notify_review_progress,
 )
 from .repo_reader import RepoReader
+from .side_effect_consolidation import (
+    SIDE_EFFECT_CONSOLIDATION_ENV as _SIDE_EFFECT_CONSOLIDATION_ENV,
+)
+from .side_effect_consolidation import (
+    consolidate_side_effect_issues,
+)
 from .side_effect_impact_pass import find_side_effect_impact_issues
 from .synthesis import synthesize_review_findings
 
@@ -185,7 +194,6 @@ __all__ = [
     "_symbol_surface",
 ]
 
-
 # Process-global submission-level short-circuit cache (see module docstring).
 # Bounded LRU mapping a whole-submission fingerprint -> the approved
 # ``CodeReviewOutput`` it produced, so an identical, previously-approved
@@ -212,10 +220,12 @@ def _submission_cache_size() -> int:
     """Resolve the submission cache capacity from the environment.
 
     Postconditions:
-        - Returns ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` parsed as an int, clamped
-          to a floor of 0 (a negative or garbage value becomes the default, an
-          explicit 0 disables the short-circuit). ``0`` is load-bearing: callers
-          treat it as "no submission cache", so every review runs in full.
+        - Returns ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` parsed as an int,
+          clamped to a floor of 0: an unset or unparseable value falls back to
+          the default, while a negative value is clamped to 0 (not the
+          default) — same as any other floor. An explicit or clamped-to 0
+          disables the short-circuit; ``0`` is load-bearing: callers treat it
+          as "no submission cache", so every review runs in full.
     """
     return parse_env_int("CODE_REVIEW_SUBMISSION_CACHE_SIZE", DEFAULT_SUBMISSION_CACHE_SIZE, 0)
 
@@ -620,14 +630,20 @@ def run_coordinator(
           then architecture, then side-effect) otherwise; either way the
           merged ``issues`` order and content are identical (see
           ``_run_tail_passes``).
+        - After the three tail passes, related ``side-effects`` findings may be
+          optionally consolidated (gated by
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
+          the consolidation step in the body) before the deterministic
+          dedupe/severity gate.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
-          fully reviewed* (same code + context + model; no unreviewed ranges)
-          returns the recorded approved output with no LLM call at all —
-          unless a ``repo_reader`` is given, in which case this short-circuit
-          never fires (a verdict that reads the rest of the repository cannot
-          be safely reproduced from an input-only cache key).
+          fully reviewed* (same code + context + model + output-affecting
+          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; no
+          unreviewed ranges) returns the recorded approved output with no LLM
+          call at all — unless a ``repo_reader`` is given, in which case this
+          short-circuit never fires (a verdict that reads the rest of the
+          repository cannot be safely reproduced from an input-only cache key).
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -649,12 +665,13 @@ def run_coordinator(
     # Submission-level short-circuit: an identical submission that was already
     # approved reproduces the same verdict, so return its cached output before any
     # LLM work (map, false-positive verification, and merge all skipped). Keyed on
-    # the raw input + model only — no compaction — so the check itself costs no
-    # model call. Skipped entirely when disabled (size 0) or when a ``repo_reader``
-    # is given: the verdict can then also depend on the rest of the repository,
-    # which the key cannot see, so a hit could mask a since-added architecture/
-    # redundancy finding or a since-resolved false positive. On a miss the run
-    # proceeds and stores its verdict below if approved.
+    # the raw input + model + output-affecting toggles (including
+    # ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``) — no compaction — so the check
+    # itself costs no model call. Skipped entirely when disabled (size 0) or when
+    # a ``repo_reader`` is given: the verdict can then also depend on the rest of
+    # the repository, which the key cannot see, so a hit could mask a since-added
+    # architecture/redundancy finding or a since-resolved false positive. On a
+    # miss the run proceeds and stores its verdict below if approved.
     submission_size = _submission_cache_size()
     submission_key: Optional[str] = None
     cached: Optional[CodeReviewOutput] = None
@@ -787,8 +804,9 @@ def run_coordinator(
         f"verifying {len(genuine_issues)} findings against the full codebase",
         _PROGRESS_VERIFYING,
     )
-    # Built once and shared with the architecture-consistency pass below: both read the
-    # same submission/repo_reader, so a single index avoids parsing the submission twice.
+    # Built once and shared with the architecture-consistency pass and the
+    # side-effect consolidation step below: all read the same submission/repo_reader,
+    # so a single index avoids parsing the submission twice.
     # CodebaseIndex is read-only after construction (see its own docstring's Invariants),
     # so this one instance is safe to hand to all three tail passes when they run
     # concurrently in worker threads (see ``_run_tail_passes``).
@@ -805,11 +823,13 @@ def run_coordinator(
     # codebase, or leaves a docstring/comment that no longer matches the
     # implementation) are three separate, additive, once-per-submission checks
     # the per-chunk map phase structurally cannot see. None reads another's
-    # output, so they run concurrently when safe (see ``_run_tail_passes``) and
-    # fold straight into the same dedupe/severity-gate/merge machinery below.
-    # (The latter two are restricted internally to the default CODE_REVIEW
-    # profile -- see their own docstrings for why the other profiles must never
-    # receive these findings.)
+    # output, so they run concurrently when safe (see ``_run_tail_passes``).
+    # After those three, related ``side-effects`` findings may optionally be
+    # consolidated (gated by ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe
+    # on error) before the same dedupe/severity-gate/merge machinery below.
+    # (The architecture and side-effect passes are restricted internally to the
+    # default CODE_REVIEW profile -- see their own docstrings for why the other
+    # profiles must never receive these findings.)
     tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,
@@ -818,6 +838,19 @@ def run_coordinator(
         shared_index=shared_index,
     )
     tail_pass_issues = tail_pass_result.issues
+    # Merge related "side-effects" findings (same enclosing function, or one
+    # citing another's) into single consolidated issues before the exact-match
+    # dedupe below -- see side_effect_consolidation's own docstring for the
+    # grouping rules. Additive-only inputs in, fewer-but-richer issues out;
+    # every other category passes through untouched.
+    if env_flag_enabled(_SIDE_EFFECT_CONSOLIDATION_ENV):
+        try:
+            tail_pass_issues = consolidate_side_effect_issues(tail_pass_issues, shared_index)
+        except Exception:
+            logger.exception(
+                "CodeReviewCoordinator: side-effect consolidation failed; "
+                "using unconsolidated tail-pass issues"
+            )
 
     notify_review_progress(
         progress_callback,
