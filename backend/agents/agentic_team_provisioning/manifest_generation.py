@@ -175,8 +175,19 @@ class ManifestRegistrationResult(NamedTuple):
 
     Supports both attribute access (``result.manifests``) and positional
     unpacking (``manifests, registered = register_team_manifests(...)``), so a
-    caller can observe whether the registry update actually succeeded instead
-    of only ever seeing the built manifests, as if registration always worked.
+    caller can observe whether the registration call path itself completed
+    instead of only ever seeing the built manifests, as if registration always
+    worked.
+
+    ``registered`` reflects only this process's local install/removal calls
+    (import, stale-cleanup scan, ``register``/``unregister``) completing
+    without raising — it is **not** a guarantee that a Postgres-backed dynamic
+    store's write-through succeeded. ``AgentRegistry.register``/``unregister``
+    already swallow a write-through failure internally (logged, never raised;
+    see ``agent_registry/loader.py``), so ``registered=True`` can still mean a
+    manifest is visible only on this worker, or a removed one is still visible
+    on others. Surfacing that would require ``AgentRegistry`` itself to expose
+    write-through confirmation — a separate change to that shared module.
     """
 
     manifests: list[AgentManifest]
