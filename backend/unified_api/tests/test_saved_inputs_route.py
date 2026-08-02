@@ -23,6 +23,7 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from agent_console import AgentConsoleStorageUnavailable
 from agent_console.models import SavedInput
 from agent_console.store import SavedInputNameConflict
 
@@ -75,6 +76,29 @@ class _FakeStore:
 
     def delete_saved_input(self, saved_id):
         return self._items.pop(saved_id, None) is not None
+
+
+class _AlwaysUnavailableStore:
+    """A store whose every method raises AgentConsoleStorageUnavailable."""
+
+    def _boom(self, *_a, **_k):
+        raise AgentConsoleStorageUnavailable("storage down")
+
+    list_saved_inputs = _boom
+    create_saved_input = _boom
+    get_saved_input = _boom
+    update_saved_input = _boom
+    delete_saved_input = _boom
+
+
+class _AlwaysConflictStore:
+    """A store whose write methods always report a name conflict."""
+
+    def create_saved_input(self, **_k):
+        raise SavedInputNameConflict("dup")
+
+    def update_saved_input(self, *_a, **_k):
+        raise SavedInputNameConflict("dup")
 
 
 @pytest.fixture()
@@ -183,3 +207,67 @@ def test_update_and_delete_saved_input(client: TestClient) -> None:
 
     resp = client.get(f"/api/agents/saved-inputs/{saved_id}")
     assert resp.status_code == 404
+
+
+def test_get_saved_input_by_id_returns_it(client: TestClient) -> None:
+    resp = client.post(
+        "/api/agents/blogging.planner/saved-inputs",
+        json={"name": "lookup-me", "input_data": {"x": 1}},
+    )
+    saved_id = resp.json()["id"]
+    resp = client.get(f"/api/agents/saved-inputs/{saved_id}")
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "lookup-me"
+
+
+def test_get_update_delete_unknown_saved_id_is_404(client: TestClient) -> None:
+    resp = client.get("/api/agents/saved-inputs/does-not-exist")
+    assert resp.status_code == 404
+
+    resp = client.put("/api/agents/saved-inputs/does-not-exist", json={"input_data": {"a": 1}})
+    assert resp.status_code == 404
+
+    resp = client.delete("/api/agents/saved-inputs/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_update_saved_input_name_conflict_is_409(client: TestClient) -> None:
+    import unified_api.routes.agent_console_saved_inputs as routes_mod
+
+    resp = client.post(
+        "/api/agents/blogging.planner/saved-inputs",
+        json={"name": "existing-a", "input_data": {}},
+    )
+    resp = client.post(
+        "/api/agents/blogging.planner/saved-inputs",
+        json={"name": "existing-b", "input_data": {}},
+    )
+    saved_id = resp.json()["id"]
+
+    original_store = routes_mod.get_store()
+    routes_mod.get_store = lambda: _AlwaysConflictStore()
+    try:
+        resp = client.put(f"/api/agents/saved-inputs/{saved_id}", json={"name": "existing-a"})
+        assert resp.status_code == 409
+    finally:
+        routes_mod.get_store = lambda: original_store
+
+
+def test_storage_unavailable_maps_to_503_on_every_endpoint(client: TestClient) -> None:
+    import unified_api.routes.agent_console_saved_inputs as routes_mod
+
+    routes_mod.get_store = lambda: _AlwaysUnavailableStore()
+    try:
+        assert client.get("/api/agents/blogging.planner/saved-inputs").status_code == 503
+        assert (
+            client.post(
+                "/api/agents/blogging.planner/saved-inputs",
+                json={"name": "x", "input_data": {}},
+            ).status_code
+            == 503
+        )
+        assert client.get("/api/agents/saved-inputs/some-id").status_code == 503
+        assert client.put("/api/agents/saved-inputs/some-id", json={"name": "x"}).status_code == 503
+        assert client.delete("/api/agents/saved-inputs/some-id").status_code == 503
+    finally:
+        pass

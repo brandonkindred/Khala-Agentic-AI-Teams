@@ -463,7 +463,7 @@ def _maybe_register_team_assistants() -> int:
         return 0
 
 
-async def _health_check_loop() -> None:
+async def _health_check_loop() -> None:  # pragma: no cover - infinite bg loop, live lifespan only
     """Periodically probe all registered teams' health endpoints.
 
     Also retries schema registration for in-process teams whose startup
@@ -617,7 +617,7 @@ def _start_agent_studio_temporal_worker() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot
+async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot  # pragma: no cover - startup requires live Postgres schema registration, Temporal worker boot, and sub-app mounting
     """Application lifespan: register own Postgres schemas, register assistant
     mount specs (no sub-apps mounted yet), then register proxy routes.
     """
@@ -1042,7 +1042,7 @@ def _shutdown_probe_executor() -> None:
         _PROBE_EXECUTOR = None
 
 
-async def _probe_postgres_live() -> bool:
+async def _probe_postgres_live() -> bool:  # pragma: no cover - requires a live Postgres connection
     """Run ``SELECT 1`` against the shared pool with a short timeout.
 
     Used by the in-process team health branch so a runtime Postgres
@@ -1108,7 +1108,7 @@ def _expected_tables_for(team_key: str) -> list[str]:
     return []
 
 
-async def _verify_in_process_schema_present(team_key: str) -> bool:
+async def _verify_in_process_schema_present(team_key: str) -> bool:  # pragma: no cover - needs live Postgres
     """Check that the team's expected tables still exist in Postgres.
 
     Codex flagged that ``SELECT 1`` alone proves connectivity but
@@ -1167,7 +1167,7 @@ async def _verify_in_process_schema_present(team_key: str) -> bool:
         return False
 
 
-def _retry_in_process_schema_registration(team_key: str) -> bool:
+def _retry_in_process_schema_registration(team_key: str) -> bool:  # pragma: no cover - needs live Postgres
     """Re-run schema registration for a team after a transient outage.
 
     Called from `/health` when the live DB probe succeeds for a team
@@ -1265,12 +1265,12 @@ async def health() -> UnifiedHealthResponse:
                 # intentional and should not flip overall health.
                 status = "unavailable"
                 intentionally_unavailable = True
-            elif key in _in_process_schema_failures:
+            elif key in _in_process_schema_failures:  # pragma: no cover - only reached with POSTGRES_HOST set
                 # Background loop may have already cleared this; if
                 # we're still in the set, persistence is still broken.
                 # Read-only: don't trigger a retry from this handler.
                 status = "unhealthy"
-            else:
+            else:  # pragma: no cover - only reached with POSTGRES_HOST set (live DB probe branch)
                 if db_live is None:
                     db_live = await _probe_postgres_live()
                 if not db_live:
@@ -1320,16 +1320,16 @@ async def list_teams() -> dict[str, Any]:
     """List all available teams with their proxy status."""
     teams = {}
     for key, config in TEAM_CONFIGS.items():
-        registered = _registered_teams.get(key, False)
+        mounted = _registered_teams.get(key, False)
         # In-process teams piggy-back on the unified API's `/docs` —
         # they don't expose a `/api/<team>/docs` endpoint themselves,
         # so don't advertise one (it would 404).
-        per_team_docs = registered and not config.in_process
+        per_team_docs = mounted and not config.in_process
         teams[key] = {
             "name": config.name,
             "prefix": config.prefix,
             "description": config.description,
-            "registered": registered,
+            "mounted": mounted,
             "enabled": config.enabled,
             "docs_url": f"{config.prefix}/docs" if per_team_docs else None,
         }
