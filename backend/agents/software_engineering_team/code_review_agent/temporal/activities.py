@@ -309,20 +309,21 @@ def find_architecture_and_redundancy_activity(
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, no architecture document, or any setup/LLM failure all degrade
           to an empty list) -- and so is this activity as a whole, including
-          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
-          the wrapped function's own env/profile early-return checks run, so
-          without this activity's own try/except a client-resolution failure
-          (e.g. no LLM provider configured) would raise even when this
-          optional, additive pass would have no-op'd anyway -- turning an
-          inapplicable pass into a failure of the whole durable review. An
-          activity failure here would only ever be an unexpected defect, not
-          an expected outcome.
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client both happen
+          BEFORE the wrapped function's own env/profile early-return checks
+          run, so without this activity's own try/except a validation or
+          client-resolution failure (e.g. malformed payload, no LLM provider
+          configured) would raise even when this optional, additive pass
+          would have no-op'd anyway -- turning an inapplicable pass into a
+          failure of the whole durable review. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
     """
     from ..architecture_consistency_pass import find_architecture_and_redundancy_issues
     from ..models import CodeReviewInput
 
-    input_data = CodeReviewInput.model_validate(review_input)
     try:
+        input_data = CodeReviewInput.model_validate(review_input)
         llm = _resolve_llm()
         findings = find_architecture_and_redundancy_issues(
             llm, input_data, repo_reader=_repo_reader_from_input(input_data)
@@ -371,12 +372,14 @@ def find_side_effect_impact_activity(
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, wrong profile, or any setup/LLM failure all degrade to an empty
           list) -- and so is this activity as a whole, including
-          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
-          the wrapped function's own env/profile/``pre_numbered`` early-return
-          checks run, so without this activity's own try/except a
-          client-resolution failure (e.g. no LLM provider configured) would
-          raise even when this optional, additive pass would have no-op'd
-          anyway (``CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS=false``, a non-default
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client both happen
+          BEFORE the wrapped function's own env/profile/``pre_numbered``
+          early-return checks run, so without this activity's own try/except a
+          validation or client-resolution failure (e.g. malformed payload, no
+          LLM provider configured) would raise even when this optional,
+          additive pass would have no-op'd anyway
+          (``CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS=false``, a non-default
           profile, or hunk-mode input) -- turning an inapplicable pass into a
           failure of the whole durable review. An activity failure here would
           only ever be an unexpected defect, not an expected outcome.
@@ -384,8 +387,8 @@ def find_side_effect_impact_activity(
     from ..models import CodeReviewInput
     from ..side_effect_impact_pass import find_side_effect_impact_issues
 
-    input_data = CodeReviewInput.model_validate(review_input)
     try:
+        input_data = CodeReviewInput.model_validate(review_input)
         llm = _resolve_llm()
         findings = find_side_effect_impact_issues(
             llm, input_data, repo_reader=_repo_reader_from_input(input_data)
@@ -520,13 +523,14 @@ def synthesize_findings_activity(
           concatenation). Wraps ``synthesis.synthesize_review_findings``, which
           never raises and never touches the verdict.
         - Never raises: this activity as a whole is fail-safe, including
-          ``_resolve_llm()`` itself. Resolving the LLM client happens before
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client happen before
           (and outside) the wrapped function's own failure handling, so without
-          this activity's own try/except a client-resolution failure (e.g. no
-          LLM provider configured) would raise instead of returning ``None`` and
-          letting the workflow fall back to deterministic concatenation. An
-          activity failure here would only ever be an unexpected defect, not an
-          expected outcome.
+          this activity's own try/except a validation or client-resolution
+          failure (e.g. malformed payload, no LLM provider configured) would
+          raise instead of returning ``None`` and letting the workflow fall
+          back to deterministic concatenation. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
     """
     from ..models import CodeReviewInput, CodeReviewIssue
     from ..synthesis import synthesize_review_findings
