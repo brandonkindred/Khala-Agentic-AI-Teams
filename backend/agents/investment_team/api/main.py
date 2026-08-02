@@ -1929,13 +1929,24 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
 
 
 def _dispatch_strategy_lab_run(
-    run_id: str, request: RunStrategyLabRequest, *, allow_already_started: bool = True
+    run_id: str,
+    request: RunStrategyLabRequest,
+    *,
+    generation: int,
+    allow_already_started: bool = True,
 ) -> None:
     """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
 
     Preconditions:
         - ``run_id``'s state is already registered in ``_active_runs`` and
           persisted (the activity reads its resume offset from that state).
+        - ``generation`` is the caller's own already-known/just-minted
+          fencing generation for this dispatch — the exact value written to
+          ``_active_runs[run_id]``/the durable store moments earlier by
+          ``_build_run_state``. Passed through explicitly (not re-derived by
+          a fresh read at dispatch time) so a transient durable-read failure
+          can never cause the newly dispatched workflow to be tagged with a
+          stale/wrong generation and immediately self-fence.
 
     Postconditions:
         - The durable workflow is started. A collision with an already-running
@@ -1962,7 +1973,7 @@ def _dispatch_strategy_lab_run(
             start_strategy_lab_batch_workflow,
         )
 
-        start_strategy_lab_batch_workflow(run_id, request)
+        start_strategy_lab_batch_workflow(run_id, request, generation)
     except Exception as exc:
         from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -2375,7 +2386,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
 
         # Dispatch the run as a durable Temporal workflow so it survives a
         # worker/process restart and is visible in the Temporal UI.
-        _dispatch_strategy_lab_run(run_id, request)
+        _dispatch_strategy_lab_run(run_id, request, generation=initial_state["generation"])
     finally:
         run_lock.release()
 
@@ -2638,7 +2649,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # The Temporal activity derives its resume offset from the persisted
         # contiguous-cycle count (set above), so a durable resume picks up where the
         # run left off.
-        _dispatch_strategy_lab_run(run_id, request)
+        _dispatch_strategy_lab_run(run_id, request, generation=resumed_state["generation"])
     finally:
         run_lock.release()
 
@@ -2719,26 +2730,35 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     ``_require_run_transition_lock``, which reserves this run_id for the
     whole check→terminate→write→dispatch sequence below).
 
-    Generation fencing closes the durable-write side of the race left by
-    confirming the old *workflow* terminated: that confirmation alone does
-    not guarantee an already in-flight, non-heartbeating *activity* has
-    stopped — Strategy Lab's activities aren't cooperatively cancellable —
-    so without fencing one could still commit a cycle record or persist
-    progress after the new cycle-0 workflow has started. The generation
-    minted above is threaded through the new workflow's persist/finalize
-    activities (see ``shared.fencing.check_fencing_token``), so a stale
-    activity's write is rejected instead of silently landing.
+    Generation fencing substantially narrows the race left by confirming the
+    old *workflow* terminated: that confirmation alone does not guarantee an
+    already in-flight, non-heartbeating *activity* has stopped — Strategy
+    Lab's activities aren't cooperatively cancellable — so without fencing
+    one could still commit a cycle record or persist progress after the new
+    cycle-0 workflow has started. The generation minted above is threaded
+    through the new workflow's persist/finalize activities (see
+    ``shared.fencing.check_fencing_token``), so a stale activity's write is
+    checked against it rather than always silently landing. For
+    ``persist_run_state_activity`` (a fast, synchronous write immediately
+    adjacent to its check) this closes the realistic window outright. For
+    ``finalize_cycle_record_activity`` (whose write happens after a
+    market-data fetch and paper-trading execution — a real amount of time)
+    the check happens both before and after that work, but the two checks
+    still can't make the underlying write atomic against the generation; see
+    ``strategy_lab.temporal.activities``'s module docstring for the full,
+    honest accounting.
 
-    Known, accepted residual limitation (the write is fenced, the
-    computation itself is not — closing that remaining gap is a real
-    feature, not a quick patch, tracked as a separate follow-up rather than
-    fixed here): a stale in-flight activity from the terminated incarnation
-    can still run to completion — burning time and cost on an LLM call or a
-    backtest — before its write is rejected as fenced; it just can no
-    longer corrupt the freshly restarted run's state. Cooperative
-    cancellation (checking ``activity.is_cancelled()``/heartbeating so a
-    terminated workflow's activities actually stop executing) would close
-    this remaining gap.
+    Known, accepted residual limitation (tracked as a separate follow-up
+    rather than fixed here — closing it is a real feature, not a quick
+    patch): a stale in-flight activity from the terminated incarnation can
+    still run to completion — burning time and cost on an LLM call, a
+    backtest, or a paper trade — before its write is checked/rejected as
+    fenced. Cooperative cancellation (checking
+    ``activity.is_cancelled()``/heartbeating so a terminated workflow's
+    activities actually stop executing) would close this remaining gap, and
+    would also fully close ``finalize_cycle_record_activity``'s wider
+    check-to-write window by stopping its execution outright rather than
+    merely detecting staleness after the fact.
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged),
@@ -2867,7 +2887,9 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # collision here means an old, un-reset execution is still running, not
         # that the intended restart is already in flight.
         try:
-            _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+            _dispatch_strategy_lab_run(
+                run_id, request, generation=restarted_state["generation"], allow_already_started=False
+            )
         except HTTPException as exc:
             if exc.status_code == 409:
                 # The reset above never actually took effect (an old execution

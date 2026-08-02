@@ -258,7 +258,10 @@ def test_persist_run_state_activity_default_generation_backward_compat(monkeypat
 
 def test_persist_run_state_activity_fails_closed_on_generation_lookup_failure(monkeypatch):
     """Regression: a transient durable-read failure inside the fencing check must
-    raise (rejecting the write), not silently accept it via a lenient default."""
+    raise (rejecting the write), not silently accept it via a lenient default --
+    but stays RETRYABLE (unlike an actual StaleFencingTokenError), since a
+    momentary job-service outage should let Temporal retry rather than
+    permanently failing the workflow."""
     from investment_team.strategy_lab import run_state
 
     def _broken(run_id):
@@ -276,7 +279,7 @@ def test_persist_run_state_activity_fails_closed_on_generation_lookup_failure(mo
     with pytest.raises(ApplicationError) as exc_info:
         act.persist_run_state_activity("run-1", {"status": "running"}, generation=5)
 
-    assert exc_info.value.non_retryable is True
+    assert exc_info.value.non_retryable is False
     assert persisted == []  # the write never happened despite a legitimately fresh generation
 
 
@@ -722,10 +725,50 @@ def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):
     assert out["record"] == {"lab_record_id": "rec-final"}
 
 
+def test_finalize_cycle_record_activity_rejects_generation_that_went_stale_during_finalize(
+    monkeypatch,
+):
+    """Regression: the post-check (after _finalize_strategy_lab_cycle_record
+    returns) must catch a restart that mints a newer generation WHILE that call
+    was running -- market-data fetch + paper-trading execution is a real amount
+    of time, so a pre-check alone (which passes here) is not enough."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    # Pre-check sees generation 2 (current, matches); post-check sees 5 (a
+    # restart minted a newer one while the finalize call below was "running").
+    generation_reads = iter([2, 5])
+    monkeypatch.setattr(
+        run_state, "get_run_generation_strict", lambda run_id: next(generation_reads)
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-final"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.finalize_cycle_record_activity(
+            {"run_id": "run-final-5", "generation": 2, "record": {"lab_record_id": "raw-1"}}
+        )
+
+    assert exc_info.value.type == "StaleFencingTokenError"
+    assert exc_info.value.non_retryable is True
+
+
 def test_finalize_cycle_record_activity_fails_closed_on_generation_lookup_failure(monkeypatch):
     """Regression: a transient durable-read failure inside the fencing check must
     raise (rejecting the finalize/persist), not silently accept it via a lenient
-    default -- otherwise an outage could mask a genuinely superseded generation."""
+    default -- otherwise an outage could mask a genuinely superseded generation.
+    Stays RETRYABLE (unlike an actual StaleFencingTokenError), matching
+    persist_run_state_activity's classification of the same failure mode."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
@@ -750,7 +793,7 @@ def test_finalize_cycle_record_activity_fails_closed_on_generation_lookup_failur
             {"run_id": "run-final-4", "generation": 5, "record": {"lab_record_id": "raw-1"}}
         )
 
-    assert exc_info.value.non_retryable is True
+    assert exc_info.value.non_retryable is False
     assert finalize_calls == []
 
 

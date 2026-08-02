@@ -145,8 +145,9 @@ def test_build_batch_input_maps_request(monkeypatch):
     }
     monkeypatch.setattr(run_state, "get_resume_seed_counters", lambda run_id: seed_counters)
 
-    bi = build_strategy_lab_batch_input("run-9", _FakeRequest())
+    bi = build_strategy_lab_batch_input("run-9", _FakeRequest(), 3)
     assert bi["run_id"] == "run-9"
+    assert bi["generation"] == 3  # passed through verbatim, not re-derived
     assert bi["batch_size"] == 3
     assert bi["batch_count"] == 2
     assert bi["max_parallel"] == 4  # clamped
@@ -181,7 +182,7 @@ def test_build_batch_input_defaults_seed_counters_for_fresh_run(monkeypatch):
     monkeypatch.setattr(run_state, "active_runs", {})
     monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
 
-    bi = build_strategy_lab_batch_input("run-fresh", _FakeRequest())
+    bi = build_strategy_lab_batch_input("run-fresh", _FakeRequest(), 1)
 
     assert bi["skipped_cycles"] == 0
     assert bi["errored_cycles"] == 0
@@ -207,7 +208,7 @@ def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
 
     req = _FakeRequest()
     req.allowed_asset_classes = ["stocks"]
-    bi = build_strategy_lab_batch_input("run-1", req)
+    bi = build_strategy_lab_batch_input("run-1", req, 1)
     assert bi["exclude_asset_classes"] == ["crypto", "forex"]
 
 
@@ -227,10 +228,12 @@ def test_start_batch_workflow_dispatches(monkeypatch):
 
     monkeypatch.setattr(shared.temporal, "start_workflow_sync", _fake_start_sync)
     monkeypatch.setattr(
-        sw, "build_strategy_lab_batch_input", lambda run_id, request: {"rid": run_id}
+        sw,
+        "build_strategy_lab_batch_input",
+        lambda run_id, request, generation: {"rid": run_id, "generation": generation},
     )
 
-    sw.start_strategy_lab_batch_workflow("run-7", _FakeRequest())
+    sw.start_strategy_lab_batch_workflow("run-7", _FakeRequest(), 5)
     assert captured["workflow_id"] == "strategy-lab-run-7"
     assert captured["task_queue"] == "strategy-lab-queue"
-    assert captured["batch_input"] == {"rid": "run-7"}
+    assert captured["batch_input"] == {"rid": "run-7", "generation": 5}

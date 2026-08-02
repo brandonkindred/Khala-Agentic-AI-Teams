@@ -426,6 +426,40 @@ def test_restart_strategy_lab_run_mints_new_generation(
     assert stub.by_id["run-gen"]["generation"] == 4
 
 
+def test_restart_strategy_lab_run_dispatches_with_the_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: the generation passed into _dispatch_strategy_lab_run must be
+    the exact value restart just minted -- passed through explicitly, not
+    re-derived by build_strategy_lab_batch_input via a separate read that could
+    transiently fail or diverge (see _dispatch_strategy_lab_run's precondition)."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-dispatch-gen"] = {
+        "run_id": "run-dispatch-gen",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 4,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-dispatch-gen", "generation": 4}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main,
+        "_dispatch_strategy_lab_run",
+        lambda run_id, request, *, generation, allow_already_started=True: captured.update(
+            generation=generation
+        ),
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-dispatch-gen/restart")
+
+    assert resp.status_code == 200
+    assert captured["generation"] == 5  # minted (4 -> 5); matches the persisted value below
+    assert api_main._active_runs["run-dispatch-gen"]["generation"] == 5
+
+
 def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -531,14 +565,14 @@ def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
     }
     stub = _StubLabClient(jobs=[{"job_id": "run-stale", "generation": 1}])
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
-    # get_run_generation (used by the fencing checks below) reads the durable
-    # store via run_state.get_lab_run_job_client directly, not api.main's alias
-    # -- both must point at the same backing store for this test to represent
-    # one consistent durable store.
+    # get_run_generation_strict (used by the fencing checks below) reads the
+    # durable store via run_state.get_lab_run_job_client directly, not
+    # api.main's alias -- both must point at the same backing store for this
+    # test to represent one consistent durable store.
     monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     # Capture the pre-restart generation, as a stale in-flight activity would have.
-    stale_generation = run_state.get_run_generation("run-stale")
+    stale_generation = run_state.get_run_generation_strict("run-stale")
     assert stale_generation == 1
 
     resp = api_client.post("/strategy-lab/runs/run-stale/restart")

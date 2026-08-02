@@ -311,7 +311,7 @@ def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_clien
     _enable_temporal(
         monkeypatch,
         "start_strategy_lab_batch_workflow",
-        lambda run_id, request: started.append(run_id),
+        lambda run_id, request, generation: started.append(run_id),
         module=sl_sw,
     )
     thread_ctor = mock.Mock()
@@ -497,7 +497,7 @@ def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
-    def _boom(run_id, request):
+    def _boom(run_id, request, generation):
         raise RuntimeError("Temporal client not available")
 
     monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _boom)
@@ -528,7 +528,7 @@ def test_strategy_lab_dispatch_treats_already_started_workflow_as_success(
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
-    def _already_started(run_id, request):
+    def _already_started(run_id, request, generation):
         raise WorkflowAlreadyStartedError(
             workflow_id=f"strategy-lab-{run_id}", run_id="prior-run", workflow_type="X"
         )
@@ -588,7 +588,7 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
         lambda rid, state, **k: persisted_calls.append(state),
     )
 
-    def _already_started(rid, request):
+    def _already_started(rid, request, generation):
         raise WorkflowAlreadyStartedError(
             workflow_id=f"strategy-lab-{rid}", run_id="prior-run", workflow_type="X"
         )
@@ -859,7 +859,7 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     started = []
     monkeypatch.setattr(
-        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)
+        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req, generation: started.append(rid)
     )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
@@ -907,7 +907,7 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
 
     started = []
     monkeypatch.setattr(
-        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)
+        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req, generation: started.append(rid)
     )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)

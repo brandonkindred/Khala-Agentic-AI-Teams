@@ -265,7 +265,7 @@ def _build_batch_input(
     monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
 
     run_id = f"run-{uuid.uuid4().hex[:6]}"
-    return build_strategy_lab_batch_input(run_id, request)
+    return build_strategy_lab_batch_input(run_id, request, 1)
 
 
 def test_batch_input_computes_complement_exclusion(monkeypatch: pytest.MonkeyPatch) -> None:

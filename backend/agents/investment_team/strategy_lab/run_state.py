@@ -71,56 +71,33 @@ def acquire_run_transition_lock(run_id: str) -> Optional[threading.Lock]:
     return run_lock if run_lock.acquire(blocking=False) else None
 
 
-def get_run_generation(run_id: str) -> int:
-    """Return run_id's current fencing generation, defaulting to 1.
-
-    Sibling to ``get_resume_seed_counters``: called from the Temporal batch
-    workflow's input builder (``build_strategy_lab_batch_input``) and from
-    the persist/finalize activities' fencing checks, so both read the same
-    persisted generation ``restart_strategy_lab_run`` mints on every restart.
-
-    Deliberately reads the DURABLE job store directly rather than going
-    through ``get_run_state`` (which prefers the process-local ``active_runs``
-    cache): the persist/finalize activities that call this run inside a
-    Temporal worker, which may be a different process from the API server
-    that handled the restart. Fencing exists specifically to reject a write
-    from a superseded incarnation across exactly that kind of process
-    boundary — trusting a cached, possibly stale in-memory generation here
-    would silently defeat the whole check in any deployment where the API
-    server and the worker aren't the same process.
-
-    Lenient by design: a durable-read failure here degrades to the same
-    default as a genuinely fresh/unknown run, which is the correct tradeoff
-    for this function's caller (``build_strategy_lab_batch_input``, a
-    best-effort dispatch-time read). The fencing checks themselves must NOT
-    be this lenient — see ``get_run_generation_strict``.
-
-    Preconditions:
-        - ``run_id`` names a strategy-lab run (may not exist).
-
-    Postconditions:
-        - Returns the run's durably persisted ``generation`` field, or ``1``
-          for a fresh/unknown run, a missing/malformed value, or a durable
-          read failure. Never raises.
-    """
-    state = load_run_from_job_service(run_id) or {}
-    try:
-        return max(1, int(state.get("generation", 1) or 1))
-    except (TypeError, ValueError):
-        return 1
-
-
 def get_run_generation_strict(run_id: str) -> int:
     """Return run_id's current fencing generation, propagating durable-read failures.
 
-    Strict counterpart to ``get_run_generation``, used ONLY by the fencing
-    checks in ``persist_run_state_activity``/``finalize_cycle_record_activity``:
-    those checks must fail CLOSED (reject the write, by letting a read
-    failure surface as an error instead of a value) rather than fail OPEN —
-    ``get_run_generation``'s lenient "default to 1 on any read failure"
-    behavior, used for its other caller, would otherwise let a transient
-    durable-read failure mask a genuinely higher current generation and
-    accept a write that should have been fenced out.
+    The sole read path for a run's fencing generation, used by the two
+    fencing checks (``persist_run_state_activity``/
+    ``finalize_cycle_record_activity``). Every OTHER caller that needs a
+    dispatch-time generation value (``run_strategy_lab``/
+    ``resume_strategy_lab_run``/``restart_strategy_lab_run``, via
+    ``build_strategy_lab_batch_input``) already has its own known/just-minted
+    value in hand and passes it through explicitly instead of calling this —
+    see ``_dispatch_strategy_lab_run``'s precondition — so there is no lenient
+    counterpart to fall back to here.
+
+    Deliberately reads the DURABLE job store directly rather than going
+    through ``get_run_state`` (which prefers the process-local ``active_runs``
+    cache): the fencing checks run inside a Temporal worker, which may be a
+    different process from the API server that handled the restart. Fencing
+    exists specifically to reject a write from a superseded incarnation
+    across exactly that kind of process boundary — trusting a cached,
+    possibly stale in-memory generation here would silently defeat the whole
+    check in any deployment where the API server and the worker aren't the
+    same process.
+
+    Fails CLOSED: a durable-read failure raises (propagates to the caller)
+    rather than defaulting to the most permissive generation, which could
+    otherwise mask a genuinely higher current generation and accept a write
+    that should have been fenced out.
 
     Preconditions:
         - ``run_id`` names a strategy-lab run (may not exist).
@@ -268,7 +245,6 @@ __all__ = [
     "lock",
     "active_runs",
     "acquire_run_transition_lock",
-    "get_run_generation",
     "get_run_generation_strict",
     "get_lab_run_job_client",
     "load_run_from_job_service",
