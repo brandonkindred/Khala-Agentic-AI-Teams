@@ -3,15 +3,13 @@
 Routed through the in-memory ``FakeJobServiceClient`` via the autouse
 ``_autouse_patched_job_store`` fixture, so a job-store call made while a
 test is executing lands in a per-test in-memory dict. That alone is not
-enough for the orchestrator/retry background threads these endpoints spawn:
-``monkeypatch`` (which backs ``patched_job_store``) reverts at the end of
-*this* test function, not when the spawned daemon thread finishes — which
-can be tens of seconds later, running the real multi-phase pipeline. The
-autouse ``_stub_background_workflow`` fixture below replaces those threads'
-targets with a no-op, the same pattern every sibling endpoint-test file
-(``test_frontend_code_v2_api.py``, ``test_backend_code_v2_api.py``) already
-uses, so no thread outlives its test and none can fall through to a real
-HTTP call against the unroutable placeholder ``JOB_SERVICE_URL``.
+enough for these endpoints: they dispatch unconditionally to Temporal's
+``start_run_team_workflow``/``start_retry_failed_workflow``, which raise
+immediately in tests (no real Temporal client is configured), turning every
+would-be-200 response into a 503. The autouse ``_stub_background_workflow``
+fixture below stubs those two dispatch calls to no-ops so the route handlers'
+synchronous behavior (status codes, the immediate job-store write) can be
+asserted without a live Temporal deployment.
 """
 
 import os
@@ -41,19 +39,19 @@ def _autouse_patched_job_store(patched_job_store):
 
 @pytest.fixture(autouse=True)
 def _stub_background_workflow(monkeypatch):
-    """Replace the fire-and-forget orchestrator/retry background threads with no-ops.
+    """Stub the Temporal dispatch calls POST /run-team (and resume/restart/retry) make.
 
-    POST /run-team (and resume/restart/retry) spawn a daemon thread running the
-    real (integration-only) multi-phase pipeline. Without this stub the thread
-    keeps running after the test (and its monkeypatch-scoped job-store patch)
-    tears down, and can later make a real HTTP call against the unroutable
-    placeholder JOB_SERVICE_URL — surfacing as an unrelated, later test's
-    failure. Every synchronous assertion in this file (status codes, the
-    immediate job-store write the route handler makes before spawning the
-    thread) is unaffected: only the background pipeline execution is skipped.
+    These routes call start_run_team_workflow/start_retry_failed_workflow
+    unconditionally now — no thread fallback. Without a real Temporal client
+    those raise, which the route's try/except turns into a 503. Stubbing them
+    to no-ops keeps every synchronous assertion in this file (status codes,
+    the immediate job-store write the route handler makes before dispatching)
+    meaningful without a live Temporal deployment.
     """
-    monkeypatch.setattr(_api_main, "_run_orchestrator_background", lambda *a, **k: None)
-    monkeypatch.setattr(_api_main, "_run_retry_background", lambda *a, **k: None)
+    import software_engineering_team.temporal.start_workflow as _start_workflow
+
+    monkeypatch.setattr(_start_workflow, "start_run_team_workflow", lambda *a, **k: None)
+    monkeypatch.setattr(_start_workflow, "start_retry_failed_workflow", lambda *a, **k: None)
 
 
 @pytest.fixture

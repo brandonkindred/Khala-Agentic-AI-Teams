@@ -1,7 +1,6 @@
 """SE team API — run-team job lifecycle routes (create, upload, list, status, retry, cancel, delete, resume, restart, llm-recheck)."""
 
 import logging
-import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +9,6 @@ from typing import Any, Dict
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from shared.hitl.status import pending_questions_from_raw
-from software_engineering_team.api import main as _main
 from software_engineering_team.api.models import (
     CancelJobResponse,
     DeleteJobResponse,
@@ -142,26 +140,17 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     job_id = str(uuid.uuid4())
     create_job(job_id, str(repo_path), job_type="run_team")
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         # Persist sprint_id inside the launch try so a transient
         # job-service failure on the update doesn't leave a pending
-        # job with no thread/workflow running. `None` is written explicitly
+        # job with no workflow running. `None` is written explicitly
         # so non-sprint runs don't carry a stale value from a previous job
         # that reused the same row (defense in depth — create_job mints a fresh uuid).
         update_job(job_id, sprint_id=request.sprint_id)
 
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if temporal_enabled:
-            start_run_team_workflow(job_id, str(repo_path))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(repo_path)),
-                kwargs={"sprint_id": request.sprint_id},
-            )
-            thread.daemon = True
-            thread.start()
+        start_run_team_workflow(job_id, str(repo_path))
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -208,19 +197,10 @@ async def run_team_upload(
     job_id = str(uuid.uuid4())
     create_job(job_id, str(workspace), job_type="run_team")
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if is_temporal_enabled():
-            start_run_team_workflow(job_id, str(workspace))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(workspace)),
-            )
-            thread.daemon = True
-            thread.start()
+        start_run_team_workflow(job_id, str(workspace))
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -357,16 +337,10 @@ def retry_failed_tasks(job_id: str) -> RetryResponse:
 
     failed_ids = [ft.get("task_id", "") for ft in failed_tasks]
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or retry thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.start_workflow import start_retry_failed_workflow
 
-        if is_temporal_enabled():
-            start_retry_failed_workflow(job_id)
-        else:
-            thread = threading.Thread(target=_main._run_retry_background, args=(job_id,))
-            thread.daemon = True
-            thread.start()
+        start_retry_failed_workflow(job_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -522,25 +496,10 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         current_activity=None,
     )
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread for resume
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow for resume
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        # Pass previously submitted answers so the orchestrator doesn't re-ask questions
-        submitted_answers = data.get("submitted_answers") or None
-
-        if temporal_enabled:
-            start_run_team_workflow(job_id, str(repo_path))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(repo_path)),
-                kwargs={
-                    "resolved_questions_override": submitted_answers,
-                    "sprint_id": sprint_id,
-                },
-                daemon=True,
-            )
-            thread.start()
+        start_run_team_workflow(job_id, str(repo_path))
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -623,19 +582,10 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     reset_job(job_id, str(repo_path), job_type="run_team")
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None, sprint_id=sprint_id)
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread for restart
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow for restart
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if temporal_enabled:
-            start_run_team_workflow(job_id, str(repo_path))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(repo_path)),
-                kwargs={"sprint_id": sprint_id},
-                daemon=True,
-            )
-            thread.start()
+        start_run_team_workflow(job_id, str(repo_path))
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -678,16 +628,10 @@ def resume_after_llm_check(job_id: str) -> RetryResponse:
 
     update_job(job_id, status="running", error=None)
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or retry thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.start_workflow import start_retry_failed_workflow
 
-        if is_temporal_enabled():
-            start_retry_failed_workflow(job_id)
-        else:
-            thread = threading.Thread(target=_main._run_retry_background, args=(job_id,))
-            thread.daemon = True
-            thread.start()
+        start_retry_failed_workflow(job_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
