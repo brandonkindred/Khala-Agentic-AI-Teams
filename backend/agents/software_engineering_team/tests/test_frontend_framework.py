@@ -181,6 +181,20 @@ def test_detect_framework_from_project_vite_config_no_markers(tmp_path: Path) ->
     assert detect_framework_from_project(tmp_path) is None
 
 
+def test_detect_framework_from_project_ignores_dependency_markers(tmp_path: Path) -> None:
+    """A *.tsx/*.vue file shipped inside node_modules or dist must not be treated as
+    a first-party marker; only unrecognized plugin configs with no real source
+    markers should return None instead of misclassifying via a vendored file."""
+    (tmp_path / "vite.config.ts").write_text("")
+    vendor_dir = tmp_path / "node_modules" / "some-react-lib"
+    vendor_dir.mkdir(parents=True)
+    (vendor_dir / "Widget.tsx").write_text("export default function Widget() {}")
+    build_dir = tmp_path / "dist"
+    build_dir.mkdir()
+    (build_dir / "bundle.vue").write_text("<template></template>")
+    assert detect_framework_from_project(tmp_path) is None
+
+
 def test_detect_framework_from_project_unreadable_directory_returns_none(
     tmp_path: Path,
     monkeypatch,

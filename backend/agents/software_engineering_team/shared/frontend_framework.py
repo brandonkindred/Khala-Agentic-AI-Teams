@@ -31,6 +31,19 @@ _ANGULAR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Directories excluded when scanning for framework marker files, so a file shipped
+# inside a dependency or build output doesn't misclassify the whole project.
+_IGNORED_MARKER_DIRS = frozenset({"node_modules", "dist", "build", ".git"})
+
+
+def _has_first_party_marker(repo_path: Path, pattern: str) -> bool:
+    """True if a file matching `pattern` exists outside dependency/build directories."""
+    for match in repo_path.rglob(pattern):
+        parents = match.relative_to(repo_path).parts[:-1]
+        if not _IGNORED_MARKER_DIRS.intersection(parents):
+            return True
+    return False
+
 
 def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
     """
@@ -47,7 +60,9 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
     - vite.config.ts or vite.config.js with no plugin marker: falls back to a
       *.vue file -> Vue, else a *.jsx or *.tsx file -> React. Vite is
       framework-agnostic and Vue also supports JSX/TSX, so this fallback is a
-      best-effort guess used only when the config doesn't name its plugin.
+      best-effort guess used only when the config doesn't name its plugin. The
+      file-marker scans ignore node_modules/dist/build/.git so a marker shipped
+      inside a dependency or build artifact doesn't misclassify the project.
 
     An unreadable file or directory encountered while scanning for these markers
     is treated as "no framework detected" rather than raising.
@@ -102,9 +117,11 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
                 return "vue"
             if "@vitejs/plugin-react" in config_content:
                 return "react"
-            if any(repo_path.rglob("*.vue")):
+            if _has_first_party_marker(repo_path, "*.vue"):
                 return "vue"
-            if any(repo_path.rglob("*.jsx")) or any(repo_path.rglob("*.tsx")):
+            if _has_first_party_marker(repo_path, "*.jsx") or _has_first_party_marker(
+                repo_path, "*.tsx"
+            ):
                 return "react"
         except (OSError, UnicodeDecodeError):
             pass
