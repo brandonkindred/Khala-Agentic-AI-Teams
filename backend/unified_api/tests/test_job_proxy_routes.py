@@ -236,6 +236,7 @@ def test_se_metrics_alias_resets_non_positive_timeout_to_default(monkeypatch: py
     _patch_async_client(monkeypatch, handler)
     resp = client.get("/api/se/metrics")
     assert resp.status_code == 200
+    assert seen["timeout"] == {"connect": 15.0, "read": 15.0, "write": 15.0, "pool": 15.0}
 
 
 def test_se_metrics_alias_returns_502_on_non_json_body(monkeypatch: pytest.MonkeyPatch) -> None:
