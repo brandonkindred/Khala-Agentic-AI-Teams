@@ -638,8 +638,16 @@ def test_merge_wave_results_activity_isolates_single_merge_failure(monkeypatch):
     params = {
         "primary_tracker_state": primary_state,
         "wave_results": [
-            {"cycle_index": 0, "record": _record_dump("stocks"), "cycle_tracker_state": primary_state},
-            {"cycle_index": 1, "record": _record_dump("crypto"), "cycle_tracker_state": primary_state},
+            {
+                "cycle_index": 0,
+                "record": _record_dump("stocks"),
+                "cycle_tracker_state": primary_state,
+            },
+            {
+                "cycle_index": 1,
+                "record": _record_dump("crypto"),
+                "cycle_tracker_state": primary_state,
+            },
         ],
     }
     out = act.merge_wave_results_activity(params)
