@@ -22,6 +22,7 @@ from code_review_agent.snapshot_comparison import (
     CORPUS,
     FindingDiff,
     SubmissionSpec,
+    _dedupe_pooled,
     _finding_similarity,
     compare_submission,
     diff_findings,
@@ -107,6 +108,24 @@ def test_diff_findings_greedily_pairs_best_scoring_candidate() -> None:
     matched_new = result.matched[0][1]
     assert "return type of parse" in matched_new.description
     assert len(result.added) == 1
+
+
+def test_dedupe_pooled_collapses_similar_findings_to_one_representative() -> None:
+    findings = [
+        _issue(description="bypasses the repository layer"),
+        _issue(description="bypasses the repository layer entirely"),
+        _issue(description="bypasses the repository layer here too"),
+    ]
+    deduped = _dedupe_pooled(findings)
+    assert deduped == [findings[0]]
+
+
+def test_dedupe_pooled_keeps_genuinely_different_findings_separate() -> None:
+    findings = [
+        _issue(description="bypasses the repository layer"),
+        _issue(description="stale docstring drift on an unrelated function"),
+    ]
+    assert _dedupe_pooled(findings) == findings
 
 
 def test_finding_similarity_zero_for_different_category() -> None:
@@ -323,3 +342,48 @@ def test_compare_submission_alternates_which_path_runs_first_across_repeats(
     # Repeat 0 (even): old path (arch, side) then new path (merged).
     # Repeat 1 (odd): new path (merged) then old path (arch, side).
     assert call_order == ["arch", "side", "merged", "merged", "arch", "side"]
+
+
+def test_compare_submission_dedupes_findings_pooled_unevenly_across_repeats(
+    tmp_path: Path,
+) -> None:
+    """The old path finds the same real finding on every repeat; the merged path
+    only finds it on one of three repeats. Without dedup, the 1:1 matcher would
+    pair one old copy with the merged copy and report the other two old copies
+    as spurious `lost` entries -- see the P1 review comment this test was added
+    in response to."""
+    repo, sha = _init_one_commit_repo(tmp_path)
+    spec = SubmissionSpec(
+        label="synthetic-uneven-repeats",
+        commit_sha=sha,
+        changed_files=("app.py",),
+        task_description="test change",
+    )
+    merged_calls = {"n": 0}
+    _FINDING = {
+        "severity": "high",
+        "category": "architecture",
+        "file_path": "app.py",
+        "description": "bypasses the repository layer",
+        "suggestion": "use the repository",
+    }
+
+    class _UnevenClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                merged_calls["n"] += 1
+                findings = [_FINDING] if merged_calls["n"] == 1 else []
+                return {"architecture_findings": findings, "side_effect_findings": []}
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {"findings": [_FINDING]}
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = compare_submission(
+        spec, lambda: _UnevenClient(), repo, tmp_path / "worktrees", repeats=3
+    )
+
+    assert len(result.architecture_diff.matched) == 1
+    assert result.architecture_diff.lost == []
+    assert result.architecture_diff.added == []

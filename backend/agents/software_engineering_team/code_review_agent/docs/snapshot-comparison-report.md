@@ -37,8 +37,8 @@ the design doc's own risk note calls out:
 | side-effect (small cross-file threading) | `83299e4` | 1 | Small, clear caller-impact case: a new parameter threaded through one call site. |
 | architecture/refactor (dead-code removal) | `c8b4098` | 1 | Exercises the architecture pass's `category: "refactor"` (cross-codebase redundancy) path. |
 | architecture + side-effect (Temporal wiring, no doc) | `569b78e` | 3 | Cross-cutting change (workflow + activities), moderate blast radius, no formal architecture document attached. |
-| large multi-file feature, **with** architecture doc | `358873b` | 9 | Highest finding-density case in the corpus; architecture doc attached (`docs/ARCHITECTURE.md`). |
-| large multi-file feature, **without** architecture doc | `358873b` | 9 | Same change, no document attached — isolates the architecture-doc-optional broadening (introduced by the same commit) from the call-count change being validated here. |
+| large multi-file feature, **with** architecture doc | `358873b` | 10 | Highest finding-density case in the corpus; architecture doc attached (`docs/ARCHITECTURE.md`). |
+| large multi-file feature, **without** architecture doc | `358873b` | 10 | Same change, no document attached — isolates the architecture-doc-optional broadening (introduced by the same commit) from the call-count change being validated here. |
 
 Full commit SHAs are in `CORPUS` in `snapshot_comparison.py`; each was located
 by finding the squash-merge commit whose title matches the change described
@@ -78,7 +78,12 @@ search) instead of isolated snippets.
   repeats, new-then-old on odd repeats), so a rate-limited or
   time-degrading real provider does not systematically disadvantage
   whichever path always ran second — repeating with a fixed order would
-  otherwise amplify that bias instead of averaging it out.
+  otherwise amplify that bias instead of averaging it out. Each path's
+  pooled findings are deduplicated independently (`_dedupe_pooled`) before
+  the cross-path diff, so a finding one path emits in every repeat and the
+  other emits in only one repeat still counts as a single match — without
+  this, the unequal pooled counts would surface as spurious `lost`/`added`
+  noise rather than the one real (in)consistency signal.
 - **What counts as a candidate regression:** a `lost` entry (old path found
   it, new path didn't) on any submission is the signal this whole exercise
   exists to catch, and an `added` entry (new path found it, old path didn't)

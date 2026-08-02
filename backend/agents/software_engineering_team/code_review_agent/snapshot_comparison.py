@@ -119,6 +119,7 @@ CORPUS: Tuple[SubmissionSpec, ...] = (
         label="large multi-file feature, with architecture doc",
         commit_sha="358873b64294e74f14d029d96e31479284601403",
         changed_files=(
+            "backend/agents/software_engineering_team/code_review_agent/__init__.py",
             "backend/agents/software_engineering_team/code_review_agent/architecture_consistency_pass.py",
             "backend/agents/software_engineering_team/code_review_agent/architecture_context.py",
             "backend/agents/software_engineering_team/code_review_agent/coordinator.py",
@@ -137,6 +138,7 @@ CORPUS: Tuple[SubmissionSpec, ...] = (
         label="large multi-file feature, without architecture doc",
         commit_sha="358873b64294e74f14d029d96e31479284601403",
         changed_files=(
+            "backend/agents/software_engineering_team/code_review_agent/__init__.py",
             "backend/agents/software_engineering_team/code_review_agent/architecture_consistency_pass.py",
             "backend/agents/software_engineering_team/code_review_agent/architecture_context.py",
             "backend/agents/software_engineering_team/code_review_agent/coordinator.py",
@@ -321,6 +323,31 @@ def _finding_similarity(a: CodeReviewIssue, b: CodeReviewIssue) -> float:
     return score
 
 
+def _dedupe_pooled(findings: Sequence[CodeReviewIssue]) -> List[CodeReviewIssue]:
+    """Collapse near-duplicate findings pooled across repeats of one path.
+
+    Preconditions:
+        - ``findings`` are all from the SAME path (old or new) and the SAME
+          category axis, pooled across some number of repeated runs.
+
+    Postconditions:
+        - Returns one representative per group of mutually similar findings
+          (``_finding_similarity(...) >= _MATCH_TEXT_THRESHOLD`` against the
+          group's first-seen member), in first-seen order. Without this, a
+          finding one path's repeats emit inconsistently (e.g. 1 of 3 runs)
+          would pool to fewer copies than the other path's consistent
+          emission (e.g. 3 of 3 runs), and the 1:1 cross-path matcher in
+          :func:`diff_findings` would then report the surplus copies as
+          spurious ``lost``/``added`` noise instead of one real match. Pure;
+          never raises.
+    """
+    deduped: List[CodeReviewIssue] = []
+    for finding in findings:
+        if not any(_finding_similarity(finding, kept) >= _MATCH_TEXT_THRESHOLD for kept in deduped):
+            deduped.append(finding)
+    return deduped
+
+
 def diff_findings(old: Sequence[CodeReviewIssue], new: Sequence[CodeReviewIssue]) -> FindingDiff:
     """Greedily pair ``old``/``new`` findings by similarity within one category axis.
 
@@ -391,13 +418,11 @@ def compare_submission(
     Postconditions:
         - Returns a result whose ``architecture_diff``/``side_effect_diff``
           are computed over the POOLED findings across all ``repeats`` runs of
-          each path (not diffed run-by-run), so a finding that appears in any
-          repeat counts once its diff is inspected as "old found it" /
-          "new found it" (repeats reduce false 'lost' calls from one
-          unlucky sample, at the cost of also pooling any duplicate the model
-          emits across runs — a human reviewing ``lost``/``added`` should
-          expect some near-duplicates from this pooling, not treat every
-          entry as a distinct finding).
+          each path, each path's pool independently deduplicated via
+          :func:`_dedupe_pooled` before the cross-path diff — so a finding
+          one path emits in every repeat and the other emits in only one
+          still counts as a single match, not surplus ``lost``/``added``
+          noise from the unequal repeat counts.
         - Which path runs first alternates by repeat index (old-then-new on
           even repeats, new-then-old on odd repeats), so a rate-limited or
           time-degrading provider does not systematically disadvantage
@@ -427,8 +452,8 @@ def compare_submission(
                     new_side.extend(s2)
         return SubmissionComparisonResult(
             label=spec.label,
-            architecture_diff=diff_findings(old_arch, new_arch),
-            side_effect_diff=diff_findings(old_side, new_side),
+            architecture_diff=diff_findings(_dedupe_pooled(old_arch), _dedupe_pooled(new_arch)),
+            side_effect_diff=diff_findings(_dedupe_pooled(old_side), _dedupe_pooled(new_side)),
             old_llm_calls=repeats * 2,
             new_llm_calls=repeats * 1,
         )
