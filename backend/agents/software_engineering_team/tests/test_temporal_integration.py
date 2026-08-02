@@ -80,6 +80,49 @@ def test_run_team_with_temporal_starts_workflow(
     assert args[1] == str(temp_work_path)
 
 
+@patch("software_engineering_team.api.routes.jobs._preflight_sprint_scope")
+@patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
+@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+def test_run_team_with_sprint_id_succeeds_under_temporal(
+    mock_temporal_enabled: MagicMock,
+    mock_start_workflow: MagicMock,
+    mock_preflight_sprint_scope: MagicMock,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """POST /run-team with sprint_id succeeds (no more 400 from the deleted Temporal-sprint guard)
+    and forwards sprint_id to start_run_team_workflow."""
+    work = tmp_path / "sprint_work"
+    work.mkdir()
+
+    r = client.post("/run-team", json={"repo_path": str(work), "sprint_id": "sprint-1"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "job_id" in data
+    mock_start_workflow.assert_called_once()
+    assert mock_start_workflow.call_args.kwargs["sprint_id"] == "sprint-1"
+
+
+@patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
+@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+def test_run_team_with_sprint_id_still_400s_under_workflow_v2(
+    mock_temporal_enabled: MagicMock,
+    mock_start_workflow: MagicMock,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /run-team with sprint_id still 400s when SE_WORKFLOW_V2 is enabled — RunTeamWorkflowV2
+    can't carry sprint_id yet, so silently proceeding would run the wrong (or no) scope."""
+    monkeypatch.setenv("SE_WORKFLOW_V2", "true")
+    work = tmp_path / "sprint_work_v2"
+    work.mkdir()
+
+    r = client.post("/run-team", json={"repo_path": str(work), "sprint_id": "sprint-1"})
+    assert r.status_code == 400
+    mock_start_workflow.assert_not_called()
+
+
 @patch("software_engineering_team.temporal.start_workflow.start_retry_failed_workflow")
 @patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
 def test_retry_failed_with_temporal_starts_workflow(
