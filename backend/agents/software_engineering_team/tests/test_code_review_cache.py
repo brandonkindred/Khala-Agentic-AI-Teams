@@ -17,6 +17,9 @@ the reduce-phase synthesis pass (which fires whenever a run has >1 sub-review).
 
 The process-global cache is cleared around every test by the autouse
 ``_reset_code_review_chunk_cache`` fixture in ``conftest.py``.
+
+Text-field truncation/length-limit behavior is out of scope here; it is
+covered by the ``build_findings_digest`` tests in ``test_code_review_synthesis.py``.
 """
 
 from __future__ import annotations

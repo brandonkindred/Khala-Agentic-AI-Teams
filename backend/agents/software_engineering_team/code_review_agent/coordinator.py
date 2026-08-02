@@ -10,8 +10,8 @@ blast-radius pass (a single additive LLM call covering architecture
 contradictions, cross-codebase redundancy, and caller-impact / documentation
 mismatches the per-chunk view cannot see — see
 ``merged_architecture_side_effect_pass``) → side-effect consolidation (merges
-related ``side-effects`` findings that share an enclosing construct or cite one
-another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
+related ``side-effects`` findings that share an enclosing construct or cite
+one another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
 severity gate, safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
@@ -610,8 +610,8 @@ def run_coordinator(
           architecture-consistency and side-effect-impact finding lists before
           deduplication and approval, preserving the downstream behavior of the
           former separate passes.
-        - After the tail passes, related ``side-effects`` findings may be
-          optionally consolidated (gated by
+        - After the false-positive filter and the merged additive pass, related
+          ``side-effects`` findings may be optionally consolidated (gated by
           ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
           the consolidation step in the body) before the deterministic
           dedupe/severity gate.
@@ -802,12 +802,12 @@ def run_coordinator(
     # redundancy, plus caller-impact / documentation mismatches) and then split
     # back into the two finding lists for downstream dedupe/gate/synthesis.
     # Neither reads the other's output, so they run concurrently when safe (see
-    # ``_run_tail_passes``). The merged halves are restricted internally to the
-    # default CODE_REVIEW profile -- see their own docstrings for why the other
-    # profiles must never receive these findings. After the tail passes, related
-    # ``side-effects`` findings may optionally be consolidated (gated by
+    # ``_run_tail_passes``). After those passes, related ``side-effects`` findings
+    # may optionally be consolidated (gated by
     # ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error) before the
-    # same dedupe/severity-gate/merge machinery below.
+    # same dedupe/severity-gate/merge machinery below. The merged halves are
+    # restricted internally to the default CODE_REVIEW profile -- see their own
+    # docstrings for why the other profiles must never receive these findings.
     tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,
