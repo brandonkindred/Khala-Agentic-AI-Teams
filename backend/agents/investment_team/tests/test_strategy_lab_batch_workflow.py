@@ -138,6 +138,10 @@ def _child_record(lab_record_id: str) -> Dict[str, Any]:
     }
 
 
+def _child_skipped() -> Dict[str, Any]:
+    return {"kind": "skipped", "convergence_tracker_state": {"trial_count": 1}}
+
+
 def _run(batch_input: Dict[str, Any], harness: _Harness) -> Dict[str, Any]:
     p1, p2 = harness.patch()
     with p1, p2:
@@ -253,6 +257,56 @@ def test_multiple_waves_when_wave_exceeds_max_parallel():
     assert harness.activity_calls.count("snapshot_prior_records_activity") == 2
     assert harness.activity_calls.count("merge_wave_results_activity") == 2
     assert harness.child_starts == ["run-1-c0", "run-1-c1", "run-1-c2"]
+
+
+# ---------------------------------------------------------------------------
+# Skipped cycles (no market data)
+# ---------------------------------------------------------------------------
+
+
+def test_skipped_cycle_is_counted_and_not_finalized():
+    captured: Dict[str, Any] = {}
+
+    def _merge(args):
+        captured["wave_results"] = args[0]["wave_results"]
+        return {"primary_tracker_state": {"ok": True}}
+
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_skipped()},
+        activity_handlers=_default_activity_handlers(merge_wave_results_activity=_merge),
+    )
+    result = _run(_batch_input(), harness)
+
+    assert result["status"] == "completed"
+    assert result["skipped_cycles"] == 1
+    assert result["errored_cycles"] == 0
+    # Only the surviving cycle was finalized/collected/merged into the tracker.
+    assert result["completed_record_ids"] == ["rec-0"]
+    assert harness.activity_calls.count("finalize_cycle_record_activity") == 1
+    assert [w["cycle_index"] for w in captured["wave_results"]] == [0]
+
+
+def test_seeded_skipped_cycles_are_additive_not_overwritten():
+    """A resumed run's skipped_cycles seed (#4014) is added to, not
+    overwritten by, new skips in this dispatch."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_skipped(), "run-1-c1": _child_skipped()},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(skipped_cycles=3), harness)
+    assert result["skipped_cycles"] == 5  # 3 seeded + 2 new
+
+
+def test_skipped_cycles_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_skipped()},
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(), harness)
+    assert any(s.get("skipped_cycles") == 1 for s in persisted)
 
 
 # ---------------------------------------------------------------------------

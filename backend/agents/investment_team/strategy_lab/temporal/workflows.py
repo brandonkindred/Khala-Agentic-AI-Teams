@@ -155,8 +155,12 @@ class StrategyLabCycleWorkflow:
         here).
     Postconditions:
         Returns ``{"record": StrategyLabRecord dump, "convergence_tracker_state":
-        <updated dto wire dict>}``, mirroring ``run_cycle``'s return plus the
-        batch-level tracker state the parent batch workflow merges.
+        <updated dto wire dict>}`` on a terminal record, mirroring ``run_cycle``'s
+        return plus the batch-level tracker state the parent batch workflow
+        merges, or ``{"kind": "skipped", "convergence_tracker_state": ...}``
+        when the attempt activity reported no market data available (no
+        ``"record"`` key in that case — the parent workflow branches on
+        ``result.get("kind") == "skipped"``).
     Invariants:
         Exactly one ``run_design_attempt_activity`` call happens per design
         attempt; the LLM-call budget, gate-result accumulation, and tracker
@@ -243,6 +247,15 @@ class StrategyLabCycleWorkflow:
             if outcome["kind"] == "record":
                 return {
                     "record": outcome["record"],
+                    "convergence_tracker_state": tracker_state,
+                }
+
+            if outcome["kind"] == "skipped":
+                # No market data — cycle-terminal immediately, no further
+                # design-attempt retry (mirrors thread mode, where the 502
+                # isn't design-attempt-scoped).
+                return {
+                    "kind": "skipped",
                     "convergence_tracker_state": tracker_state,
                 }
 
@@ -354,6 +367,10 @@ class StrategyLabBatchWorkflow:
             ``paper_trading_lookback_days`` (int, default 365): forwarded to
             ``finalize_cycle_record_activity``.
           - ``start_cycle_offset`` (int, default 0): resume anchor.
+          - ``skipped_cycles`` (int, default 0): resume-seed for cycles
+            already skipped (no market data) before this dispatch (from
+            ``get_resume_seed_counters``); added to, not overwritten by, new
+            skips.
           - ``errored_details`` (optional list, default empty): resume seed for
             the per-failure diagnostic list, carried forward from persisted run
             state (mirrors thread mode's ``errored_details``).
@@ -367,21 +384,24 @@ class StrategyLabBatchWorkflow:
             every cycle so each child need not re-resolve it.
     Postconditions:
         Returns ``{"run_id", "status", "completed_record_ids", "errored_cycles",
-        "errored_details", "tracker_merge_error_count", "convergence_tracker_state"}``.
-        ``status`` is the exact external stop status (``cancelled``/``failed``/
-        ``interrupted``) when one was observed between waves — never forced to
-        ``cancelled`` for an interrupt/failure — else ``completed`` /
-        ``completed_with_errors`` (the latter when ≥1 cycle errored). Every
-        completed cycle's record is finalized (paper-traded + persisted) via
-        ``finalize_cycle_record_activity`` before the batch returns.
-        ``errored_details`` accumulates a capped (``_ERRORED_DETAILS_MAX``),
-        structured entry (``cycle_index``, ``batch_index``, ``error``,
-        ``exception_type``[, ``reason``]) per failed cycle — both a
-        child-workflow failure and a per-record tracker-merge failure reported
-        by ``merge_wave_results_activity`` — seeded forward from ``batch_input``
-        and never truncated below what was seeded. A tracker-merge failure is
-        isolated to its own record (does not fail the wave) but still counts
-        toward ``errored_cycles`` and ``tracker_merge_error_count``.
+        "skipped_cycles", "errored_details", "tracker_merge_error_count",
+        "convergence_tracker_state"}``. ``status`` is the exact external stop
+        status (``cancelled``/``failed``/``interrupted``) when one was observed
+        between waves — never forced to ``cancelled`` for an interrupt/failure —
+        else ``completed`` / ``completed_with_errors`` (the latter when ≥1 cycle
+        errored). Every completed, non-skipped cycle's record is finalized
+        (paper-traded + persisted) via ``finalize_cycle_record_activity`` before
+        the batch returns; a cycle whose child workflow reports ``{"kind":
+        "skipped", ...}`` (no market data) is counted in ``skipped_cycles``
+        instead and never finalized. ``errored_details`` accumulates a capped
+        (``_ERRORED_DETAILS_MAX``), structured entry (``cycle_index``,
+        ``batch_index``, ``error``, ``exception_type``[, ``reason``]) per failed
+        cycle — both a child-workflow failure and a per-record tracker-merge
+        failure reported by ``merge_wave_results_activity`` — seeded forward
+        from ``batch_input`` and never truncated below what was seeded. A
+        tracker-merge failure is isolated to its own record (does not fail the
+        wave) but still counts toward ``errored_cycles`` and
+        ``tracker_merge_error_count``.
     Invariants:
         Each wave merges its settled cycles into the batch-level tracker in
         cycle-index order (via ``merge_wave_results_activity``), so directives are
@@ -413,6 +433,7 @@ class StrategyLabBatchWorkflow:
         completed_record_ids: List[str] = []
         completed_indices: set[int] = set(range(start_cycle_offset))
         errored = 0
+        skipped = int(batch_input.get("skipped_cycles", 0))
         errored_details: List[Dict[str, Any]] = list(batch_input.get("errored_details") or [])
         tracker_merge_errors = int(batch_input.get("tracker_merge_error_count", 0))
         # The exact persisted external stop status ("cancelled"/"failed"/
@@ -515,6 +536,12 @@ class StrategyLabBatchWorkflow:
                                 }
                             )
                         continue
+                    if result.get("kind") == "skipped":
+                        # No market data — a soft skip, not an error; the
+                        # cycle contributes no record, so it's neither
+                        # finalized nor merged into the batch tracker.
+                        skipped += 1
+                        continue
                     finalized = await _exec(
                         act.finalize_cycle_record_activity,
                         params={
@@ -559,6 +586,7 @@ class StrategyLabBatchWorkflow:
                         "contiguous_cycles": _contiguous_prefix(completed_indices),
                         "completed_record_ids": list(completed_record_ids),
                         "errored_cycles": errored,
+                        "skipped_cycles": skipped,
                         "errored_details": errored_details,
                         "tracker_merge_error_count": tracker_merge_errors,
                     },
@@ -586,6 +614,7 @@ class StrategyLabBatchWorkflow:
             "status": status,
             "completed_record_ids": completed_record_ids,
             "errored_cycles": errored,
+            "skipped_cycles": skipped,
             "errored_details": errored_details,
             "tracker_merge_error_count": tracker_merge_errors,
             "convergence_tracker_state": primary_tracker_state,
