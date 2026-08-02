@@ -62,9 +62,16 @@ def _start_temporal_worker_backstop() -> None:
 
 
 def _startup() -> None:
-    """Composite ASGI startup hook: engine-provider probe + Temporal worker backstop.
+    """Composite ASGI startup hook: logging setup + engine-provider probe + Temporal
+    worker backstop.
 
-    Postconditions: runs both startup steps; neither raises into app startup.
+    Configuring logging here (rather than at module import time) means this app's
+    default log format is only applied once serving begins, so it can't clobber a
+    host process's own logging setup (e.g. SE's ``_se_startup``, or a test's log
+    capture) just by importing this module.
+
+    Postconditions: runs all startup steps; none raise into app startup.
     """
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     _warn_if_no_engine_provider()
     _start_temporal_worker_backstop()
