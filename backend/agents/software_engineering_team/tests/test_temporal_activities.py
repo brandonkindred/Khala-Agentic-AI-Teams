@@ -249,22 +249,74 @@ def test_parse_spec_activity_exception_path(
     assert failure_records[-1].trace_id == "parse-spec-trace-id"
 
 
-def test_parse_spec_activity_accepts_sprint_id_without_using_it_yet(
-    tmp_path, patched_job_store
+def test_parse_spec_activity_with_sprint_id_matches_shared_helper_output(
+    monkeypatch, tmp_path, patched_job_store
 ) -> None:
-    """sprint_id is accepted by the signature (V2 prep) but not yet forwarded into
-    sprint-scope spec synthesis — passing it doesn't change behavior. Same missing-spec
-    failure as test_parse_spec_activity_exception_path, now with sprint_id supplied."""
+    """When sprint_id is set, parse_spec_activity synthesizes spec content via
+    shared.sprint_scope.load_requirements_from_sprint (same helper the V1 path
+    uses) instead of reading an on-disk spec, and skips the LLM parse + PRA agent
+    entirely — no LLM/PRA mocking is needed since neither runs on this path."""
+    from datetime import datetime, timezone
+
+    from product_delivery.models import Sprint, SprintWithStories, Story
     from software_engineering_team.shared import job_store as js
+    from software_engineering_team.shared.sprint_scope import load_requirements_from_sprint
     from software_engineering_team.temporal import activities
 
+    def _now():
+        return datetime.now(tz=timezone.utc)
+
+    story = Story(
+        id="story-1",
+        epic_id="epic-1",
+        title="Login form",
+        user_story="As a user, I want to log in",
+        status="proposed",
+        wsjf_score=None,
+        rice_score=None,
+        estimate_points=None,
+        author="tester",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    sprint = Sprint(
+        id="sprint-1",
+        product_id="product-1",
+        name="Iteration 5",
+        capacity_points=13.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="tester",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    sprint_view = SprintWithStories(
+        sprint=sprint, stories=[story], acceptance_criteria_by_story_id={}
+    )
+
+    class _StubStore:
+        def get_sprint_with_stories(self, sprint_id: str):
+            return sprint_view
+
+    import product_delivery as pd_mod
+
+    monkeypatch.setattr(pd_mod, "get_store", lambda: _StubStore())
+
     js.create_job("ps-sprint", repo_path=str(tmp_path))
-    with pytest.raises(Exception):
-        activities.parse_spec_activity(
-            "ps-sprint", str(tmp_path), trace_id="t1", sprint_id="sprint-1"
-        )
+    result = activities.parse_spec_activity(
+        "ps-sprint", str(tmp_path), trace_id="t1", sprint_id="sprint-1"
+    )
+
+    expected_requirements, expected_spec_content = load_requirements_from_sprint("sprint-1")
+    assert result["spec_content"] == expected_spec_content
+    assert result["requirements_title"] == expected_requirements.title
+    # Sprint path skips PRA: the synthesized spec is used as-is, no PRA iterations.
+    assert result["validated_spec"] == expected_spec_content
+    assert result["pra_iterations"] == 0
+
     job = js.get_job("ps-sprint")
-    assert job["status"] == js.JOB_STATUS_FAILED
+    assert job["status"] != js.JOB_STATUS_FAILED
 
 
 def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:

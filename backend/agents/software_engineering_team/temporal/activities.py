@@ -351,18 +351,21 @@ def parse_spec_activity(
     must be passed explicitly rather than inherited via contextvars.
 
     Postconditions:
-        ``sprint_id`` is accepted so ``RunTeamWorkflowV2`` can carry it end to end,
-        but is not yet forwarded into sprint-scope spec synthesis — that wiring is
-        separate follow-up work. Passing it doesn't change this activity's behavior.
+        When ``sprint_id`` is set, spec content is synthesized from the
+        ``product_delivery`` sprint's planned stories (via
+        ``shared.sprint_scope.load_requirements_from_sprint``) instead of read from
+        disk, and both the LLM spec-parse and the PRA agent are skipped — mirroring
+        the thread-mode orchestrator's sprint path (``discovery.py``).
     """
     with bind_trace_id(trace_id or new_trace_id()):
-        return _parse_spec_activity_body(job_id, repo_path, spec_content_override)
+        return _parse_spec_activity_body(job_id, repo_path, spec_content_override, sprint_id)
 
 
 def _parse_spec_activity_body(
     job_id: str,
     repo_path: str,
     spec_content_override: Optional[str],
+    sprint_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Body of :func:`parse_spec_activity`, run inside its ``bind_trace_id`` block.
 
@@ -397,14 +400,26 @@ def _parse_spec_activity_body(
         )
 
         initial_spec_path = None
-        if spec_content_override is not None:
+        requirements = None
+        # Sprint path: spec is synthesized from the product_delivery sprint's planned
+        # stories. Both the LLM spec-parse and the PRA agent are skipped below — the
+        # spec is already structured (per-story user_story + ACs) and validated by
+        # the upstream Sprint Planner. Mirrors discovery.py::resolve_spec_source.
+        if sprint_id is not None:
+            from software_engineering_team.shared.sprint_scope import (
+                load_requirements_from_sprint,
+            )
+
+            requirements, spec_content = load_requirements_from_sprint(sprint_id)
+        elif spec_content_override is not None:
             spec_content = spec_content_override
         else:
             initial_spec_path = get_newest_spec_path(path)
             spec_content = get_newest_spec_content(path)
 
         context_files = gather_context_files(path)
-        requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
+        if sprint_id is None:
+            requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
         update_job(
             job_id, requirements_title=requirements.title, status_text="Specification parsed"
         )
@@ -412,33 +427,43 @@ def _parse_spec_activity_body(
         _check_cancellation(job_id)
         plan_dir = ensure_plan_dir(path)
 
-        # Run PRA
-        from software_engineering_team.orchestrator import _make_pra_job_updater
-        from software_engineering_team.product_requirements_analysis_agent import (
-            ProductRequirementsAnalysisAgent,
-        )
+        if sprint_id is not None:
+            # Sprint path: PRA's review/communicate/update/cleanup loop has nothing
+            # to do (the spec is already structured and validated), so the
+            # synthesized spec is used directly. Mirrors
+            # discovery.py::run_product_requirements_analysis's sprint path.
+            validated_spec = spec_content
+            pra_iterations = 0
+        else:
+            # Run PRA
+            from software_engineering_team.orchestrator import _make_pra_job_updater
+            from software_engineering_team.product_requirements_analysis_agent import (
+                ProductRequirementsAnalysisAgent,
+            )
 
-        # Shared with the thread path: rewrites current_phase into the analysis_*
-        # fields AND rescales the agent's own 0-100 progress onto the product-analysis
-        # band — without it the Temporal bar sprints to 100 during PRA and collapses
-        # at the next phase handoff.
-        _pra_updater = _make_pra_job_updater(job_id)
+            # Shared with the thread path: rewrites current_phase into the analysis_*
+            # fields AND rescales the agent's own 0-100 progress onto the
+            # product-analysis band — without it the Temporal bar sprints to 100
+            # during PRA and collapses at the next phase handoff.
+            _pra_updater = _make_pra_job_updater(job_id)
 
-        pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
-        pra_result = pra_agent.run_workflow(
-            spec_content=spec_content,
-            repo_path=path,
-            job_id=job_id,
-            job_updater=_pra_updater,
-            context_files=context_files,
-            initial_spec_path=Path(initial_spec_path) if initial_spec_path else None,
-        )
-        if not pra_result.success:
-            err = pra_result.failure_reason or "PRA did not complete"
-            update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
-            return SpecParseResult(spec_content=spec_content).model_dump()
+            pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
+            pra_result = pra_agent.run_workflow(
+                spec_content=spec_content,
+                repo_path=path,
+                job_id=job_id,
+                job_updater=_pra_updater,
+                context_files=context_files,
+                initial_spec_path=Path(initial_spec_path) if initial_spec_path else None,
+            )
+            if not pra_result.success:
+                err = pra_result.failure_reason or "PRA did not complete"
+                update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
+                return SpecParseResult(spec_content=spec_content).model_dump()
 
-        validated_spec = pra_result.final_spec_content or spec_content
+            validated_spec = pra_result.final_spec_content or spec_content
+            pra_iterations = pra_result.iterations
+
         _check_cancellation(job_id)
 
         return SpecParseResult(
@@ -447,7 +472,7 @@ def _parse_spec_activity_body(
             requirements_title=requirements.title,
             plan_dir=str(plan_dir),
             context_files_count=len(context_files),
-            pra_iterations=pra_result.iterations,
+            pra_iterations=pra_iterations,
         ).model_dump()
 
     except Exception as e:
