@@ -222,9 +222,13 @@ a distinct team key, since `start_team_worker` is idempotent per team key):
 
 The paper-trading (`/strategy-lab/paper-trade`, `/stop`), Strategy Lab run
 (`/strategy-lab/run`, `/strategy-lab/runs/{id}/resume`,
-`/strategy-lab/runs/{id}/restart`), and orchestrator/advisor endpoints
-(`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
-`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset they return
+`/strategy-lab/runs/{id}/restart`), and orchestrator/advisor mutation endpoints
+(`POST /proposals/create`, `POST /proposals/{id}/validate`, `POST /strategies`,
+`POST /strategies/{id}/validate`, `POST /promotions/decide`, `POST /memos`,
+`POST /advisor/sessions`, `POST /advisor/sessions/{id}/messages`,
+`POST /advisor/sessions/{id}/complete` — not the read-only `GET /proposals/{id}`
+or `GET /advisor/sessions/{id}`, which read local state directly and work
+regardless of Temporal) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset they return
 HTTP 503 rather than falling back to in-process execution (`_require_temporal()`'s check,
 shared by all of them). When `TEMPORAL_ADDRESS` is set but the shared client itself is
 unreachable, most of these routes still 503 (each dispatch helper's own except-block maps
@@ -241,8 +245,8 @@ return 200 with the workflow left queued indefinitely (see
 `strategy_lab/README.md`'s "Temporal dispatch" section for detail); the
 orchestrator/advisor endpoints instead execute-and-wait (`execute_workflow_sync`,
 via `_execute_advisory`), so a dead `investment-advisory-queue` poller instead
-surfaces as an HTTP 502 (`_translate_advisory_failure`) after the ~300s execute
-timeout, not a silent 200.
+surfaces as an HTTP 502 (`_translate_advisory_failure`) after the ~180s execute
+timeout (`ADVISORY_TIMEOUT` — 2 minutes — plus a 60s buffer), not a silent 200.
 
 ### INVESTMENT_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Ceiling on how many `investment-queue` activities
