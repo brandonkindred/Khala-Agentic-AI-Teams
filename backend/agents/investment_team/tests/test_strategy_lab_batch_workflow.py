@@ -297,6 +297,32 @@ def test_seeded_skipped_cycles_are_additive_not_overwritten():
     assert result["skipped_cycles"] == 5  # 3 seeded + 2 new
 
 
+def test_seeded_completed_record_ids_are_extended_not_overwritten():
+    """A resumed run's completed_record_ids seed is extended with newly
+    finalized ids, not overwritten — required because persist_run_state's
+    job-service write replaces the field's value wholesale rather than
+    appending, so the seed is the only way pre-resume ids survive the first
+    mid-run persist after resume."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(completed_record_ids=["prior-1", "prior-2"]), harness)
+    assert result["completed_record_ids"] == ["prior-1", "prior-2", "rec-0", "rec-1"]
+
+
+def test_completed_record_ids_seed_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(completed_record_ids=["prior-1"]), harness)
+    assert any(p.get("completed_record_ids") == ["prior-1", "rec-0", "rec-1"] for p in persisted)
+
+
 def test_skipped_cycles_persisted_mid_run():
     persisted: List[Dict[str, Any]] = []
     harness = _Harness(
@@ -609,6 +635,98 @@ def test_signal_brief_refreshed_once_per_batch():
     # 2 batches × batch_size 2.
     _run(_batch_input(batch_size=2, batch_count=2), harness)
     assert harness.activity_calls.count("compute_signal_brief_activity") == 2
+
+
+# ---------------------------------------------------------------------------
+# Resume carry-forward regression — ported from test_strategy_lab_resume.py
+# (which exercised thread-mode's _strategy_lab_worker directly). A skip
+# encountered after resume must ADD to the pre-resume skipped count, not
+# overwrite it, and every persisted snapshot's progress counters must be
+# monotonically non-decreasing from the pre-resume floor.
+# ---------------------------------------------------------------------------
+
+
+def _resume_batch_input(**overrides: Any) -> Dict[str, Any]:
+    """A 10-cycle run (2 batches x 5) resumed after 3 contiguous completions
+    and 2 prior skips — mirrors the pre-resume snapshot
+    ``resume_strategy_lab_run`` would have carried into ``batch_input`` via
+    ``rehydrate_active_run_offset``/``get_resume_seed_counters``.
+    ``max_parallel=1`` keeps waves single-cycle so persisted snapshots are
+    deterministic and individually inspectable."""
+    return _batch_input(
+        batch_size=5,
+        batch_count=2,
+        max_parallel=1,
+        start_cycle_offset=3,
+        skipped_cycles=2,
+        completed_record_ids=["r1", "r2", "r3"],
+        **overrides,
+    )
+
+
+def test_resume_carries_forward_skipped_cycles():
+    """A skip encountered after resume must ADD to the pre-resume skipped
+    count. Before #4014/#4015 existed, the Temporal path had no seed at all,
+    so any post-resume skip would have been the run's only recorded skip."""
+    harness = _Harness(
+        child_results={
+            "run-1-c3": _child_skipped(),  # first resumed cycle: no market data
+            **{f"run-1-c{i}": _child_record(str(i)) for i in range(4, 10)},
+        },
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_resume_batch_input(), harness)
+
+    # 2 prior skips + 1 new skip = 3.
+    assert result["skipped_cycles"] == 3
+    # 3 prior completions + 6 new successes = 9 (cycle index 3 skipped, 4..9 succeed).
+    assert result["completed_record_ids"] == [
+        "r1",
+        "r2",
+        "r3",
+        "rec-4",
+        "rec-5",
+        "rec-6",
+        "rec-7",
+        "rec-8",
+        "rec-9",
+    ]
+    assert result["status"] == "completed"
+
+
+def test_resume_progress_never_moves_backward():
+    """Across every persisted snapshot, completed_cycles and skipped_cycles
+    must be monotonically non-decreasing from the pre-resume floor."""
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={f"run-1-c{i}": _child_record(str(i)) for i in range(3, 10)},
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_resume_batch_input(), harness)
+
+    last_completed = 3  # pre-resume floor
+    last_skipped = 2  # pre-resume floor
+    saw_completed_cycles = False
+    for snap in persisted:
+        if "completed_cycles" not in snap:
+            continue
+        saw_completed_cycles = True
+        completed = snap["completed_cycles"]
+        skipped = snap.get("skipped_cycles", last_skipped)
+        assert completed >= last_completed, (
+            f"completed_cycles moved backward: {last_completed} -> {completed}"
+        )
+        assert skipped >= last_skipped, (
+            f"skipped_cycles moved backward: {last_skipped} -> {skipped}"
+        )
+        last_completed = completed
+        last_skipped = skipped
+
+    assert saw_completed_cycles
+    assert last_completed == 3 + 7  # 3 prior + 7 new successful cycles (3..9)
+    assert last_skipped == 2  # no post-resume skips in this scenario
 
 
 # ---------------------------------------------------------------------------
