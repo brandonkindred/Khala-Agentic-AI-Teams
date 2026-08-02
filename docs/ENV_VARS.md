@@ -224,9 +224,14 @@ The paper-trading (`/strategy-lab/paper-trade`, `/stop`), Strategy Lab run
 (`/strategy-lab/run`, `/strategy-lab/runs/{id}/resume`,
 `/strategy-lab/runs/{id}/restart`), and orchestrator/advisor endpoints
 (`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
-`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset or the
-shared client unreachable they return HTTP 503 rather than falling back to
-in-process execution. Only the ad hoc `POST /backtests` endpoint keeps a thread
+`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset they return
+HTTP 503 rather than falling back to in-process execution (`_require_temporal()`'s check,
+shared by all of them). When `TEMPORAL_ADDRESS` is set but the shared client itself is
+unreachable, most of these routes still 503 (each dispatch helper's own except-block maps
+the resulting `RuntimeError` to 503) — except `/strategy-lab/paper-trade/{session_id}/stop`,
+whose narrower exception handling (`stop_live_paper_trading`'s generic delivery-failure
+catch) maps that case to HTTP 502 instead; only the `TEMPORAL_ADDRESS`-unset path 503s for
+that one route. Only the ad hoc `POST /backtests` endpoint keeps a thread
 fallback. Note the 503 only covers a missing/unreachable *client*, not a missing poller
 on the target queue — the two dispatch styles above degrade differently when a
 specific queue has no worker but the shared client is still connected:
