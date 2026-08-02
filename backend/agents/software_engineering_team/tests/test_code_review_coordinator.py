@@ -1996,6 +1996,47 @@ def test_total_failure_still_raises_even_with_graceful_default(monkeypatch) -> N
     assert "bad1.py" in unreviewed and "bad2.py" in unreviewed
 
 
+def test_total_failure_unreviewed_excludes_genuine_issue_descriptions(monkeypatch) -> None:
+    """``CodeReviewUnavailableError.unreviewed`` must name only not-reviewed
+    ranges, never genuine reviewer findings -- even if a ``_ChunkOutcome``
+    somehow carried both (violating its own invariant that a failed chunk
+    never contributes to ``issues``). Regression guard for the coordinator
+    once concatenating ``outcome.issues`` into ``unreviewed``."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent import mapping
+
+    genuine = CodeReviewIssue(
+        severity="high",
+        category="logic",
+        file_path="reviewed.py",
+        description="a genuine finding a chunk actually reviewed",
+        suggestion="fix it",
+    )
+    not_reviewed = CodeReviewIssue(
+        severity="high",
+        category="general",
+        file_path="unreviewed.py",
+        description="reviewed.py (lines 1-2) could not be reviewed automatically",
+        suggestion="",
+    )
+    # approved_flags is deliberately empty (no chunk succeeded) while issues is
+    # non-empty, to prove the coordinator's own construction of ``unreviewed``
+    # never leaks genuine findings, independent of whether mapping's own
+    # invariant always holds elsewhere.
+    forced_outcome = mapping._ChunkOutcome(
+        issues=[genuine], not_reviewed_issues=[not_reviewed], approved_flags=[]
+    )
+    monkeypatch.setattr(coord, "_map_chunks", lambda *args, **kwargs: [forced_outcome])
+
+    with pytest.raises(CodeReviewUnavailableError) as excinfo:
+        run_coordinator(
+            DummyLLMClient(),
+            CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t", language="python"),
+        )
+    assert excinfo.value.unreviewed == [not_reviewed.description]
+    assert genuine.description not in excinfo.value.unreviewed
+
+
 # ---------------------------------------------------------------------------
 # Last-resort thinking-off retry (make semantic exhaustion rare)
 # ---------------------------------------------------------------------------

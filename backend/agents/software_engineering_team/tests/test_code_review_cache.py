@@ -939,6 +939,23 @@ def test_submission_cache_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -
     assert spy["n"] == 1
 
 
+def test_submission_cache_size_clamps_negative_and_garbage_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_submission_cache_size()`` never returns ``None``/negative/non-int
+    regardless of a hostile ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` value -- the
+    eviction loop in ``run_coordinator`` relies on this without re-checking
+    (see its postcondition)."""
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "-5")
+    assert coord._submission_cache_size() == 0
+
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "not-a-number")
+    assert coord._submission_cache_size() == coord.DEFAULT_SUBMISSION_CACHE_SIZE
+
+    monkeypatch.delenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", raising=False)
+    assert coord._submission_cache_size() == coord.DEFAULT_SUBMISSION_CACHE_SIZE
+
+
 def test_submission_cache_bypassed_when_repo_reader_given(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
