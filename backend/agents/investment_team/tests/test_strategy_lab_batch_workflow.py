@@ -466,6 +466,87 @@ def test_errored_details_persisted_mid_run():
     assert any("errored_details" in p and p["errored_details"] for p in persisted)
 
 
+def test_merge_error_is_folded_without_failing_the_batch():
+    """A tracker-merge failure reported by ``merge_wave_results_activity``
+    (isolated per-record, per #4016/#4017) degrades to a soft counter bump —
+    it never propagates as an exception through ``run()``."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+        ),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["status"] == "completed_with_errors"
+    assert result["errored_cycles"] == 1
+    assert result["tracker_merge_error_count"] == 1
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 1,
+            "batch_index": 1,
+            "error": "merge boom",
+            "exception_type": "ValueError",
+            "reason": "tracker_merge_failed",
+        }
+    ]
+    # Both cycles were still finalized — the merge failure didn't drop a record.
+    assert sorted(result["completed_record_ids"]) == ["rec-0", "rec-1"]
+
+
+def test_seeded_tracker_merge_error_count_is_added_not_overwritten():
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+        ),
+    )
+    result = _run(_batch_input(tracker_merge_error_count=4), harness)
+    assert result["tracker_merge_error_count"] == 5
+
+
+def test_tracker_merge_error_count_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(), harness)
+    assert any(p.get("tracker_merge_error_count") == 1 for p in persisted)
+
+
 def test_signal_brief_refreshed_once_per_batch():
     harness = _Harness(
         child_results={f"run-1-c{i}": _child_record(str(i)) for i in range(4)},
