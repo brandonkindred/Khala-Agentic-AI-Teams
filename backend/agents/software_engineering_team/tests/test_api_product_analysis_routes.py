@@ -199,6 +199,40 @@ def test_start_from_spec_rolls_back_project_dir_on_dispatch_failure(
     assert retry_resp.status_code == 200
 
 
+def test_start_from_spec_keeps_project_dir_on_dispatch_timeout(
+    monkeypatch, tmp_path: Path, client
+):
+    """A dispatch TimeoutError is ambiguous (the workflow may still get scheduled
+    after we return), so the project dir must NOT be rolled back — only genuine
+    dispatch failures (e.g. no Temporal client) are safe to roll back."""
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    import software_engineering_team.temporal.start_workflow as start_workflow
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+
+    def _raise_timeout(*a, **k):
+        raise FutureTimeoutError("start_workflow did not acknowledge in time")
+
+    monkeypatch.setattr(start_workflow, "start_standalone_workflow", _raise_timeout)
+
+    resp = client.post(
+        "/product-analysis/start-from-spec",
+        json={"project_name": "myproj4", "spec_content": "# Spec\nFeature"},
+    )
+    assert resp.status_code == 503
+    proj_dir = tmp_path / "projects" / "myproj4"
+    assert proj_dir.exists()
+
+    # A retry under the same name correctly 400s: the project is still there
+    # because we don't know whether the earlier dispatch actually succeeded.
+    retry_resp = client.post(
+        "/product-analysis/start-from-spec",
+        json={"project_name": "myproj4", "spec_content": "# Spec\nFeature"},
+    )
+    assert retry_resp.status_code == 400
+
+
 def test_start_from_spec_400_when_project_already_exists(monkeypatch, tmp_path: Path, client):
     """If the project directory already exists, return 400."""
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))

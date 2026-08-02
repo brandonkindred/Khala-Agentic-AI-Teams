@@ -3,6 +3,7 @@
 import logging
 import shutil
 import uuid
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Optional
 
@@ -155,6 +156,17 @@ def start_product_analysis_from_spec(request: StartFromSpecRequest) -> ProductAn
             initial_spec_path=initial_spec_path_str,
         )
     except (
+        FutureTimeoutError
+    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+        # _run_async's future.result(timeout=...) doesn't cancel the coroutine
+        # on timeout, so the workflow may still get scheduled after we return
+        # here. Deleting project_dir in that case would race a workflow that
+        # ends up reading/writing a directory a retry just recreated — leave
+        # it in place; do not roll back an ambiguous outcome.
+        logger.exception("Product-analysis workflow dispatch timed out (ambiguous outcome)")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start product-analysis workflow from spec")
@@ -163,7 +175,10 @@ def start_product_analysis_from_spec(request: StartFromSpecRequest) -> ProductAn
         # unconditional now, so "Temporal unavailable" is a routine failure
         # mode here (not just a rare worker outage), and leaving the
         # directory behind would permanently block retries under the same
-        # project_name via the "Project already exists" 400 above.
+        # project_name via the "Project already exists" 400 above. Safe here
+        # (unlike TimeoutError above) because every other exception means the
+        # dispatch attempt itself definitively failed before/without
+        # scheduling a workflow.
         shutil.rmtree(project_dir, ignore_errors=True)
         raise HTTPException(status_code=503, detail=str(e)) from e
 
