@@ -44,13 +44,7 @@ def _run_async(coro: Any) -> Any:
 
 
 def is_workflow_v2_enabled() -> bool:
-    """Whether ``SE_WORKFLOW_V2`` selects ``RunTeamWorkflowV2`` for ``start_run_team_workflow``.
-
-    Exposed so callers (e.g. the jobs API) can reject sprint-scoped requests
-    before dispatch when V2 is selected — ``RunTeamWorkflowV2`` doesn't accept
-    ``sprint_id`` yet, so silently proceeding would either fail asynchronously
-    in the orchestrator or, if a stale on-disk spec exists, run the wrong scope.
-    """
+    """Whether ``SE_WORKFLOW_V2`` selects ``RunTeamWorkflowV2`` for ``start_run_team_workflow``."""
     import os
 
     return os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
@@ -66,9 +60,8 @@ def start_run_team_workflow(
 ) -> None:
     """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id.
 
-    ``sprint_id`` is forwarded only on the V1 path (``RunTeamWorkflow``), which
-    accepts it as a trailing positional arg; ``RunTeamWorkflowV2`` does not yet
-    support sprint-scoped runs, so it is omitted from the V2 args entirely.
+    ``sprint_id`` is forwarded on both paths — ``RunTeamWorkflow`` and
+    ``RunTeamWorkflowV2`` both accept it as their trailing positional arg.
     """
     workflow_id = f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"
     client = get_temporal_client()
@@ -84,9 +77,8 @@ def start_run_team_workflow(
         spec_content_override,
         resolved_questions_override,
         planning_only,
+        sprint_id,
     ]
-    if not use_v2:
-        args.append(sprint_id)
 
     _run_async(
         client.start_workflow(
