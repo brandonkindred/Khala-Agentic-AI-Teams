@@ -38,6 +38,7 @@ def run_orchestrator_activity(
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
     trace_id: str = "",
+    sprint_id: Optional[str] = None,
 ) -> None:
     """Execute the main Tech Lead orchestrator (run_orchestrator).
 
@@ -46,6 +47,8 @@ def run_orchestrator_activity(
         Temporal can retry (per the workflow retry policy) and fail the workflow.
         ``trace_id`` (workflow-supplied, or freshly generated when blank) is
         forwarded to ``run_orchestrator``, which binds it for the whole 4-phase run.
+        ``sprint_id``, when set, is forwarded to ``run_orchestrator`` so it pulls
+        planned scope from that Product Delivery sprint instead of parsing a spec.
     """
     resolved_trace_id = trace_id or new_trace_id()
     try:
@@ -57,6 +60,7 @@ def run_orchestrator_activity(
             spec_content_override=spec_content_override,
             resolved_questions_override=resolved_questions_override,
             planning_only=planning_only,
+            sprint_id=sprint_id,
             trace_id=resolved_trace_id,
         )
     except Exception as e:

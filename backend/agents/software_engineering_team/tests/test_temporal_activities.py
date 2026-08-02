@@ -31,6 +31,7 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
         spec_content_override=None,
         resolved_questions_override=None,
         planning_only=False,
+        sprint_id=None,
         trace_id=None,
     ):
         called.update(
@@ -38,6 +39,7 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
             repo_path=repo_path,
             spec_override=spec_content_override,
             planning_only=planning_only,
+            sprint_id=sprint_id,
             trace_id=trace_id,
         )
 
@@ -49,7 +51,32 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
     )
     assert called["job_id"] == "job1"
     assert called["planning_only"] is True
+    assert called["sprint_id"] is None
     assert called["trace_id"]  # activity generates one when the caller passes none
+
+
+def test_run_orchestrator_activity_forwards_sprint_id(monkeypatch, tmp_path) -> None:
+    from software_engineering_team.temporal import activities
+
+    called: Dict[str, Any] = {}
+
+    def fake_run_orchestrator(
+        job_id,
+        repo_path,
+        *,
+        spec_content_override=None,
+        resolved_questions_override=None,
+        planning_only=False,
+        sprint_id=None,
+        trace_id=None,
+    ):
+        called["sprint_id"] = sprint_id
+
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator.run_orchestrator", fake_run_orchestrator
+    )
+    activities.run_orchestrator_activity("job1", str(tmp_path), sprint_id="sprint-123")
+    assert called["sprint_id"] == "sprint-123"
 
 
 def test_run_orchestrator_activity_failure_captured(
