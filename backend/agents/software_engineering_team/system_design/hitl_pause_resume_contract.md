@@ -388,6 +388,22 @@ while True:
     not required — a required field would 422 every one of today's
     callers. Each route enforces its presence explicitly (a plain check,
     not Pydantic validation) only in the native-Temporal-signal branch.
+  - Presence alone is not enough: in the native-Temporal-signal branch, the
+    route must also compare the submitted token against the job record's
+    currently persisted `resume_token` and reject a mismatch (e.g. 409)
+    *before* calling `signal_workflow_sync`, rather than forwarding it and
+    letting the workflow silently no-op. A legitimate client can only ever
+    have learned a `resume_token` from the pause notification or a status
+    poll, both of which read it off the job record — so by construction that
+    record is already written by the time any real client could hold a
+    token, and the route can validate against it directly. Skipping this
+    check has two costs: the route reports success for a request the
+    workflow is about to ignore, giving the caller false confidence their
+    answer landed; and during the early-signal window (§2), an incorrect
+    token is buffered in `self._buffered_signals` keyed by that same wrong
+    value — since no real pause will ever carry it, it is never looked up
+    or evicted, so repeated bad submissions accumulate indefinitely in
+    durable workflow state.
 - **Both coding-team and SE answers routes need a three-way mode branch**,
   not a binary Temporal/thread split — a Temporal-mode job is not
   automatically signal-capable:
