@@ -583,6 +583,45 @@ def test_compare_submission_detects_and_counts_call_failures(tmp_path: Path) -> 
     json.dumps(result.to_dict())  # must stay JSON-serializable
 
 
+def test_run_two_call_derives_logger_name_from_the_actual_pass_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: failure detection must key off the pass function's own
+    ``__module__``, not a hard-coded guess at its import path.
+
+    A hard-coded ``"code_review_agent.<pass>"`` string only matches when this
+    package happens to be imported bare (e.g. under pytest's path
+    insertion); imported through the fully-qualified
+    ``software_engineering_team.code_review_agent`` package, the pass's real
+    logger name differs and a hard-coded guess would silently never observe
+    its failure warning. Simulate that mismatch by swapping in a fake pass
+    function under an unrelated module name and confirming the failure is
+    still detected.
+    """
+    from code_review_agent import snapshot_comparison as sc
+
+    fake_module_name = "totally.unrelated.qualified.path.architecture_consistency_pass"
+
+    def _fake_pass(llm: object, input_data: object, *, repo_reader: object, index: object) -> list:
+        logging.getLogger(fake_module_name).warning("simulated fail-safe warning")
+        return []
+
+    _fake_pass.__module__ = fake_module_name
+    monkeypatch.setattr(sc, "find_architecture_and_redundancy_issues", _fake_pass)
+    # Keep the side-effect half a clean no-op so only the architecture fake's
+    # forced failure is under test.
+    monkeypatch.setattr(
+        sc, "find_side_effect_impact_issues", lambda llm, input_data, *, repo_reader, index: []
+    )
+
+    _, _, architecture_failed, side_effect_failed = sc.run_two_call(
+        llm=object(), input_data=object(), repo_reader=None, index=object()
+    )
+
+    assert architecture_failed is True
+    assert side_effect_failed is False
+
+
 # ---------------------------------------------------------------------------
 # _require_passes_enabled
 # ---------------------------------------------------------------------------

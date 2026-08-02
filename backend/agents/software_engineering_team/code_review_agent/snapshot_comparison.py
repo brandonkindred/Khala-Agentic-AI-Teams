@@ -308,7 +308,12 @@ def _call_pass_detecting_failure(fn: Callable[[], object], logger_name: str) -> 
 
     Preconditions:
         - ``logger_name`` is the ``__name__``-derived logger of the pass module
-          ``fn`` invokes (e.g. ``"code_review_agent.architecture_consistency_pass"``).
+          ``fn`` invokes. Callers should pass the invoked function's own
+          ``__module__`` attribute (not a hard-coded string) so the name
+          matches however this package was actually imported — bare
+          (``code_review_agent.architecture_consistency_pass``, under
+          pytest's path insertion) or fully qualified
+          (``software_engineering_team.code_review_agent.architecture_consistency_pass``).
 
     Postconditions:
         - Returns ``(fn()'s result, failed)`` where ``failed`` is True iff that
@@ -349,13 +354,13 @@ def run_two_call(
         lambda: find_architecture_and_redundancy_issues(
             llm, input_data, repo_reader=repo_reader, index=index
         ),
-        "code_review_agent.architecture_consistency_pass",
+        find_architecture_and_redundancy_issues.__module__,
     )
     side_effect, side_effect_failed = _call_pass_detecting_failure(
         lambda: find_side_effect_impact_issues(
             llm, input_data, repo_reader=repo_reader, index=index
         ),
-        "code_review_agent.side_effect_impact_pass",
+        find_side_effect_impact_issues.__module__,
     )
     return architecture, side_effect, architecture_failed, side_effect_failed
 
@@ -378,7 +383,7 @@ def run_merged_call(
         lambda: find_architecture_and_side_effect_issues(
             llm, input_data, repo_reader=repo_reader, index=index
         ),
-        "code_review_agent.merged_architecture_side_effect_pass",
+        find_architecture_and_side_effect_issues.__module__,
     )
     return architecture, side_effect, failed
 
