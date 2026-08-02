@@ -625,6 +625,8 @@ class DummyLLMClient(LLMClient):
         # one agent's prompt, not the loose single words that caused the
         # earlier revert.
         lowered = prompt.lower()
+        # Shared across instances so sequential coding stubs can mint distinct
+        # module/component names when the task hint alone is not enough.
         DummyLLMClient._call_counter += 1
         self._request_count += 1
         counter = DummyLLMClient._call_counter

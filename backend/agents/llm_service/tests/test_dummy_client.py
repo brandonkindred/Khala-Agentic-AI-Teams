@@ -1,7 +1,17 @@
-"""Tests for DummyLLMClient: complete_json returns dict; get_max_context_tokens; complete returns str."""
+"""Tests for DummyLLMClient heuristic stubs and Strands Model surface.
+
+Covers ``complete`` / ``complete_json`` / ``complete_text``, ``get_max_context_tokens``,
+async ``structured_output`` (including multi-turn routing), ``stream`` with
+``system_prompt_content`` (branding Phase 1 anchors and empty-list overrides),
+and helpers (``_extract_name_from_hint``, strip-filter frozensets,
+``_content_to_text`` / ``_last_user_text`` / ``_aggregated_user_tool_text``).
+"""
+
+from __future__ import annotations
 
 import json
 import re
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -99,6 +109,16 @@ async def test_structured_output_routes_on_json_tool_result_content() -> None:
     assert "Dummy architecture" in events[0]["output"].overview
 
 
+def _as_stream_messages(messages: list[dict[str, Any]]) -> Any:
+    """Cast plain dict fixtures to the Strands Message type expected by ``stream``."""
+    return cast(Any, messages)
+
+
+def _as_system_content(blocks: list[dict[str, str]]) -> Any:
+    """Cast plain dict fixtures to Strands ``SystemContentBlock`` list."""
+    return cast(Any, blocks)
+
+
 @pytest.mark.asyncio
 async def test_dummy_stream_empty_system_prompt_content_clears_stale_string() -> None:
     """An explicit empty content list must override a stale branding system_prompt."""
@@ -106,7 +126,7 @@ async def test_dummy_stream_empty_system_prompt_content_clears_stale_string() ->
     messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
     chunks: list[str] = []
     async for event in c.stream(
-        messages,  # type: ignore[arg-type]
+        _as_stream_messages(messages),
         system_prompt=(
             "You must return brand_purpose, mission_statement, and vision_statement "
             "for the brand strategy agent."
@@ -254,7 +274,7 @@ async def test_dummy_structured_output_yields_validated_model() -> None:
 
 @pytest.mark.asyncio
 async def test_dummy_stream_uses_system_prompt_content_when_system_prompt_absent() -> None:
-    """Branding Phase 1 anchors live in system text; content blocks must not be dropped."""
+    """Branding Phase 1: system text via content blocks alone selects purpose/vision stub."""
     c = DummyLLMClient()
     messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
     system_prompt_content = [
@@ -267,9 +287,9 @@ async def test_dummy_stream_uses_system_prompt_content_when_system_prompt_absent
     ]
     chunks: list[str] = []
     async for event in c.stream(
-        messages,  # type: ignore[arg-type]
+        _as_stream_messages(messages),
         system_prompt=None,
-        system_prompt_content=system_prompt_content,  # type: ignore[arg-type]
+        system_prompt_content=_as_system_content(system_prompt_content),
     ):
         delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
         text = delta.get("text")
@@ -283,7 +303,7 @@ async def test_dummy_stream_uses_system_prompt_content_when_system_prompt_absent
 
 @pytest.mark.asyncio
 async def test_dummy_stream_prefers_system_prompt_content_over_stale_string() -> None:
-    """Structured content blocks win when a non-matching system_prompt string is also set."""
+    """Branding Phase 1: content blocks win over a non-matching legacy system_prompt."""
     c = DummyLLMClient()
     messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
     system_prompt_content = [
@@ -296,9 +316,9 @@ async def test_dummy_stream_prefers_system_prompt_content_over_stale_string() ->
     ]
     chunks: list[str] = []
     async for event in c.stream(
-        messages,  # type: ignore[arg-type]
+        _as_stream_messages(messages),
         system_prompt="You are a generic assistant with no branding output fields.",
-        system_prompt_content=system_prompt_content,  # type: ignore[arg-type]
+        system_prompt_content=_as_system_content(system_prompt_content),
     ):
         delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
         text = delta.get("text")
