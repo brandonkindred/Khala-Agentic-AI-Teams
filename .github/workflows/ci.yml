@@ -382,6 +382,18 @@ jobs:
                   "source": "agent_provisioning_team",
                   "extra_requirements": "agent_provisioning_team/requirements.txt",
               },
+              # unified_api lives at backend/unified_api/ (a sibling of backend/agents/,
+              # this job's working directory), so its test/source paths are given
+              # relative to backend/agents/ — same convention as the Postgres-only
+              # shared.postgres / shared.neo4j jobs below, which reach one level up
+              # the same way. Installs nothing extra: agents/requirements.txt already
+              # covers unified_api's imports (it's the file backend/Dockerfile installs
+              # for the unified-api container).
+              "unified_api": {
+                  "name": "Unified API",
+                  "tests": "../unified_api/tests/",
+                  "source": "unified_api",
+              },
           }
 
           # Batched into one runner; pytest runs once per team sequentially
