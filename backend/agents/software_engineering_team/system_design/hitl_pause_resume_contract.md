@@ -125,20 +125,27 @@ while True:
     await workflow.wait_condition(lambda: self._submitted_answers is not None)
 
     # Convert to resolved-question records (same shape hitl.answers_to_resolved
-    # produces) and merge them into the ACTUAL activity input rather than
-    # attaching a bare extra field -- run_pipeline_activity parses its payload
-    # strictly as RunRequest, which has no "resolved_answers" field and would
-    # silently discard one. Where the merge target lives depends on pause_kind:
+    # produces) and merge them into fields the activity's RunRequest/
+    # CodingTeamPlanInput actually define -- not a bare extra key, which
+    # run_pipeline_activity's RunRequest parsing would silently discard.
     resolved = to_resolved_records(self._submitted_answers)
     if result["pause_kind"] == "worker_escalation":
         # Must land on the specific paused task's revision_feedback, not the
         # plan-level list -- run_implement reads a task's own
         # revision_feedback, not plan_input.resolved_questions, so a
         # plan-level-only merge lets the worker re-ask the same question.
+        # task_decision_overrides is a new CodingTeamPlanInput field (see
+        # resume contract below); the orchestrator applies it to the
+        # restored task right after graph.restore().
         task_id = result["pause_context"]["task_id"]
-        request = attach_task_decision(request, task_id, resolved)
+        request["plan_input"]["task_decision_overrides"] = {
+            **request["plan_input"].get("task_decision_overrides", {}),
+            task_id: resolved,
+        }
     else:  # "entry" | "tech_lead_clarify"
-        request = merge_resolved_questions(request, resolved)
+        request["plan_input"]["resolved_questions"] = (
+            request["plan_input"].get("resolved_questions", []) + resolved
+        )
     request["job_id"] = result["job_id"]
 
     self._submitted_answers = None
@@ -148,36 +155,57 @@ while True:
 
 ### 3. Resume contract
 
+- The client must echo back the token it was given, not have the server
+  re-derive "the current" token at submission time. `resume_token` is
+  returned to the client as part of the pause notification (the job
+  record's `pending_questions` / status payload) when the pause first
+  becomes visible. `SubmitAnswersRequest` gains a required `resume_token`
+  field; the answers route uses *that* value, not whatever `resume_token`
+  happens to be current in the job record at submission time. Otherwise a
+  delayed or retried submission for pause A that arrives after pause B has
+  already started would get tagged with B's (now-current) token by the
+  server and pass the workflow's token check despite answering the wrong
+  pause.
 - **Both** answers-submission surfaces must dispatch a signal to their
   matching workflow type, not just the coding-team one:
   - `POST /run/{job_id}/answers` (coding-team-only jobs,
-    `api/routes/coding_team_hitl.py`) signals the `CodingTeamWorkflow` run.
+    `api/routes/coding_team_hitl.py`) signals the `CodingTeamWorkflow` run,
+    whose workflow ID is `f"{WORKFLOW_ID_PREFIX}{job_id}"` using the existing
+    `WORKFLOW_ID_PREFIX = "coding_team-"` constant
+    (`temporal/coding_team_constants.py`).
   - `POST /run-team/{job_id}/answers` (SE-level jobs,
     `api/routes/hitl.py`) currently only writes to the job store; it must
-    equally be updated to signal the corresponding `RunTeamWorkflowV2` run.
-    Missing this means SE Temporal jobs would have their job-store
-    `waiting_for_answers` flag cleared but their workflow never learns of
-    it, and it waits indefinitely. Both routes resolve their target workflow
-    by a documented workflow-ID convention (e.g.
-    `f"coding-team-{job_id}"` / `f"se-team-{job_id}"`) and call
-    `handle.signal("submit_answers", resume_token, answers)`, where
-    `resume_token` is read back from the job record's persisted
-    `pending_questions`/pause metadata (not re-derived from `job_id` alone —
-    see the per-pause `resume_token` in the activity return contract above).
+    equally be updated to signal the corresponding `RunTeamWorkflowV2` run,
+    whose workflow ID is `f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"` using the
+    existing `WORKFLOW_ID_PREFIX_RUN_TEAM = "se-run-team-"` constant
+    (`temporal/constants.py`) — not an invented prefix. Missing this means SE
+    Temporal jobs would have their job-store `waiting_for_answers` flag
+    cleared but their workflow never learns of it, and it waits indefinitely.
+  - Both routes call `handle.signal("submit_answers", client_resume_token,
+    answers)` using the client-echoed token described above.
 - `POST /run/{job_id}/resume`'s cross-worker lease mechanism
   (`resume_claim_at` / `resume_claim_seq` in `job_store.py`) becomes
   unnecessary for Temporal-mode jobs — Temporal itself durably tracks a
   waiting workflow across worker restarts — and is retained only for
   thread-mode jobs.
 - Orchestrator re-entry still loads `task_graph_snapshot` via
-  `graph.restore()` + `reset_in_flight()` exactly as today. The signaled
-  answers are converted to resolved-question records and merged into the
-  next activity request as described in the workflow contract above — into
-  `plan_input.resolved_questions` for entry/Tech-Lead pauses, or attached to
-  the specific paused task's `revision_feedback` for worker-escalation
-  pauses — rather than re-reading `submitted_answers` back from the job
-  record, and rather than passing them as an extra field the activity's
-  `RunRequest` parsing would silently ignore.
+  `graph.restore()` + `reset_in_flight()` exactly as today. Neither
+  `RunRequest` (fields: `repo_path`, `plan_input`) nor `CodingTeamPlanInput`
+  currently has anywhere to carry a per-task decision, so the entry/Tech-Lead
+  case and the worker-escalation case need two different, explicitly-defined
+  landing spots rather than one invented helper call:
+  - **Entry/Tech-Lead pauses:** the resolved-question records are merged
+    into `plan_input.resolved_questions` (the field already exists on
+    `CodingTeamPlanInput` and the orchestrator already reads it) before the
+    next `run_pipeline_activity` call.
+  - **Worker-escalation pauses:** `CodingTeamPlanInput` gains a new field,
+    `task_decision_overrides: Dict[str, List[dict]]` (task ID → resolved
+    answer records). Immediately after `graph.restore()` on re-entry, the
+    orchestrator applies each override to the matching restored task's
+    `revision_feedback` *before* that task is handed to `run_implement`
+    again — this is a new, explicit contract field, not a bare pass-through
+    of an ad hoc object the activity's existing parsing would silently
+    ignore.
 
 ## Open questions (flagged, not resolved by this spike)
 
