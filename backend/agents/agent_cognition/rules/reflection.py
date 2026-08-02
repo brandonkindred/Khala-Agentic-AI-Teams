@@ -648,6 +648,72 @@ def _is_active_target(target_rule_id: str | None, active_by_id: dict[str, Rule])
     return bool(target_rule_id) and target_rule_id in active_by_id
 
 
+_UNSPECIFIED = object()
+"""Sentinel meaning "field not provided" — distinct from an explicit ``None``.
+
+A stored ``proposed_rule`` dict and a parsed ``_ProposedAction`` disagree on how
+"not provided" is spelled: a dict key can be truly *absent* or *explicitly null*,
+and the store's ``_build_rule_from_spec`` treats those differently (absent →
+default; explicit ``null`` → ``RuleMode(None)``/``int(None)`` raises, the
+proposal is unapprovable). A parsed ``_ProposedAction`` field collapses both
+into ``None`` and, for that source, both legitimately mean "no explicit intent".
+Using ``None`` itself as the sentinel would conflate an explicit stored ``null``
+with true absence, so callers reading a dict pass this sentinel via
+``dict.get(key, _UNSPECIFIED)`` instead.
+"""
+
+
+def _resolve_mode_and_priority(
+    raw_mode: Any, raw_priority: Any, target_rule: Rule | None
+) -> tuple[Any, Any]:
+    """Resolve an effective ``mode``/``priority`` from a raw (possibly unspecified) pair.
+
+    Preconditions: ``raw_mode``/``raw_priority`` are each either the field's
+    actual value (including ``None``, if the source explicitly carries one) or
+    the ``_UNSPECIFIED`` sentinel. ``target_rule`` is the proposal's active
+    target when the caller wants amend-style inheritance for an unspecified
+    field, ``None`` when the caller wants plain (advisory/0) defaulting instead.
+    Postconditions: a specified raw value always wins, *even if it is itself
+    invalid* (e.g. an explicit ``None``) — validation is the caller's job, and
+    this function must never paper over a value the store would actually
+    reject; otherwise ``target_rule`` (when given) supplies its value;
+    otherwise defaults to ``(advisory, 0)``.
+
+    Two distinct callers, two distinct intents — both share this function so
+    the "unspecified" branch can't drift out of sync between them:
+      * ``_build_proposed_rule`` treats a parsed item's ``None`` mode/priority as
+        unspecified (pydantic collapses an omitted field and an explicit JSON
+        ``null`` the same way, and both legitimately mean "no explicit intent"
+        for a *newly authored* proposal) and passes the active target so an
+        ordinary text amend inherits the rule it's amending.
+      * ``_dedupe_key_of``/``_is_noop_amend`` pass ``None`` for ``target_rule`` —
+        they must key/compare a *stored* ``proposed_rule`` exactly as the
+        store's ``_build_rule_from_spec`` (the approval path) will actually
+        interpret it, and that path defaults a missing field to advisory/0 with
+        **no target inheritance at all** (it is handed only
+        ``proposal.proposed_rule``, never the target). Passing the target here
+        would make dedupe/no-op believe a malformed or hand-authored proposal
+        resolves to the target's current values when approving it would really
+        persist advisory/0 — silently suppressing a distinct, correctly
+        resolved proposal as a "duplicate" of one that approves to different
+        content. They also pass ``_UNSPECIFIED`` (not the raw ``.get()`` result)
+        for a truly absent key, so an explicit stored ``null`` — which the store
+        rejects outright rather than defaulting — resolves to ``None`` here too
+        and so can never collide with a valid, approvable value.
+    """
+    mode = (
+        raw_mode
+        if raw_mode is not _UNSPECIFIED
+        else (target_rule.mode.value if target_rule is not None else RuleMode.ADVISORY.value)
+    )
+    priority = (
+        raw_priority
+        if raw_priority is not _UNSPECIFIED
+        else (target_rule.priority if target_rule is not None else 0)
+    )
+    return mode, priority
+
+
 def _build_proposed_rule(
     item: _ProposedAction, target_rule: Rule | None = None
 ) -> dict[str, Any] | None:
@@ -667,19 +733,16 @@ def _build_proposed_rule(
 
     Preconditions: when ``item`` is an amend, ``target_rule`` is its active target.
     """
-    raw_mode = (
-        item.mode
-        if item.mode is not None
-        else (target_rule.mode.value if target_rule else RuleMode.ADVISORY.value)
+    raw_mode, raw_priority = _resolve_mode_and_priority(
+        item.mode if item.mode is not None else _UNSPECIFIED,
+        item.priority if item.priority is not None else _UNSPECIFIED,
+        target_rule,
     )
     try:
         mode = RuleMode(raw_mode)
     except ValueError:
         logger.warning("reflection: unknown rule mode %r; dropping", raw_mode)
         return None
-    raw_priority = (
-        item.priority if item.priority is not None else (target_rule.priority if target_rule else 0)
-    )
     if isinstance(raw_priority, bool) or not isinstance(raw_priority, int):
         logger.warning("reflection: priority %r is not an int; dropping", raw_priority)
         return None
@@ -771,6 +834,18 @@ def _dedupe_key_of(proposal: RuleProposal) -> _DedupeKey:
     affects rule ordering, so a proposal that only corrects priority is a distinct
     change that must still reach review. Retire proposals carry no rule body, so
     they collide on ``(action, target, None, None, None, None)``.
+
+    ``mode``/``priority`` default via :func:`_resolve_mode_and_priority` with no
+    target (advisory/0 on a truly *absent* key) — deliberately mirroring the
+    store's ``_build_rule_from_spec``, which is handed only ``proposed_rule`` on
+    approval and never consults the target. Keying against a target-inherited
+    value here would suppress a distinct, correctly resolved proposal as a
+    "duplicate" of a stored ``proposed_rule`` that would actually approve to
+    different content. An explicit ``null`` for either field is passed through
+    as-is rather than defaulted (via ``dict.get(key, _UNSPECIFIED)``, not plain
+    ``.get(key)``) — the store rejects that proposal outright rather than
+    defaulting it, so it must key distinctly from any real value, never
+    collapse onto (and suppress) a valid advisory/0 proposal.
     """
     text: str | None = None
     mode: str | None = None
@@ -780,9 +855,12 @@ def _dedupe_key_of(proposal: RuleProposal) -> _DedupeKey:
         candidate = proposal.proposed_rule.get("text")
         if isinstance(candidate, str):
             text = _normalize_text(candidate)
-        mode = proposal.proposed_rule.get("mode") or RuleMode.ADVISORY.value
+        mode, priority = _resolve_mode_and_priority(
+            proposal.proposed_rule.get("mode", _UNSPECIFIED),
+            proposal.proposed_rule.get("priority", _UNSPECIFIED),
+            None,
+        )
         predicate_fp = _predicate_fingerprint(proposal.proposed_rule.get("predicate"))
-        priority = proposal.proposed_rule.get("priority")
     return (proposal.action.value, proposal.target_rule_id, text, mode, predicate_fp, priority)
 
 
@@ -818,6 +896,18 @@ def _is_noop_amend(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> boo
     approving it would retire the rule and insert an identical replacement —
     needless churn and lineage/evidence change for no behavior change. Such a
     no-op is suppressed (counted ``deduped``) before it reaches the queue.
+
+    The proposal's own ``mode``/``priority`` default via
+    :func:`_resolve_mode_and_priority` with no target (advisory/0 on a truly
+    *absent* key), matching what the store's ``_build_rule_from_spec`` would
+    actually persist on approval — an absent field is compared as the value
+    approval will give it, never as an inherited target value it will never
+    receive. An explicit ``null`` is passed through as-is (via
+    ``dict.get(key, _UNSPECIFIED)``) rather than defaulted, so a proposal the
+    store would reject outright never gets miscompared to (and dropped as a
+    false duplicate of) the target's real value. ``target`` here is only the
+    *comparison* baseline (the active rule's current fields), independent of
+    the resolver's inheritance parameter.
     """
     if proposal.action != ProposalAction.AMEND or not isinstance(proposal.proposed_rule, dict):
         return False
@@ -825,11 +915,14 @@ def _is_noop_amend(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> boo
     if target is None:
         return False
     pr = proposal.proposed_rule
+    mode, priority = _resolve_mode_and_priority(
+        pr.get("mode", _UNSPECIFIED), pr.get("priority", _UNSPECIFIED), None
+    )
     return (
         _normalize_text(pr.get("text") or "") == _normalize_text(target.text)
-        and (pr.get("mode") or RuleMode.ADVISORY.value) == target.mode.value
+        and mode == target.mode.value
         and _predicate_fingerprint(pr.get("predicate")) == _predicate_fingerprint(target.predicate)
-        and pr.get("priority") == target.priority
+        and priority == target.priority
     )
 
 
