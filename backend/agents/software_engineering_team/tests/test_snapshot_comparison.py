@@ -286,3 +286,40 @@ def test_compare_submission_to_dict_is_json_serializable(tmp_path: Path) -> None
         spec, lambda: _ScriptedComparisonClient(), repo, tmp_path / "worktrees", repeats=1
     )
     json.dumps(result.to_dict())  # must not raise
+
+
+def test_compare_submission_alternates_which_path_runs_first_across_repeats(
+    tmp_path: Path,
+) -> None:
+    """A rate-limited/degrading real provider must not systematically penalize
+    whichever path always ran second within a repeat -- see the P1 review
+    comment this test was added in response to."""
+    repo, sha = _init_one_commit_repo(tmp_path)
+    spec = SubmissionSpec(
+        label="synthetic-order",
+        commit_sha=sha,
+        changed_files=("app.py",),
+        task_description="test change",
+    )
+    call_order: list[str] = []
+
+    class _OrderTrackingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                call_order.append("merged")
+                return {"architecture_findings": [], "side_effect_findings": []}
+            if _ARCH_PASS_ANCHOR in prompt:
+                call_order.append("arch")
+                return {"findings": []}
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                call_order.append("side")
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    compare_submission(
+        spec, lambda: _OrderTrackingClient(), repo, tmp_path / "worktrees", repeats=2
+    )
+
+    # Repeat 0 (even): old path (arch, side) then new path (merged).
+    # Repeat 1 (odd): new path (merged) then old path (arch, side).
+    assert call_order == ["arch", "side", "merged", "merged", "arch", "side"]

@@ -74,6 +74,11 @@ search) instead of isolated snippets.
   submission cannot distinguish a genuine prompt-structure regression from
   ordinary sampling variance. `N=1` (the default) is a plumbing smoke test,
   not a statistically meaningful comparison; a real run should use `N ≥ 3`.
+  Which path runs first alternates every repeat (old-then-new on even
+  repeats, new-then-old on odd repeats), so a rate-limited or
+  time-degrading real provider does not systematically disadvantage
+  whichever path always ran second — repeating with a fixed order would
+  otherwise amplify that bias instead of averaging it out.
 - **What counts as a candidate regression:** a `lost` entry (old path found
   it, new path didn't) on any submission is the signal this whole exercise
   exists to catch, and an `added` entry (new path found it, old path didn't)

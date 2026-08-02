@@ -398,6 +398,12 @@ def compare_submission(
           emits across runs — a human reviewing ``lost``/``added`` should
           expect some near-duplicates from this pooling, not treat every
           entry as a distinct finding).
+        - Which path runs first alternates by repeat index (old-then-new on
+          even repeats, new-then-old on odd repeats), so a rate-limited or
+          time-degrading provider does not systematically disadvantage
+          whichever path always ran second within a repeat — an ordering
+          bias that repeating with a fixed order would amplify, not average
+          out.
         - The worktree is always removed, even when a pass call raises.
     """
     assert repeats >= 1, "repeats must be >= 1"
@@ -408,13 +414,17 @@ def compare_submission(
         old_side: List[CodeReviewIssue] = []
         new_arch: List[CodeReviewIssue] = []
         new_side: List[CodeReviewIssue] = []
-        for _ in range(repeats):
-            a, s = run_two_call(llm_factory(), input_data, repo_reader, index)
-            old_arch.extend(a)
-            old_side.extend(s)
-            a2, s2 = run_merged_call(llm_factory(), input_data, repo_reader, index)
-            new_arch.extend(a2)
-            new_side.extend(s2)
+        for i in range(repeats):
+            steps = ["old", "new"] if i % 2 == 0 else ["new", "old"]
+            for step in steps:
+                if step == "old":
+                    a, s = run_two_call(llm_factory(), input_data, repo_reader, index)
+                    old_arch.extend(a)
+                    old_side.extend(s)
+                else:
+                    a2, s2 = run_merged_call(llm_factory(), input_data, repo_reader, index)
+                    new_arch.extend(a2)
+                    new_side.extend(s2)
         return SubmissionComparisonResult(
             label=spec.label,
             architecture_diff=diff_findings(old_arch, new_arch),
