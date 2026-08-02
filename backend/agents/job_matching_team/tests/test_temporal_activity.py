@@ -380,6 +380,19 @@ def test_rank_returns_top_and_totals(monkeypatch):
     assert isinstance(args[1], JobSeekerProfile)
 
 
+def test_rank_rejects_non_positive_top_n(monkeypatch):
+    postings = [JobPosting(company="A", title="Eng").ensure_fingerprint()]
+    agent = _FakeAgent("rank", [])
+    monkeypatch.setattr("job_matching_team.agents.ranker.JobRankerAgent", lambda: agent)
+
+    with pytest.raises(ValueError, match="top_n must be >= 1"):
+        ActivityEnvironment().run(
+            rank_activity, _serialize_postings(postings), _profile_dict(), 0, "job-1"
+        )
+
+    assert agent.calls == []  # fails fast, before the ranker ever runs
+
+
 # ===========================================================================
 # finalize_scan_activity
 # ===========================================================================
