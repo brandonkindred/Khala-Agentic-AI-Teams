@@ -357,6 +357,20 @@ def test_events_emitted(root_spec, mock_llm):
     assert AgentEventType.AGENT_ANALYSING in event_types
     assert AgentEventType.AGENT_COMPLETE in event_types
 
+    # Schema-contract check: pin the fields SSE consumers rely on, so a
+    # rename/removal fails here instead of silently breaking streaming
+    # clients. (Unlike `assert AgentEvent.model_fields`, which is always
+    # truthy for any model with fields, this fails if a specific field goes
+    # missing.)
+    assert {"event_type", "agent_id", "agent_name", "depth"} <= AgentEvent.model_fields.keys()
+
+    # Value-level check: every emitted event actually describes this root
+    # agent's execution, not just the right count/types of events.
+    for event in events:
+        assert event.agent_id == root_spec.agent_id
+        assert event.agent_name == root_spec.name
+        assert event.depth == root_spec.depth
+
 
 # ------------------------------------------------------------------
 # Original query threading
