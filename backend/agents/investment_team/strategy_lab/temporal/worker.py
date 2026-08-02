@@ -7,9 +7,11 @@ every fine-grained activity). Kept off the shared ``teams_registry`` auto-loop
 first-ever child-workflow fan-out gets its own queue with independently tunable
 concurrency and blast-radius isolation.
 
-Not yet called by any app lifespan/entrypoint — wiring the boot in is the Stage 5
-cutover. Kept side-effect-free at import time (all reads happen inside the
-function body) so importing the package never trips the sandbox.
+Called from ``investment_team.temporal.worker.start_investment_temporal_worker_thread``,
+which boots it alongside the investment team's own ``investment-queue`` and
+``investment-advisory-queue`` workers. Kept side-effect-free at import time (all
+reads happen inside the function body) so importing the package never trips the
+sandbox.
 """
 
 from __future__ import annotations
