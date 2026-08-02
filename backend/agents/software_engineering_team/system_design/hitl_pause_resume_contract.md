@@ -47,7 +47,25 @@ workflow. No equivalent exists yet for HITL answers.
 `run_pipeline_activity` (and the SE-level analogue
 `execute_coding_team_activity`) must stop blocking through a pause. When a
 HITL gate would otherwise call `hitl.wait_for_answers`, the orchestrator
-instead returns immediately from the activity with a discriminated result:
+instead returns immediately from the activity with a discriminated result.
+
+**This is a per-caller strategy, not a universal change to
+`run_coding_team_orchestrator` itself.** That function is shared: both
+`run_orchestrator_wired` (`api/orchestration.py:57-80`, used by the Temporal
+path) and `_run_with_github_hooks` (`api/orchestration.py:877-946`, the
+still-threaded `run-from-github` flow) call it directly, and the latter
+passes `on_pause=_on_pause` expecting the call to stay blocked through a
+pause exactly as today — there is no activity boundary in the thread-mode
+path for a "return early" result to unwind through, and unconditionally
+changing the shared function's behavior would make the GitHub-hook thread
+return prematurely at its first pause instead of blocking until answered.
+`run_coding_team_orchestrator` (and `_run_pause_cycle` beneath it) must
+therefore take an explicit pause-strategy argument: Temporal-activity
+callers (`run_pipeline_activity`, `execute_coding_team_activity`) request
+"return on pause" and get the discriminated result below; thread-mode
+callers, including `run_orchestrator_wired`'s own thread-mode uses and
+`_run_with_github_hooks`, keep requesting today's "block through pause"
+strategy unchanged, `on_pause` included.
 
 ```python
 # Paused, waiting on a human:
@@ -214,13 +232,18 @@ The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
   activity persists `waiting_for_answers=True` to the job record (and a
   client can act on that) before the activity call itself returns — so an
   early signal can arrive before `self._active_resume_token` is even set. In
-  that case the handler buffers `payload` — but only if nothing is already
-  buffered (`self._buffered_signal is None`); two valid submissions racing in
-  during this same early window must not let the second overwrite the
-  first, or the same delivery-order-dependent race the check above prevents
-  reappears in the narrower window before `_active_resume_token` exists. Once
-  the workflow observes "paused" and learns the token, it checks the buffer
-  for a match before waiting.
+  that case the handler buffers the payload **keyed by its own
+  `resume_token`** — `self._buffered_signals: dict[str, list]`, not a single
+  slot — inserting only if that specific token isn't already present (first
+  submission per token wins). A single shared slot is not enough: a delayed
+  retry for an already-resolved pause A can arrive after A clears but before
+  pause B's activity even returns, occupying a lone slot and silently
+  discarding B's own early, legitimate submission (or vice versa) — each
+  pause's buffered answer must be independent of any other pause's,
+  resolved or not. Once the workflow observes "paused" and learns
+  `resume_token`, it looks up (and evicts) that key in
+  `self._buffered_signals`; any other still-buffered tokens are left alone
+  for their own eventual pause to claim.
 - `@workflow.query pending_questions() -> list` / `status() -> dict` — for
   polling clients, mirroring `CodeReviewWorkflow.progress()`. `status()`
   derives `waiting_for_answers` as
