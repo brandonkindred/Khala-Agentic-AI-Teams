@@ -484,14 +484,32 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # Lifecycle methods
     # ------------------------------------------------------------------
     def run(self, inp) -> ToolAgentOutput:
+        """Run the agent's execute phase.
+
+        Preconditions: ``inp`` exposes ``microtask.id`` (see :meth:`execute`).
+        Postconditions: returns a ``ToolAgentOutput`` with no code changes applied.
+        """
         return self.execute(inp)
 
     def execute(self, inp) -> ToolAgentOutput:
+        """Default execute action for review tool agents; review agents perform work in :meth:`review`.
+
+        Preconditions: ``inp`` exposes ``microtask.id``.
+        Postconditions: logs at INFO via :attr:`_logger`, then returns a
+            ``ToolAgentOutput`` indicating no changes were applied.
+        """
         label = self.execute_label or self.name
         self._logger.info("%s: microtask %s (execute stub)", label, inp.microtask.id)
         return ToolAgentOutput(summary=f"{label} execute — no changes applied.")
 
     def plan(self, inp) -> ToolAgentPhaseOutput:
+        """Return planning recommendations and summary.
+
+        Preconditions: none (``inp`` is accepted for interface parity but unused).
+        Postconditions: returns a ``ToolAgentPhaseOutput`` populated verbatim
+            from :attr:`plan_recommendations` and :attr:`plan_summary`,
+            independent of ``inp``.
+        """
         return ToolAgentPhaseOutput(
             recommendations=list(self.plan_recommendations),
             summary=self.plan_summary,
