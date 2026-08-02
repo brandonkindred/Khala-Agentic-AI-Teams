@@ -132,6 +132,41 @@ def test_detect_framework_from_project_none(tmp_path: Path) -> None:
     assert detect_framework_from_project(None) is None
 
 
+def test_detect_framework_from_project_vue_via_vite_config(tmp_path: Path) -> None:
+    """Detect Vue from vite.config.ts plus a *.vue file, with no package.json."""
+    (tmp_path / "vite.config.ts").write_text("")
+    (tmp_path / "App.vue").write_text("<template></template>")
+    assert detect_framework_from_project(tmp_path) == "vue"
+
+
+def test_detect_framework_from_project_react_via_vite_config(tmp_path: Path) -> None:
+    """Detect React from vite.config.js plus a *.tsx file when no *.vue file exists."""
+    (tmp_path / "vite.config.js").write_text("")
+    (tmp_path / "App.tsx").write_text("export default function App() {}")
+    assert detect_framework_from_project(tmp_path) == "react"
+
+
+def test_detect_framework_from_project_vite_config_no_markers(tmp_path: Path) -> None:
+    """Vite config with no Vue or React markers returns None (no false positive)."""
+    (tmp_path / "vite.config.ts").write_text("")
+    assert detect_framework_from_project(tmp_path) is None
+
+
+def test_detect_framework_from_project_unreadable_directory_returns_none(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """An unreadable subdirectory during marker scanning degrades to None, not a crash."""
+
+    (tmp_path / "vite.config.ts").write_text("")
+
+    def _raise_permission_error(self, pattern):
+        raise PermissionError("simulated unreadable directory")
+
+    monkeypatch.setattr(Path, "rglob", _raise_permission_error)
+    assert detect_framework_from_project(tmp_path) is None
+
+
 def test_resolve_frontend_framework_normalizes_value() -> None:
     """Metadata value is normalized (lowercased, valid values only)."""
     assert resolve_frontend_framework({"framework_target": "React"}, "") == "react"
