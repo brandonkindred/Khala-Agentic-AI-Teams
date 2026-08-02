@@ -38,6 +38,7 @@ from code_review_agent.side_effect_impact_pass import (
     find_side_effect_impact_issues,
 )
 
+from llm_service import LLMJsonParseError
 from llm_service.clients.dummy import DummyLLMClient
 
 # Unique anchor in this pass's user prompt (never the system prompt), distinct
@@ -604,7 +605,7 @@ def test_fails_safe_on_llm_error() -> None:
 def test_fails_safe_on_unparsable_reply() -> None:
     class _Gibberish(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            return "not even a dict-shaped reply"  # type: ignore[return-value]
+            raise LLMJsonParseError("not even a dict-shaped reply")
 
     result = find_side_effect_impact_issues(_Gibberish(), _input())
     assert result == []
