@@ -42,12 +42,15 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
     - package.json with react or react-dom -> React
     - package.json with vue -> Vue
     - vue.config.js (Vue CLI-specific) -> Vue
-    - vite.config.ts or vite.config.js, plus a *.vue file -> Vue
-    - vite.config.ts or vite.config.js, with no *.vue file but a *.jsx or *.tsx
-      file -> React (Vite is framework-agnostic, unlike vue.config.js)
+    - vite.config.ts or vite.config.js naming "@vitejs/plugin-vue" -> Vue
+    - vite.config.ts or vite.config.js naming "@vitejs/plugin-react" -> React
+    - vite.config.ts or vite.config.js with no plugin marker: falls back to a
+      *.vue file -> Vue, else a *.jsx or *.tsx file -> React. Vite is
+      framework-agnostic and Vue also supports JSX/TSX, so this fallback is a
+      best-effort guess used only when the config doesn't name its plugin.
 
-    An unreadable directory encountered while scanning for these markers is treated
-    as "no framework detected" rather than raising.
+    An unreadable file or directory encountered while scanning for these markers
+    is treated as "no framework detected" rather than raising.
 
     Returns "angular", "react", "vue", or None if not detected.
     """
@@ -87,9 +90,18 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
     if (repo_path / "vue.config.js").exists():
         return "vue"
 
-    # vite.config.ts/js is framework-agnostic; check for Vue markers, then React
-    if (repo_path / "vite.config.ts").exists() or (repo_path / "vite.config.js").exists():
+    # vite.config.ts/js is framework-agnostic; prefer its named plugin, falling
+    # back to file markers only when the config doesn't identify a plugin
+    vite_config_path = repo_path / "vite.config.ts"
+    if not vite_config_path.exists():
+        vite_config_path = repo_path / "vite.config.js"
+    if vite_config_path.exists():
         try:
+            config_content = vite_config_path.read_text(encoding="utf-8")
+            if "@vitejs/plugin-vue" in config_content:
+                return "vue"
+            if "@vitejs/plugin-react" in config_content:
+                return "react"
             if any(repo_path.rglob("*.vue")):
                 return "vue"
             if any(repo_path.rglob("*.jsx")) or any(repo_path.rglob("*.tsx")):

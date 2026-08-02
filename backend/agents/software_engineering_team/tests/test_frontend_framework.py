@@ -154,6 +154,27 @@ def test_detect_framework_from_project_vue_config_with_jsx_stays_vue(tmp_path: P
     assert detect_framework_from_project(tmp_path) == "vue"
 
 
+def test_detect_framework_from_project_vite_config_plugin_vue_with_tsx_stays_vue(
+    tmp_path: Path,
+) -> None:
+    """A Vite+Vue project rendering via TSX (no *.vue files) still resolves to Vue when
+    the config names @vitejs/plugin-vue, instead of guessing React from the extension."""
+    (tmp_path / "vite.config.ts").write_text(
+        "import vue from '@vitejs/plugin-vue'\nexport default { plugins: [vue()] }\n"
+    )
+    (tmp_path / "App.tsx").write_text("export default {}")
+    assert detect_framework_from_project(tmp_path) == "vue"
+
+
+def test_detect_framework_from_project_vite_config_plugin_react(tmp_path: Path) -> None:
+    """A Vite config naming @vitejs/plugin-react resolves to React directly, even
+    without scanning for *.jsx/*.tsx markers."""
+    (tmp_path / "vite.config.ts").write_text(
+        "import react from '@vitejs/plugin-react'\nexport default { plugins: [react()] }\n"
+    )
+    assert detect_framework_from_project(tmp_path) == "react"
+
+
 def test_detect_framework_from_project_vite_config_no_markers(tmp_path: Path) -> None:
     """Vite config with no Vue or React markers returns None (no false positive)."""
     (tmp_path / "vite.config.ts").write_text("")
