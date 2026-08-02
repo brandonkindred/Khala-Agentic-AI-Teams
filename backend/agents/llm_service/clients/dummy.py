@@ -18,7 +18,7 @@ import hashlib
 import json
 import re
 import sys
-from collections.abc import AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
@@ -75,91 +75,143 @@ def ensure_strands_model_registration() -> None:
         Model._abc_caches_clear()
     _STRANDS_MODEL_REGISTERED = True
 
-_STRIP_VERBS = {
-    "implement",
-    "create",
-    "build",
-    "add",
-    "setup",
-    "set",
-    "up",
-    "configure",
-    "make",
-    "define",
-    "develop",
-    "write",
-    "design",
-    "establish",
-    "generate",
-    "fetches",
-    "displays",
-    "handles",
-    "manages",
-    "processes",
-    "returns",
-    "provides",
-    "supports",
-    "includes",
-    "enables",
-    "renders",
-}
-_STRIP_FILLERS = {
-    "the",
-    "that",
-    "with",
-    "using",
-    "which",
-    "for",
-    "and",
-    "a",
-    "an",
-    "to",
-    "of",
-    "in",
-    "on",
-    "by",
-    "from",
-    "into",
-    "as",
-    "via",
-    "its",
-    "all",
-    "application",
-    "system",
-    "project",
-    "based",
-    "proper",
-    "production",
-    "quality",
-    "complete",
-    "full",
-    "new",
-    "existing",
-    "angular",
-    "react",
-    "vue",
-    "spring",
-    "fastapi",
-    "flask",
-    "django",
-}
-_STRIP_SUFFIXES = {
-    "component",
-    "service",
-    "module",
-    "endpoint",
-    "endpoints",
-    "middleware",
-    "guard",
-    "pipe",
-    "directive",
-    "interceptor",
-    "controller",
-    "repository",
-}
+
+# Prompts this long that still mention "approved" are treated as code-review
+# chunks (full review context) rather than short approval-only stubs.
+CODE_REVIEW_MIN_PROMPT_LENGTH = 200
+
+_STRIP_VERBS: frozenset[str] = frozenset(
+    {
+        "implement",
+        "create",
+        "build",
+        "add",
+        "setup",
+        "set",
+        "up",
+        "configure",
+        "make",
+        "define",
+        "develop",
+        "write",
+        "design",
+        "establish",
+        "generate",
+        "fetches",
+        "displays",
+        "handles",
+        "manages",
+        "processes",
+        "returns",
+        "provides",
+        "supports",
+        "includes",
+        "enables",
+        "renders",
+    }
+)
+_STRIP_FILLERS: frozenset[str] = frozenset(
+    {
+        "the",
+        "that",
+        "with",
+        "using",
+        "which",
+        "for",
+        "and",
+        "a",
+        "an",
+        "to",
+        "of",
+        "in",
+        "on",
+        "by",
+        "from",
+        "into",
+        "as",
+        "via",
+        "its",
+        "all",
+        "application",
+        "system",
+        "project",
+        "based",
+        "proper",
+        "production",
+        "quality",
+        "complete",
+        "full",
+        "new",
+        "existing",
+        "angular",
+        "react",
+        "vue",
+        "spring",
+        "fastapi",
+        "flask",
+        "django",
+    }
+)
+_STRIP_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "component",
+        "service",
+        "module",
+        "endpoint",
+        "endpoints",
+        "middleware",
+        "guard",
+        "pipe",
+        "directive",
+        "interceptor",
+        "controller",
+        "repository",
+    }
+)
+
+
+def _placeholder_slug(hint: str, separator: str, max_length: int) -> str:
+    """Build a unique fallback slug when filtering leaves no usable words.
+
+    Preconditions:
+        - ``hint`` / ``separator`` are strings; ``separator`` is non-empty.
+        - ``max_length`` is a positive integer.
+
+    Postconditions:
+        - Returns a non-empty identifier of at most ``max_length`` characters
+          whose digest portion is derived from ``hint``, so distinct hints
+          produce distinct placeholders.
+    """
+    digest = hashlib.md5(hint.encode()).hexdigest()[:8]
+    result = f"item{separator}{digest}"
+    if len(result) > max_length:
+        result = result[:max_length].rstrip(separator)
+    return result or f"item{separator}0"
 
 
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
+    """Derive a short, identifier-friendly name from a free-form hint.
+
+    Strips common verbs, filler words, and type suffixes, then joins the
+    remaining words with ``separator`` and truncates to ``max_length``.
+
+    Preconditions:
+        - ``hint`` is a string (may be empty; empty / all-stripped yields a
+          hint-derived placeholder).
+        - ``separator`` is a non-empty string safe for identifiers.
+        - ``max_length`` is a positive integer.
+
+    Postconditions:
+        - Returns a non-empty string of at most ``max_length`` characters.
+        - The result contains only lowercase alphanumerics and ``separator``.
+        - When filtering leaves no usable words, the placeholder is derived
+          from a digest of ``hint`` so distinct all-stripped hints do not
+          collapse onto one path.
+    """
+    assert isinstance(hint, str)
+    assert isinstance(separator, str) and separator
+    assert isinstance(max_length, int) and max_length > 0
+
     expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", hint)
     words = re.sub(r"[^a-z0-9\s]+", " ", expanded.lower()).split()
     filtered = [
@@ -167,11 +219,117 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
         for w in words
         if w not in _STRIP_VERBS and w not in _STRIP_FILLERS and w not in _STRIP_SUFFIXES
     ]
-    name_words = filtered[:3] if filtered else words[:2]
-    result = separator.join(name_words)
+    if not filtered:
+        # Do not reintroduce verbs/fillers/suffixes; stay unique per hint.
+        return _placeholder_slug(hint, separator, max_length)
+    result = separator.join(filtered[:3])
     if len(result) > max_length:
         result = result[:max_length].rstrip(separator)
-    return result or f"item{separator}1"
+    return result or _placeholder_slug(hint, separator, max_length)
+
+
+def _content_to_text(content: Any) -> str:
+    """Flatten a message ``content`` field into newline-joined text.
+
+    Recognizes ``text``, bare strings, nested ``toolResult``, and ``json``
+    blocks (serialized like ``_tool_result_content_to_text`` in the adapter).
+
+    Preconditions:
+        - ``content`` is a string, a list of Strands content blocks, or other.
+
+    Postconditions:
+        - Returns a string (empty when no text can be extracted).
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and "text" in block:
+            parts.append(str(block["text"]))
+        elif isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and "json" in block:
+            parts.append(json.dumps(block["json"]))
+        elif isinstance(block, dict) and "toolResult" in block:
+            tr = block.get("toolResult") or {}
+            nested = _content_to_text(tr.get("content", []))
+            if nested:
+                parts.append(nested)
+    return "\n".join(parts)
+
+
+def _last_user_text(messages: list) -> str:
+    """Return concatenated text from the most recent user message.
+
+    Used by ``stream()``. Multi-block text within that single turn is
+    newline-joined so routing anchors in later blocks are not dropped.
+
+    Preconditions:
+        - ``messages`` is a list of Strands-style message dicts (role/content).
+
+    Postconditions:
+        - Returns a string (empty when no user text is present).
+        - When the latest user message has multiple text blocks, all of them
+          appear in the returned string (newline-joined).
+    """
+    assert isinstance(messages, list)
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        return _content_to_text(msg.get("content", []))
+    return ""
+
+
+def _aggregated_user_tool_text(messages: list) -> str:
+    """Join all user/tool turn texts for structured-output routing.
+
+    Mirrors ``LLMClientModel.structured_output``, which aggregates converted
+    user and tool message contents so follow-up turns like "return that as
+    structured output" still see routing anchors from earlier requests.
+    ``stream()`` continues to use ``_last_user_text`` (latest turn only).
+
+    Preconditions:
+        - ``messages`` is a list of Strands-style message dicts (role/content).
+
+    Postconditions:
+        - Returns a string (empty when no user/tool text is present).
+        - Non-empty user/tool turns appear in order, separated by blank lines.
+    """
+    assert isinstance(messages, list)
+    parts: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") not in ("user", "tool"):
+            continue
+        text = _content_to_text(msg.get("content", []))
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _flatten_system_prompt_content(
+    system_prompt_content: list[SystemContentBlock] | None,
+) -> str:
+    """Flatten Strands system content blocks into a single prompt string.
+
+    Preconditions:
+        - ``system_prompt_content`` is ``None`` or a list of content blocks.
+
+    Postconditions:
+        - Returns concatenated text from blocks (empty when absent).
+    """
+    if not system_prompt_content:
+        return ""
+    parts: list[str] = []
+    for block in system_prompt_content:
+        if isinstance(block, dict):
+            parts.append(str(block.get("text", "") or ""))
+        else:
+            parts.append(str(block))
+    return "".join(parts)
 
 
 class DummyLLMClient(LLMClient):
@@ -279,29 +437,40 @@ class DummyLLMClient(LLMClient):
         ensure_strands_model_registration()
         return dict(self._model_config)
 
-    def structured_output(
+    async def structured_output(
         self,
         output_model: type,
         prompt: list,
         system_prompt: str | None = None,
         **kwargs: Any,
-    ) -> Any:
-        """Not used by Strands agent structured-output flows.
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Yield Strands structured-output events from the dummy pattern matcher.
 
-        Agents with ``structured_output=`` invoke the structured-output tool
-        through ``stream()`` / ``chat()``. Raising here fails loudly if a
-        caller hits the ABC method by mistake instead of silently returning
-        an empty/invalid model instance.
+        Aggregates all user/tool turns (not just the latest) so a follow-up
+        like "return that as structured output" still routes on anchors from
+        the original request — matching ``LLMClientModel.structured_output``.
 
-        Preconditions: none.
-        Postconditions: always raises ``NotImplementedError``; attaches Model when
-            importable.
+        Preconditions:
+            - ``output_model`` is a Pydantic model type with ``model_validate``.
+            - ``prompt`` is a Strands-style message list.
+
+        Postconditions:
+            - Yields a single event ``{"output": validated}`` on success.
+            - Raises ``ValueError`` when the stub dict cannot validate.
+            - Attaches Strands ``Model`` to the class MRO when importable.
         """
         ensure_strands_model_registration()
-        raise NotImplementedError(
-            "DummyLLMClient.structured_output is unused; Strands structured "
-            "output goes through stream()/chat() with StructuredOutputTool"
-        )
+        assert hasattr(output_model, "model_validate")
+        prompt_text = _aggregated_user_tool_text(prompt)
+        data = self.complete_json(prompt_text, system_prompt=system_prompt)
+        try:
+            validated = output_model.model_validate(data)
+        except Exception as exc:
+            raise ValueError(
+                f"DummyLLMClient.structured_output: failed to parse into "
+                f"{getattr(output_model, '__name__', output_model)}: {exc}"
+            ) from exc
+        yield {"output": validated}
 
     async def stream(
         self,
@@ -321,23 +490,21 @@ class DummyLLMClient(LLMClient):
         invoking that tool with data from the ``complete_json`` pattern matcher.
         Otherwise yields a plain text response.
 
+        When ``system_prompt_content`` is supplied (including an empty list), it
+        is treated as authoritative over the legacy ``system_prompt`` string so
+        branding Phase 1 branches that anchor on system text still match even
+        if a stale string is also present, and an explicit empty override clears
+        that stale string.
+
         Preconditions: ``messages`` is a sequence of Strands-shaped message dicts.
         Postconditions: yields a complete assistant stream; attaches Strands
             ``Model`` to the class MRO when importable.
         """
         ensure_strands_model_registration()
-        # Extract user text from the last user message
-        user_text = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                for block in msg.get("content", []):
-                    if isinstance(block, dict) and "text" in block:
-                        user_text = block["text"]
-                        break
-                    elif isinstance(block, str):
-                        user_text = block
-                        break
-                break
+        del tool_choice, invocation_state  # accepted for ABC compatibility
+        user_text = _last_user_text(messages)
+        if system_prompt_content is not None:
+            system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
         # Route through the existing complete_json pattern matcher for rich responses
         response_data = self.complete_json(user_text, system_prompt=system_prompt)
@@ -444,10 +611,10 @@ class DummyLLMClient(LLMClient):
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the
         # branches below look for in the user prompt they build. Scanning
-        # ``system_prompt`` here was tried and reverted because loose
-        # single-word branches (``"pipeline"``, ``"security"``)
-        # cross-contaminated other teams' prompts that happened to mention
-        # those words in their persona text.
+        # ``system_prompt`` was tried and reverted because loose single-word
+        # branches (``"pipeline"``, ``"security"``) cross-contaminated other
+        # teams' prompts that happened to mention those words in their persona
+        # text.
         #
         # Exception: the branding Phase 1 / Phase 2 branches further down DO
         # anchor on ``system_prompt`` (via ``system_lowered`` later in this
@@ -458,6 +625,8 @@ class DummyLLMClient(LLMClient):
         # one agent's prompt, not the loose single words that caused the
         # earlier revert.
         lowered = prompt.lower()
+        # Shared across instances so sequential coding stubs can mint distinct
+        # module/component names when the task hint alone is not enough.
         DummyLLMClient._call_counter += 1
         self._request_count += 1
         counter = DummyLLMClient._call_counter
@@ -729,8 +898,10 @@ class DummyLLMClient(LLMClient):
             }
         elif (
             "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
-        ) and ("approved" not in lowered or len(lowered) > 200):
-            # Catch-all for code review / chunk review prompts routed through Strands
+        ) and ("approved" not in lowered or len(lowered) > CODE_REVIEW_MIN_PROMPT_LENGTH):
+            # Catch-all for code review / chunk review prompts routed through Strands.
+            # Long prompts that mention "approved" still match: they carry full review
+            # context, unlike short approval-only stubs below the length threshold.
             return {
                 "approved": True,
                 "issues": [],
@@ -1025,12 +1196,16 @@ class DummyLLMClient(LLMClient):
         # (built with structured_output=, see agents.py). Cumulative
         # carry-forward stubs: each specialist repeats upstream fields so a
         # linear Graph predecessor exposes the full prior narrative.
-        elif "brand_story" in system_lowered and "boilerplate_variants" in system_lowered and (
-            "tagline_rationale" not in system_lowered
-            and "personality_traits" not in system_lowered
-            and "messaging_framework" not in system_lowered
-            and "jobs_to_be_done" not in system_lowered
-            and "writing_guidelines" not in system_lowered
+        elif (
+            "brand_story" in system_lowered
+            and "boilerplate_variants" in system_lowered
+            and (
+                "tagline_rationale" not in system_lowered
+                and "personality_traits" not in system_lowered
+                and "messaging_framework" not in system_lowered
+                and "jobs_to_be_done" not in system_lowered
+                and "writing_guidelines" not in system_lowered
+            )
         ):
             return {
                 "brand_story": (
@@ -1047,7 +1222,9 @@ class DummyLLMClient(LLMClient):
                     ),
                 ],
             }
-        elif "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered:
+        elif (
+            "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered
+        ):
             return {
                 **{
                     "brand_story": (
@@ -1425,9 +1602,7 @@ class DummyLLMClient(LLMClient):
             elif m.get("role") == "user":
                 user_prompt = m.get("content") or ""
 
-        has_tool_result = any(
-            isinstance(m, dict) and m.get("role") == "tool" for m in messages
-        )
+        has_tool_result = any(isinstance(m, dict) and m.get("role") == "tool" for m in messages)
 
         if tools and not has_tool_result:
             structured_tool = None
