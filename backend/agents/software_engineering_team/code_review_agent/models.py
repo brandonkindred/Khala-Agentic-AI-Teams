@@ -187,7 +187,14 @@ class FileSegment(BaseModel):
 
     @property
     def line_count(self) -> int:
-        """Number of lines in this segment's content."""
+        """Number of lines in this segment's content.
+
+        A trailing ``"\\n"`` ends the last line rather than starting a phantom
+        empty one (``splitlines()`` semantics), matching how ``total_lines`` is
+        computed for the same content in ``chunking.split_block_into_segments``
+        — the two always agree, so a whole-file segment is never misclassified
+        as partial by a trailing-newline off-by-one.
+        """
         return len(self.content.splitlines()) or 1
 
     @property
@@ -349,8 +356,12 @@ class ChunkReviewOutput(BaseModel):
     approved: bool = Field(default=False, description="True if chunk has no critical/high issues")
     issues: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Issues found (each with severity, category, file_path, title, description, "
-        "suggestion)",
+        description="Issues found (each with severity, category, file_path, line, start_line, "
+        "title, description, suggestion, pre_existing). Items are already validated against "
+        "ChunkReviewIssueLLM's typed schema at the LLM response boundary in "
+        "chunk_reviewer._run_chunk_review before being flattened to plain dicts here; "
+        "normalization into CodeReviewIssue happens once, downstream, in "
+        "chunking._issues_from_chunk_output.",
     )
     summary: str = Field(default="", description="Review summary for this chunk")
     spec_compliance_notes: str = Field(
