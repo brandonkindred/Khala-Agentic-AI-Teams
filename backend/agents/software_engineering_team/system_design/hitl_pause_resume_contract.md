@@ -162,6 +162,23 @@ escalates within that window is folded into the *same* pause
 (`pause_context.task_ids` lists all of them; `pending_questions` is their
 concatenated batch) rather than each publishing a competing one.
 
+Critically, this changes *when* the job record is written relative to
+today's single-worker `_run_pause_cycle` (`pause_cycle.py:283-289`), which
+publishes `waiting_for_answers=True` / `pending_questions` as its first
+action, before anything blocks. For a worker-escalation pause the orchestrator
+must **not** carry that publish-immediately behavior forward: it must hold
+the job record write until the drain reaches quiescence, then persist the
+full, already-concatenated (namespaced, see below) batch in one update. If
+the first worker's questions were instead published as soon as that worker
+escalated, a client could poll, see that partial batch, and submit a
+complete-looking answer set while the drain window is still open; a second
+worker escalating moments later would be folded into `pending_questions` for
+a pause the client has already answered and the workflow is about to
+acknowledge in full, leaving that second worker's question permanently
+unanswered under a token that's already being consumed. The pause must not
+become externally visible — job record or activity return alike — until the
+drain is finished and the batch is final.
+
 Concatenating batches is not safe as-is: `hitl.convert_to_structured_questions()`
 preserves a question's `id` verbatim when the caller already supplied one
 (`hitl.py:234`), only auto-generating a `uuid4`-suffixed id otherwise. Two
@@ -215,35 +232,44 @@ The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
   most one value; the installed Temporal Python SDK's `WorkflowHandle.signal`
   itself only takes one positional `arg`, with `args=[...]` needed for more
   than one, so a single dict payload avoids that entirely and stays
-  consistent with how every other signal in this repo is already called). If
-  `payload["resume_token"] != self._active_resume_token`, the signal is a
-  stale or duplicate submission (e.g. a retried HTTP call, or an answer to a
-  pause that already resolved) and must be **ignored**, not applied.
-  Otherwise, only if `self._submitted_answers is None` (this token's first
-  valid batch), sets `self._submitted_answers = payload["answers"]` — a
-  second matching-token signal (a double-submit, or two clients racing to
-  answer the same pause) must be ignored too, not silently overwrite the
-  first. Temporal can deliver both signals before the workflow task next
-  runs and observes `wait_condition`, so an unconditional overwrite would
-  make which human answer "wins" depend on delivery order rather than
-  first-submission-wins. This is the *only* state the wait condition gates on;
-  the handler must not depend on
-  the workflow having already observed the "paused" outcome, since the
-  activity persists `waiting_for_answers=True` to the job record (and a
-  client can act on that) before the activity call itself returns — so an
-  early signal can arrive before `self._active_resume_token` is even set. In
-  that case the handler buffers the payload **keyed by its own
-  `resume_token`** — `self._buffered_signals: dict[str, list]`, not a single
-  slot — inserting only if that specific token isn't already present (first
-  submission per token wins). A single shared slot is not enough: a delayed
-  retry for an already-resolved pause A can arrive after A clears but before
-  pause B's activity even returns, occupying a lone slot and silently
-  discarding B's own early, legitimate submission (or vice versa) — each
-  pause's buffered answer must be independent of any other pause's,
-  resolved or not. Once the workflow observes "paused" and learns
-  `resume_token`, it looks up (and evicts) that key in
-  `self._buffered_signals`; any other still-buffered tokens are left alone
-  for their own eventual pause to claim.
+  consistent with how every other signal in this repo is already called).
+  The handler must check `self._active_resume_token` **before** doing any
+  token-equality comparison, in this order — the ordering matters, not just
+  the individual rules, since the activity persists
+  `waiting_for_answers=True` to the job record (and a client can act on
+  that) before the activity call itself returns, so a signal can legitimately
+  arrive while `self._active_resume_token` is still `None`:
+  1. **`self._active_resume_token is None`** (no pause is active from this
+     workflow's perspective yet — an early signal beat the activity's return):
+     buffer the payload **keyed by its own `resume_token`** —
+     `self._buffered_signals: dict[str, list]`, not a single slot — inserting
+     only if that specific token isn't already present (first submission per
+     token wins). Do **not** fall through to the mismatch check below; a
+     `None` active token is not a mismatch, it's "no opinion yet." A single
+     shared slot is not enough here either: a delayed retry for an
+     already-resolved pause A can arrive after A clears but before pause B's
+     activity even returns, occupying a lone slot and silently discarding
+     B's own early, legitimate submission (or vice versa) — each pause's
+     buffered answer must be independent of any other pause's, resolved or
+     not.
+  2. **`self._active_resume_token` is set and `payload["resume_token"] !=
+     self._active_resume_token`**: a stale or duplicate submission (e.g. a
+     retried HTTP call, or an answer to a pause that already resolved) — must
+     be **ignored**, not applied.
+  3. **Otherwise** (`payload["resume_token"] == self._active_resume_token`):
+     only if `self._submitted_answers is None` (this token's first valid
+     batch), set `self._submitted_answers = payload["answers"]` — a second
+     matching-token signal (a double-submit, or two clients racing to answer
+     the same pause) must be ignored too, not silently overwrite the first.
+     Temporal can deliver both signals before the workflow task next runs and
+     observes `wait_condition`, so an unconditional overwrite would make
+     which human answer "wins" depend on delivery order rather than
+     first-submission-wins.
+
+  `self._submitted_answers` is the *only* state the wait condition gates on.
+  Once the workflow observes "paused" and learns `resume_token`, it looks up
+  (and evicts) that key in `self._buffered_signals`; any other still-buffered
+  tokens are left alone for their own eventual pause to claim.
 - `@workflow.query pending_questions() -> list` / `status() -> dict` — for
   polling clients, mirroring `CodeReviewWorkflow.progress()`. `status()`
   derives `waiting_for_answers` as
