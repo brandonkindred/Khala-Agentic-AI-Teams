@@ -610,6 +610,50 @@ def test_merge_wave_results_activity_merges_in_cycle_index_order():
     assert merged.trial_count == 6
     # Both cycles' asset classes recorded for diversity steering, in index order.
     assert merged._asset_class_history == ["stocks", "crypto"]
+    assert out["merge_errors"] == []
+
+
+def test_merge_wave_results_activity_isolates_single_merge_failure(monkeypatch):
+    """A single record's ``merge_from`` failure is captured, not fatal: the
+    activity still succeeds, the other record's merge still lands, and the
+    failure is reported as a structured ``merge_errors`` entry."""
+    from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
+
+    primary_state = ConvergenceTracker().to_wire_dict()
+
+    def _record_dump(asset_class: str) -> Dict[str, Any]:
+        return _strategy_lab_record_dict(asset_class=asset_class)
+
+    real_merge_from = ConvergenceTracker.merge_from
+    calls = {"n": 0}
+
+    def _flaky_merge_from(self, other):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("merge boom")
+        return real_merge_from(self, other)
+
+    monkeypatch.setattr(ConvergenceTracker, "merge_from", _flaky_merge_from)
+
+    params = {
+        "primary_tracker_state": primary_state,
+        "wave_results": [
+            {"cycle_index": 0, "record": _record_dump("stocks"), "cycle_tracker_state": primary_state},
+            {"cycle_index": 1, "record": _record_dump("crypto"), "cycle_tracker_state": primary_state},
+        ],
+    }
+    out = act.merge_wave_results_activity(params)
+    # Both records still recorded for diversity steering (outside the isolated try).
+    merged = ConvergenceTracker.from_wire_dict(out["primary_tracker_state"])
+    assert merged._asset_class_history == ["stocks", "crypto"]
+    assert out["merge_errors"] == [
+        {
+            "cycle_index": 1,
+            "error": "merge boom",
+            "exception_type": "ValueError",
+            "reason": "tracker_merge_failed",
+        }
+    ]
 
 
 # -- Direct tests for the extracted api.main helpers the batch activities wrap --

@@ -665,21 +665,28 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     except Exception:
         logger.exception("agent_registry postgres schema registration failed")
 
-    try:
-        from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
-        from shared.postgres import register_team_schemas
+    # Gate on the team's `enabled` flag, same rationale as product_delivery
+    # below: disabling agent_studio must also disable its startup side
+    # effects (schema DDL, failure logs), not just leave the schema import
+    # to run unconditionally regardless of config.
+    if TEAM_CONFIGS["agent_studio"].enabled:
+        try:
+            from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
+            from shared.postgres import register_team_schemas
 
-        register_team_schemas(AGENT_STUDIO_SCHEMA)
-    except Exception:
-        logger.exception("agent_studio postgres schema registration failed")
+            register_team_schemas(AGENT_STUDIO_SCHEMA)
+        except Exception:
+            logger.exception("agent_studio postgres schema registration failed")
 
-    try:
-        from shared.postgres import register_team_schemas
-        from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
+    # Gate on the team's `enabled` flag (same rationale as agent_studio above).
+    if TEAM_CONFIGS["user_profile"].enabled:
+        try:
+            from shared.postgres import register_team_schemas
+            from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
 
-        register_team_schemas(USER_PROFILE_SCHEMA)
-    except Exception:
-        logger.exception("user_profile postgres schema registration failed")
+            register_team_schemas(USER_PROFILE_SCHEMA)
+        except Exception:
+            logger.exception("user_profile postgres schema registration failed")
 
     try:
         from agent_cognition.postgres import SCHEMA as AGENT_COGNITION_SCHEMA
@@ -909,7 +916,6 @@ from unified_api.routes.llm_config import router as llm_config_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
 from unified_api.routes.sandboxes import router as sandboxes_router
-from unified_api.routes.user_profile import router as user_profile_router
 
 app.include_router(integrations_router)
 app.include_router(llm_config_router)
@@ -921,10 +927,13 @@ app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
 app.include_router(cognition_router)
-# Honor the user_profile team's `enabled` flag (it has a TEAM_CONFIGS entry),
-# matching the product_delivery gate below: disabling the team must make
-# /api/user-profile/* stop answering, not just disappear from /teams.
+# Honor the in-process team's `enabled` flag and gate the import too (same
+# rationale as product_delivery below): disabling the team via TEAM_CONFIGS
+# must make /api/user-profile/* stop answering AND keep user_profile out of
+# the module graph, not just disappear from /teams.
 if TEAM_CONFIGS["user_profile"].enabled:
+    from unified_api.routes.user_profile import router as user_profile_router
+
     app.include_router(user_profile_router)
 # Honor the in-process team's `enabled` flag: an operator that disables
 # the team via TEAM_CONFIGS expects /api/product-delivery/* to stop

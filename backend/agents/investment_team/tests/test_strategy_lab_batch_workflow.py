@@ -400,6 +400,207 @@ def test_errored_cycle_is_counted_and_yields_completed_with_errors():
     assert harness.activity_calls.count("finalize_cycle_record_activity") == 1
 
 
+def test_errored_details_captures_structured_entry_for_failed_cycle():
+    harness = _Harness(
+        child_results={
+            "run-1-c0": _child_record("0"),
+            "run-1-c1": RuntimeError("cycle blew up"),
+        },
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 2,
+            "batch_index": 1,
+            "error": "cycle blew up",
+            "exception_type": "RuntimeError",
+        }
+    ]
+
+
+def test_errored_details_walks_full_cause_chain_to_terminal_failure():
+    """A real child-workflow failure surfaces as a multi-hop chain —
+    ChildWorkflowError -> ActivityError -> ApplicationError (the domain
+    error) — so ``exception_type``/``error`` must reflect the terminal cause,
+    not just one ``__cause__`` hop (which would only reach the generic
+    RPC-boundary wrapper, e.g. ActivityError, not the real failure)."""
+
+    class _OuterChildWorkflowError(Exception):
+        pass
+
+    class _MiddleActivityError(Exception):
+        pass
+
+    class _DomainValueError(Exception):
+        pass
+
+    terminal = _DomainValueError("root cause")
+    middle = _MiddleActivityError("activity task failed")
+    middle.__cause__ = terminal
+    outer = _OuterChildWorkflowError("child workflow execution failed")
+    outer.__cause__ = middle
+
+    harness = _Harness(
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 1,
+            "batch_index": 1,
+            "error": "root cause",
+            "exception_type": "_DomainValueError",
+        }
+    ]
+
+
+def test_errored_details_uses_application_error_type_not_class_name():
+    """The real terminal cause is usually the ApplicationError
+    ``_map_exception_to_application_error`` produced, whose actionable
+    classification lives in ``.type`` (e.g. "ValueError" or an LLM outcome) —
+    the Python class name is just "ApplicationError" for every such failure,
+    which would defeat the whole point of walking the chain."""
+    from temporalio.exceptions import ApplicationError
+
+    terminal = ApplicationError("bad json", type="ValueError", non_retryable=True)
+    middle = Exception("activity task failed")
+    middle.__cause__ = terminal
+    outer = Exception("child workflow execution failed")
+    outer.__cause__ = middle
+
+    harness = _Harness(
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"][0]["exception_type"] == "ValueError"
+
+
+def test_errored_details_cap_enforced():
+    n = 55
+    child_results = {f"run-1-c{i}": RuntimeError(f"boom-{i}") for i in range(n)}
+    harness = _Harness(
+        child_results=child_results,
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(batch_size=n, max_parallel=n), harness)
+    assert result["errored_cycles"] == n
+    assert len(result["errored_details"]) == wf._ERRORED_DETAILS_MAX
+
+
+def test_seeded_errored_details_are_extended_not_overwritten():
+    seed = [{"cycle_index": 99, "batch_index": 9, "error": "old", "exception_type": "OldError"}]
+    harness = _Harness(
+        child_results={
+            "run-1-c0": _child_record("0"),
+            "run-1-c1": RuntimeError("new failure"),
+        },
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(errored_details=seed), harness)
+    assert result["errored_details"][0] == seed[0]
+    assert len(result["errored_details"]) == 2
+    assert result["errored_details"][1]["error"] == "new failure"
+
+
+def test_errored_details_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={
+            "run-1-c0": _child_record("0"),
+            "run-1-c1": RuntimeError("cycle blew up"),
+        },
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(), harness)
+    assert any("errored_details" in p and p["errored_details"] for p in persisted)
+
+
+def test_merge_error_is_folded_without_failing_the_batch():
+    """A tracker-merge failure reported by ``merge_wave_results_activity``
+    (isolated per-record, per #4016/#4017) degrades to a soft counter bump —
+    it never propagates as an exception through ``run()``."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+        ),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["status"] == "completed_with_errors"
+    assert result["errored_cycles"] == 1
+    assert result["tracker_merge_error_count"] == 1
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 1,
+            "batch_index": 1,
+            "error": "merge boom",
+            "exception_type": "ValueError",
+            "reason": "tracker_merge_failed",
+        }
+    ]
+    # Both cycles were still finalized — the merge failure didn't drop a record.
+    assert sorted(result["completed_record_ids"]) == ["rec-0", "rec-1"]
+
+
+def test_seeded_tracker_merge_error_count_is_added_not_overwritten():
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+        ),
+    )
+    result = _run(_batch_input(tracker_merge_error_count=4), harness)
+    assert result["tracker_merge_error_count"] == 5
+
+
+def test_tracker_merge_error_count_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(), harness)
+    assert any(p.get("tracker_merge_error_count") == 1 for p in persisted)
+
+
 def test_signal_brief_refreshed_once_per_batch():
     harness = _Harness(
         child_results={f"run-1-c{i}": _child_record(str(i)) for i in range(4)},

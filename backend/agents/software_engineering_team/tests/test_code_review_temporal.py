@@ -398,6 +398,17 @@ def test_architecture_activity_fails_safe_when_llm_resolution_raises(
     assert out == []
 
 
+def test_architecture_activity_fails_safe_on_invalid_review_input() -> None:
+    """``CodeReviewInput.model_validate`` runs inside the fail-safe handler, so a
+    malformed payload must degrade to ``[]`` rather than raise and fail the
+    durable workflow (matching the activity's documented never-raises contract)."""
+    from code_review_agent.temporal import activities as A
+
+    # ``files={}`` is rejected by CodeReviewInput's construction validator.
+    out = A.find_architecture_and_redundancy_activity({"files": {}})
+    assert out == []
+
+
 # ---------------------------------------------------------------------------
 # 3b. repo_root reconstructs a whole-repo reader across the Temporal boundary
 # ---------------------------------------------------------------------------
@@ -555,6 +566,16 @@ def test_side_effect_activity_fails_safe_when_llm_resolution_raises(
 
     monkeypatch.setattr(A, "_resolve_llm", _raise)
     out = A.find_side_effect_impact_activity(_input().model_dump(mode="json"))
+    assert out == []
+
+
+def test_side_effect_activity_fails_safe_on_invalid_review_input() -> None:
+    """``CodeReviewInput.model_validate`` runs inside the fail-safe handler, so a
+    malformed payload must degrade to ``[]`` rather than raise and fail the
+    durable workflow (matching the activity's documented never-raises contract)."""
+    from code_review_agent.temporal import activities as A
+
+    out = A.find_side_effect_impact_activity({"files": {}})
     assert out == []
 
 
@@ -739,6 +760,22 @@ def test_synthesize_activity_fails_safe_when_llm_resolution_raises(
         _input().model_dump(mode="json"),
         approved=False,
         issues=issues,
+        chunk_summaries=["s1", "s2"],
+        chunk_spec_notes=["n1", "n2"],
+    )
+    assert out is None
+
+
+def test_synthesize_activity_fails_safe_on_invalid_review_input() -> None:
+    """``CodeReviewInput.model_validate`` is inside the fail-safe handler, so a
+    malformed payload must return ``None`` (workflow falls back to deterministic
+    concatenation) rather than raise out of the activity."""
+    from code_review_agent.temporal import activities as A
+
+    out = A.synthesize_findings_activity(
+        {"files": {}},
+        approved=False,
+        issues=[],
         chunk_summaries=["s1", "s2"],
         chunk_spec_notes=["n1", "n2"],
     )
