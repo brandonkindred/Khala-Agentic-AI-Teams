@@ -23,9 +23,12 @@ serving `strategy-lab-queue` (booted via
 `investment_team.temporal.worker.start_investment_temporal_worker_thread`). `POST
 /strategy-lab/run`, `/strategy-lab/runs/{id}/resume`, and `/strategy-lab/runs/{id}/restart`
 all dispatch through `StrategyLabBatchWorkflow` and return HTTP 503 if the shared Temporal
-client is unreachable (`TEMPORAL_ADDRESS` unset, or the start RPC itself fails) — there is no
-thread-mode fallback. This differs from the ad hoc `POST /backtests` endpoint, which still
-falls back to a daemon thread in that case.
+client is unreachable — `TEMPORAL_ADDRESS` unset, or a transport/availability failure starting
+the workflow. (A `WorkflowAlreadyStartedError` collision with an already-running workflow for
+the same run — e.g. a resume issued after an API-process restart — is a distinct, non-503 case:
+run/resume treat it as a no-op success, restart rejects it with `409`.) There is no thread-mode
+fallback. This differs from the ad hoc `POST /backtests` endpoint, which still falls back to a
+daemon thread on a client/availability failure.
 
 Note the 503 only covers a missing/unreachable client, not a missing poller: `start_workflow`
 just waits for the Temporal *server* to accept the start request, not for a worker to actually
