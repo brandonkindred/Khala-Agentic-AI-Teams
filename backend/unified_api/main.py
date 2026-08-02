@@ -145,8 +145,17 @@ class AssistantMountSpec:
 
 # Registry of assistant mount specs, keyed by team_key. Populated at startup
 # by _maybe_register_team_assistants (registration only — no sub-app is
-# constructed or mounted here); consumed by a future first-request mount hook.
+# constructed or mounted here); consumed on demand by _ensure_assistant_mounted.
 _ASSISTANT_REGISTRY: dict[str, AssistantMountSpec] = {}
+
+# team_keys whose assistant sub-app has actually been constructed and mounted
+# (the idempotency marker consulted by _ensure_assistant_mounted).
+_MOUNTED_ASSISTANTS: set[str] = set()
+
+# One asyncio.Lock per team_key, created lazily. Concurrent first-requests for
+# different teams don't serialize against each other; concurrent first-requests
+# for the SAME team queue behind one mount.
+_ASSISTANT_MOUNT_LOCKS: dict[str, asyncio.Lock] = {}
 
 # Track which teams were successfully registered (for health endpoint).
 _registered_teams: dict[str, bool] = {}
@@ -323,8 +332,9 @@ def mount_assistant_app(app: FastAPI, spec: AssistantMountSpec) -> None:
         * The assistant sub-app for spec.team_key is mounted at
           spec.mount_path with the standard permissive CORS middleware.
 
-    Not called from lifespan today — kept as a ready-made unit for the
-    first-request lazy-mount hook to call.
+    Called by _ensure_assistant_mounted, the first-request lazy-mount hook —
+    never call this directly, it does not check or update _MOUNTED_ASSISTANTS
+    and is not safe to call twice for the same team_key.
     """
     from team_assistant.api import create_assistant_app
 
@@ -337,6 +347,94 @@ def mount_assistant_app(app: FastAPI, spec: AssistantMountSpec) -> None:
         allow_headers=["*"],
     )
     app.mount(spec.mount_path, assistant_app)
+
+
+async def _ensure_assistant_mounted(team_key: str) -> bool:
+    """Idempotently, thread/async-safely mount team_key's assistant sub-app on
+    its first request.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns True if the team's assistant sub-app is mounted (whether by
+          this call or an earlier one). Returns False if team_key has no
+          registry entry (assistants disabled, or no assistant configured for
+          that team), or if mounting raised — the failure is logged and
+          swallowed so the request path never 500s on this, and the NEXT
+          request for team_key retries the mount (self-healing; team_key is
+          only added to _MOUNTED_ASSISTANTS on success).
+        * On first successful mount, the newly-added route is moved to the
+          front of app.routes so it takes priority over that team's
+          already-registered proxy catch-all route (`{prefix}/{path:path}`)
+          — Starlette matches app.routes in list order and the catch-all,
+          registered at lifespan startup, would otherwise always shadow a
+          Mount appended later. The reorder is scoped to this one team's own
+          anchored Mount pattern and cannot affect unrelated routes.
+
+    No `await` occurs between the mount and the reorder (mount_assistant_app
+    and everything it calls are synchronous), so this critical section runs
+    atomically w.r.t. the event loop even across different teams' locks.
+    """
+    if team_key in _MOUNTED_ASSISTANTS:
+        return True
+    spec = _ASSISTANT_REGISTRY.get(team_key)
+    if spec is None:
+        return False
+    lock = _ASSISTANT_MOUNT_LOCKS.setdefault(team_key, asyncio.Lock())
+    async with lock:
+        if team_key in _MOUNTED_ASSISTANTS:
+            return True
+        try:
+            mount_assistant_app(app, spec)
+            mounted_route = app.routes[-1]
+            app.routes.remove(mounted_route)
+            app.routes.insert(0, mounted_route)
+        except Exception:
+            logger.warning("Could not mount assistant sub-app for %s", team_key, exc_info=True)
+            return False
+        _MOUNTED_ASSISTANTS.add(team_key)
+        logger.info("Mounted assistant sub-app for %s at %s", team_key, spec.mount_path)
+        return True
+
+
+def _match_unmounted_assistant_prefix(path: str) -> str | None:
+    """Return the team_key whose assistant mount_path is a prefix of path and
+    is not yet mounted, or None.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Boundary-safe: "/api/blogging/assistant-x" does not match the
+          "/api/blogging/assistant" mount_path (plain str.startswith would
+          false-match here). Exact-equal and "/"-separated child paths match.
+    """
+    for team_key, spec in _ASSISTANT_REGISTRY.items():
+        if team_key in _MOUNTED_ASSISTANTS:
+            continue
+        if path == spec.mount_path or path.startswith(spec.mount_path + "/"):
+            return team_key
+    return None
+
+
+class AssistantLazyMountMiddleware:
+    """ASGI middleware: mounts a team's assistant sub-app on its first request.
+
+    Defined here (not unified_api/middleware/) because it needs the real
+    FastAPI `app` singleton to mount into — the `app` an ASGI middleware
+    receives via __init__ is just the next inner ASGI layer, never the
+    FastAPI instance itself — and because it is tightly coupled to this
+    module's own registry/state (_ASSISTANT_REGISTRY, _MOUNTED_ASSISTANTS).
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            team_key = _match_unmounted_assistant_prefix(scope.get("path") or "")
+            if team_key is not None:
+                await _ensure_assistant_mounted(team_key)
+        await self.app(scope, receive, send)
 
 
 def _maybe_register_team_assistants() -> int:
@@ -754,6 +852,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Lazy-mount team assistant sub-apps on first request. Registered here (after
+# CORS, before Security) so that — since Starlette's add_middleware makes the
+# LAST-added middleware outermost/first-to-run — Security still runs before
+# any mount attempt (a request Security 403s never triggers a wasted mount),
+# while this still runs before the router resolves the route.
+app.add_middleware(AssistantLazyMountMiddleware)
 
 # Security gateway
 from unified_api.middleware import SecurityGatewayMiddleware
