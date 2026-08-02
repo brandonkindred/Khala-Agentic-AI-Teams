@@ -86,13 +86,29 @@ notification to the workflow, not the source of truth for pause state.
 `run_pipeline_activity` (worker crash, timeout, etc.) after the pause has
 already been persisted to the job record but before the activity call
 returned "paused" to the workflow. On (re-)entry the orchestrator must first
-check the job record for an already-persisted, unresolved pause and, if one
-exists, re-emit its exact `resume_token` / `pending_questions` / `pause_kind`
-/ `pause_context` unchanged rather than minting a new one — a client that
-already saw the original token must have its later `submit_answers` signal
-match, not be rejected forever by the token check because a retry silently
-started a second pause. A fresh `resume_token` is minted only when persisting
-a genuinely new pause.
+check the job record for an already-persisted, unresolved pause — but this
+check alone is ambiguous with the *normal* resume path: after a genuine
+signal-driven resume, `waiting_for_answers` is still `True` in the job
+record (per the note below, only the orchestrator itself clears it, and it
+hasn't yet on this very invocation), so a naive "unresolved pause exists →
+re-emit it" rule would re-pause on every single resume before ever reaching
+the code that applies the resolved answers — an infinite loop, not just a
+retry-race fix. The two cases must be told apart explicitly: every resumed
+`request` therefore carries `request["acknowledged_resume_token"]`, set by
+the workflow to the `resume_token` it is resolving (see §2). On (re-)entry:
+- If a persisted, unresolved pause exists **and**
+  `request.get("acknowledged_resume_token") == persisted_resume_token`: this
+  invocation is the one meant to consume it. Apply the resolved
+  `resolved_questions` / `task_decision_overrides`, clear the pause envelope,
+  and continue execution normally — do **not** re-emit.
+- If a persisted, unresolved pause exists **and** the token doesn't match
+  (missing, or a stale/older token): this is a genuine pre-work activity
+  retry — re-emit the exact `resume_token` / `pending_questions` /
+  `pause_kind` / `pause_context` unchanged rather than minting a new one, so
+  a client that already saw the original token isn't rejected forever by the
+  signal handler's token check.
+- Otherwise (no persisted pause), proceed normally; a fresh `resume_token` is
+  minted only when persisting a genuinely new pause.
 
 This idempotency check is only correct if the job record's pause envelope
 (`waiting_for_answers`, `pending_questions`, `resume_token`, `pause_kind`,
@@ -236,6 +252,13 @@ while True:
             request["plan_input"].get("resolved_questions", []) + resolved
         )
     request["job_id"] = result["job_id"]
+    # Tells the orchestrator THIS invocation is the one resolving the
+    # persisted pause it will still find in the job record (only the
+    # orchestrator clears waiting_for_answers, and only after consuming this
+    # acknowledgment) -- without it, re-entry can't tell a genuine resume
+    # apart from a pre-work activity retry and would re-pause forever. See
+    # the idempotency note in §1.
+    request["acknowledged_resume_token"] = result["resume_token"]
 
     self._submitted_answers = None
     self._pending_questions = None
@@ -252,6 +275,18 @@ while True:
   that arrives after pause B has already started would get tagged with B's
   (now-current) token by the server and pass the workflow's token check
   despite answering the wrong pause.
+  - This requires an actual response-schema change, not just an assumption:
+    today's `StatusResponse` (`api/coding_team_models.py:44`) and
+    `JobStatusResponse` (`api/models.py:170`) expose only
+    `pending_questions` / `waiting_for_answers`, and `PendingQuestion`
+    (`shared/hitl/models.py:43`) has no token field. `resume_token` is
+    per pause *round* (shared by every question in a batch), not
+    per-question, so it belongs as a new top-level
+    `resume_token: Optional[str] = None` field on both status response
+    models — populated from the job record's persisted `resume_token` — not
+    added to `PendingQuestion`. Without this, a client that discovers the
+    pause by polling status (rather than only from the original pause
+    notification) has no way to obtain the token it's required to echo.
   - `SubmitAnswersRequest` (`api/coding_team_state.py`) is a **shared**
     model already consumed by three routes: coding-team's
     `/run/{job_id}/answers`, SE's `/run-team/{job_id}/answers`, and the
@@ -360,7 +395,11 @@ while True:
     mirrored alongside `resolved_questions_override` and threaded through to
     `_build_coding_team_plan_input`, and `RunTeamWorkflowV2`'s resume loop
     must pass it explicitly on each activity call — adding the model field
-    fixes only the standalone `CodingTeamWorkflow` path.
+    fixes only the standalone `CodingTeamWorkflow` path. `acknowledged_resume_token`
+    (§1) needs the same explicit threading: `execute_coding_team_activity`
+    gains an `acknowledged_resume_token: Optional[str] = None` parameter
+    alongside the others, since it has no `request` dict for the workflow to
+    set a bare key on.
 
 ## Open questions (flagged, not resolved by this spike)
 
