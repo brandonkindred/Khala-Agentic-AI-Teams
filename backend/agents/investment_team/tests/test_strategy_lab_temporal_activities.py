@@ -377,6 +377,45 @@ def test_run_design_attempt_activity_maps_unexpected_error(monkeypatch):
     assert exc_info.value.non_retryable is True
 
 
+def test_run_design_attempt_activity_returns_skipped_outcome_for_502(monkeypatch):
+    """A 502 ("no market data") HTTPException is caught and surfaced as a
+    structured ``kind='skipped'`` outcome — cycle-terminal, never re-raised —
+    mirroring thread mode's soft-skip handling of the same status code."""
+    from fastapi import HTTPException
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_attempt(self, **kwargs):
+        raise HTTPException(status_code=502, detail="Failed to fetch historical market data.")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["kind"] == "skipped"
+    assert out["reason"] == "no_market_data"
+    assert out["budget_calls"] == 7
+    assert "convergence_tracker_state" in out
+    assert "drift" in out
+
+
+def test_run_design_attempt_activity_maps_non_502_http_exception_as_fatal(monkeypatch):
+    """A non-502 HTTPException is still a deep failure (matches thread mode's
+    "non-502 HTTPException from a cycle is a deep failure" branch) — mapped
+    to a non-retryable ApplicationError, not a skip."""
+    from fastapi import HTTPException
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_attempt(self, **kwargs):
+        raise HTTPException(status_code=500, detail="unexpected")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.run_design_attempt_activity(_run_design_attempt_params())
+    assert exc_info.value.non_retryable is True
+
+
 # ---------------------------------------------------------------------------
 # Batch-level activities (Stage 4)
 # ---------------------------------------------------------------------------

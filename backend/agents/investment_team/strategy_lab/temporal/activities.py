@@ -320,9 +320,14 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         dump or None>, "last_code": str, "failure_phase": str|None,
         "design_context": {...}|None, "convergence_tracker_state": ...,
         "gate_results": [...], "budget_calls": int, "drift": {...}}`` when
-        ``_run_design_attempt`` raised ``SpecImplementabilityError``. Any other
-        exception maps to ``ApplicationError`` via
-        :func:`_map_exception_to_application_error`.
+        ``_run_design_attempt`` raised ``SpecImplementabilityError``, or
+        ``{"kind": "skipped", "reason": "no_market_data",
+        "convergence_tracker_state": ..., "gate_results": [...],
+        "budget_calls": int, "drift": {...}}`` when it raised an
+        ``HTTPException(502)`` (no market data available — mirrors thread
+        mode's soft-skip handling; cycle-terminal, no further re-entry). Any
+        other exception (including a non-502 ``HTTPException``) maps to
+        ``ApplicationError`` via :func:`_map_exception_to_application_error`.
     Invariants:
         The returned ``convergence_tracker_state``/``gate_results``/
         ``budget_calls`` reflect exactly this attempt's mutations layered on
@@ -330,6 +335,8 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         collector — the workflow owns the parent copy-on-entry/merge across
         attempts.
     """
+    from fastapi import HTTPException
+
     from investment_team.models import (
         BacktestConfig,
         CodeRevision,
@@ -429,6 +436,21 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "budget_calls": budget.calls_made,
             "drift": _drift_to_wire(drift_collector),
         }
+    except HTTPException as exc:
+        # Mirrors thread mode's cycle-level handling (api.main's wave loop):
+        # a 502 ("no market data") degrades to a soft skip, not a failure —
+        # this outcome is cycle-terminal (no further design-attempt retry).
+        # Any other HTTPException status is still a deep failure.
+        if exc.status_code == 502:
+            return {
+                "kind": "skipped",
+                "reason": "no_market_data",
+                "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
+                "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
+                "budget_calls": budget.calls_made,
+                "drift": _drift_to_wire(drift_collector),
+            }
+        raise _map_exception_to_application_error(exc) from exc
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
     return {
