@@ -117,8 +117,21 @@ the workflow to the `resume_token` it is resolving (see §2). On (re-)entry:
 - If a persisted, unresolved pause exists **and**
   `request.get("acknowledged_resume_token") == persisted_resume_token`: this
   invocation is the one meant to consume it. Apply the resolved
-  `resolved_questions` / `task_decision_overrides`, clear the pause envelope,
-  and continue execution normally — do **not** re-emit.
+  `resolved_questions` / `task_decision_overrides`, **persist the accepted
+  answer batch to the job record's `submitted_answers`**, clear the pause
+  envelope, and continue execution normally — do **not** re-emit. The
+  persist step matters beyond in-memory application:
+  `system_design/architecture.md`'s "Persistence And Resume" section already
+  documents "submitted HITL answers" as one of the fields the orchestrator
+  persists, and status/audit consumers that read the job record depend on
+  it being there. The native-signal answers route (§3) deliberately never
+  writes to the job record — only the orchestrator, on this consuming
+  invocation, does — so without this explicit step a native-Temporal pause's
+  human answers would exist only transiently in workflow memory and vanish
+  from the job record entirely once the workflow folds them into
+  `resolved_questions` / `task_decision_overrides` and moves on, unlike the
+  thread-mode store-and-clear path where the route itself writes
+  `submitted_answers` directly.
 - If a persisted, unresolved pause exists **and** the token doesn't match
   (missing, or a stale/older token): this is a genuine pre-work activity
   retry — re-emit the exact `resume_token` / `pending_questions` /
