@@ -34,6 +34,7 @@ from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.models import (
+    ChunkReviewOutput,
     CodeReviewInput,
     CodeReviewUnavailableError,
     FileSegment,
@@ -707,31 +708,73 @@ def test_clear_chunk_outcome_cache_empties_registries() -> None:
     assert mapping._CHUNK_INFLIGHT == {}
 
 
+class _BlockingReviewer:
+    """Reviewer stand-in whose ``run`` signals entry, blocks, then approves.
+
+    Drives a real leader through ``_cached_review_chunk`` so a test can pause
+    it mid-review (LLM call in flight) and clear the cache from the main
+    thread, rather than faking the leader's cache write directly.
+    """
+
+    def __init__(self, entered: threading.Event, release: threading.Event) -> None:
+        self._entered = entered
+        self._release = release
+        self.calls = 0
+
+    def run(self, chunk_input: Any) -> ChunkReviewOutput:
+        self.calls += 1
+        self._entered.set()
+        assert self._release.wait(timeout=5), "test deadlocked waiting for release"
+        return ChunkReviewOutput(approved=True, issues=[], summary="ok")
+
+
 def test_clear_mid_flight_does_not_prevent_leader_from_caching() -> None:
     """Clearing while a leader is in flight does not stop it from later caching.
 
     Pins the corrected postcondition on ``clear_chunk_outcome_cache``: the
     guaranteed-miss promise holds only when no review of that chunk is already
     in flight. A leader in flight when the clear runs holds no lock across its
-    LLM call, so it can still publish its outcome afterward — reproduced here
-    by publishing the leader's result the same way ``_cached_review_chunk``'s
-    finally-block does, after the clear has already returned.
+    LLM call, so it can still publish its outcome afterward. Exercised through
+    the real ``_cached_review_chunk`` leader path (a worker thread blocked
+    inside its "LLM call" via ``_BlockingReviewer``, released only after the
+    clear returns) rather than a direct cache write, so a future change to the
+    caching logic itself — e.g. a generation check meant to suppress a stale
+    post-clear write — would be caught by this test.
     """
     chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
     key = mapping._chunk_cache_key(chunk, context_fp, "")
-    mapping._CHUNK_INFLIGHT[key] = Future()  # a leader is in flight
 
-    mapping.clear_chunk_outcome_cache()
-    assert key not in mapping._CHUNK_OUTCOME_CACHE
+    entered = threading.Event()
+    release = threading.Event()
+    reviewer = _BlockingReviewer(entered, release)
+    outcomes: List[mapping._ChunkOutcome] = []
 
-    # The in-flight leader (unaware of the clear) now completes and caches its
-    # outcome, exactly as it would outside a test.
-    outcome = _simple_outcome()
-    with mapping._CHUNK_OUTCOME_CACHE_LOCK:
-        mapping._CHUNK_OUTCOME_CACHE[key] = outcome
+    def _run_leader() -> None:
+        outcomes.append(mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp))
 
+    leader_thread = threading.Thread(target=_run_leader)
+    leader_thread.start()
+    try:
+        # The leader registers its in-flight slot before calling reviewer.run,
+        # so this confirms the clear below races a genuinely in-flight review.
+        assert entered.wait(timeout=5), "leader never reached its blocking review call"
+        assert key in mapping._CHUNK_INFLIGHT
+
+        mapping.clear_chunk_outcome_cache()
+        assert key not in mapping._CHUNK_OUTCOME_CACHE
+        assert key not in mapping._CHUNK_INFLIGHT
+
+        # Let the (unaware) leader finish; it should still cache its outcome.
+        release.set()
+    finally:
+        leader_thread.join(timeout=5)
+        assert not leader_thread.is_alive(), "leader thread did not finish"
+
+    assert reviewer.calls == 1
     assert key in mapping._CHUNK_OUTCOME_CACHE  # the "guaranteed miss" did not hold
+    assert outcomes[0].approved_flags == [True]
 
 
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
