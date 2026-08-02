@@ -165,6 +165,18 @@ def test_get_psycopg_returns_none_when_import_previously_failed(monkeypatch: pyt
     assert result is None
 
 
+def test_get_psycopg_imports_and_caches_module_on_success(monkeypatch: pytest.MonkeyPatch):
+    """_get_psycopg() imports psycopg fresh and caches it when nothing is cached yet."""
+    mod = _reload(monkeypatch)
+    mod._psycopg_module = None
+    mod._psycopg_import_failed = False
+    import psycopg as real_psycopg
+
+    result = mod._get_psycopg()
+    assert result is real_psycopg
+    assert mod._psycopg_module is real_psycopg
+
+
 # ---------------------------------------------------------------------------
 # pg_* operations when Postgres is disabled
 # ---------------------------------------------------------------------------
@@ -317,3 +329,98 @@ def test_pg_delete_service_credentials_noop_when_psycopg_missing(
     mod._psycopg_import_failed = True
     # Must not raise, must not try to open a connection.
     mod.pg_delete_service_credentials("svc")
+
+
+# ---------------------------------------------------------------------------
+# pg_set_credential / pg_delete_credential / pg_delete_service_credentials:
+# the actual DB-write bodies (enabled + psycopg present)
+# ---------------------------------------------------------------------------
+
+
+def test_pg_set_credential_empty_value_deletes_instead_of_writing(monkeypatch: pytest.MonkeyPatch):
+    """An empty value routes to pg_delete_credential rather than writing an empty ciphertext row."""
+    mod = _reload(monkeypatch, postgres_host="host")
+    deleted = {}
+    monkeypatch.setattr(mod, "pg_delete_credential", lambda service, key: deleted.setdefault("called", (service, key)))
+    mod.pg_set_credential("svc", "key", "")
+    assert deleted["called"] == ("svc", "key")
+
+
+def test_pg_set_credential_writes_encrypted_value(monkeypatch: pytest.MonkeyPatch):
+    """pg_set_credential() encrypts and issues an upsert against the credentials table."""
+    mod = _reload(monkeypatch, postgres_host="host")
+    conn = _fake_conn(None)
+    cur = conn.cursor.return_value
+    fake_psycopg = MagicMock()
+    fake_psycopg.connect.return_value = conn
+    monkeypatch.setattr(mod, "_get_psycopg", lambda: fake_psycopg)
+    fernet = MagicMock()
+    fernet.encrypt.return_value = b"cipher-bytes"
+    monkeypatch.setattr(mod, "get_integration_fernet", lambda: fernet)
+
+    mod.pg_set_credential("svc", "key", "secret-value")
+
+    fernet.encrypt.assert_called_once_with(b"secret-value")
+    sql, params = cur.execute.call_args.args
+    assert "INSERT INTO encrypted_integration_credentials" in sql
+    assert params == ("svc", "key", "cipher-bytes")
+
+
+def test_pg_delete_credential_issues_delete_when_enabled(monkeypatch: pytest.MonkeyPatch):
+    """pg_delete_credential() issues a DELETE scoped to (service, key) when psycopg is available."""
+    mod = _reload(monkeypatch, postgres_host="host")
+    conn = _fake_conn(None)
+    cur = conn.cursor.return_value
+    fake_psycopg = MagicMock()
+    fake_psycopg.connect.return_value = conn
+    monkeypatch.setattr(mod, "_get_psycopg", lambda: fake_psycopg)
+
+    mod.pg_delete_credential("svc", "key")
+
+    sql, params = cur.execute.call_args.args
+    assert "DELETE FROM encrypted_integration_credentials" in sql
+    assert params == ("svc", "key")
+
+
+def test_pg_delete_credential_noop_when_psycopg_missing(monkeypatch: pytest.MonkeyPatch):
+    """pg_delete_credential() is a silent no-op when psycopg is missing (mirrors service-scoped variant)."""
+    mod = _reload(monkeypatch, postgres_host="localhost")
+    mod._psycopg_module = None
+    mod._psycopg_import_failed = True
+    mod.pg_delete_credential("svc", "key")  # must not raise, must not try to connect
+
+
+def test_pg_delete_credential_swallows_connection_errors(monkeypatch: pytest.MonkeyPatch):
+    """pg_delete_credential() logs and does not raise when the delete fails."""
+    mod = _reload(monkeypatch, postgres_host="host")
+    fake_psycopg = MagicMock()
+    fake_psycopg.connect.side_effect = RuntimeError("connection refused")
+    monkeypatch.setattr(mod, "_get_psycopg", lambda: fake_psycopg)
+
+    mod.pg_delete_credential("svc", "key")  # must not raise
+
+
+def test_pg_delete_service_credentials_issues_delete_when_enabled(monkeypatch: pytest.MonkeyPatch):
+    """pg_delete_service_credentials() issues a DELETE scoped to service only."""
+    mod = _reload(monkeypatch, postgres_host="host")
+    conn = _fake_conn(None)
+    cur = conn.cursor.return_value
+    fake_psycopg = MagicMock()
+    fake_psycopg.connect.return_value = conn
+    monkeypatch.setattr(mod, "_get_psycopg", lambda: fake_psycopg)
+
+    mod.pg_delete_service_credentials("svc")
+
+    sql, params = cur.execute.call_args.args
+    assert "DELETE FROM encrypted_integration_credentials" in sql
+    assert params == ("svc",)
+
+
+def test_pg_delete_service_credentials_swallows_connection_errors(monkeypatch: pytest.MonkeyPatch):
+    """pg_delete_service_credentials() logs and does not raise when the delete fails."""
+    mod = _reload(monkeypatch, postgres_host="host")
+    fake_psycopg = MagicMock()
+    fake_psycopg.connect.side_effect = RuntimeError("connection refused")
+    monkeypatch.setattr(mod, "_get_psycopg", lambda: fake_psycopg)
+
+    mod.pg_delete_service_credentials("svc")  # must not raise
