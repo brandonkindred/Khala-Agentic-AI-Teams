@@ -756,7 +756,7 @@ class StrategyLabOrchestrator(
             single-window and walk-forward-fallback paths never trip a
             spurious veto here. Enforcement of "mandatory cost-stress on
             winning-candidate runs" lives at the production entrypoint
-            (``api.main._strategy_lab_worker`` force-enables the flag).
+            (``build_strategy_lab_batch_input`` force-enables the flag).
         """
         if not execution_succeeded or not trades:
             return []

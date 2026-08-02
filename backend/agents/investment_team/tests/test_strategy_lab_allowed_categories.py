@@ -3,29 +3,27 @@
 The Strategy Lab UI lets the user constrain which asset categories the design
 agent may generate strategies for. The selection rides on
 ``RunStrategyLabRequest.allowed_asset_classes`` and is translated into the
-design pipeline's existing ``exclude_asset_classes`` constraint at the worker
-boundary. These tests cover:
+design pipeline's existing ``exclude_asset_classes`` constraint by
+``build_strategy_lab_batch_input`` before the Temporal batch workflow starts.
+These tests cover:
 
   * normalization of the raw selection to canonical, ideation-valid labels,
   * the allowed → excluded complement,
   * request-model validation (including the empty-after-normalization reject),
   * mix-hint steering restricted to the allowed classes, and
-  * the worker threading the computed exclusion into every cycle.
+  * ``build_strategy_lab_batch_input`` computing the exclusion for the batch.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, List, Optional
+from typing import Any, Dict
 
 import pytest
 from pydantic import ValidationError
 
 from investment_team.api import main as lab_main  # noqa: E402
-from investment_team.api.main import (  # noqa: E402
-    RunStrategyLabRequest,
-    _strategy_lab_worker,
-)
+from investment_team.api.main import RunStrategyLabRequest  # noqa: E402
 from investment_team.models import (  # noqa: E402
     BacktestConfig,
     BacktestRecord,
@@ -251,126 +249,26 @@ def test_mix_hint_keeps_stocks_nudge_when_stocks_allowed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Worker threading: allowed_asset_classes → exclude_asset_classes per cycle
+# build_strategy_lab_batch_input: allowed_asset_classes → exclude_asset_classes
 # ---------------------------------------------------------------------------
 
 
-def _make_cycle_record(idx: int, config: BacktestConfig) -> StrategyLabRecord:
-    suffix = uuid.uuid4().hex[:6]
-    strategy = StrategySpec(
-        strategy_id=f"strat-{idx}-{suffix}",
-        authored_by="test",
-        asset_class="forex",
-        hypothesis="h",
-        signal_definition="sig",
-        timeframe="1d",
-        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
-        exit_rules=[StopLossRule(pct=0.03)],
-        risk_limits={},
-        speculative=False,
-    )
-    now = lab_main._now()
-    backtest = BacktestRecord(
-        backtest_id=f"bt-{idx}-{suffix}",
-        strategy_id=strategy.strategy_id,
-        strategy=strategy,
-        config=config,
-        submitted_by="test",
-        submitted_at=now,
-        completed_at=now,
-        result=_stub_backtest_result(),
-        notes=[],
-        trades=[],
-    )
-    return StrategyLabRecord(
-        lab_record_id=f"lab-{idx}-{suffix}",
-        strategy=strategy,
-        backtest=backtest,
-        is_winning=False,
-        strategy_rationale="r",
-        analysis_narrative="ok",
-        created_at=now,
-        quality_gate_results=[],
-    )
-
-
-@pytest.fixture
-def empty_lab_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lab_main, "_strategy_lab_records", {})
-    monkeypatch.setattr(lab_main, "_strategies", {})
-    monkeypatch.setattr(lab_main, "_backtests", {})
-    monkeypatch.setattr(lab_main, "_active_runs", {})
-
-
-def _seed_run_state(run_id: str, request: RunStrategyLabRequest) -> None:
-    lab_main._active_runs[run_id] = {
-        "run_id": run_id,
-        "status": "running",
-        "started_at": lab_main._now(),
-        "total_cycles": request.batch_size * request.batch_count,
-        "completed_cycles": 0,
-        "skipped_cycles": 0,
-        "current_cycle": None,
-        "completed_record_ids": [],
-        "error": None,
-        "request_payload": request.model_dump(),
-        "batch_size": request.batch_size,
-        "batch_count": request.batch_count,
-        "completed_batches": 0,
-        "current_batch": None,
-    }
-
-
-class _StubTracker:
-    def snapshot(self) -> "_StubTracker":
-        return _StubTracker()
-
-    def record(self, *_a: Any, **_kw: Any) -> None:
-        pass
-
-    def merge_from(self, *_a: Any, **_kw: Any) -> None:
-        pass
-
-
-def _run_worker_capturing_exclusions(
+def _build_batch_input(
     monkeypatch: pytest.MonkeyPatch, request: RunStrategyLabRequest
-) -> List[Optional[List[str]]]:
-    """Run the worker with stubs and return the ``exclude_asset_classes`` each cycle saw."""
-    seen: List[Optional[List[str]]] = []
+) -> Dict[str, Any]:
+    from investment_team.strategy_lab import run_state
+    from investment_team.strategy_lab.temporal.start_workflow import (
+        build_strategy_lab_batch_input,
+    )
 
-    class _StubOrchestrator:
-        _counter = 0
-
-        def __init__(self, convergence_tracker: Any = None) -> None:
-            self.convergence_tracker = _StubTracker()
-
-        def run_cycle(
-            self,
-            prior_records: List[StrategyLabRecord],
-            config: BacktestConfig,
-            signal_brief: Any = None,
-            on_phase: Any = None,
-            exclude_asset_classes: Optional[List[str]] = None,
-        ) -> StrategyLabRecord:
-            type(self)._counter += 1
-            seen.append(exclude_asset_classes)
-            return _make_cycle_record(type(self)._counter, config)
-
-    monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _StubOrchestrator)
-    monkeypatch.setattr(lab_main, "ConvergenceTracker", _StubTracker)
-    monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
-    monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
+    monkeypatch.setattr(run_state, "active_runs", {})
+    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
 
     run_id = f"run-{uuid.uuid4().hex[:6]}"
-    _seed_run_state(run_id, request)
-    _strategy_lab_worker(run_id, request)
-    assert lab_main._active_runs[run_id]["status"] == "completed"
-    return seen
+    return build_strategy_lab_batch_input(run_id, request)
 
 
-def test_worker_threads_complement_exclusion_into_every_cycle(
-    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_batch_input_computes_complement_exclusion(monkeypatch: pytest.MonkeyPatch) -> None:
     request = RunStrategyLabRequest(
         batch_size=2,
         batch_count=1,
@@ -378,14 +276,12 @@ def test_worker_threads_complement_exclusion_into_every_cycle(
         paper_trading_enabled=False,
         allowed_asset_classes=["forex"],
     )
-    seen = _run_worker_capturing_exclusions(monkeypatch, request)
-    assert len(seen) == 2
-    expected = ["stocks", "crypto", "futures", "commodities"]
-    assert all(exc == expected for exc in seen)
+    batch_input = _build_batch_input(monkeypatch, request)
+    assert batch_input["exclude_asset_classes"] == ["stocks", "crypto", "futures", "commodities"]
 
 
-def test_worker_passes_no_exclusion_when_all_categories_allowed(
-    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
+def test_batch_input_no_exclusion_when_all_categories_allowed(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = RunStrategyLabRequest(
         batch_size=1,
@@ -394,21 +290,19 @@ def test_worker_passes_no_exclusion_when_all_categories_allowed(
         paper_trading_enabled=False,
         allowed_asset_classes=list(PROMPT_ASSET_CLASSES),
     )
-    seen = _run_worker_capturing_exclusions(monkeypatch, request)
-    assert seen == [None]
+    batch_input = _build_batch_input(monkeypatch, request)
+    assert batch_input["exclude_asset_classes"] is None
 
 
-def test_worker_passes_no_exclusion_when_unset(
-    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_batch_input_no_exclusion_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     request = RunStrategyLabRequest(
         batch_size=1,
         batch_count=1,
         max_parallel=1,
         paper_trading_enabled=False,
     )
-    seen = _run_worker_capturing_exclusions(monkeypatch, request)
-    assert seen == [None]
+    batch_input = _build_batch_input(monkeypatch, request)
+    assert batch_input["exclude_asset_classes"] is None
 
 
 # ---------------------------------------------------------------------------

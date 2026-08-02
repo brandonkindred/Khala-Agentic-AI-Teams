@@ -124,8 +124,9 @@ class _ShadowContext:
         # strategy_indicators._shared_registry). Owned here — not a
         # module/thread-level cache — so this execution's indicator state is
         # never visible to any other _ShadowContext. This matters because this
-        # class runs in-process on worker threads (api.main's
-        # _strategy_lab_worker ThreadPoolExecutor and similar) that can process
+        # class runs in-process on worker threads (the Temporal worker's
+        # activity thread pool, executing ``run_design_attempt_activity`` for
+        # a wave's cycles concurrently, and similar) that can process
         # many shadow executions over their lifetime, including — if two
         # contexts for the same symbol are ever constructed before either
         # runs — executions whose bar ingestion interleaves rather than one

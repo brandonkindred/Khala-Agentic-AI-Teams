@@ -21,6 +21,7 @@ fixtures. Targets:
   done).
 * ``delete_strategy_lab_record`` success path.
 * ``complete_advisor_session`` happy path.
+* ``RunStrategyLabRequest`` batch_size/batch_count bounds.
 """
 
 from __future__ import annotations
@@ -36,19 +37,18 @@ def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
     env-configured ceiling and logs only when it actually lowers the value."""
     import logging
 
-    from investment_team.api import main as api_main
     from investment_team.strategy_lab import config
 
     monkeypatch.setattr(config, "MAX_CONCURRENT_CYCLES", 2)
-    assert api_main._clamp_max_parallel(1) == 1  # below cap → unchanged
-    assert api_main._clamp_max_parallel(2) == 2  # at cap → unchanged
+    assert config.clamp_max_parallel(1) == 1  # below cap → unchanged
+    assert config.clamp_max_parallel(2) == 2  # at cap → unchanged
     with caplog.at_level(logging.INFO, logger=config.logger.name):
-        assert api_main._clamp_max_parallel(5) == 2  # above cap → clamped + logged
+        assert config.clamp_max_parallel(5) == 2  # above cap → clamped + logged
     assert any("concurrency capped to 2" in r.getMessage() for r in caplog.records)
 
     # Default (cap == MAX_PARALLEL) imposes no extra constraint up to the schema max.
     monkeypatch.setattr(config, "MAX_CONCURRENT_CYCLES", config.MAX_PARALLEL)
-    assert api_main._clamp_max_parallel(config.MAX_PARALLEL) == config.MAX_PARALLEL
+    assert config.clamp_max_parallel(config.MAX_PARALLEL) == config.MAX_PARALLEL
 
 
 def test_run_strategy_lab_request_default_within_cap() -> None:
@@ -60,6 +60,25 @@ def test_run_strategy_lab_request_default_within_cap() -> None:
     default_mp = api_main.RunStrategyLabRequest().max_parallel
     assert default_mp == min(3, api_main._MAX_PARALLEL)
     assert 1 <= default_mp <= api_main._MAX_PARALLEL
+
+
+def test_run_strategy_lab_request_total_cycles_is_batch_size_times_batch_count() -> None:
+    """Sanity check: the request validates and computes total work correctly,
+    and its batch_size/batch_count bounds (including the operator-tunable
+    _MAX_BATCH_COUNT ceiling) are enforced."""
+    from pydantic import ValidationError
+
+    from investment_team.api import main as api_main
+
+    request = api_main.RunStrategyLabRequest(batch_size=5, batch_count=4)
+    assert request.batch_size * request.batch_count == 20
+
+    with pytest.raises(ValidationError):
+        api_main.RunStrategyLabRequest(batch_size=0)
+    with pytest.raises(ValidationError):
+        api_main.RunStrategyLabRequest(batch_count=0)
+    with pytest.raises(ValidationError):
+        api_main.RunStrategyLabRequest(batch_count=api_main._MAX_BATCH_COUNT + 1)
 
 
 class _InMemoryDict:

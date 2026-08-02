@@ -290,7 +290,6 @@ def api_client(monkeypatch):
 
     monkeypatch.setattr(api_main, "_active_runs", {})
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
-    monkeypatch.setattr(api_main, "_strategy_lab_worker", lambda *a, **k: None)
     return TestClient(api_main.app)
 
 
@@ -347,11 +346,10 @@ def test_strategy_lab_dispatch_returns_503_when_temporal_disabled(monkeypatch, a
 
 
 def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> None:
-    """A dispatch failure that never reaches _strategy_lab_worker (e.g. a
-    Temporal outage) must not leak its _active_runs entry forever — repeated
-    requests during an outage would otherwise grow it unboundedly until a
-    process restart. _fail_strategy_lab_run schedules the same delayed
-    cleanup the worker's own failure path uses."""
+    """A dispatch failure (e.g. a Temporal outage) must not leak its
+    _active_runs entry forever — repeated requests during an outage would
+    otherwise grow it unboundedly until a process restart.
+    _fail_strategy_lab_run schedules a 900s delayed cleanup for this."""
     from investment_team.api import main as api_main
 
     run_id = "run-cleanup-me"
