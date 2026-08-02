@@ -304,6 +304,9 @@ def test_run_design_attempt_activity_returns_record_outcome(monkeypatch):
     captured: Dict[str, Any] = {}
 
     class _FakeGate:
+        gate_name = "g"
+        passed = True
+
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
             return {"gate_name": "g", "passed": True}
 
@@ -396,6 +399,72 @@ def test_run_design_attempt_activity_returns_skipped_outcome_for_502(monkeypatch
     assert out["budget_calls"] == 7
     assert "convergence_tracker_state" in out
     assert "drift" in out
+
+
+def test_run_design_attempt_activity_returns_skipped_outcome_for_market_data_gate(monkeypatch):
+    """The real production signal: no exception at all — a failed
+    "market_data" gate recorded on this attempt's own gate additions is
+    detected and reported as a skip instead of a "record" outcome, matching
+    what ``_fetch_market_data``/``_fetch_market_data_for_synthesis`` actually
+    do (they never raise; they record this gate and let the design attempt
+    return a normal-shaped record)."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-nodata"}
+
+    class _FakeGate:
+        def __init__(self, gate_name: str, passed: bool) -> None:
+            self.gate_name = gate_name
+            self.passed = passed
+
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"gate_name": self.gate_name, "passed": self.passed}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["cumulative_gate_results"].append(_FakeGate("market_data", False))
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["kind"] == "skipped"
+    assert out["reason"] == "no_market_data"
+    assert "record" not in out
+
+
+def test_run_design_attempt_activity_ignores_prior_attempts_market_data_gate(monkeypatch):
+    """A market_data gate failure from an earlier (already re-entered)
+    attempt, carried forward in the seeded ``gate_results``, must not cause a
+    later, genuinely successful attempt to be misreported as skipped — only
+    gates appended during THIS call count."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-ok"}
+
+    def _fake_attempt(self, **kwargs):
+        # No new gate appended this attempt — data fetch succeeded this time.
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    params = _run_design_attempt_params(
+        gate_results=[
+            {
+                "gate_name": "market_data",
+                "passed": False,
+                "phase": "synthesis",
+                "severity": "critical",
+                "details": "prior attempt had no data",
+            }
+        ]
+    )
+    out = act.run_design_attempt_activity(params)
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-ok"
 
 
 def test_run_design_attempt_activity_maps_non_502_http_exception_as_fatal(monkeypatch):
