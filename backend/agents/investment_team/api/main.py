@@ -2533,14 +2533,26 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status (via
-          ``_get_run_state``) is in ``RESUMABLE_STATUSES`` (pending/running/
-          failed/interrupted/agent_crash).
+        - ``run_id`` identifies a run whose persisted status — read INSIDE
+          the transition lock below, not beforehand — is in
+          ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/
+          agent_crash). Reading it (or the counters/payload derived from it)
+          before acquiring the lock could observe a stale snapshot: another
+          transition for this same run_id could fully complete — write its
+          own state, dispatch, and even reach a terminal status — before
+          this request obtains the lock, at which point ``_ensure_no_active_run()``
+          no longer sees a ``"running"`` entry to block on, and a resume
+          built from the stale snapshot would rebuild the run from
+          outdated counters/payload and dispatch duplicate work. Only a
+          cheap existence check (``run_id`` resolves to *some* known run)
+          runs before the lock, so a request for a nonexistent run_id never
+          allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict
           (the original ``RunStrategyLabRequest`` payload).
         - No other run currently has status ``"running"``.
         - No other run/resume/restart transition for this run_id is
-          currently in flight (checked first, before ``_ensure_no_active_run()``).
+          currently in flight (checked first, before re-reading state or
+          calling ``_ensure_no_active_run()``).
 
     Postconditions:
         - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
@@ -2561,27 +2573,35 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - ``HTTPException`` 409: another transition for this run_id is
           already in flight (#4028), or another run is already ``"running"``.
     """
-    state = _get_run_state(run_id)
-    try:
-        validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
-
-    payload = state.get("request_payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available.")
-
-    completed_cycles = state.get("completed_cycles", 0)
-    # contiguous_cycles tracks the highest unbroken sequence from index 0
-    # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
-    contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
-    request = RunStrategyLabRequest(**payload)
-    total_cycles = request.batch_size * request.batch_count
-    completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+    # Cheap existence-only check (no lock): avoids growing the transition-lock
+    # registry for a run_id that was never created (or already purged).
+    if _get_run_state(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
 
     run_lock = _require_run_transition_lock(run_id)
     try:
+        # Re-read + derive everything from state INSIDE the lock — see
+        # Preconditions for why reading it beforehand risks a stale-snapshot
+        # duplicate dispatch.
+        state = _get_run_state(run_id)
+        try:
+            validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
+        except ValueError as exc:
+            code = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
+
+        payload = state.get("request_payload")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Original request payload not available.")
+
+        completed_cycles = state.get("completed_cycles", 0)
+        # contiguous_cycles tracks the highest unbroken sequence from index 0
+        # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
+        contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
+        request = RunStrategyLabRequest(**payload)
+        total_cycles = request.batch_size * request.batch_count
+        completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+
         _ensure_no_active_run()
 
         # Re-initialize in-memory state

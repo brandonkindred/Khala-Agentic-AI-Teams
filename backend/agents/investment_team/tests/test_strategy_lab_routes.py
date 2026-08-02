@@ -397,6 +397,53 @@ def test_resume_strategy_lab_run_returns_409_when_transition_lock_held(
         held_lock.release()
 
 
+def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_before(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: resume must derive its dispatched counters/payload from
+    state read AFTER acquiring the transition lock, not from a snapshot
+    taken beforehand — a concurrent transition for the same run_id could
+    otherwise complete (write its own state, dispatch, even reach a
+    terminal status) between an earlier read and this request's lock
+    acquisition, at which point _ensure_no_active_run() no longer blocks
+    it, and a resume built from the stale snapshot would rebuild the run
+    from outdated counters and dispatch duplicate work.
+
+    Simulated via a stateful _get_run_state stub keyed on call count (not
+    real threads): the fixed code calls it twice (a cheap existence check,
+    then the real read inside the lock) — only the second call's result
+    should drive the dispatch. The old code called it exactly once, before
+    the lock, so this test would have used the stale snapshot against it."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-resume-uses-post-lock-state"
+    stale_state = _resumable_state(run_id, contiguous_cycles=2, completed_cycles=2)
+    fresh_state = _resumable_state(run_id, contiguous_cycles=5, completed_cycles=5)
+    api_main._active_runs[run_id] = stale_state
+
+    call_count = {"n": 0}
+
+    def _stateful_get_run_state(rid: str):
+        call_count["n"] += 1
+        if call_count["n"] > 1:
+            # Simulate a concurrent transition completing and overwriting
+            # state between the first (existence) read and the real one.
+            api_main._active_runs[rid] = fresh_state
+        return _run_state.get_run_state(rid)
+
+    monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
+    assert resp.status_code == 200
+    assert call_count["n"] >= 2
+    body = resp.json()
+    # 5 + 1 (fresh), not 2 + 1 (stale).
+    assert "resumed from cycle 6" in body["message"]
+    assert api_main._active_runs[run_id]["contiguous_cycles"] == 5
+
+
 def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
