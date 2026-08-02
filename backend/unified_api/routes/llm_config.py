@@ -171,7 +171,10 @@ class LlmProviderEntryResponse(BaseModel):
         False, description="True when this entry has a stored API key (the value is never returned)."
     )
     limit_exceeded: bool = Field(False, description="True while this provider is usage-limited.")
-    limit_type: str = Field("", description="Lightweight label for the limit (e.g. 'rate', 'weekly').")
+    limit_type: str = Field(
+        "",
+        description="Lightweight label for the limit (e.g. 'rate', 'session', 'weekly').",
+    )
     reset_at: datetime | None = Field(
         None, description="When the usage limit is expected to reset (UTC); null when not limited."
     )

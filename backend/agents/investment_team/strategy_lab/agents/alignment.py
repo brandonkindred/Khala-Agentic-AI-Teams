@@ -33,17 +33,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
 
 from shared.env_config import env_int
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
-from ._llm_budget import DesignBudgetExhausted
-from ._llm_envelope import run_structured_agent
-from ._parse_helpers import coerce_strict_bool, extract_json_object
+from ._agent_runner import run_single_shot_agent
+from ._parse_helpers import coerce_strict_bool
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import ALIGNMENT_FIX_SCHEMA
-from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -321,30 +318,24 @@ class TradeAlignmentAgent:
             symbol=symbol,
             entry_date=entry_date,
         )
-        agent = Agent(
-            model=get_strands_model("strategy_alignment"),
-            system_prompt=system_prompt,
-            tools=[],
-        )
-        try:
-            parsed = run_structured_agent(
-                agent,
-                user_prompt,
-                agent_key="strategy_alignment",
-                phase="alignment_near_miss",
-                parse=extract_json_object,
-                charge=True,
-                logger=logger,
-            )
-        except DesignBudgetExhausted:
-            raise
-        except Exception as exc:
+
+        def _on_failure(exc: Exception) -> Any:
             logger.debug(
                 "Near-miss adjudicator failed to produce parseable JSON: %s",
                 exc,
                 exc_info=True,
             )
             raise AlignmentAuditError(f"{type(exc).__name__}: {exc}") from exc
+
+        _, parsed = run_single_shot_agent(
+            agent_key="strategy_alignment",
+            phase="alignment_near_miss",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            charge=True,
+            logger=logger,
+            on_failure=_on_failure,
+        )
 
         legitimate = _parse_legitimate(parsed.get("legitimate", False))
         rationale = str(parsed.get("rationale", "")).strip()
@@ -389,31 +380,24 @@ class TradeAlignmentAgent:
             response_schema_json=_ALIGNMENT_FIX_SCHEMA_JSON,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_alignment"),
-            system_prompt=system_prompt,
-            tools=[],
-        )
-        try:
-            parsed = run_structured_agent(
-                agent,
-                user_prompt,
-                agent_key="strategy_alignment",
-                phase="alignment_propose_fix",
-                parse=extract_json_object,
-                charge=True,
-                max_attempts=_alignment_max_attempts(),
-                logger=logger,
-            )
-        except DesignBudgetExhausted:
-            raise
-        except Exception as exc:
+        def _on_failure(exc: Exception) -> Any:
             logger.debug(
                 "Alignment fix proposer failed to produce parseable JSON: %s",
                 exc,
                 exc_info=True,
             )
             raise AlignmentAuditError(f"{type(exc).__name__}: {exc}") from exc
+
+        _, parsed = run_single_shot_agent(
+            agent_key="strategy_alignment",
+            phase="alignment_propose_fix",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            charge=True,
+            max_attempts=_alignment_max_attempts(),
+            logger=logger,
+            on_failure=_on_failure,
+        )
 
         # ``preserve_proposed_code=True``: the deterministic gate has
         # already decided misaligned, so an LLM that over-claims

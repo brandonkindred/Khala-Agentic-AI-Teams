@@ -34,10 +34,10 @@ def _max_concurrent_activities() -> int:
     Preconditions:
         - none (environment may be unset or garbage).
     Postconditions:
-        - Returns ``SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`` when it parses to
-          a positive int, else the documented default (unset/garbage/≤0 →
-          default), via the shared ``env_int`` parser (which warns on a
-          set-but-unparseable value).
+        - Returns the parsed env value when set and parseable; unset or
+          unparseable → default ``8``; parsed but ``< 1`` → floored to ``1``
+          via ``env_int(..., floor=1)`` (which warns on a set-but-unparseable
+          value).
     """
     return env_int(
         "SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES",

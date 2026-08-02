@@ -237,6 +237,9 @@ def test_search_repository_reports_truncated_when_disk_reader_listing_itself_is_
 
 
 def test_search_repository_fails_safe_on_reader_error() -> None:
+    """A list_files failure must report truncated=True so callers do not treat
+    an empty result as proof the substring is absent from the repository."""
+
     class _RaisingReader:
         def list_files(self):
             raise RuntimeError("boom")
@@ -245,7 +248,26 @@ def test_search_repository_fails_safe_on_reader_error() -> None:
             raise RuntimeError("boom")
 
     index = CodebaseIndex(files={}, repo_reader=_RaisingReader())
-    assert _search_repository(index, "bar") == ([], False)
+    assert _search_repository(index, "bar") == ([], True)
+
+
+def test_search_repository_tool_flags_truncated_when_list_files_fails() -> None:
+    """When list_files raises, the tool must warn that the scan was truncated
+    rather than claiming an exhaustive 'no matches in the rest of the repository'."""
+
+    class _RaisingReader:
+        def list_files(self):
+            raise RuntimeError("boom")
+
+        def read_file(self, path: str):
+            raise RuntimeError("boom")
+
+    index = CodebaseIndex(files={"app/main.py": "code"}, repo_reader=_RaisingReader())
+    search_repository = _build_side_effect_tools(index)[-1]
+    result = search_repository("bar(")
+    assert "No matches for" in result
+    assert "truncated" in result.lower()
+    assert "in the rest of the repository" not in result
 
 
 def test_search_repository_skips_a_single_unreadable_file() -> None:
@@ -323,6 +345,9 @@ def test_search_repository_tool_reports_no_reader() -> None:
     index = CodebaseIndex(files={"app/main.py": "code"})
     search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     assert "No repository access" in search_repository("bar")
+    doc = " ".join((search_repository.__doc__ or "").split()).lower()
+    assert "fall back" not in doc
+    assert "no repository access is available beyond the submission" in doc
 
 
 def test_search_repository_tool_reports_no_matches() -> None:

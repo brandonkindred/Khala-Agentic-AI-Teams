@@ -50,7 +50,12 @@ from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
-from .code_boundaries import node_end_line, node_start_line
+from .function_boundaries import (
+    enclosing_construct,
+    enclosing_construct_start_heuristic,
+    segment_containing_line,
+    strip_numbered_prefixes,
+)
 from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
@@ -82,19 +87,9 @@ _MANIFEST_LIMIT = 300
 _CONTEXT_FIELD_CHARS = 4_000
 _CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 
-# Column-0 token prefixes that should NOT be counted as construct start lines
-# by the heuristic fallback used for non-Python files.
-_HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
-
-# The ``render_annotated_hunks`` path (coding-team PR review) prefixes each
-# hunk line with its original file line number: ``4242: const x = 1;``.  This
-# pattern detects and strips those prefixes so the function-finder helpers
-# receive plain code and a physical (1-based) line index.
-_LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
-
 # Default per-group verification call timeout (seconds); see
 # ``_verify_timeout_seconds`` below.
-DEFAULT_VERIFY_TIMEOUT_SECONDS = 300
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 3600
 
 
 def _verify_timeout_seconds() -> int:
@@ -292,9 +287,16 @@ class CodebaseIndex:
               a non-blank excerpt exists; ``(None, [])`` when it names it without
               one, or when ``key`` is blank.
             - ``(exact_key, [])`` on an exact file match.
-            - ``(sole_hit, hits)`` when exactly one suffix match, else
-              ``(None, hits)``, where ``hits`` are the candidate paths that
+            - ``(sole_exact_normalized, [])`` when exactly one stored path equals
+              ``key`` after ``_normalize_leading`` on both sides (so ``./app/main.py``
+              prefers ``app/main.py`` over a nested suffix like ``src/app/main.py``).
+            - ``(None, exact_hits)`` when multiple stored paths share that exact
+              normalized form.
+            - ``(sole_hit, hits)`` when exactly one bare-name / path-suffix match,
+              else ``(None, hits)``, where ``hits`` are the candidate paths that
               share the requested final segment or path suffix — never raises.
+            - A ``../`` prefix is never treated as ``./``; parent-dir citations do
+              not collapse to a bare basename.
         """
         if not key:
             return None, []
@@ -302,21 +304,28 @@ class CodebaseIndex:
             return (self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None), []
         if key in self.files:
             return key, []
+        # Prefer an exact match of the leading-normalized key before any
+        # bare-name / suffix fallback. ``_normalize_leading`` strips only
+        # literal ``./`` repeats (and one leading ``/``) — never ``../`` —
+        # so ``./app/main.py`` can resolve to ``app/main.py`` even when
+        # ``src/app/main.py`` would also be a suffix hit.
+        normalized = self._normalize_leading(key)
+        exact = [p for p in self.files if self._normalize_leading(p) == normalized]
+        if len(exact) == 1:
+            return exact[0], []
+        if len(exact) > 1:
+            return None, exact
         # Bare-name / suffix fallback: the model often cites ``main.py`` for
         # ``app/services/main.py``, or ``config/.env`` for ``src/config/.env``.
         # Match every stored path whose final ``/``-segment (bare name) or
-        # trailing path suffix equals ``key`` after stripping a leading ``./``
-        # or ``/`` from both sides (without mangling hidden names like
-        # ``.env``); a unique hit resolves, and the full list lets
-        # ``read_file`` distinguish ambiguity.
-        normalized = self._normalize_leading(key)
-
+        # trailing path suffix equals the normalized key (without mangling
+        # hidden names like ``.env``); a unique hit resolves, and the full
+        # list lets ``read_file`` distinguish ambiguity.
         if "/" in normalized:
             hits = [
                 p
                 for p in self.files
-                if (norm_p := self._normalize_leading(p)) == normalized
-                or norm_p.endswith("/" + normalized)
+                if self._normalize_leading(p).endswith("/" + normalized)
             ]
         else:
             hits = [p for p in self.files if self._final_segment(p) == normalized]
@@ -510,73 +519,10 @@ def _strip_numbered_prefixes(
 ) -> Tuple[str, int, Optional[Callable[[int], int]]]:
     """Strip ``N: `` line-number prefixes from pre-numbered hunk content.
 
-    The coding-team PR-review path calls ``render_annotated_hunks`` which
-    prepends each line with its new-file line number: ``4242: const x = 1;``.
-    This content reaches the verifier's ``CodebaseIndex`` verbatim, so the
-    function-finder helpers must strip those prefixes before scanning.
-
-    Preconditions:
-        - ``content`` is a string (may be empty).
-        - ``line_number`` >= 1.
-
-    Postconditions:
-        - If the first non-blank line does NOT match ``r'^\\d+: '``, the
-          content is not pre-numbered; returns ``(content, line_number, None)``
-          unchanged — no remap is needed.
-        - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
-          where:
-          - ``stripped_content`` is the content with all ``N: `` prefixes
-            removed (non-numbered lines, e.g. ``...`` hunk separators, are
-            kept as-is).
-          - ``physical_index`` is the 1-based line index in
-            ``stripped_content`` whose original prefix equals ``line_number``.
-            When no line matches exactly (the target line was a removed ``-``
-            line absent from the hunk), the last line with prefix <
-            ``line_number`` is used; falls back to 1 when nothing precedes.
-          - ``line_mapper(physical)`` maps a physical line index back to its
-            original file line number (or to ``physical`` if the line had no
-            numbered prefix, e.g. a separator).
-        - Never raises when preconditions hold.
+    Thin re-export of :func:`function_boundaries.strip_numbered_prefixes`,
+    kept under this name for existing call sites/tests in this module.
     """
-    if not isinstance(content, str):
-        raise TypeError("content must be a string")
-    if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
-        raise ValueError("line_number must be a positive integer")
-    lines = content.splitlines()
-    if not lines:
-        return content, line_number, None
-
-    first_nonblank = next((ln for ln in lines if ln.strip()), "")
-    if not _LINE_NUMBER_PREFIX_RE.match(first_nonblank):
-        return content, line_number, None
-
-    stripped: List[str] = []
-    phys_to_orig: Dict[int, int] = {}
-    physical_index = 1
-    exact_match = False
-    last_before: Optional[int] = None
-
-    for i, line in enumerate(lines, start=1):
-        m = _LINE_NUMBER_PREFIX_RE.match(line)
-        if m:
-            orig = int(m.group(1))
-            phys_to_orig[i] = orig
-            stripped.append(line[m.end() :])
-            if orig == line_number and not exact_match:
-                physical_index = i
-                exact_match = True
-            elif orig < line_number:
-                last_before = i
-        else:
-            stripped.append(line)
-
-    if not exact_match and last_before is not None:
-        physical_index = last_before
-
-    def _lookup(phys: int) -> int:
-        return phys_to_orig.get(phys, phys)
-
-    return "\n".join(stripped), physical_index, _lookup
+    return strip_numbered_prefixes(content, line_number)
 
 
 def _find_python_function_at_line(
@@ -601,9 +547,9 @@ def _find_python_function_at_line(
         - Returns a "module level" message when no enclosing construct is found.
         - Returns a parse-error message and never raises on ``SyntaxError`` or
           any other ``ast.parse`` failure so the caller can fall back gracefully.
-        - Start/end lines come from the shared ``node_start_line``/
-          ``node_end_line`` helpers (``end_lineno`` when present, else the node's
-          own ``lineno``), so all three AST consumers agree on construct ranges.
+        - Start/end lines come from :func:`function_boundaries.enclosing_construct`,
+          which itself uses the shared ``node_start_line``/``node_end_line``
+          helpers, so all AST consumers agree on construct ranges.
     """
     if not isinstance(content, str) or not content:
         raise ValueError("content must be a non-empty string")
@@ -614,48 +560,48 @@ def _find_python_function_at_line(
     if line_number > len(lines):
         return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
 
-    try:
-        tree = ast.parse(content)
-    except Exception as exc:
-        return (
-            f"Could not parse {path} as Python ({type(exc).__name__}: {exc}); "
-            "use read_file to inspect the full file manually."
+    construct = enclosing_construct(content, line_number, annotated_hunks=line_mapper is not None)
+
+    if construct is None:
+        # enclosing_construct() never raises; re-parse once here only to tell a
+        # genuine parse failure apart from "parsed fine, but module level" so
+        # the two get distinct messages. Re-parse only the gap-bounded segment
+        # enclosing_construct() itself resolved against -- naively re-parsing
+        # the full annotated-hunk content would join independent hunks across
+        # a bare "..." gap marker and can raise on its own (e.g.
+        # IndentationError from a later hunk's indented continuation),
+        # misreporting a valid module-level line as unparseable.
+        segment = segment_containing_line(
+            content, line_number, annotated_hunks=line_mapper is not None
         )
-
-    candidates = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        start_line = node_start_line(node)
-        end_line = node_end_line(node)
-        if start_line <= line_number <= end_line:
-            kind = "class" if isinstance(node, ast.ClassDef) else "function"
-            candidates.append((end_line - start_line, start_line, end_line, node.name, kind))
-
-    if not candidates:
+        if segment is None:
+            return (
+                f"Line {shown} of {path} falls between annotated hunks "
+                "(no excerpt covers that line); use read_file to inspect the full file."
+            )
+        try:
+            ast.parse(segment)
+        except Exception as exc:
+            return (
+                f"Could not parse {path} as Python ({type(exc).__name__}: {exc}); "
+                "use read_file to inspect the full file manually."
+            )
         return (
             f"Line {shown} of {path} is at module level "
             "(no enclosing function, method, or class found)."
         )
 
-    # Smallest span → innermost enclosing construct.
-    _, func_start, func_end, name, kind = min(candidates)
-
+    kind = construct.kind
+    name = construct.name
     class_label = ""
-    if kind == "function":
-        # Find the innermost class that fully contains this function's range;
-        # its presence means the function is a method.
-        enclosing_classes = [
-            (span, cname)
-            for span, cstart, cend, cname, ckind in candidates
-            if ckind == "class" and cstart <= func_start and cend >= func_end
-        ]
-        if enclosing_classes:
-            _, class_name = min(enclosing_classes)
-            class_label = f" in class '{class_name}'"
+    if kind == "function" and "." in name:
+        class_name, name = name.split(".", 1)
+        class_label = f" in class '{class_name}'"
 
-    display_start = line_mapper(func_start) if line_mapper is not None else func_start
-    display_end = line_mapper(func_end) if line_mapper is not None else func_end
+    display_start = (
+        line_mapper(construct.start_line) if line_mapper is not None else construct.start_line
+    )
+    display_end = line_mapper(construct.end_line) if line_mapper is not None else construct.end_line
     return (
         f"Line {shown} is inside {kind} '{name}'{class_label} "
         f"({path} lines {display_start}–{display_end})."
@@ -671,10 +617,10 @@ def _find_heuristic_function_at_line(
 ) -> str:
     """Guess the enclosing construct for ``line_number`` using column-0 heuristics.
 
-    Scans from the first line up to ``line_number`` and returns the start line of
-    the last column-0 declaration found — the same heuristic used by
-    ``code_boundaries._heuristic_break_lines`` for chunk splitting. Useful for
-    TypeScript, JavaScript, Go, and other non-Python languages.
+    Scans from the first line up to ``line_number`` and formats a message naming
+    the start line of the last column-0 declaration found — the same heuristic
+    used by ``code_boundaries._heuristic_break_lines`` for chunk splitting.
+    Useful for TypeScript, JavaScript, Go, and other non-Python languages.
 
     Preconditions:
         - ``content`` is a non-empty string.
@@ -682,9 +628,9 @@ def _find_heuristic_function_at_line(
         - ``path`` is a non-empty string used only for display.
 
     Postconditions:
-        - Returns a descriptive message naming the best-guess construct start
-          line (not the raw integer) and advising ``read_file`` for the precise
-          construct name.
+        - Returns a human-readable message identifying the best-guess start line
+          of the enclosing construct and advising the use of ``read_file`` for
+          the precise construct name.
         - Returns an explicit beyond-EOF message when ``line_number`` exceeds
           the file length.
         - Returns a "no construct found" message (never raises when
@@ -699,17 +645,7 @@ def _find_heuristic_function_at_line(
     lines = content.splitlines()
     if line_number > len(lines):
         return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
-    best_start: Optional[int] = None
-    for i, line in enumerate(lines, start=1):
-        if i > line_number:
-            break
-        if not line or not line.strip():
-            continue
-        if line[0].isspace():
-            continue
-        if line.startswith(_HEURISTIC_SKIP):
-            continue
-        best_start = i
+    best_start = enclosing_construct_start_heuristic(content, line_number)
 
     if best_start is None:
         return (
@@ -929,6 +865,9 @@ def _parse_verdicts(data: object, count: int) -> Dict[int, _Verdict]:
         - Returns verdicts only for integer indices in ``[0, count)``; a verdict
           referencing an out-of-range index is dropped (it cannot be mapped to a
           finding this call was asked about).
+        - When multiple verdicts share an index, the first in-range verdict is
+          kept and later duplicates are ignored with a warning (first-wins so a
+          later malformed or incorrect entry cannot overwrite a valid earlier one).
         - A non-dict reply, or one without a list ``verdicts``, yields ``{}`` so
           the caller keeps every finding in the group.
     """
@@ -944,6 +883,12 @@ def _parse_verdicts(data: object, count: int) -> Dict[int, _Verdict]:
             continue
         index, verdict = parsed
         if 0 <= index < count:
+            if index in verdicts:
+                logger.warning(
+                    "FalsePositiveFilter: duplicate verdict for index %s, ignoring duplicate",
+                    index,
+                )
+                continue
             verdicts[index] = verdict
     return verdicts
 
@@ -985,6 +930,33 @@ def code_fence_for(content: str) -> str:
     return _code_fence_for(content)
 
 
+def _sanitize_finding_field(text: str) -> str:
+    """Collapse whitespace and neutralize prompt-structure metacharacters.
+
+    Finding ``description`` / ``suggestion`` text is untrusted reviewer output.
+    Runs of three or more backticks can mimic a CommonMark fence; runs of three
+    or more hyphens can mimic the ``--- Finding index i ---`` separators this
+    module emits. Breaking those runs with U+200B keeps the text readable while
+    preventing structural corruption of the verifier prompt.
+
+    Preconditions:
+        - ``text`` is a string (may be empty).
+
+    Postconditions:
+        - Returns a single line (all whitespace collapsed to spaces).
+        - Contains no run of three or more consecutive backticks or hyphens.
+        - Never raises.
+    """
+    collapsed = " ".join(text.split())
+
+    def _break_runs(match: re.Match[str]) -> str:
+        return "\u200b".join(match.group())
+
+    collapsed = re.sub(r"`{3,}", _break_runs, collapsed)
+    collapsed = re.sub(r"-{3,}", _break_runs, collapsed)
+    return collapsed
+
+
 def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     """Render one indexed finding block (anchor line + metadata) for the prompt.
 
@@ -992,9 +964,12 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
         - Returns the lines for finding ``i``: an ``--- Finding index i ---``
           anchor the verdict contract refers back to, a severity/category/
           location line, the description, and the suggestion when present.
-        - ``description`` and ``suggestion`` are whitespace-normalized
-          (``' '.join(text.split())``) so multi-line or oddly spaced text
-          collapses to a single prompt line.
+        - ``description`` and ``suggestion`` are whitespace-normalized and
+          sanitized via ``_sanitize_finding_field`` so multi-line or oddly
+          spaced text collapses to a single prompt line and backtick / ``---``
+          runs cannot corrupt the surrounding prompt structure. The structural
+          finding-index anchor is built here and is not passed through the
+          sanitizer.
     """
     location = issue.file_path or "(file unknown)"
     if issue.line is not None:
@@ -1002,10 +977,10 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     block = [
         f"--- Finding index {i} ---",
         f"severity: {issue.severity} | category: {issue.category} | location: {location}",
-        f"description: {' '.join(issue.description.split())}",
+        f"description: {_sanitize_finding_field(issue.description)}",
     ]
     if issue.suggestion:
-        block.append(f"suggestion: {' '.join(issue.suggestion.split())}")
+        block.append(f"suggestion: {_sanitize_finding_field(issue.suggestion)}")
     return block
 
 

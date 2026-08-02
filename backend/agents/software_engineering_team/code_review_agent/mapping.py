@@ -52,7 +52,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 from llm_service import (
     LLMClient,
@@ -65,6 +65,7 @@ from llm_service import (
     LLMUnreachableAfterRetriesError,
 )
 from shared.concurrency import parallel_map
+from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -93,6 +94,7 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
+from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -345,21 +347,19 @@ def _thinking_off_retry_enabled() -> bool:
 def _chain_has(exc: BaseException, types: Tuple[type, ...]) -> bool:
     """Whether ``exc`` or its cause/context chain contains one of ``types``.
 
+    Preconditions:
+        - ``types`` may be empty; an empty tuple means no type can match.
+
     Postconditions:
-        - Walks the ``__cause__``/``__context__`` chain up to a bounded depth
-          (strands may wrap the client error) and returns True on the first match.
+        - Walks the ``__cause__``/``__context__`` chain via ``_exception_chain``
+          and returns True on the first match. Empty ``types`` returns False.
           Never raises. Mirrors the traversal in ``_is_content_failure`` for a
           narrower type check (used to gate the thinking-off retry to the failures
           it can actually fix).
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
-        if isinstance(current, types):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    if not types:
+        return False
+    return any(isinstance(c, types) for c in _exception_chain(exc))
 
 
 def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _ChunkOutcome:
@@ -469,6 +469,25 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
     return _ChunkOutcome(not_reviewed_issues=issues)
 
 
+def _bisect_halves_run_sequentially(llm: LLMClient) -> bool:
+    """True when a bisected chunk's two halves must be reviewed one at a time.
+
+    Mirrors ``coordinator._tail_passes_run_sequentially``: scripted
+    ``DummyLLMClient`` doubles use a shared non-thread-safe response index, so
+    fanning the halves out concurrently would corrupt scripted call order/count.
+    Duplicated locally rather than imported — ``coordinator`` imports from this
+    module, so the reverse import would be circular.
+
+    Postconditions: returns ``True`` iff ``llm`` is (or wraps) a
+    ``DummyLLMClient``. Pure.
+    """
+    from llm_service.clients.dummy import DummyLLMClient
+
+    if isinstance(llm, DummyLLMClient):
+        return True
+    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+
+
 def _review_chunk_with_recovery(
     reviewer: ChunkReviewAgent,
     chunk: ReviewChunk,
@@ -501,8 +520,14 @@ def _review_chunk_with_recovery(
           — e.g. a ``KeyError``/``TypeError`` from a reviewer bug) propagate
           unchanged: they fail closed so the defect surfaces, rather than being
           masked as a not-reviewed finding.
-        - Known content failures bisect up to the depth cap; any chunk that
-          cannot bisect further — the original or a bisected child — gets
+        - Known content failures bisect up to the depth cap; the two halves are
+          reviewed concurrently (via ``parallel_map``) unless ``reviewer.llm`` is
+          a scripted ``DummyLLMClient`` double or ``_map_parallelism() <= 1``, in
+          which case they run sequentially exactly as before — see
+          ``_bisect_halves_run_sequentially``. Either way, results merge via
+          ``_ChunkOutcome.absorb()`` in a fixed halves[0]-then-halves[1] order,
+          independent of which half's call actually finishes first. Any chunk
+          that cannot bisect further — the original or a bisected child — gets
           exactly one same-input retry, EXCEPT a ladder-spent reasoning-loop
           semantic exhaustion (``finish_reason != "length"`` with
           ``retry_thinking_level`` set): that skips both the line-split and the
@@ -602,24 +627,37 @@ def _review_chunk_with_recovery(
         # the other half's files, so those files become genuine siblings whose
         # surface it should see (when surface_by_path is unavailable — a direct
         # caller passed None — the parent's surface rides along unchanged).
-        outcome = _review_chunk_with_recovery(
-            reviewer,
-            halves[0],
-            base_input,
-            _half_sibling_surface(halves[0], surface_by_path, sibling_surface),
-            surface_by_path,
-            depth + 1,
-        )
-        outcome.absorb(
-            _review_chunk_with_recovery(
+        branches: List[Callable[[], _ChunkOutcome]] = [
+            lambda half=halves[0]: _review_chunk_with_recovery(
                 reviewer,
-                halves[1],
+                half,
                 base_input,
-                _half_sibling_surface(halves[1], surface_by_path, sibling_surface),
+                _half_sibling_surface(half, surface_by_path, sibling_surface),
                 surface_by_path,
                 depth + 1,
-            )
-        )
+            ),
+            lambda half=halves[1]: _review_chunk_with_recovery(
+                reviewer,
+                half,
+                base_input,
+                _half_sibling_surface(half, surface_by_path, sibling_surface),
+                surface_by_path,
+                depth + 1,
+            ),
+        ]
+        # Each half is a fully independent recursive call (no shared mutable
+        # state), so they fan out concurrently — unless the LLM double can't
+        # tolerate it or the operator has capped parallelism to 1. Either way,
+        # ``results[0]``/``results[1]`` preserve halves[0]/halves[1] order (see
+        # ``parallel_map``'s ``preserve_order`` default), so the merge below is
+        # identical to the sequential path regardless of completion order.
+        if _bisect_halves_run_sequentially(reviewer.llm) or _map_parallelism() <= 1:
+            outcome = branches[0]()
+            outcome.absorb(branches[1]())
+        else:
+            results = parallel_map(branches, lambda fn: fn(), max_workers=2, skip_none=False)
+            outcome = results[0]
+            outcome.absorb(results[1])
         return outcome
     # A same-input retry is worthwhile unless it is futile: a ladder-spent
     # reasoning-loop exhaustion (``skip_retry``) would only re-run the model's
@@ -900,20 +938,23 @@ def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str)
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
-          resolved model) changes. It is derived from ``input_data.model_dump()``,
-          so it keys on the whole input, not a hand-picked subset: a new
-          ``CodeReviewInput`` field is hashed automatically and can never be
+          resolved model) changes, and also whenever the output-affecting
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` toggle flips. It is derived
+          from ``input_data.model_dump()`` plus that toggle, so it keys on the
+          whole input (not a hand-picked subset) plus consolidation identity: a
+          new ``CodeReviewInput`` field is hashed automatically and can never be
           silently dropped. Two submissions collide only when their full inputs
-          are identical, so a hit means the review would be the same work.
-          (Every current field is verdict-affecting, so this is exactly the
-          submission identity; a future non-verdict field would only cause extra
-          misses — full re-reviews — never a stale hit.)
+          and consolidation setting are identical, so a hit means the review
+          would be the same work. (Every current field is verdict-affecting, so
+          this is exactly the submission identity; a future non-verdict field
+          would only cause extra misses — full re-reviews — never a stale hit.)
         - Computed from raw fields only (no compaction/LLM), so the short-circuit
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
     payload = input_data.model_dump(mode="json")
     payload["__model__"] = model_fingerprint
+    payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
     return _stable_json_digest(payload)
 
 
@@ -955,9 +996,10 @@ def _cached_review_chunk(
           recomputes its own sibling surface.
 
     Postconditions:
-        - When caching is disabled (``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` ==
-          0) this is a pure passthrough to ``_review_chunk_with_recovery`` — no
-          caching and no single-flight, identical to no cache at all.
+        - When caching is disabled (non-positive
+          ``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE``) this is a pure passthrough to
+          ``_review_chunk_with_recovery`` — no caching and no single-flight,
+          identical to no cache at all.
         - On a hit, returns a deep clone of the stored outcome (never the shared
           instance), so the caller may mutate it freely; findings/verdicts are
           reproduced identically.

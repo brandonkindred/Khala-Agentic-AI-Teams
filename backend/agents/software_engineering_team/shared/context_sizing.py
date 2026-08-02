@@ -156,7 +156,7 @@ def compute_code_review_map_chunk_chars(llm: LLMClient) -> int:
 
 # Dual-array response reserve for the merged architecture + side-effect pass
 # (2 × the map-phase ``reserved_response_tokens=4096``). Also used as the
-# floor when raising a tight ``LLM_MAX_TOKENS`` for that call's output budget.
+# floor when raising a tight ``LLM_MAX_OUTPUT_TOKENS`` for that call's output budget.
 CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS = 8192
 # Single enabled-half response reserve (one finding array).
 CODE_REVIEW_MERGED_PASS_SINGLE_RESPONSE_TOKENS = 4096

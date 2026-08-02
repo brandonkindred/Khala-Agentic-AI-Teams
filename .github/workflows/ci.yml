@@ -229,6 +229,7 @@ jobs:
             # triggers a rebuild and main never publishes stale code.
             docker_backend:
               - 'backend/Dockerfile'
+              - 'backend/requirements-unified-api.txt'
               - 'backend/.dockerignore'
               - 'backend/agents/**'
               - 'backend/unified_api/**'

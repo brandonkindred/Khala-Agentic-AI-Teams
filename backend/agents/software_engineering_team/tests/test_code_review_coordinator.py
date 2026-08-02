@@ -16,11 +16,14 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
+from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import (
+    MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
+    _cap_issues,
     _issues_from_chunk_output,
     _map_parallelism,
+    _reconcile_approval,
     _render_architecture_context,
     _segment_range_label,
     _tail_passes_run_sequentially,
@@ -32,9 +35,11 @@ from code_review_agent.coordinator import (
     run_coordinator,
     split_block_into_segments,
 )
+from code_review_agent.mapping import _bisect_halves_run_sequentially
 from code_review_agent.models import (
     ChunkReviewOutput,
     CodeReviewInput,
+    CodeReviewIssue,
     CodeReviewOutput,
     CodeReviewUnavailableError,
     FileSegment,
@@ -68,6 +73,76 @@ _MAP_CHUNK_SEPARATION_HEADROOM = 2_000
 # ---------------------------------------------------------------------------
 # Pure-function tests
 # ---------------------------------------------------------------------------
+
+
+def _issue(severity: str, description: str, *, line: int = 1) -> CodeReviewIssue:
+    """Build a minimal ``CodeReviewIssue`` for cap/reconcile unit tests."""
+    return CodeReviewIssue(
+        severity=severity,
+        category="general",
+        file_path="a.py",
+        line=line,
+        description=description,
+        suggestion="fix it",
+    )
+
+
+def test_cap_issues_under_limit_preserves_order() -> None:
+    issues = [_issue("low", f"n{i}", line=i) for i in range(1, 6)]
+    capped = _cap_issues(issues)
+    assert capped == issues
+    assert capped is not issues  # shallow copy
+
+
+def test_cap_issues_exactly_at_limit_preserves_order() -> None:
+    issues = [_issue("medium", f"m{i}", line=i) for i in range(1, MAX_CODE_REVIEW_ISSUES + 1)]
+    capped = _cap_issues(issues)
+    assert len(capped) == MAX_CODE_REVIEW_ISSUES
+    assert [i.description for i in capped] == [i.description for i in issues]
+
+
+def test_cap_issues_over_limit_severity_first_stable_within_rank() -> None:
+    # 5 critical, 5 high, then enough medium/low/info that total exceeds the cap.
+    # Input order is deliberately low-first so a first-seen trim would keep nits.
+    lows = [_issue("low", f"low-{i}", line=100 + i) for i in range(20)]
+    mediums = [_issue("medium", f"med-{i}", line=200 + i) for i in range(20)]
+    highs = [_issue("high", f"high-{i}", line=10 + i) for i in range(5)]
+    criticals = [_issue("critical", f"crit-{i}", line=i) for i in range(5)]
+    issues = [*lows, *mediums, *highs, *criticals]
+    assert len(issues) > MAX_CODE_REVIEW_ISSUES
+
+    capped = _cap_issues(issues)
+    assert len(capped) == MAX_CODE_REVIEW_ISSUES
+    severities = [i.severity for i in capped]
+    assert severities[:5] == ["critical"] * 5
+    assert severities[5:10] == ["high"] * 5
+    assert all(s == "medium" for s in severities[10:])
+    # Within severity, original relative order is preserved.
+    assert [i.description for i in capped[:5]] == [f"crit-{i}" for i in range(5)]
+    assert [i.description for i in capped[5:10]] == [f"high-{i}" for i in range(5)]
+    assert [i.description for i in capped[10:]] == [f"med-{i}" for i in range(20)]
+
+
+def test_cap_then_reconcile_medium_only_still_approves() -> None:
+    issues = [_issue("medium", f"m{i}", line=i) for i in range(1, MAX_CODE_REVIEW_ISSUES + 6)]
+    capped = _cap_issues(issues)
+    assert len(capped) == MAX_CODE_REVIEW_ISSUES
+    approved, out = _reconcile_approval(False, capped)
+    assert approved is True
+    assert len(out) == MAX_CODE_REVIEW_ISSUES
+
+
+def test_cap_then_reconcile_keeps_critical_and_rejects() -> None:
+    # Critical arrives last in the uncapped list (would be dropped by first-seen
+    # trim) but severity-first ranking keeps it in the capped set.
+    mediums = [_issue("medium", f"m{i}", line=i) for i in range(1, MAX_CODE_REVIEW_ISSUES + 1)]
+    critical = _issue("critical", "must-keep", line=999)
+    capped = _cap_issues([*mediums, critical])
+    assert any(i.description == "must-keep" for i in capped)
+    assert capped[0].severity == "critical"
+    approved, out = _reconcile_approval(True, capped)
+    assert approved is False
+    assert any(i.severity == "critical" for i in out)
 
 
 def test_parse_code_into_file_blocks_single_file() -> None:
@@ -548,6 +623,36 @@ def _numbered_file(n_lines: int, width: int = 40) -> str:
     return "\n".join(f"line {i:05d} ".ljust(width, "x") for i in range(1, n_lines + 1))
 
 
+def _failme_content_in_bisect_window(budget: int) -> str:
+    """Build FAILME lines sized into [2 * MIN_SPLIT_SEGMENT_CHARS, budget).
+
+    Preconditions:
+        - budget > 2 * MIN_SPLIT_SEGMENT_CHARS (window must admit at least one line stride).
+    Postconditions:
+        - Returned content length L satisfies 2 * MIN_SPLIT_SEGMENT_CHARS <= L < budget.
+        - Every line is 40 chars and contains the FAILME marker.
+    """
+    line_body_width = 40
+    target = (2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2
+    # Joined length of n 40-char lines is 41*n - 1; use 41 as the stride estimate.
+    n_lines = max(1, (target + 1) // (line_body_width + 1))
+    content = "\n".join(
+        f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+    )
+    while len(content) >= budget and n_lines > 1:
+        n_lines -= 1
+        content = "\n".join(
+            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+        )
+    while len(content) < 2 * MIN_SPLIT_SEGMENT_CHARS:
+        n_lines += 1
+        content = "\n".join(
+            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+        )
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    return content
+
+
 def test_split_within_budget_returns_single_whole_segment() -> None:
     content = _numbered_file(10)
     segments = split_block_into_segments("a.py", content, max_chars=10_000)
@@ -705,6 +810,61 @@ def test_segment_range_label_uses_embedded_numbers_for_pre_numbered() -> None:
     assert _segment_range_label(seg) == "src/feature.py (original lines 4000-4050)"
     plain = FileSegment(path="a.py", content="x = 1\ny = 2", start_line=5, total_lines=20)
     assert _segment_range_label(plain) == "a.py (lines 5-6 of 20)"
+
+
+# ---------------------------------------------------------------------------
+# FileSegment / ReviewChunk construction invariants
+# ---------------------------------------------------------------------------
+
+
+def test_file_segment_valid_constructs() -> None:
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2", start_line=5, total_lines=20)
+    assert seg.end_line == 6
+
+
+def test_file_segment_rejects_zero_start_line() -> None:
+    with pytest.raises(ValidationError, match="start_line must be 1-based"):
+        FileSegment(path="a.py", content="x = 1", start_line=0, total_lines=1)
+
+
+def test_file_segment_rejects_total_lines_too_small() -> None:
+    with pytest.raises(ValidationError, match="total_lines must be at least line_count"):
+        FileSegment(path="a.py", content="x = 1\ny = 2", total_lines=1)
+
+
+def test_file_segment_rejects_extending_past_eof() -> None:
+    with pytest.raises(ValidationError, match="segment extends past end of file"):
+        FileSegment(path="a.py", content="x = 1\ny = 2", start_line=5, total_lines=5)
+
+
+def test_review_chunk_rejects_duplicate_paths() -> None:
+    with pytest.raises(ValidationError, match="unique paths"):
+        ReviewChunk(
+            segments=[
+                FileSegment(path="a.py", content="x = 1", total_lines=1),
+                FileSegment(path="a.py", content="y = 2", total_lines=1),
+            ]
+        )
+
+
+def test_review_chunk_rejects_duplicate_empty_paths() -> None:
+    with pytest.raises(ValidationError, match="unique paths"):
+        ReviewChunk(
+            segments=[
+                FileSegment(path="", content="x = 1", total_lines=1),
+                FileSegment(path="", content="y = 2", total_lines=1),
+            ]
+        )
+
+
+def test_review_chunk_allows_distinct_paths_including_empty() -> None:
+    chunk = ReviewChunk(
+        segments=[
+            FileSegment(path="", content="x = 1", total_lines=1),
+            FileSegment(path="a.py", content="y = 2", total_lines=1),
+        ]
+    )
+    assert len(chunk.segments) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1151,88 @@ class _FailNTimes(DummyLLMClient):
         return super().complete_json(prompt, **kwargs)
 
 
+class _HalfTimingDummyDelegate:
+    """Inner delegate for a non-``DummyLLMClient`` stand-in (see
+    ``_NonDummyLLMClient`` further below in this file): forces the combined
+    a.py+b.py chunk review to fail (triggering bisection), returns a distinct
+    low-severity issue per single-file chunk-review half (so a test can
+    inspect merge order), and records each half's call interval — sleeping
+    first if a delay was configured for that half — so a test can prove or
+    control relative timing. Every other prompt (the tail passes) is
+    delegated to a real ``DummyLLMClient``.
+    """
+
+    def __init__(self, delays: dict[str, float] | None = None) -> None:
+        self._inner = DummyLLMClient()
+        self.delays = delays or {}
+        self._lock = threading.Lock()
+        self.intervals: dict[str, tuple[float, float]] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward anything not overridden below (get_max_context_tokens,
+        # update_config, get_config, structured_output, stream, chat, ...) to
+        # the real DummyLLMClient — _NonDummyLLMClient calls those directly.
+        return getattr(self._inner, name)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
+        if is_chunk_review and has_a and has_b:
+            raise _bisecting_failure("no content")  # force bisection
+        if is_chunk_review and (has_a or has_b):
+            key = "a" if has_a else "b"
+            start = time.monotonic()
+            time.sleep(self.delays.get(key, 0.0))
+            end = time.monotonic()
+            with self._lock:
+                self.intervals[key] = (start, end)
+            return {
+                "approved": True,
+                "issues": [
+                    {
+                        "severity": "low",
+                        "category": "general",
+                        "file_path": f"{key}.py",
+                        "line": 1,
+                        "description": f"finding-{key}",
+                        "suggestion": "n/a",
+                    }
+                ],
+                "summary": f"summary-{key}",
+                "spec_compliance_notes": "",
+            }
+        return self._inner.complete_json(prompt, **kwargs)
+
+
+class _TimedDummyHalfClient(DummyLLMClient):
+    """``DummyLLMClient`` subclass with the same combined-fails/per-half-timing
+    behavior as ``_HalfTimingDummyDelegate``, but reached as a bare
+    ``DummyLLMClient`` instance (not wrapped) — used to prove the two halves
+    still run strictly sequentially for a scripted double, exactly as before
+    this fan-out existed.
+    """
+
+    def __init__(self, delay: float = 0.0) -> None:
+        super().__init__()
+        self.delay = delay
+        self._lock = threading.Lock()
+        self.intervals: dict[str, tuple[float, float]] = {}
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
+        if is_chunk_review and has_a and has_b:
+            raise _bisecting_failure("no content")
+        if is_chunk_review and (has_a or has_b):
+            key = "a" if has_a else "b"
+            start = time.monotonic()
+            time.sleep(self.delay)
+            end = time.monotonic()
+            with self._lock:
+                self.intervals[key] = (start, end)
+        return super().complete_json(prompt, **kwargs)
+
+
 def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
     """A chunk whose combined review fails is bisected per segment; both halves
     succeed individually, so the review completes normally."""
@@ -1081,6 +1323,84 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
     assert client.calls == 6
 
 
+def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:
+    """Mirrors ``_tail_passes_run_sequentially``: True for a bare
+    ``DummyLLMClient`` and for a wrapper exposing a ``.client`` attribute
+    pointing at one; False for anything else."""
+    assert _bisect_halves_run_sequentially(DummyLLMClient()) is True
+    assert _bisect_halves_run_sequentially(MagicMock()) is False
+
+    class _Wrapper:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+
+    assert _bisect_halves_run_sequentially(_Wrapper(DummyLLMClient())) is True
+    assert _bisect_halves_run_sequentially(_Wrapper(MagicMock())) is False
+
+
+def test_bisected_halves_reviewed_concurrently_for_non_dummy_client() -> None:
+    """When the LLM is not a scripted ``DummyLLMClient`` double, the two
+    bisected halves are reviewed concurrently instead of strictly
+    sequentially: each half's call sleeps briefly, and their recorded
+    intervals must overlap — sequential calls could never produce that."""
+    delegate = _HalfTimingDummyDelegate(delays={"a": 0.05, "b": 0.05})
+    stand_in = _NonDummyLLMClient(delegate)
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    assert result.approved is True
+    a_start, a_end = delegate.intervals["a"]
+    b_start, b_end = delegate.intervals["b"]
+    assert a_start < b_end and b_start < a_end
+
+
+def test_bisected_halves_stay_sequential_for_dummy_llm_client() -> None:
+    """Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe
+    response index, so the two bisected halves must still run one at a
+    time for them: each half's call sleeps briefly, and their recorded
+    intervals must NOT overlap."""
+    client = _TimedDummyHalfClient(delay=0.05)
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    assert result.approved is True
+    a_start, a_end = client.intervals["a"]
+    b_start, b_end = client.intervals["b"]
+    assert a_end <= b_start or b_end <= a_start
+
+
+def test_bisection_absorb_preserves_halves_order_regardless_of_completion_order() -> None:
+    """halves[1] (b.py) finishes first — its call has no delay while halves[0]
+    (a.py) sleeps — but the merged outcome must still list a.py's finding
+    before b.py's: ``.absorb()`` merge order is fixed by input order, not by
+    which concurrent branch actually completes first."""
+    delegate = _HalfTimingDummyDelegate(delays={"a": 0.08, "b": 0.0})
+    stand_in = _NonDummyLLMClient(delegate)
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    a_start, a_end = delegate.intervals["a"]
+    b_start, b_end = delegate.intervals["b"]
+    assert b_end <= a_end  # sanity check: b genuinely finished first
+    findings = [i.description for i in result.issues if i.description.startswith("finding-")]
+    assert findings == ["finding-a", "finding-b"]
+
+
 def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> None:
     """A single-file chunk that semantically exhausts degrades straight to a
     blocking not-reviewed finding — no line-split, no same-input retry (both would
@@ -1091,10 +1411,7 @@ def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> N
     # in test_large_failing_file_bisects_then_raises_with_ranges), but semantic
     # exhaustion must not.
     budget = compute_code_review_map_chunk_chars(DummyLLMClient())
-    line_len = 41
-    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
-    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    content = _failme_content_in_bisect_window(budget)
     # retry_thinking_level set => the client actually spent its downgrade ladder,
     # so re-sampling is futile and the fast-path degrades without retry.
     client = _SelectiveRaiser(
@@ -1119,10 +1436,7 @@ def test_length_empty_semantic_exhaustion_still_line_splits() -> None:
     not. This is the same large single-file setup as the reasoning-loop test above,
     but the length variant bisects (>=2 calls) instead of degrading on the first."""
     budget = compute_code_review_map_chunk_chars(DummyLLMClient())
-    line_len = 41
-    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
-    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    content = _failme_content_in_bisect_window(budget)
     client = _SelectiveRaiser(
         "FAILME",
         exc=LLMSemanticExhaustionError(
@@ -1425,6 +1739,17 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     # Reviewer-code bugs fail closed.
     assert _is_content_failure(KeyError("bug")) is False
     assert _is_content_failure(TypeError("bug")) is False
+
+
+def test_chain_has_empty_types_returns_false_without_raising() -> None:
+    """Empty ``types`` must return False (never raise); non-empty still matches the chain."""
+    from code_review_agent.mapping import _chain_has
+
+    assert _chain_has(ValueError("x"), ()) is False
+    assert _chain_has(ValueError("x"), (ValueError,)) is True
+    wrapped = RuntimeError("outer")
+    wrapped.__cause__ = TypeError("inner")
+    assert _chain_has(wrapped, (TypeError,)) is True
 
 
 def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
@@ -1837,10 +2162,7 @@ def test_large_failing_file_bisects_then_raises_with_ranges() -> None:
     # the live budget so the test stays valid if the map budget shifts (e.g. the
     # sibling-surface reservation).
     budget = compute_code_review_map_chunk_chars(DummyLLMClient())
-    line_len = 41  # 40-char body + "\n"
-    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
-    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    content = _failme_content_in_bisect_window(budget)
     client = _SelectiveRaiser("FAILME")
     with pytest.raises(CodeReviewUnavailableError) as excinfo:
         run_coordinator(

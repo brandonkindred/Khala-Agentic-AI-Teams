@@ -49,7 +49,7 @@ ENV_LLM_MODEL = "LLM_MODEL"
 ENV_LLM_BASE_URL = "LLM_BASE_URL"
 ENV_LLM_TIMEOUT = "LLM_TIMEOUT"
 ENV_LLM_CONTEXT_SIZE = "LLM_CONTEXT_SIZE"
-ENV_LLM_MAX_TOKENS = "LLM_MAX_TOKENS"
+ENV_LLM_MAX_OUTPUT_TOKENS = "LLM_MAX_OUTPUT_TOKENS"
 ENV_LLM_MAX_RETRIES = "LLM_MAX_RETRIES"
 ENV_LLM_BACKOFF_BASE = "LLM_BACKOFF_BASE"
 ENV_LLM_BACKOFF_MAX = "LLM_BACKOFF_MAX"
@@ -66,9 +66,11 @@ ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER = "LLM_RATE_LIMIT_HONOR_RETRY_AFTER"
 # next instead of burning the slow LLM_RATE_LIMIT_* backoff in place. FAST_429 (default
 # on) makes the failover-chain clients raise the 429 immediately (zero in-place
 # rate-limit retries) so the hand-off isn't delayed by minutes. The *_WINDOW_S vars are
-# the fallback reset windows used to compute reset_at when a 429 carries no Retry-After.
+# fallback reset windows (session/weekly are fixed from the error; rate uses
+# Retry-After when present).
 ENV_LLM_FAILOVER_FAST_429 = "LLM_FAILOVER_FAST_429"
 ENV_LLM_FAILOVER_RATE_WINDOW_S = "LLM_FAILOVER_RATE_WINDOW_S"
+ENV_LLM_FAILOVER_SESSION_WINDOW_S = "LLM_FAILOVER_SESSION_WINDOW_S"
 ENV_LLM_FAILOVER_WEEKLY_WINDOW_S = "LLM_FAILOVER_WEEKLY_WINDOW_S"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
@@ -287,11 +289,11 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     # synthesis) rather than the open-ended main review. deepseek-v4-pro:cloud's
     # reasoning_effort wire mapping collapses "low"/"medium" onto the same "high"
     # tier as code_review (see KNOWN_MODEL_THINKING_LEVELS below), so a thinking-tier
-    # pin alone cannot make this genuinely lighter; llama3.1 is this codebase's
+    # pin alone cannot make this genuinely lighter; qwen3.5:9b-mlx is this codebase's
     # established smaller/faster model tier (already used for soc2,
     # accessibility_audit) and has no registered thinking levels of its own, so no
     # AGENT_DEFAULT_THINK entry applies here.
-    "code_review_verify": "llama3.1",
+    "code_review_verify": "qwen3.5:9b-mlx",
     "repair": "deepseek-v4-pro:cloud",
     "devops": "deepseek-v4-pro:cloud",
     "dbc_comments": "deepseek-v4-pro:cloud",
@@ -317,10 +319,10 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "security": "deepseek-v4-pro:cloud",
     "accessibility": "deepseek-v4-pro:cloud",
     # Other teams
-    "soc2": "llama3.1",
+    "soc2": "qwen3.5:9b-mlx",
     "blog": "deepseek-v4-pro:cloud",
     "personal_assistant": "llama3.2",
-    "accessibility_audit": "llama3.1",
+    "accessibility_audit": "qwen3.5:9b-mlx",
     "strategy_ideation": "deepseek-v4-pro:cloud",
     "signal_intelligence": "deepseek-v4-pro:cloud",
     "deepthought": "deepseek-v4-pro:cloud",
@@ -371,7 +373,7 @@ def resolve_agent_default_think(agent_key: "str | None") -> "str | None":
 OLLAMA_MODEL_SUGGESTIONS: list[str] = [
     "deepseek-v4-pro:cloud",
     "qwen3-coder:480b-cloud",
-    "llama3.1",
+    "qwen3.5:9b-mlx",
     "llama3.2",
 ]
 
@@ -440,10 +442,10 @@ def resolve_provider() -> str:
     return raw
 
 
-def resolve_max_tokens() -> int:
-    """Return the configured output-token cap from ``LLM_MAX_TOKENS``, or 0 if unset.
+def resolve_max_output_tokens() -> int:
+    """Return the configured output-token cap from ``LLM_MAX_OUTPUT_TOKENS``, or 0 if unset.
 
-    Centralizes the ``LLM_MAX_TOKENS`` env lookup so provider clients don't read
+    Centralizes the ``LLM_MAX_OUTPUT_TOKENS`` env lookup so provider clients don't read
     ``os.environ`` directly (mirrors the other resolvers here) — used by
     :meth:`OllamaLLMClient._resolve_max_tokens`. A missing,
     non-integer, or non-positive value yields ``0`` — the caller's "unset"
@@ -452,7 +454,7 @@ def resolve_max_tokens() -> int:
 
     Postconditions: returns an int ``>= 0``. Never raises.
     """
-    raw = os.environ.get(ENV_LLM_MAX_TOKENS)
+    raw = os.environ.get(ENV_LLM_MAX_OUTPUT_TOKENS)
     if not raw:
         return 0
     try:
@@ -462,10 +464,13 @@ def resolve_max_tokens() -> int:
     return val if val > 0 else 0
 
 
-# Fallback reset windows (seconds) when a 429 carries no Retry-After. Weekly is
-# long so a weekly-exhausted provider isn't retried hourly; rate is ~5m.
+# Fallback reset windows (seconds). Session/weekly Cloud caps ignore Retry-After
+# and use these fixed windows from the error time; rate uses Retry-After when
+# present, else the short rate window (~5m). Weekly defaults to 24h because
+# Ollama Cloud weekly 429 bodies do not include a reset timestamp.
 _DEFAULT_FAILOVER_RATE_WINDOW_S = 300.0
-_DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 7 * 24 * 3600.0
+_DEFAULT_FAILOVER_SESSION_WINDOW_S = 5 * 3600.0
+_DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 24 * 3600.0
 
 
 def failover_fast_429_enabled() -> bool:
@@ -492,15 +497,31 @@ def _resolve_positive_window(env_name: str, default: float) -> float:
 
 
 def failover_rate_window_seconds() -> float:
-    """Fallback reset window for a non-weekly 429 with no Retry-After (default 5m).
+    """Fallback reset window for a rate 429 with no Retry-After (default 5m).
 
     Postconditions: returns ``> 0`` seconds. Never raises.
     """
     return _resolve_positive_window(ENV_LLM_FAILOVER_RATE_WINDOW_S, _DEFAULT_FAILOVER_RATE_WINDOW_S)
 
 
+def failover_session_window_seconds() -> float:
+    """Fixed reset window for a session-limit 429 (default 5h).
+
+    Session/weekly classifications ignore ``Retry-After``; this window is measured
+    from the error time.
+
+    Postconditions: returns ``> 0`` seconds. Never raises.
+    """
+    return _resolve_positive_window(
+        ENV_LLM_FAILOVER_SESSION_WINDOW_S, _DEFAULT_FAILOVER_SESSION_WINDOW_S
+    )
+
+
 def failover_weekly_window_seconds() -> float:
-    """Fallback reset window for a weekly-limit 429 with no Retry-After (default 7d).
+    """Fixed reset window for a weekly-limit 429 (default 24h).
+
+    Session/weekly classifications ignore ``Retry-After``; this window is measured
+    from the error time (Ollama Cloud weekly bodies omit a reset timestamp).
 
     Postconditions: returns ``> 0`` seconds. Never raises.
     """
@@ -686,8 +707,8 @@ def resolve_model_for_provider(
     Preconditions: ``provider`` is the already-resolved active provider id, or
         ``None`` to resolve it here (a caller that already has it passes it to
         avoid a redundant :func:`resolve_provider` lock acquisition).
-    Postconditions: returns a non-empty model id appropriate for
-        :func:`resolve_provider`. Never raises.
+    Postconditions: returns a non-empty model id appropriate for the
+        active provider. Never raises.
     """
     active = provider or resolve_provider()
     if active == "claude":
@@ -721,8 +742,14 @@ def resolve_timeout(agent_key: Optional[str] = None) -> float:
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:
     """
-    Resolve context size (tokens) for a model: env LLM_CONTEXT_SIZE (global override),
-    then KNOWN_MODEL_CONTEXT[model], else None (caller may use /api/show or default).
+    Resolve context size (tokens) for a model.
+
+    Order: env ``LLM_CONTEXT_SIZE`` (global override, clamped to a minimum of
+    2048), then ``KNOWN_MODEL_CONTEXT[model]``, else ``None`` (caller may use
+    ``/api/show`` or default).
+
+    Postconditions: when an env override is a valid int, returns ``>= 2048``;
+        otherwise returns the known-model value or ``None``. Never raises.
     """
     # Not expressible via shared.env.parse_int: an unset *or* invalid override must
     # fall through to the model-specific KNOWN_MODEL_CONTEXT value (an Optional[int]),

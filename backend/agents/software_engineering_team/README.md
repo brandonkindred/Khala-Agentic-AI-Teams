@@ -123,23 +123,24 @@ flowchart LR
   quality --> integration
 ```
 
-**Product Delivery loop:** when `POST /api/software-engineering/run-team` is called with `{sprint_id}`, the orchestrator skips Discovery and hydrates `ProductRequirements` from the sprint's planned stories via `_load_requirements_from_sprint`. On the legacy SE pipeline path the Integration phase then fires `_maybe_ship_sprint_release` (the default `use_coding_team=True` path currently returns before this hook), which on a fully-completed sprint ships a release via `ReleaseManagerAgent` and auto-promotes Integration-phase failures into `product_delivery_feedback_items` tagged with the sprint id (queryable via `GET /api/product-delivery/feedback`; operator triage feeds the next groom). See [`ARCHITECTURE.md` §11 — Product Delivery Loop](../../../ARCHITECTURE.md#11-product-delivery-loop) and `backend/agents/product_delivery/README.md`.
+**Product Delivery loop:** when `POST /api/software-engineering/run-team` is called with `{sprint_id}`, the orchestrator skips Discovery and hydrates `ProductRequirements` from the sprint's planned stories via `_load_requirements_from_sprint`. After planning, `_run_coding_and_finalize` runs `run_coding_team_orchestrator` to completion, emits DORA lifecycle metrics, and reconciles the SE `failed_tasks` list from the persisted coding-team snapshot — there is no Integration-phase release hook on this path. The `_maybe_ship_sprint_release` hook and its call into `ReleaseManagerAgent` (`product_delivery/release_manager_agent/agent.py`) have been removed as dead code (they had no production caller); `ReleaseManagerAgent` still exists but is not currently invoked by the SE pipeline. See [`ARCHITECTURE.md` §11 — Product Delivery Loop](../../../ARCHITECTURE.md#11-product-delivery-loop) for the current state and follow-up plan to wire it back in.
 
 ### Per-Task Workflow Gates
 
-**Backend:** build verification → code review → acceptance verifier → security → QA → DbC → Tech Lead review → documentation
+These are the gates run by the default v2 execution path (`backend_code_v2_team`/`frontend_code_v2_team`, driven by the coding-team engine's Tech Lead), per `run_gated_execution_impl`'s `GATE_CONFIG`:
 
-**Frontend:** design (optional, skipped for lightweight tasks) → implementation → build → code review → QA → accessibility → security → acceptance verifier → DbC → Tech Lead → documentation
+**Backend and Frontend (same gate sequence):** build verification (lint + build, single CI-owned gate) → Code Review (build/lint findings + code review against spec/standards + every wired tool agent, e.g. accessibility and ui_design for frontend) → QA + Security (run in parallel over the same post-Code-Review snapshot, `parallelize_qa_security=True`) → Documentation (self-review loop, never fails). A gate that finds issues batch-fixes them and, for QA/Security, restarts from Code Review.
 
 **Frontend internal pipeline order:** UX Designer → UI Designer → Design System → Frontend Architect → Feature Implementation → UX Engineer → Performance Engineer → Build/Release
 
 Build verification (lint + build) is a single CI-owned gate that runs once, before
 Code Review; the Code Review phase itself does not re-run lint or build checks.
 
-Data and control-flow dependencies among the build/code-review/security/QA/DbC
-gates specifically (a subset of the full sequences above — it does not cover
-acceptance verification, Tech Lead review, or accessibility), and which of them
-are safe to parallelize vs. require a redesign, are mapped in
+There is no separate acceptance-verifier, DbC, or Tech-Lead-review gate inside this per-microtask loop. Those agents (`acceptance_verifier`, `dbc_comments`, `tech_lead`, and standalone `security`/`qa`/`code_review`) are registered in the separate legacy top-level orchestrator's agent factory, which is not exercised by the default `use_coding_team=True` execution path — see the higher-level Tech Lead review step in [Flow](#flow) below.
+
+Data and control-flow dependencies among the build/code-review/security/QA
+gates specifically, and which of them are safe to parallelize vs. require a
+redesign, are mapped in
 [`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md).
 
 ## Plan folder
@@ -168,16 +169,13 @@ All planning artifacts are written to a `plan/` folder at the project root (work
    - **Build verification** (pytest for backend, ng build for frontend) — the sole
      lint/build gate, owned by CI; it runs once here and is not repeated by the
      Code review step below
-   - **Code review** (against spec and standards)
-   - **Acceptance criteria verification** (optional; per-criterion check)
-   - **Security review** (per task for backend; per task for frontend)
-   - **QA review** (backend: bugs + persisted integration/unit tests and README)
-   - **Accessibility review** (frontend only)
-   - **DbC comments** (add pre/postconditions)
-   - Merge to development, Tech Lead review, Documentation update
+   - **Code review** (build/lint findings + against spec/standards + every wired tool agent, e.g. accessibility for frontend)
+   - **QA review + Security review** (run in parallel over the same post-Code-Review snapshot; backend QA covers bugs + persisted integration/unit tests and README)
+   - **Documentation** (self-review loop)
+   - Merge to development, Tech Lead review
 9. **Integration phase** – After workers complete, Integration Agent validates backend-frontend API contract alignment.
 10. **Final security** (full codebase) and **documentation** pass when Tech Lead requests.
-11. **Retry path** – Failed tasks are retried through the same full workflow (build, code review, QA, a11y, security, DBC).
+11. **Retry path** – Failed tasks are retried through the same full workflow (build verification, code review, QA + security in parallel, documentation).
 
 ## Requirements
 
@@ -197,76 +195,64 @@ Or from the project root:
 python software_engineering_team/agent_implementations/run_api_server.py
 ```
 
-This starts the team's HTTP API on `http://127.0.0.1:8000`; see [API](#api) below for the `/run-team` request format. By default the team uses `DummyLLMClient` for testing without an LLM (`LLM_PROVIDER=dummy`, the default). To use a real model (e.g. Ollama), set the environment variables below.
+This starts the team's HTTP API on `http://127.0.0.1:8000`; see [API](#api) below for the `/run-team` request format. LLM resolution is driven by the Postgres-backed ordered provider list configured in the LLM Provider settings UI (`/llm-config`), which is the sole source of live resolution when Postgres is configured. `LLM_PROVIDER=dummy` is a hard override that selects `DummyLLMClient` for testing without any LLM and never touches Postgres. The other environment variables below only supply defaults for blank fields in the provider list (or, if the list is empty / `POSTGRES_HOST` is unset, the effective configuration for local/dev use).
 
 **LLM configuration (environment variables):**
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `LLM_PROVIDER` | `dummy` or `ollama` | `dummy` |
-| `LLM_MODEL` | Model name for Ollama | `qwen3.5:397b-cloud` |
-| `LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
+| `LLM_PROVIDER` | `dummy` (hard override), `ollama`, or `claude` | `ollama` |
+| `LLM_MODEL` | Model name; resolved per-agent (see below) when unset | none — falls back to the per-agent default, or `deepseek-v4-pro:cloud` |
+| `LLM_BASE_URL` | Provider base URL | `https://ollama.com` |
 | `LLM_TIMEOUT` | Timeout in seconds | `3600` |
 | `LLM_MAX_RETRIES` | Max retries for 429/5xx errors | `4` |
 | `LLM_BACKOFF_BASE` | Base seconds for exponential backoff | `2` |
 | `LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
 | `LLM_MAX_CONCURRENCY` | Max concurrent LLM calls (default 4; set 4–6 for faster runs with parallel planning and backend+frontend workers; lower to 2 if GPU/memory limited) | `4` |
-| `LLM_MAX_TOKENS` | Max tokens to generate; if unset, uses min(context size, 32768) so APIs that cap output (e.g. 32K) work | 32768 (capped) |
-| `LLM_CONTEXT_SIZE` | Context window in tokens; if unset, uses known model table or Ollama /api/show. Effective context = max minus largest agent reservation. qwen3.5:397b-cloud: 256K max (242K effective). | (model-dependent) |
+| `LLM_MAX_OUTPUT_TOKENS` | Max tokens to generate; if unset, uses min(context size, 32768) so APIs that cap output (e.g. 32K) work | 32768 (capped) |
+| `LLM_CONTEXT_SIZE` | Context window in tokens; if unset, uses known model table or Ollama /api/show. Effective context = max minus largest agent reservation; exact sizes depend on the resolved model. | (model-dependent) |
 | `LLM_ENABLE_THINKING` | Enable thinking mode for qwen3.5 models; improves reasoning quality but increases latency and token usage. Set to `false` to disable. | `true` (for qwen3.5) |
-| `SW_ENABLE_PLANNING_CACHE` | Reuse cached TaskAssignment when spec and architecture unchanged; set to `0` or `false` to disable | `1` (enabled) |
 
-**Per-agent model configuration:** Each agent can use a different model. Set `LLM_MODEL_<agent_key>` to override (e.g. `LLM_MODEL_backend`, `LLM_MODEL_tech_lead`). Model resolution order: per-agent env var → `LLM_MODEL` (global fallback) → recommended default for that agent → `qwen3.5:397b-cloud`.
+**Per-agent model configuration:** Each agent can use a different model. Set `LLM_MODEL_<agent_key>` to override (e.g. `LLM_MODEL_backend`, `LLM_MODEL_tech_lead`). Model resolution order: per-agent env var (`LLM_MODEL_<agent_key>`) → runtime model set in the LLM Provider settings UI → `LLM_MODEL` (global env fallback) → the agent's entry in `AGENT_DEFAULT_MODELS` → `DEFAULT_FALLBACK_MODEL` (`deepseek-v4-pro:cloud`) if the agent key has no table entry.
 
-Recommended defaults (all :cloud versions) when no overrides are set:
+Defaults (`AGENT_DEFAULT_MODELS` in `llm_service/config.py`) when no overrides are set:
 
 | Model | Agents |
 |-------|--------|
-| qwen3.5:397b-cloud | All agents (backend, frontend, code_review, repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility) |
+| `kimi-k2.7-code:cloud` | backend, frontend, code_review |
+| `qwen3.5:9b-mlx` | code_review_verify |
+| `deepseek-v4-pro:cloud` | repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility (also the fallback for any agent key not listed above) |
 
-Example: `export LLM_MODEL_tech_lead=qwen3.5:cloud` overrides only the Tech Lead; other agents use their defaults or `LLM_MODEL`.
+Example: `export LLM_MODEL_tech_lead=<model-id>` overrides only the Tech Lead; other agents use their defaults or `LLM_MODEL`.
 
 Example with Ollama:
 ```bash
 export LLM_PROVIDER=ollama
-export LLM_MODEL=qwen3.5:397b-cloud
+export LLM_MODEL=kimi-k2.7-code:cloud
 python -m agent_implementations.run_api_server
 ```
 
-Ensure Ollama is running with the model (e.g. `ollama run qwen3.5:397b-cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=llama3.2` for Ollama, or your provider's model id).
+Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=llama3.2` for Ollama, or your provider's model id). Note this only takes effect when the Postgres provider list is empty or the matching entry's model field is blank — otherwise the provider list value wins.
 
-**Iteration caps (environment variables):** Lowering these can speed runs but may reduce refinement.
+**Per-phase retry limits:** each per-microtask review gate (Code Review, QA, Security, Documentation) has a hardcoded retry cap of `3` fix attempts (`max_retries`/`code_review_max_retries`/`qa_max_retries`/`security_max_retries`/`documentation_max_retries` on `MicrotaskReviewConfig`/`BaseMicrotaskReviewConfig` in `backend_code_v2_team/models.py`, `frontend_code_v2_team/models.py`, and `shared/v2_models.py`). These are not environment-configurable.
+
+**Coding-team concurrency (environment variables, `progress_config.py`):** lowering these can reduce parallel LLM load but slows runs.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SW_MAX_ALIGNMENT_ITERATIONS` | Max Tech Lead ↔ Architecture alignment loops | `100` |
-| `SW_MAX_CONFORMANCE_RETRIES` | Max spec conformance retries | `100` |
-| `SW_MAX_REVIEW_ITERATIONS` | Max code review → fix rounds (backend) | `100` |
-| `SW_MAX_CLARIFICATION_ROUNDS` | Max clarification rounds (backend) | `100` |
-| `SW_MAX_SAME_BUILD_FAILURES` | Stop if build fails identically N times (backend) | `6` |
-| `SW_MAX_CODE_REVIEW_ITERATIONS` | Max code review rounds (frontend) | `100` |
-| `SW_MAX_CLARIFICATION_REFINEMENTS` | Max clarification refinements (frontend) | `100` |
+| `CODING_TEAM_NO_CHANGE_REVISIT_CAP` | Cap on consecutive no-change revision rounds | `3` |
+| `CODING_TEAM_REVIEW_CONCURRENCY` | Max Tech Lead review LLM calls dispatched concurrently | `4` |
+| `CODING_TEAM_GROOM_CONCURRENCY` | Max Tech Lead task-grooming LLM calls dispatched concurrently | `4` |
+| `CODING_TEAM_IMPLEMENTATION_CONCURRENCY` | Max implementation workers dispatched concurrently in one round | `4` |
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
-
-### Planning cache and stable spec
-
-When `SW_ENABLE_PLANNING_CACHE=1` (default), the first successful planning run stores the `TaskAssignment` under a cache key derived from spec, architecture, and project overview. Subsequent runs on the same repo with an unchanged spec reuse the cached plan and skip alignment/conformance loops, making planning much faster.
-
-**Stable spec per branch practice:**
-
-- When you branch for a feature, keep `initial_spec.md` mostly stable for that branch.
-- If you need a substantial spec change, make it once, then re-run the team to regenerate a new cached plan.
-- For small, non-structural edits (typos, wording clarifications), batch changes rather than repeatedly invoking the full team on slightly different specs.
-
-**Verifying the cache:** Run the team twice on the same repo/spec. The second run should log `Planning cache HIT (key=...)` and `Using cached planning result (skipping alignment/conformance)`. To force a fresh plan, change the spec enough that the cache key changes, or set `SW_ENABLE_PLANNING_CACHE=0`.
 
 ### Faster runs summary
 
 - **Parallel planning:** Domain planning agents (API Contract, Data Arch, UI/UX, Infra, etc.) run in dependency tiers with internal parallelism (Tier 1 → Tier 2 → Tier 3).
 - **LLM concurrency:** Default `LLM_MAX_CONCURRENCY=4`; set 4–6 for faster runs when GPU/memory allows.
 - **Skip planning:** `SW_SKIP_PLANNING_AGENTS` or `SW_MINIMAL_PLANNING=1` for time-sensitive runs.
-- **Iteration caps:** Lower `SW_MAX_*` env vars to reduce refinement rounds (may reduce quality).
+- **Concurrency:** Lower the `CODING_TEAM_*` concurrency env vars to reduce parallel LLM load (slows runs); per-phase retry caps are fixed at 3 and are not configurable.
 
 ### Future improvements (design only)
 
