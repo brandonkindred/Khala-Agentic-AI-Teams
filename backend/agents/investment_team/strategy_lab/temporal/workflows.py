@@ -474,16 +474,22 @@ class StrategyLabBatchWorkflow:
                     if isinstance(result, BaseException):
                         errored += 1
                         if len(errored_details) < _ERRORED_DETAILS_MAX:
-                            # ``.cause`` unwraps Temporal's ChildWorkflowError
-                            # wrapper to the actual failure, matching thread
-                            # mode's exception_type (the real error, not the
-                            # RPC-boundary wrapper type).
-                            underlying = getattr(result, "cause", result)
+                            # Walk the full Temporal cause chain to the terminal
+                            # failure — a child-workflow failure surfaces here as
+                            # ChildWorkflowError -> ActivityError -> ApplicationError
+                            # (the domain error _map_exception_to_application_error
+                            # produced), so a single ``__cause__`` hop only reaches
+                            # ActivityError's generic RPC-boundary type/message, not
+                            # the real failure. Mirrors ``_root_cause_message`` in
+                            # ``market_research_team/temporal/workflows.py``.
+                            underlying: BaseException = result
+                            while underlying.__cause__ is not None:
+                                underlying = underlying.__cause__
                             errored_details.append(
                                 {
                                     "cycle_index": cycle_index + 1,
                                     "batch_index": batch_idx + 1,
-                                    "error": str(result),
+                                    "error": str(underlying),
                                     "exception_type": type(underlying).__name__,
                                 }
                             )

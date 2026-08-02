@@ -365,20 +365,30 @@ def test_errored_details_captures_structured_entry_for_failed_cycle():
     ]
 
 
-def test_errored_details_unwraps_cause_for_exception_type():
-    """A Temporal ChildWorkflowError-style wrapper: ``exception_type`` reflects
-    the unwrapped ``.cause`` (the real failure), while ``error`` keeps the
-    wrapper's own string (matching thread mode's non-RPC-boundary error text
-    as closely as the wrapper allows)."""
+def test_errored_details_walks_full_cause_chain_to_terminal_failure():
+    """A real child-workflow failure surfaces as a multi-hop chain —
+    ChildWorkflowError -> ActivityError -> ApplicationError (the domain
+    error) — so ``exception_type``/``error`` must reflect the terminal cause,
+    not just one ``__cause__`` hop (which would only reach the generic
+    RPC-boundary wrapper, e.g. ActivityError, not the real failure)."""
 
-    class _Wrapper(Exception):
-        def __init__(self, cause: Exception) -> None:
-            super().__init__("child workflow failed")
-            self.cause = cause
+    class _OuterChildWorkflowError(Exception):
+        pass
 
-    wrapped = _Wrapper(ValueError("root cause"))
+    class _MiddleActivityError(Exception):
+        pass
+
+    class _DomainValueError(Exception):
+        pass
+
+    terminal = _DomainValueError("root cause")
+    middle = _MiddleActivityError("activity task failed")
+    middle.__cause__ = terminal
+    outer = _OuterChildWorkflowError("child workflow execution failed")
+    outer.__cause__ = middle
+
     harness = _Harness(
-        child_results={"run-1-c0": wrapped, "run-1-c1": _child_record("1")},
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
         activity_handlers=_default_activity_handlers(),
     )
     result = _run(_batch_input(), harness)
@@ -386,8 +396,8 @@ def test_errored_details_unwraps_cause_for_exception_type():
         {
             "cycle_index": 1,
             "batch_index": 1,
-            "error": "child workflow failed",
-            "exception_type": "ValueError",
+            "error": "root cause",
+            "exception_type": "_DomainValueError",
         }
     ]
 
