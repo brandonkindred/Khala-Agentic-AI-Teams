@@ -237,11 +237,7 @@ def compute_code_review_merged_pass_budgets(
         raise ValueError(f"finding_array_count must be 1 or 2, got {finding_array_count!r}")
     ctx = llm.get_max_context_tokens()
     fixed_prompt_tokens = int(
-        (
-            max(0, system_prompt_chars)
-            + max(0, base_scaffolding_chars)
-            + max(0, tool_schema_chars)
-        )
+        (max(0, system_prompt_chars) + max(0, base_scaffolding_chars) + max(0, tool_schema_chars))
         / CHARS_PER_TOKEN
     )
     transcript_tokens = int(max(0, tool_transcript_chars) / CHARS_PER_TOKEN)

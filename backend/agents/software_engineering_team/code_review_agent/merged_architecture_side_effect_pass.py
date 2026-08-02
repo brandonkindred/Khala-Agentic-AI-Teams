@@ -359,6 +359,7 @@ def _with_merged_pass_output_budget(
         - Injected non-``LLMClientModel`` test models are returned unchanged.
         - Never mutates ``model``.
     """
+    assert response_tokens >= 1024, "response_tokens must be >= 1024"
     if not isinstance(model, LLMClientModel):
         return model
     configured = resolve_max_output_tokens()
@@ -554,9 +555,7 @@ def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
 
         line_cost = len(path) + 1
         omitted_after = len(paths) - (shown + 1)
-        room_for_note = (
-            len(_overflow_manifest_note(omitted_after)) + 1 if omitted_after > 0 else 0
-        )
+        room_for_note = len(_overflow_manifest_note(omitted_after)) + 1 if omitted_after > 0 else 0
         if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
             lines.append(_overflow_manifest_note(len(paths) - shown))
             break

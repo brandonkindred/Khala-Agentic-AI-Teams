@@ -322,11 +322,7 @@ class CodebaseIndex:
         # hidden names like ``.env``); a unique hit resolves, and the full
         # list lets ``read_file`` distinguish ambiguity.
         if "/" in normalized:
-            hits = [
-                p
-                for p in self.files
-                if self._normalize_leading(p).endswith("/" + normalized)
-            ]
+            hits = [p for p in self.files if self._normalize_leading(p).endswith("/" + normalized)]
         else:
             hits = [p for p in self.files if self._final_segment(p) == normalized]
 

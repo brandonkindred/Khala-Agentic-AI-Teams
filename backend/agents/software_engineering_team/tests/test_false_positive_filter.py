@@ -783,9 +783,7 @@ def test_parse_verdicts_keeps_first_on_duplicate_index(caplog) -> None:
     assert set(parsed) == {0}
     assert parsed[0].is_false_positive is False
     assert parsed[0].reasoning == "first"
-    assert any(
-        "duplicate verdict for index 0" in r.message for r in caplog.records
-    )
+    assert any("duplicate verdict for index 0" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- prompt

@@ -253,7 +253,7 @@ LLM activity emits `activity.heartbeat` so Temporal can detect a hung activity
 faster than its full timeout. The ceiling is one third of the fixed 180s
 activity heartbeat timeout, guaranteeing at least ~3 beats per window regardless
 of configuration — so a mis-set value can never make a healthy activity
-heartbeat-timeout. Parsed via the shared `env_float` (unset/garbage/non-finite →
+heartbeat-timeout window. Parsed via the shared `env_float` (unset/garbage/non-finite →
 default, with a warning on a set-but-unparseable value).
 
 ### MARKET_RESEARCH_TEMPORAL_HEARTBEAT_INTERVAL_S
