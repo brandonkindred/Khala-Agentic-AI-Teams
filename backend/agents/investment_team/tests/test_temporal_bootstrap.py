@@ -731,6 +731,78 @@ def test_rehydrate_active_run_offset_defaults_to_zero(monkeypatch) -> None:
     assert run_state.rehydrate_active_run_offset("missing") == 0
 
 
+def test_get_resume_seed_counters_defaults_for_unknown_run(monkeypatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+
+    assert run_state.get_resume_seed_counters("missing") == {
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "errored_details": [],
+        "tracker_merge_error_count": 0,
+    }
+
+
+def test_get_resume_seed_counters_reads_persisted_values(monkeypatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    details = [{"cycle_index": 1, "error": "boom"}]
+    monkeypatch.setattr(
+        run_state,
+        "active_runs",
+        {
+            "run-c": {
+                "run_id": "run-c",
+                "status": "interrupted",
+                "skipped_cycles": 3,
+                "errored_cycles": 2,
+                "errored_details": details,
+                "tracker_merge_error_count": 1,
+            }
+        },
+    )
+
+    seeded = run_state.get_resume_seed_counters("run-c")
+
+    assert seeded == {
+        "skipped_cycles": 3,
+        "errored_cycles": 2,
+        "errored_details": details,
+        "tracker_merge_error_count": 1,
+    }
+    # A fresh list, not an alias — the caller mustn't be able to mutate the
+    # live in-memory run state through the returned dict.
+    assert seeded["errored_details"] is not details
+
+
+def test_get_resume_seed_counters_defensive_against_malformed_values(monkeypatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(
+        run_state,
+        "active_runs",
+        {
+            "run-d": {
+                "run_id": "run-d",
+                "status": "failed",
+                "skipped_cycles": "not-a-number",
+                "errored_cycles": None,
+                "errored_details": "not-a-list",
+                "tracker_merge_error_count": -5,
+            }
+        },
+    )
+
+    seeded = run_state.get_resume_seed_counters("run-d")
+
+    assert seeded["skipped_cycles"] == 0
+    assert seeded["errored_cycles"] == 0
+    assert seeded["errored_details"] == []
+    assert seeded["tracker_merge_error_count"] == 0  # clamped, matches rehydrate's max(0, ...)
+
+
 def test_strategy_lab_run_failure_reports_only_hard_failure(monkeypatch) -> None:
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
