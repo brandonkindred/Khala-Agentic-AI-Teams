@@ -43,12 +43,20 @@ logger = logging.getLogger(__name__)
 # Bounded walk so a cyclic/adversarial cause chain can never loop forever.
 _MAX_CAUSE_DEPTH = 12
 
-# The message substring ``_await_client`` (``shared/temporal/runner.py``) raises
-# when no worker client became available within its wait window. This is the
-# only ``RuntimeError`` ``_run_via_temporal`` may reclassify as
+# RuntimeError message substrings that mean dispatch never actually started —
+# the only conditions ``_run_via_temporal`` may reclassify as
 # dispatch-unavailable; any other ``RuntimeError`` must propagate unchanged
 # rather than being silently downgraded into an in-process fallback.
-_CLIENT_UNAVAILABLE_MARKER = "Temporal client not available"
+#   - "Temporal client not available": ``_await_client``
+#     (``shared/temporal/runner.py``) raises this when no worker client became
+#     available within its wait window.
+#   - "Event loop is closed": the worker can exit and close its loop in the
+#     window between ``_await_client`` returning it and
+#     ``execute_code_review_workflow_sync`` scheduling the workflow coroutine
+#     onto it (``asyncio.run_coroutine_threadsafe`` raises this synchronously
+#     when the target loop is closed) — see ``shared/temporal/worker.py``'s
+#     shutdown handling of this same race.
+_CLIENT_UNAVAILABLE_MARKERS = ("Temporal client not available", "Event loop is closed")
 
 
 def _reports_review_unavailable(exc: BaseException, marker: str) -> bool:
@@ -231,9 +239,11 @@ class CodeReviewAgent:
         Raises:
             CodeReviewUnavailableError: the workflow reported it could not review
                 the submission (mapped from its ``ApplicationError`` marker).
-            _TemporalDispatchUnavailable: the worker/client never became available
-                (the caller falls back to in-process review). Raised only for that
-                specific condition — any other ``RuntimeError`` from the workflow
+            _TemporalDispatchUnavailable: dispatch never actually started — the
+                worker/client never became available, or the worker's loop closed
+                out from under the dispatch call (see ``_CLIENT_UNAVAILABLE_MARKERS``)
+                — and the caller falls back to in-process review. Raised only for
+                those conditions; any other ``RuntimeError`` from the workflow
                 dispatch path propagates unchanged instead of being misclassified.
             TimeoutError: this call's own wait for the workflow result exceeded
                 the configured ceiling (``CODE_REVIEW_EXECUTE_TIMEOUT_S``); the
@@ -261,13 +271,15 @@ class CodeReviewAgent:
                 execute_timeout_s=execute_timeout_s,
             )
         except RuntimeError as exc:
-            if _CLIENT_UNAVAILABLE_MARKER not in str(exc):
-                # Not the "no worker client" condition ``_await_client`` raises —
-                # an unexpected failure inside workflow dispatch must propagate
-                # unchanged rather than being misclassified as dispatch-unavailable
-                # and silently downgraded to the in-process fallback.
+            if not any(marker in str(exc) for marker in _CLIENT_UNAVAILABLE_MARKERS):
+                # Not a known "dispatch never started" condition — an unexpected
+                # failure inside workflow execution must propagate unchanged
+                # rather than being misclassified as dispatch-unavailable and
+                # silently downgraded to the in-process fallback.
                 raise
-            # ``_await_client`` raises this when no worker client is available.
+            # ``_await_client`` raises the "client not available" message when no
+            # worker client is available; the worker's own shutdown race can raise
+            # "Event loop is closed" instead (see ``_CLIENT_UNAVAILABLE_MARKERS``).
             raise _TemporalDispatchUnavailable(str(exc)) from exc
         except WorkflowFailureError as exc:
             # The unavailable marker may sit at the top of the cause chain (the
