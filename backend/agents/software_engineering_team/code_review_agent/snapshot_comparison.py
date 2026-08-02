@@ -296,7 +296,7 @@ class FindingDiff:
 
     def to_dict(self) -> dict:
         return {
-            "matched_count": len(self.matched),
+            "matched": [{"old": o.model_dump(), "new": n.model_dump()} for o, n in self.matched],
             "lost": [i.model_dump() for i in self.lost],
             "added": [i.model_dump() for i in self.added],
         }
@@ -498,7 +498,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "Compare the pre-consolidation two-call architecture/side-effect "
             "findings against the merged one-call pass, over a corpus of real "
-            "past PRs. See docs/snapshot-comparison-report.md."
+            "past submissions. See docs/snapshot-comparison-report.md."
         )
     )
     parser.add_argument(

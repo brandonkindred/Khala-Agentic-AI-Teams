@@ -76,14 +76,25 @@ search) instead of isolated snippets.
   not a statistically meaningful comparison; a real run should use `N ≥ 3`.
 - **What counts as a candidate regression:** a `lost` entry (old path found
   it, new path didn't) on any submission is the signal this whole exercise
-  exists to catch. An `added` entry (new path found it, old path didn't) is
-  **not automatically a regression** — the architecture-doc-optional
-  broadening landed in the *same* commit as the call-count merge, so new
-  architecture findings on the without-doc corpus entries are an **expected**
-  side effect of that (separately intentional) change, not evidence the
-  merge itself introduced false positives. Attribute `added` findings by
-  checking whether they are architecture-category findings on a
-  without-doc entry before treating them as a false-positive regression.
+  exists to catch, and an `added` entry (new path found it, old path didn't)
+  is a candidate new false positive — treat every entry in both lists as
+  worth reviewing. The old path's `find_architecture_and_redundancy_issues`
+  is the CURRENT standalone module, which already carries the
+  architecture-doc-optional broadening (it is not a pre-broadening
+  snapshot) — so that broadening is applied identically on both sides of
+  every comparison, old and new. It is therefore **not** a valid reason to
+  discount an `added` architecture finding on a without-doc entry: both
+  paths are equally free to produce doc-optional architecture findings, so
+  an asymmetry between them reflects the call-structure change (one call vs
+  two competing for shared attention/budget) — exactly the kind of
+  regression this harness exists to catch, not an artifact to filter out.
+  The with-doc/without-doc split still matters for a different reason: it
+  lets a reviewer see whether that doc-optional reasoning holds up
+  consistently under both call structures, not as a pre-filter on findings.
+  Every `matched` pair is also included in the report (not just a count) —
+  spot-check a sample of these too, since the similarity heuristic can
+  mismatch two genuinely different findings that merely share a category,
+  file, and enough wording overlap, silently hiding a real lost+added pair.
 
 ## How to run this for real
 
@@ -94,11 +105,19 @@ LLM provider list (`/llm-config`, see `docs/ENV_VARS.md`).
 
 ```bash
 cd backend
-python -m code_review_agent.snapshot_comparison \
+PYTHONPATH="$(pwd):$(pwd)/agents/software_engineering_team:$(pwd)/agents" \
+  .venv/bin/python -m code_review_agent.snapshot_comparison \
   --repo-root /path/to/a/full/clone/of/this/repo \
   --repeats 3 \
   --output snapshot_comparison_report.json
 ```
+
+`code_review_agent` is only importable as a bare top-level package with that
+exact `PYTHONPATH` (mirroring how `agents/software_engineering_team/conftest.py`
+sets up `sys.path` for pytest — this module is not part of that test session,
+so it needs the same three directories supplied explicitly; a bare
+`cd backend && python -m code_review_agent.snapshot_comparison` fails
+immediately with `ModuleNotFoundError: No module named 'code_review_agent'`).
 
 `--repo-root` must be a clone that has the six corpus commits reachable
 (a shallow clone may need `git fetch --deepen=<n>` or `--unshallow` first).
@@ -138,7 +157,11 @@ What remains before this validation can be marked complete:
    and must be individually assessed (is the old-path finding still valid?
    did the merged prompt genuinely drop it, or word it differently enough to
    evade the similarity match?).
-3. Review the `added` entries, filtering out expected without-doc
-   architecture findings per the Methodology section above; anything left is
-   a candidate new false positive.
-4. Record the outcome and a go/no-go recommendation in this section.
+3. Review every `added` entry — each is a candidate new false positive (see
+   the Methodology section above for why without-doc architecture findings
+   must not be discounted by default).
+4. Spot-check a sample of `matched` pairs for both categories to confirm the
+   similarity heuristic paired genuinely equivalent findings, not two
+   different findings that merely share a category/file and overlapping
+   wording.
+5. Record the outcome and a go/no-go recommendation in this section.
