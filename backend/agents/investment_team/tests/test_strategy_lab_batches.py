@@ -846,7 +846,7 @@ def test_restart_accepts_completed_with_errors(
     # Stub the Temporal dispatch so restart doesn't actually run the pipeline.
     started: List[str] = []
     monkeypatch.setattr(
-        lab_main, "_dispatch_strategy_lab_run", lambda rid, req: started.append(rid)
+        lab_main, "_dispatch_strategy_lab_run", lambda rid, req, **kw: started.append(rid)
     )
     monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
 

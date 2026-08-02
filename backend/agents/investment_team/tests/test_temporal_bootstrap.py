@@ -346,6 +346,42 @@ def test_strategy_lab_dispatch_returns_503_when_temporal_disabled(monkeypatch, a
     assert run_state["status"] == "failed"
 
 
+def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> None:
+    """A dispatch failure that never reaches _strategy_lab_worker (e.g. a
+    Temporal outage) must not leak its _active_runs entry forever — repeated
+    requests during an outage would otherwise grow it unboundedly until a
+    process restart. _fail_strategy_lab_run schedules the same delayed
+    cleanup the worker's own failure path uses."""
+    from investment_team.api import main as api_main
+
+    run_id = "run-cleanup-me"
+    monkeypatch.setattr(api_main, "_active_runs", {run_id: {"run_id": run_id, "status": "running"}})
+    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+
+    captured = {}
+
+    class _FakeTimer:
+        def __init__(self, delay, callback):
+            captured["delay"] = delay
+            captured["callback"] = callback
+            self.daemon = None
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+
+    api_main._fail_strategy_lab_run(run_id, "boom")
+
+    assert api_main._active_runs[run_id]["status"] == "failed"
+    assert captured["delay"] == 900.0
+    assert captured["started"] is True
+
+    # Firing the captured callback (simulating the timer elapsing) pops the entry.
+    captured["callback"]()
+    assert run_id not in api_main._active_runs
+
+
 def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -> None:
     from investment_team.api import main as api_main
     from investment_team.models import StrategySpec
@@ -467,6 +503,43 @@ def test_strategy_lab_dispatch_treats_already_started_workflow_as_success(
     assert resp.status_code == 200
     (run_state,) = api_main._active_runs.values()
     assert run_state["status"] == "running"
+
+
+def test_strategy_lab_restart_returns_409_on_workflow_already_started(
+    monkeypatch, api_client
+) -> None:
+    """Restart's collision differs from resume's: a WorkflowAlreadyStartedError
+    means an old, un-reset execution is still running (not that the intended
+    restart is already in flight), so it must 409 rather than silently
+    succeed (which would misreport a from-scratch restart) or mark the run
+    failed (which would abort a still-healthy old execution)."""
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    import shared.temporal
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
+
+    run_id = "run-restart-collide"
+    persisted = {
+        "run_id": run_id,
+        "status": "cancelled",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    monkeypatch.setattr(api_main, "_get_run_state", lambda rid: persisted)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    def _already_started(rid, request):
+        raise WorkflowAlreadyStartedError(
+            workflow_id=f"strategy-lab-{rid}", run_id="prior-run", workflow_type="X"
+        )
+
+    monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _already_started)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+
+    assert resp.status_code == 409
+    (run_state,) = api_main._active_runs.values()
+    assert run_state["status"] != "failed"
 
 
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
