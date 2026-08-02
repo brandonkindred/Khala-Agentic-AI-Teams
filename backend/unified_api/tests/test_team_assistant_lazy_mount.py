@@ -57,6 +57,34 @@ def test_assistant_health_reaches_mounted_subapp_not_proxy_catchall(monkeypatch:
     assert "blogging" in main._MOUNTED_ASSISTANTS
 
 
+def test_kill_switch_disabled_assistant_path_never_mounts_and_hits_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false, the real startup
+    registration step must register nothing, so a first request to
+    {prefix}/assistant/... never mounts an assistant sub-app and instead
+    reaches the team's proxy catch-all — end to end, through the real
+    _maybe_register_team_assistants and AssistantLazyMountMiddleware path,
+    not by clearing the registry directly (that's the unregistered-team
+    scenario covered separately, below)."""
+    monkeypatch.setenv("BLOGGING_SERVICE_URL", "http://fake-upstream.invalid")
+    monkeypatch.setattr(main, "UNIFIED_API_TEAM_ASSISTANTS_ENABLED", False)
+
+    async def fake_proxy_request(request, url, path, team_key, timeout):
+        return {"proxied": True, "team_key": team_key, "path": path}
+
+    monkeypatch.setattr("unified_api.team_proxy.proxy_request", fake_proxy_request)
+
+    main._maybe_register_team_assistants()
+    assert main._ASSISTANT_REGISTRY == {}, "kill-switch must leave the registry empty"
+    main._register_proxy_routes(main.app)
+
+    client = TestClient(main.app)
+    resp = client.get("/api/blogging/assistant/health")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"proxied": True, "team_key": "blogging", "path": "assistant/health"}
+    assert "blogging" not in main._MOUNTED_ASSISTANTS
+
+
 def test_unregistered_assistant_path_still_hits_proxy_catchall(monkeypatch: pytest.MonkeyPatch) -> None:
     """A path under a team with no registered assistant must still reach the
     proxy catch-all — the reorder fix must be scoped to the one mounted
