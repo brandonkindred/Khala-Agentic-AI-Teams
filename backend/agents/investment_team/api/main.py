@@ -3158,6 +3158,20 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           back in this case, see Postconditions).
         - ``HTTPException`` 503: Temporal is disabled/unavailable, or the
           prior execution couldn't be resolved due to a Temporal-side error.
+
+    Known, accepted residual races (each requires multiple unlikely events
+    to align; closing either is a real feature, not a quick patch — tracked
+    as follow-ups rather than fixed here):
+        - Two concurrent restart/resume calls for the *same* run_id both
+          pass ``_ensure_no_active_run()`` before either writes state (it's
+          check-then-release, not a reservation) — the second's termination
+          call can then target the *first's* freshly-started workflow
+          instead of the stale one it meant to clean up (tracked as #4028).
+        - Confirming the old *workflow* terminated does not guarantee an
+          already in-flight, non-heartbeating *activity* has stopped —
+          Strategy Lab's activities aren't cooperatively cancellable, so one
+          can still commit a cycle record or paper trade after the new
+          cycle-0 workflow has started (tracked as #4029).
     """
     state = _get_run_state(run_id)
     # "completed_with_errors" is a terminal outcome of the same workflow as
