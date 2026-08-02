@@ -365,6 +365,28 @@ while True:
     signal-capable (V2) before choosing a branch — attempting a signal
     against a workflow ID that doesn't define `submit_answers`, or that
     isn't the one actually running, silently fails to unblock it.
+  - **"V2 workflow" is not itself sufficient — the check must be per-phase,
+    not per-workflow-class.** `RunTeamWorkflowV2`'s Phase 1
+    (`parse_spec_activity`, `temporal/workflows.py:119-127`) runs the PRA
+    agent (`temporal/activities.py:448-469`), which pauses via its own
+    *third*, entirely separate poll loop —
+    `product_requirements_analysis_agent/user_communication.wait_for_answers`
+    (`user_communication.py:88-106`), gated purely on the job-store
+    `waiting_for_answers` flag and cleared by that same module
+    (`user_communication.py:65-82`) — never touched by this redesign, which
+    only restructures the coding-team-specific pauses inside
+    `run_pipeline_activity` / `execute_coding_team_activity`'s Phase 3. A
+    pause that occurs during a `RunTeamWorkflowV2` job's Phase 1 is
+    therefore still a PRA-phase pause with no `submit_answers` signal
+    wired for it at all; routing it to the signal-only branch just because
+    the workflow class is V2 would buffer a signal nobody reads while the
+    real PRA poll loop keeps blocking on a job-store flag this branch was
+    told not to clear. The route must instead check what's actually
+    persisted for *this* pause: only a pause carrying the new discriminated
+    envelope (`resume_token` / `pause_kind`, per §1 — i.e. one that went
+    through the redesigned Phase 3 activity) takes the signal-only branch;
+    a pause with no such envelope (PRA's Phase 1, or SE V1 entirely) takes
+    the store-and-clear branch regardless of the workflow's class.
 - `POST /run/{job_id}/resume`'s cross-worker lease mechanism
   (`resume_claim_at` / `resume_claim_seq` in `job_store.py`) becomes
   unnecessary for Temporal-mode jobs — Temporal itself durably tracks a
