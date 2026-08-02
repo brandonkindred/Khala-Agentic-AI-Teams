@@ -800,9 +800,10 @@ def test_finalize_cycle_record_activity_fails_closed_on_generation_lookup_failur
 def test_finalize_cycle_record_activity_tolerates_missing_run_id(monkeypatch):
     """Backward compat: a strategy_lab_finalize_cycle_record task Temporal already
     scheduled from a pre-upgrade workflow history (its recorded input predates
-    run_id/generation entirely) must still succeed on retry, not KeyError -- the
-    fencing check is skipped rather than enforced against a key that was never
-    part of that payload's contract."""
+    run_id/generation entirely) must still succeed on retry, not KeyError. When
+    even the activity-context run_id recovery fails (as here -- this test calls
+    the activity directly, outside any real Temporal execution, so
+    activity.info() raises) both fencing checks no-op rather than crash."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
@@ -833,6 +834,118 @@ def test_finalize_cycle_record_activity_tolerates_missing_run_id(monkeypatch):
         }
     )
     assert out["record"] == {"lab_record_id": "rec-legacy"}
+
+
+# ---------------------------------------------------------------------------
+# _infer_run_id_from_activity_context (#4029 review round 4)
+# ---------------------------------------------------------------------------
+
+
+def test_infer_run_id_from_activity_context_recovers_from_workflow_id(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        act.activity, "info", lambda: SimpleNamespace(workflow_id="strategy-lab-run-42")
+    )
+    assert act._infer_run_id_from_activity_context() == "run-42"
+
+
+def test_infer_run_id_from_activity_context_returns_none_outside_activity_execution(monkeypatch):
+    def _no_context():
+        raise RuntimeError("Not in activity context")
+
+    monkeypatch.setattr(act.activity, "info", _no_context)
+    assert act._infer_run_id_from_activity_context() is None
+
+
+def test_infer_run_id_from_activity_context_returns_none_for_mismatched_prefix(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        act.activity, "info", lambda: SimpleNamespace(workflow_id="some-other-workflow-id")
+    )
+    assert act._infer_run_id_from_activity_context() is None
+
+
+def test_finalize_cycle_record_activity_recovers_run_id_from_activity_context(monkeypatch):
+    """A pre-upgrade payload missing run_id must still be fenced when a real
+    Temporal execution context is available -- recovering run_id from
+    workflow_id rather than skipping the check outright."""
+    from types import SimpleNamespace
+
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(
+        act.activity, "info", lambda: SimpleNamespace(workflow_id="strategy-lab-run-legacy2")
+    )
+
+    seen_run_ids = []
+
+    def _get_generation(run_id):
+        seen_run_ids.append(run_id)
+        return 1  # matches params["generation"] below -- not stale
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _get_generation)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-legacy2"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    # No run_id in params -- must be recovered from the activity context above.
+    out = act.finalize_cycle_record_activity(
+        {"generation": 1, "record": {"lab_record_id": "raw-legacy2"}}
+    )
+    assert out["record"] == {"lab_record_id": "rec-legacy2"}
+    assert seen_run_ids == ["run-legacy2", "run-legacy2"]  # pre-check + post-check, both fenced
+
+
+def test_finalize_cycle_record_activity_post_check_lookup_failure_is_not_retryable(monkeypatch):
+    """Regression: unlike the pre-check, the post-check's OWN lookup failure must
+    NOT be retryable -- _finalize_strategy_lab_cycle_record already durably
+    committed by that point, so retrying the whole activity would re-execute
+    its non-idempotent side effects (a fresh paper-trading session) again."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    # First call (pre-check) succeeds; second call (post-check) fails.
+    call_count = {"n": 0}
+
+    def _get_generation(run_id):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return 2
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _get_generation)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-final"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.finalize_cycle_record_activity(
+            {"run_id": "run-final-6", "generation": 2, "record": {"lab_record_id": "raw-1"}}
+        )
+
+    assert exc_info.value.non_retryable is True
+    assert call_count["n"] == 2  # both checks ran; the write already happened by the second
 
 
 def test_merge_wave_results_activity_merges_in_cycle_index_order():

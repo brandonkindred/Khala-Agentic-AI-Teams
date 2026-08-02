@@ -53,19 +53,30 @@ cancellation would close both remaining gaps (the wasted compute AND
 execution outright once terminated) and is tracked as a separate,
 deliberately deferred optimization.
 
-Two more honest edges: the fencing checks read via ``run_state.
+More honest edges: the fencing checks read via ``run_state.
 get_run_generation_strict``, which fails CLOSED (raises, rejecting the
 write) on a transient durable-read failure rather than defaulting to the
 most permissive generation — a lenient default there would let a read
-failure mask a genuinely higher current generation — but that raised
-lookup failure is kept RETRYABLE (only an actual ``StaleFencingTokenError``
-is non-retryable), so a momentary job-service outage doesn't permanently
-fail the workflow. And a run created before generation fencing shipped has
-no persisted ``generation`` field at all; its first post-upgrade restart
-mints generation 2 rather than 1 (see ``restart_strategy_lab_run``), since
-1 is also what a caller that omits ``generation`` entirely (a pre-upgrade
+failure mask a genuinely higher current generation. That raised lookup
+failure is kept RETRYABLE for a check with nothing committed yet (only an
+actual ``StaleFencingTokenError`` is non-retryable there), so a momentary
+job-service outage doesn't permanently fail the workflow — EXCEPT
+``finalize_cycle_record_activity``'s post-check, whose own lookup failure is
+deliberately non-retryable: by that point the write already committed, so a
+retry would re-execute ``_finalize_strategy_lab_cycle_record``'s
+non-idempotent side effects (a fresh paper-trading session, orphaning the
+first) a second time rather than safely re-attempting nothing-yet-done work.
+
+A run created before generation fencing shipped has no persisted
+``generation`` field at all; its first post-upgrade restart mints
+generation 2 rather than 1 (see ``restart_strategy_lab_run``), since 1 is
+also what a caller that omits ``generation`` entirely (a pre-upgrade
 in-flight activity) is treated as presenting, and equal tokens are accepted
-by ``check_fencing_token``.
+by ``check_fencing_token``. And ``finalize_cycle_record_activity`` recovers
+a missing ``run_id`` from the activity's own Temporal ``workflow_id``
+(``_infer_run_id_from_activity_context``) rather than skipping fencing
+outright — a pre-upgrade in-flight activity's *payload* predates ``run_id``,
+but the workflow_id it's executing under does not.
 """
 
 from __future__ import annotations
@@ -108,6 +119,38 @@ def _map_exception_to_application_error(exc: Exception) -> ApplicationError:
     return ApplicationError(
         f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=True
     )
+
+
+def _infer_run_id_from_activity_context() -> Optional[str]:
+    """Best-effort fallback: recover run_id from the current activity's Temporal
+    workflow_id when a caller's payload predates the run_id field.
+
+    ``StrategyLabBatchWorkflow`` always dispatches under the deterministic
+    workflow id ``f"{WORKFLOW_ID_PREFIX}{run_id}"`` (``strategy_lab.temporal.
+    start_workflow.start_strategy_lab_batch_workflow``), so run_id is
+    recoverable from the activity execution context even for a
+    ``strategy_lab_finalize_cycle_record`` task Temporal scheduled before the
+    run_id parameter existed — its recorded input can't carry a key that
+    didn't exist yet, but the workflow_id it's running under is unaffected by
+    that and is available regardless.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns the recovered run_id, or ``None`` when there is no current
+        activity execution context (e.g. a direct, non-Temporal call — this
+        codebase's own test suite calls activities as plain Python functions)
+        or the workflow_id doesn't match the expected prefix. Never raises.
+    """
+    try:
+        workflow_id = activity.info().workflow_id
+    except Exception:
+        return None
+    from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
+
+    if workflow_id and workflow_id.startswith(WORKFLOW_ID_PREFIX):
+        return workflow_id[len(WORKFLOW_ID_PREFIX) :]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -668,48 +711,56 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         ``params`` carries ``record`` (a ``StrategyLabRecord`` JSON dump from the
         cycle workflow), and optionally ``run_id`` (the owning run),
         ``generation`` (the fencing generation the calling workflow incarnation
-        was dispatched with, default ``1``), ``signal_brief_storage`` (dict or
-        None), ``paper_trading_enabled`` (bool, default True), and
-        ``paper_trading_lookback_days`` (int, default 365). ``run_id`` is
-        optional — not merely defaulted — for compatibility with a
-        ``strategy_lab_finalize_cycle_record`` task Temporal already scheduled
-        from a pre-upgrade workflow history (its recorded input predates this
-        key entirely) that gets retried after a rolling deploy/worker restart;
-        such a payload skips both fencing checks below rather than raising.
+        was dispatched with, default ``1`` — the legacy generation, since that's
+        also the generation a pre-upgrade caller that never set this field is
+        treated as presenting), ``signal_brief_storage`` (dict or None),
+        ``paper_trading_enabled`` (bool, default True), and
+        ``paper_trading_lookback_days`` (int, default 365). When ``params``
+        lacks ``run_id`` — a ``strategy_lab_finalize_cycle_record`` task
+        Temporal already scheduled from a pre-upgrade workflow history, whose
+        recorded input predates this key entirely, retried after a rolling
+        deploy/worker restart — it is recovered from the current activity's
+        Temporal ``workflow_id`` (``"strategy-lab-{run_id}"``, always available
+        from the execution context regardless of what the scheduled payload
+        contains), so such a payload is still fenced rather than silently
+        skipped. Only when even that recovery fails (no activity context at
+        all, e.g. a direct non-Temporal call) do both fencing checks below
+        no-op.
     Postconditions:
-        When ``run_id`` is present, checks its fencing token BOTH before and
-        after ``_finalize_strategy_lab_cycle_record`` (market-data fetch +
+        Checks the fencing token BOTH before and after
+        ``_finalize_strategy_lab_cycle_record`` (market-data fetch +
         paper-trading execution + the durable record write — not a fast,
         adjacent operation like ``persist_run_state_activity``'s): raises a
         non-retryable ``ApplicationError`` when ``generation`` is stale at
         either check. The pre-check is a cheap early exit for an
         already-known-stale call; the post-check catches a restart that
-        mints a newer generation WHILE this activity was running. Neither
-        check is a true atomic conditional write against the record store —
-        see the module docstring's honest accounting of what's actually
-        closed here. Otherwise (including when ``run_id`` is absent — see
-        Preconditions) returns ``{"record": <finalized StrategyLabRecord JSON
+        mints a newer generation WHILE this activity was running — its own
+        lookup failure is deliberately NOT retryable (unlike the pre-check's),
+        since ``_finalize_strategy_lab_cycle_record`` already durably
+        committed by that point and retrying the whole activity would
+        re-execute its non-idempotent side effects (a fresh paper-trading
+        session, orphaning the first). Neither check is a true atomic
+        conditional write against the record store — see the module
+        docstring's honest accounting of what's actually closed here.
+        Otherwise returns ``{"record": <finalized StrategyLabRecord JSON
         dump>}`` — the same record with ``paper_trading_*`` resolved and
         durably persisted. Raises ``ApplicationError`` on any other unexpected
         exception from ``_finalize_strategy_lab_cycle_record`` itself
-        (paper-trading failures are already non-fatal inside the helper). Both
-        fencing reads fail CLOSED: a transient durable-read failure raises
-        (via ``get_run_generation_strict``) rather than silently defaulting to
-        the most permissive generation, but is kept RETRYABLE (only an actual
-        ``StaleFencingTokenError`` is non-retryable) so a momentary job-service
-        outage doesn't permanently fail the workflow.
+        (paper-trading failures are already non-fatal inside the helper).
     """
     from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.run_state import get_run_generation_strict
     from shared.fencing import check_fencing_token
 
-    def _check_generation(run_id: str) -> None:
+    def _check_generation(run_id: str, *, retry_on_lookup_failure: bool) -> None:
         try:
             current_generation = get_run_generation_strict(run_id)
         except Exception as exc:  # noqa: BLE001
             raise ApplicationError(
-                f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=False
+                f"{type(exc).__name__}: {exc}",
+                type=type(exc).__name__,
+                non_retryable=not retry_on_lookup_failure,
             ) from exc
         try:
             check_fencing_token(
@@ -722,9 +773,12 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             raise _map_exception_to_application_error(exc) from exc
 
     record = StrategyLabRecord.parse_persisted(params["record"])
-    run_id = params.get("run_id")
+    run_id = params.get("run_id") or _infer_run_id_from_activity_context()
     if run_id is not None:
-        _check_generation(run_id)  # cheap early exit for an already-stale call
+        # Cheap early exit for an already-known-stale call. Safe to retry the
+        # whole activity if THIS lookup itself transiently fails: nothing has
+        # been written yet.
+        _check_generation(run_id, retry_on_lookup_failure=True)
     try:
         finalized = _finalize_strategy_lab_cycle_record(
             record,
@@ -739,7 +793,10 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         # above was running (market data + paper trading can take a while) --
         # this can no longer prevent the write that already happened, but it
         # does stop the workflow from treating this cycle's result as trusted.
-        _check_generation(run_id)
+        # NOT retryable on a lookup failure here: the write already committed,
+        # so retrying the whole activity would re-run _finalize_strategy_lab_
+        # cycle_record's non-idempotent side effects a second time.
+        _check_generation(run_id, retry_on_lookup_failure=False)
     return {"record": finalized.model_dump(mode="json")}
 
 
