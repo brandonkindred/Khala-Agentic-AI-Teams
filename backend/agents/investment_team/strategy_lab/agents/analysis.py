@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from pathlib import Path
 from typing import Any, List, Optional
@@ -44,6 +45,24 @@ _ANALYSIS_SYSTEM_PROMPT = (
     + "\n\n"
     + _STOP_ORDER_SEMANTICS
 )
+
+
+@functools.lru_cache(maxsize=None)
+def _get_analysis_review_system_prompt() -> str:
+    """Build and cache the self-review system prompt (body + stop-order block).
+
+    Preconditions: ``analysis_review_system.md`` exists and is readable UTF-8
+    text when first invoked.
+    Postconditions: returns a non-empty ``str`` containing the review body and
+    the stop-order semantics text, separated by a blank line; subsequent calls
+    return the same cached composed prompt without re-reading the file.
+    Invariants: module import does not invoke this helper.
+    """
+    body = (_PROMPT_DIR / "analysis_review_system.md").read_text(encoding="utf-8")
+    if not body:
+        raise ValueError("analysis_review_system.md must be non-empty")
+    return body + "\n\n" + _STOP_ORDER_SEMANTICS
+
 
 # The self-review risk-model check (instruction "1a"). Kept as its own
 # implicitly-concatenated constant — rather than one ~1k-char line inside the
@@ -233,15 +252,7 @@ class AnalysisAgent:
             draft_narrative=draft_narrative,
         )
 
-        review_system = (
-            "You are a critical peer reviewer for quantitative research, with a quant's rigor and a veteran trader's instinct. "
-            "You ensure narrative analysis is faithful to strategy specs, backtest aggregates, and simulated trade facts. "
-            "You enforce the correct risk model: the deployed position size (e.g. 'risk 5% per trade') IS the per-trade capital at risk and loss cap, while stop-loss, trailing stops, and take-profit are separate within-position safeguards analyzed as a distinct dimension. "
-            "Reject any claim that derives per-trade risk by multiplying the stop into sizing (deployed-fraction times stop), calls such a stop-multiplied figure the 'capital at risk' / 'capital in play', or blames low/negative returns on 'low effective risk'. "
-            "Stating that the deployed size IS the capital at risk — including that a genuinely small deployment is small capital at risk — is accurate and must be preserved. "
-            "You correct any contradiction or overclaim before signing off."
-            "\n\n" + _STOP_ORDER_SEMANTICS
-        )
+        review_system = _get_analysis_review_system_prompt()
 
         def _on_review_failure(exc: Exception) -> None:
             logger.exception("Self-review failed, using draft")
