@@ -49,8 +49,14 @@ def start_run_team_workflow(
     spec_content_override: Optional[str] = None,
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
+    sprint_id: Optional[str] = None,
 ) -> None:
-    """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id."""
+    """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id.
+
+    ``sprint_id`` is forwarded only on the V1 path (``RunTeamWorkflow``), which
+    accepts it as a trailing positional arg; ``RunTeamWorkflowV2`` does not yet
+    support sprint-scoped runs, so it is omitted from the V2 args entirely.
+    """
     import os
 
     workflow_id = f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"
@@ -61,16 +67,20 @@ def start_run_team_workflow(
     use_v2 = os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
     workflow_cls = RunTeamWorkflowV2 if use_v2 else RunTeamWorkflow
 
+    args: List[Any] = [
+        job_id,
+        repo_path,
+        spec_content_override,
+        resolved_questions_override,
+        planning_only,
+    ]
+    if not use_v2:
+        args.append(sprint_id)
+
     _run_async(
         client.start_workflow(
             workflow_cls.run,
-            args=[
-                job_id,
-                repo_path,
-                spec_content_override,
-                resolved_questions_override,
-                planning_only,
-            ],
+            args=args,
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )
