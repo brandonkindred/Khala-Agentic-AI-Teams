@@ -693,34 +693,45 @@ calls are also `reviewer.run()` calls, so this knob's enforcement contract
 covers them too, but the two dispatch modes differ in *how* it is enforced:
 
 - **Thread-mode fallback** (in-process `run_coordinator`): a single
-  `threading.Semaphore`, sized to this knob's effective value (the `min(...)`
-  above) and created once per review run, is threaded through the whole map
-  phase — `_map_chunks` → `_cached_review_chunk` →
-  `_review_chunk_with_recovery` — and acquired around every actual
+  `threading.Semaphore`, sized to `_map_parallelism()` (`min(CODE_REVIEW_MAP_PARALLELISM,
+  LLM_MAX_CONCURRENCY)`, floored at 1) and created once per review run, is
+  threaded through the whole map phase — `_map_chunks` → `_cached_review_chunk`
+  → `_review_chunk_with_recovery` — and acquired around every actual
   `reviewer.run()` call: the top-level chunk review, any same-input retry, the
-  thinking-off retry, and both bisection halves. This makes
-  `CODE_REVIEW_MAP_PARALLELISM` a true **run-wide** ceiling: the total number
-  of concurrent chunk-review LLM calls for one run — top-level fan-out plus
-  every bisection recursion combined, at any depth — never exceeds it, even
-  when several top-level chunks bisect at the same time (previously, each
-  bisecting worker added its own independent 2-worker pool on top of whatever
-  else was in flight, so two simultaneously-bisecting top-level chunks could
-  issue four concurrent recovery calls even with this knob set to `2`).
-- **Temporal mode**: each chunk (and, recursively, each bisection half) is
-  reviewed by its own independent `review_chunk_activity` invocation with no
-  in-process object shared across activities, so a Python-level semaphore
-  cannot reach across them and this knob does **not** bound bisection
-  concurrency there. Temporal-mode bisection concurrency is bounded only by
-  the process-wide `LLM_MAX_CONCURRENCY` semaphore (every provider client call
-  still acquires it) and by the Temporal worker's own activity-slot ceiling
-  (`CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`, below) — not by the finer
-  per-review `CODE_REVIEW_MAP_PARALLELISM` budget. This is an accepted,
-  documented gap rather than a bug: it only matters for an operator who sets
-  this knob *below* `LLM_MAX_CONCURRENCY` specifically for a stricter
-  per-review budget (cost control, or a provider tier that throttles below the
-  global default), and even then concurrent bisections can only transiently
-  exceed the ceiling they configured, never cause literal overload beyond the
-  still-enforced global limit.
+  thinking-off retry, and both bisection halves. Unlike the outer map-phase fan-out
+  width, this size is **not** further clamped to `chunk_count`: a review with a
+  single top-level chunk that bisects can still issue up to `_map_parallelism()`
+  concurrent `reviewer.run()` calls (e.g. both halves at once), not artificially
+  limited to 1. This makes `CODE_REVIEW_MAP_PARALLELISM` a true **run-wide**
+  ceiling: the total number of concurrent chunk-review LLM calls for one run —
+  top-level fan-out plus every bisection recursion combined, at any depth —
+  never exceeds it, even when several top-level chunks bisect at the same time
+  (previously, each bisecting worker added its own independent 2-worker pool on
+  top of whatever else was in flight, so two simultaneously-bisecting top-level
+  chunks could issue four concurrent recovery calls even with this knob set to
+  `2`).
+- **Temporal mode**: only the top-level chunk fan-out is split across
+  independent activities — `temporal/workflows.py` schedules one
+  `review_chunk_activity` per prepared chunk. A chunk's bisection recursion is
+  **not** its own activity: `review_chunk_activity` calls
+  `mapping._cached_review_chunk` once (`temporal/activities.py`), and any
+  bisection halves it triggers run as nested, in-process calls inside that
+  same activity, exactly like the thread-mode recursion but with no run-scoped
+  semaphore threaded in (an activity has no reference to another activity's
+  in-process objects, so `run_coordinator`'s semaphore can't reach across
+  them, and no per-activity equivalent is constructed either). Concurrency
+  within one activity's bisection is therefore bounded only by the fixed
+  2-worker pool per split point and the process-wide `LLM_MAX_CONCURRENCY`
+  semaphore (every provider client call still acquires it) — **not** by the
+  Temporal worker's activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`
+  (below), which bounds how many *top-level* chunk activities run concurrently,
+  not the nested bisection calls inside any single one of them. This is an
+  accepted, documented gap rather than a bug: it only matters for an operator
+  who sets `CODE_REVIEW_MAP_PARALLELISM` *below* `LLM_MAX_CONCURRENCY`
+  specifically for a stricter per-review budget (cost control, or a provider
+  tier that throttles below the global default), and even then concurrent
+  bisections can only transiently exceed the ceiling they configured, never
+  cause literal overload beyond the still-enforced global limit.
 
 ### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
 Int (default `3600`, floor `1`). Per-group timeout for the false-positive
