@@ -35,7 +35,7 @@ from code_review_agent.coordinator import (
     run_coordinator,
     split_block_into_segments,
 )
-from code_review_agent.mapping import _bisect_halves_run_sequentially
+from code_review_agent.mapping import _bisect_halves_run_sequentially, _run_reviewer_call
 from code_review_agent.models import (
     ChunkReviewOutput,
     CodeReviewInput,
@@ -1204,6 +1204,48 @@ class _HalfTimingDummyDelegate:
         return self._inner.complete_json(prompt, **kwargs)
 
 
+class _MultiFileFirstCallFailsDelegate:
+    """Inner delegate for a non-``DummyLLMClient`` stand-in (see
+    ``_NonDummyLLMClient``): the FIRST chunk-review call naming a given
+    top-level file path fails (forcing that chunk to bisect); every later
+    call naming that path succeeds but blocks on ``release`` while tracking
+    how many chunk-review calls are simultaneously in flight, so a test can
+    observe the true PEAK concurrency across several top-level chunks that
+    bisect at the same time -- not just within one chunk's own bisection.
+    Every other prompt (the tail passes) is delegated to a real
+    ``DummyLLMClient``.
+    """
+
+    def __init__(self, paths: list[str], release: threading.Event) -> None:
+        self._inner = DummyLLMClient()
+        self._paths = paths
+        self._release = release
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+        self.current = 0
+        self.peak = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        path = next((p for p in self._paths if f"### {p} ###" in prompt), None)
+        if is_chunk_review and path is not None:
+            with self._lock:
+                first = path not in self._seen
+                self._seen.add(path)
+            if first:
+                raise _bisecting_failure("no content")  # force this chunk to bisect
+            with self._lock:
+                self.current += 1
+                self.peak = max(self.peak, self.current)
+            self._release.wait(timeout=5)
+            with self._lock:
+                self.current -= 1
+        return self._inner.complete_json(prompt, **kwargs)
+
+
 class _TimedDummyHalfClient(DummyLLMClient):
     """``DummyLLMClient`` subclass with the same combined-fails/per-half-timing
     behavior as ``_HalfTimingDummyDelegate``, but reached as a bare
@@ -1336,6 +1378,46 @@ def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> Non
 
     assert _bisect_halves_run_sequentially(_Wrapper(DummyLLMClient())) is True
     assert _bisect_halves_run_sequentially(_Wrapper(MagicMock())) is False
+
+
+def test_run_reviewer_call_acquires_and_always_releases_the_run_limiter() -> None:
+    """``_run_reviewer_call`` is the single choke point every actual chunk
+    review passes through: it must acquire the given semaphore before calling
+    ``reviewer.run`` and release it afterward on both success and failure, so
+    a permit is never leaked and the next caller (a sibling top-level chunk or
+    a bisection half) can always proceed once this call finishes."""
+
+    class _Stub:
+        def run(self, chunk_input: Any, **kwargs: Any) -> Any:
+            return ("ok", kwargs)
+
+    limiter = threading.Semaphore(1)
+    assert _run_reviewer_call(_Stub(), object(), limiter) == ("ok", {})
+    # Released after success: the sole permit is available again.
+    assert limiter.acquire(blocking=False) is True
+    limiter.release()
+
+    class _Raises:
+        def run(self, chunk_input: Any, **kwargs: Any) -> Any:
+            raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        _run_reviewer_call(_Raises(), object(), limiter)
+    # Released after a failure too -- never leaked on the exception path.
+    assert limiter.acquire(blocking=False) is True
+    limiter.release()
+
+
+def test_run_reviewer_call_with_no_limiter_is_a_passthrough() -> None:
+    """``run_limiter=None`` (a direct caller, a test double, or the Temporal
+    per-activity call path -- none of which share a limiter object) skips the
+    semaphore entirely and just forwards to ``reviewer.run``."""
+
+    class _Stub:
+        def run(self, chunk_input: Any, **kwargs: Any) -> Any:
+            return kwargs
+
+    assert _run_reviewer_call(_Stub(), object(), None, think=False) == {"think": False}
 
 
 def test_bisected_halves_reviewed_concurrently_for_non_dummy_client() -> None:
@@ -2378,6 +2460,54 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
     client = _ConcurrencyProbe()
     run_coordinator(client, CodeReviewInput(files=files, task_description="t", language="python"))
     assert 2 <= state["peak"] <= 3
+
+
+def test_run_wide_limiter_caps_concurrent_bisection_across_top_level_chunks(monkeypatch) -> None:
+    """Two top-level chunks that bisect AT THE SAME TIME must not push the
+    total number of concurrent ``reviewer.run()`` calls above
+    CODE_REVIEW_MAP_PARALLELISM: each top-level worker's bisection halves
+    share one review-run-scoped limiter with the outer fan-out and with every
+    other chunk's bisection, rather than each spinning up its own independent
+    2-worker budget on top of whatever else is in flight. With 2 top-level
+    chunks (workers=2) each bisecting into 2 concurrent halves, an unbounded
+    (pre-fix) run could reach 4 concurrent chunk-review calls even though the
+    ceiling here is 2.
+    """
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "2")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "10")  # not the binding constraint here
+
+    budget = compute_code_review_map_chunk_chars(DummyLLMClient())
+    # Each file sized into the bisect window but comfortably more than half the
+    # map-chunk budget, so the two files never pack into one top-level chunk
+    # (build_review_chunks flushes a new chunk once the running total would
+    # exceed the cap) -- two independent, simultaneously-bisecting chunks.
+    content_a = _failme_content_in_bisect_window(budget)
+    content_b = _failme_content_in_bisect_window(budget)
+
+    release = threading.Event()
+    delegate = _MultiFileFirstCallFailsDelegate(["big_a.py", "big_b.py"], release)
+    stand_in = _NonDummyLLMClient(delegate)
+
+    def _release_soon() -> None:
+        time.sleep(0.3)
+        release.set()
+
+    threading.Thread(target=_release_soon, daemon=True).start()
+    try:
+        result = run_coordinator(
+            stand_in,
+            CodeReviewInput(
+                files={"big_a.py": content_a, "big_b.py": content_b},
+                task_description="t",
+                language="python",
+            ),
+        )
+    finally:
+        release.set()
+
+    assert result.approved is True
+    assert delegate.peak <= 2, "run-wide limiter must cap concurrent bisection calls at the ceiling"
+    assert delegate.peak >= 1  # sanity: the concurrent path (not the sequential fallback) ran
 
 
 def test_headerless_code_reviews_as_single_unnamed_block() -> None:

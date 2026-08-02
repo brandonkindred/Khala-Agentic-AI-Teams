@@ -627,6 +627,18 @@ def run_coordinator(
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
+        - The total number of concurrent chunk-review ``reviewer.run()`` calls
+          for this run — top-level chunks and every concurrently in-flight
+          bisection-recovery half combined — never exceeds ``_map_parallelism()``:
+          a semaphore sized to that budget is created once here and threaded
+          through the map phase (see ``_map_chunks``'s ``run_limiter``), so
+          ``CODE_REVIEW_MAP_PARALLELISM`` is a true run-wide ceiling in thread
+          mode, not just a bound on the outer per-chunk fan-out width. Temporal
+          mode reviews each chunk via an independent, stateless
+          ``review_chunk_activity`` invocation with no such object shared across
+          activities, so this ceiling does not apply there — see
+          ``docs/ENV_VARS.md``'s ``CODE_REVIEW_MAP_PARALLELISM`` entry for its
+          Temporal-mode bound.
 
     Raises:
         CodeReviewUnavailableError: when the review model is unavailable
@@ -753,8 +765,30 @@ def run_coordinator(
 
     chunk_reviewer = ChunkReviewAgent(llm)
     outcome = _ChunkOutcome()
+    # Review-run-scoped concurrency ceiling: one semaphore, created once for this
+    # call and shared by every chunk, sized to this run's ``_map_parallelism()``
+    # budget. Threaded through ``_map_chunks`` -> ``_cached_review_chunk`` ->
+    # ``_review_chunk_with_recovery`` down to every actual ``reviewer.run()``
+    # call, so it caps the TOTAL number of concurrent chunk-review LLM calls for
+    # this run -- the top-level per-chunk fan-out *and* every concurrently
+    # in-flight bisection-recovery half together -- rather than only the outer
+    # map-phase fan-out width. Without this, each top-level worker that bisects
+    # would add its own independent 2-worker pool on top of whatever else is
+    # already running, letting the true concurrency exceed the configured
+    # ceiling when multiple chunks bisect at the same time (see
+    # ``_review_chunk_with_recovery``'s bisection branch). Thread-mode only: see
+    # ``docs/ENV_VARS.md``'s ``CODE_REVIEW_MAP_PARALLELISM`` entry for why
+    # Temporal mode cannot share this object across per-chunk activities and is
+    # bounded differently instead.
+    run_limiter = threading.Semaphore(_map_parallelism())
     for per_chunk in _map_chunks(
-        chunk_reviewer, chunks, base_input, context_fp, surface_by_path, progress_callback
+        chunk_reviewer,
+        chunks,
+        base_input,
+        context_fp,
+        surface_by_path,
+        progress_callback,
+        run_limiter=run_limiter,
     ):
         outcome.absorb(per_chunk)
 
