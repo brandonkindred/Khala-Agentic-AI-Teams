@@ -85,7 +85,6 @@ strategy unchanged, `on_pause` included.
                                        # since neither this shape nor hitl.answers_to_resolved()'s
                                        # output otherwise identifies which task asked it) so a
                                        # batched multi-worker pause can be partitioned back out
-    "task_graph_snapshot": {...},     # already persisted; included for the caller's convenience
 }
 
 # Finished normally:
@@ -99,6 +98,19 @@ strategy unchanged, `on_pause` included.
 `waiting_for_answers=True` and `pending_questions` to the job record (as it
 does today) before returning `"paused"` — the activity's return value is a
 notification to the workflow, not the source of truth for pause state.
+
+`task_graph_snapshot` is deliberately **not** part of this result, despite
+being "already persisted" and seemingly free to include: the workflow loop
+in §2 never reads it (it only consumes `resume_token` / `pending_questions` /
+`pause_kind` / `pause_context`), and on resume the orchestrator reloads it
+independently via `graph.restore()` (§3) rather than expecting it back from
+the workflow — so it has no consumer on either side of this boundary. For a
+job with a large task graph or substantial `revision_feedback`, including it
+anyway risks exceeding Temporal's configured activity-result payload limit;
+that would fail the *completion* of the very activity call that is supposed
+to report the pause, and a retry would hit the same oversized payload again,
+so the workflow could never observe `"paused"` at all. Return only the pause
+metadata the workflow actually needs.
 
 **Idempotency across activity retries:** Temporal can retry
 `run_pipeline_activity` (worker crash, timeout, etc.) after the pause has
@@ -281,8 +293,22 @@ The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
 
   `self._submitted_answers` is the *only* state the wait condition gates on.
   Once the workflow observes "paused" and learns `resume_token`, it looks up
-  (and evicts) that key in `self._buffered_signals`; any other still-buffered
-  tokens are left alone for their own eventual pause to claim.
+  (and evicts) that key in `self._buffered_signals`; **every other entry is
+  discarded too, not left alone.** This workflow's main loop (below) only
+  ever has one pause round in flight at a time — the moment a new
+  `resume_token` activates, every other key still sitting in
+  `self._buffered_signals` belongs either to a pause that already resolved
+  (its own activation already evicted its entry) or to a `resume_token` that
+  will *never* activate (a stale/duplicate retry's payload, buffered during
+  the narrow window where `self._active_resume_token` was `None` between two
+  pause rounds — see rule 1 above). Since `resume_token` is minted fresh per
+  pause round and never reused, such an entry can provably never be claimed
+  by any future pause; leaving it in the dict rather than dropping it here
+  would let repeated stale retries across a long-running job's many pause
+  rounds accumulate unboundedly in durable workflow state. Evicting
+  everything but the newly-activated key on each activation bounds
+  `self._buffered_signals` to at most one stale entry per pause round instead
+  of growing without limit.
 - `@workflow.query pending_questions() -> list` / `status() -> dict` — for
   polling clients, mirroring `CodeReviewWorkflow.progress()`. `status()`
   derives `waiting_for_answers` as
@@ -307,6 +333,21 @@ while True:
     self._pending_questions = result["pending_questions"]
     self._check_buffered_signal_for(self._active_resume_token)  # apply a signal that beat us here
     await workflow.wait_condition(lambda: self._submitted_answers is not None)
+    # A gate on submitted answers alone silently strands the workflow if the
+    # job is cancelled while paused: SE's cancel route marks the job record
+    # cancelled unconditionally, then makes a BEST-EFFORT attempt at native
+    # Temporal cancellation (`cancel_run_team_workflow`, api/routes/jobs.py's
+    # /run-team/{job_id}/cancel) whose failure is explicitly swallowed
+    # (`except Exception: logger.debug(...)`) -- so a transient RPC error
+    # leaves the job record terminal while this workflow, having received no
+    # cancellation, sits in wait_condition forever with no submitted_answers
+    # ever coming. Today's hitl.wait_for_answers poll loop can't strand this
+    # way: it independently re-checks the job record's terminal status on
+    # every 5s tick regardless of what happened at the Temporal RPC layer.
+    # The native design needs an equivalent reconciliation path -- e.g. a
+    # bounded wait_condition timeout after which an activity re-reads the job
+    # record and the loop exits on a terminal status it finds there, closing
+    # the gap left by a best-effort cancel that never reached the workflow.
 
     # hitl.answers_to_resolved(submitted_answers, pending_questions) needs BOTH
     # args -- it recovers question_text/answer labels from pending_questions;
