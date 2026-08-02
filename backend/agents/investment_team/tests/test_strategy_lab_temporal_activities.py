@@ -169,6 +169,9 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
 
 def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
 
     captured = {}
     monkeypatch.setattr(
@@ -191,7 +194,7 @@ def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
 def test_persist_run_state_activity_rejects_stale_generation(monkeypatch):
     from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
 
     persisted = []
     from investment_team.api import main as api_main
@@ -211,7 +214,7 @@ def test_persist_run_state_activity_rejects_stale_generation(monkeypatch):
 def test_persist_run_state_activity_accepts_current_or_newer_generation(monkeypatch):
     from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
 
     captured = {}
     from investment_team.api import main as api_main
@@ -238,7 +241,7 @@ def test_persist_run_state_activity_default_generation_backward_compat(monkeypat
     accepted against a fresh run's persisted generation of 1."""
     from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 1)
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
 
     captured = {}
     from investment_team.api import main as api_main
@@ -251,6 +254,30 @@ def test_persist_run_state_activity_default_generation_backward_compat(monkeypat
 
     act.persist_run_state_activity("run-1", {"status": "running"})
     assert captured["state"] == {"status": "running"}
+
+
+def test_persist_run_state_activity_fails_closed_on_generation_lookup_failure(monkeypatch):
+    """Regression: a transient durable-read failure inside the fencing check must
+    raise (rejecting the write), not silently accept it via a lenient default."""
+    from investment_team.strategy_lab import run_state
+
+    def _broken(run_id):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _broken)
+
+    persisted = []
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.persist_run_state_activity("run-1", {"status": "running"}, generation=5)
+
+    assert exc_info.value.non_retryable is True
+    assert persisted == []  # the write never happened despite a legitimately fresh generation
 
 
 def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
@@ -606,6 +633,9 @@ def test_is_run_cancelled_activity_delegates(monkeypatch):
 
 def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
 
     class _FakeRecord:
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
@@ -645,7 +675,7 @@ def test_finalize_cycle_record_activity_rejects_stale_generation(monkeypatch):
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
 
     finalize_calls = []
     monkeypatch.setattr(
@@ -672,7 +702,7 @@ def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
 
     class _FakeRecord:
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
@@ -692,6 +722,38 @@ def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):
     assert out["record"] == {"lab_record_id": "rec-final"}
 
 
+def test_finalize_cycle_record_activity_fails_closed_on_generation_lookup_failure(monkeypatch):
+    """Regression: a transient durable-read failure inside the fencing check must
+    raise (rejecting the finalize/persist), not silently accept it via a lenient
+    default -- otherwise an outage could mask a genuinely superseded generation."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    def _broken(run_id):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _broken)
+
+    finalize_calls = []
+    monkeypatch.setattr(
+        api_main,
+        "_finalize_strategy_lab_cycle_record",
+        lambda *a, **k: finalize_calls.append((a, k)),
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.finalize_cycle_record_activity(
+            {"run_id": "run-final-4", "generation": 5, "record": {"lab_record_id": "raw-1"}}
+        )
+
+    assert exc_info.value.non_retryable is True
+    assert finalize_calls == []
+
+
 def test_finalize_cycle_record_activity_tolerates_missing_run_id(monkeypatch):
     """Backward compat: a strategy_lab_finalize_cycle_record task Temporal already
     scheduled from a pre-upgrade workflow history (its recorded input predates
@@ -702,9 +764,9 @@ def test_finalize_cycle_record_activity_tolerates_missing_run_id(monkeypatch):
     from investment_team.strategy_lab import run_state
 
     def _fail_if_called(run_id):
-        raise AssertionError("get_run_generation must not be called when run_id is absent")
+        raise AssertionError("get_run_generation_strict must not be called when run_id is absent")
 
-    monkeypatch.setattr(run_state, "get_run_generation", _fail_if_called)
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _fail_if_called)
 
     class _FakeRecord:
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:

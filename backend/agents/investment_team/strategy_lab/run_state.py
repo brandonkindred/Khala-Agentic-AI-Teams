@@ -89,16 +89,56 @@ def get_run_generation(run_id: str) -> int:
     would silently defeat the whole check in any deployment where the API
     server and the worker aren't the same process.
 
+    Lenient by design: a durable-read failure here degrades to the same
+    default as a genuinely fresh/unknown run, which is the correct tradeoff
+    for this function's caller (``build_strategy_lab_batch_input``, a
+    best-effort dispatch-time read). The fencing checks themselves must NOT
+    be this lenient — see ``get_run_generation_strict``.
+
     Preconditions:
         - ``run_id`` names a strategy-lab run (may not exist).
 
     Postconditions:
         - Returns the run's durably persisted ``generation`` field, or ``1``
-          for a fresh/unknown run or a missing/malformed value. Never raises.
+          for a fresh/unknown run, a missing/malformed value, or a durable
+          read failure. Never raises.
     """
     state = load_run_from_job_service(run_id) or {}
     try:
         return max(1, int(state.get("generation", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def get_run_generation_strict(run_id: str) -> int:
+    """Return run_id's current fencing generation, propagating durable-read failures.
+
+    Strict counterpart to ``get_run_generation``, used ONLY by the fencing
+    checks in ``persist_run_state_activity``/``finalize_cycle_record_activity``:
+    those checks must fail CLOSED (reject the write, by letting a read
+    failure surface as an error instead of a value) rather than fail OPEN —
+    ``get_run_generation``'s lenient "default to 1 on any read failure"
+    behavior, used for its other caller, would otherwise let a transient
+    durable-read failure mask a genuinely higher current generation and
+    accept a write that should have been fenced out.
+
+    Preconditions:
+        - ``run_id`` names a strategy-lab run (may not exist).
+
+    Postconditions:
+        - Returns the run's durably persisted ``generation`` field, or ``1``
+          for a run with no ``generation`` field yet (a fresh/never-restarted
+          run — not a read failure) or a run that does not exist. Raises
+          whatever the underlying job-service client raises on a transport
+          failure — callers must let this propagate, not swallow it.
+    """
+    client = get_lab_run_job_client()
+    job = client.get_job(run_id)
+    if not job:
+        return 1
+    data = job.get("data", job)
+    try:
+        return max(1, int(data.get("generation", 1) or 1))
     except (TypeError, ValueError):
         return 1
 
@@ -229,6 +269,7 @@ __all__ = [
     "active_runs",
     "acquire_run_transition_lock",
     "get_run_generation",
+    "get_run_generation_strict",
     "get_lab_run_job_client",
     "load_run_from_job_service",
     "get_run_state",

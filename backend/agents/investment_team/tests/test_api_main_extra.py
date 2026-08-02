@@ -1071,6 +1071,64 @@ def test_get_run_generation_malformed_or_nonpositive_value_defaults_to_one(
     assert run_state.get_run_generation("run-bad") == 1
 
 
+# ---------------------------------------------------------------------------
+# get_run_generation_strict (#4029 review: fail closed on a durable-read failure)
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_generation_strict_returns_one_for_unknown_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NotFound:
+        def get_job(self, jid):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NotFound())
+    assert run_state.get_run_generation_strict("run-unknown") == 1
+
+
+def test_get_run_generation_strict_reads_persisted_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": 4}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-g4") == 4
+
+
+def test_get_run_generation_strict_defaults_to_one_when_field_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NoGenerationField:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running"}  # no "generation" key at all
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NoGenerationField())
+    assert run_state.get_run_generation_strict("run-legacy") == 1
+
+
+def test_get_run_generation_strict_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: unlike get_run_generation, a transient durable-read failure must
+    NOT silently default to generation 1 -- that would let a stale write past the
+    fencing check during exactly the kind of outage fencing needs to guard against.
+    The failure must propagate so the caller (the fencing check) rejects the write."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, jid):
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(ConnectionError):
+        run_state.get_run_generation_strict("run-x")
+
+
 def test_build_run_state_generation_defaults_to_one() -> None:
     from investment_team.api import main as api_main
 

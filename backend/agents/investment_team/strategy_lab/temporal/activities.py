@@ -36,6 +36,17 @@ exactly between them is (rarely) still possible. It also only fences the
 still run to completion (burning time/cost) before its write is rejected;
 cooperative cancellation would close that remaining gap and is tracked as a
 separate, deliberately deferred optimization.
+
+Two more honest edges: the fencing checks read via ``run_state.
+get_run_generation_strict``, which fails CLOSED (raises, rejecting the
+write) on a transient durable-read failure rather than defaulting to the
+most permissive generation — a lenient default there would let a read
+failure mask a genuinely higher current generation. And a run created
+before generation fencing shipped has no persisted ``generation`` field at
+all; its first post-upgrade restart mints generation 2 rather than 1 (see
+``restart_strategy_lab_run``), since 1 is also what a caller that omits
+``generation`` entirely (a pre-upgrade in-flight activity) is treated as
+presenting, and equal tokens are accepted by ``check_fencing_token``.
 """
 
 from __future__ import annotations
@@ -190,10 +201,14 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
         racing exactly between them is (rarely) still possible. This closes
         the realistic window — the prior workflow is already confirmed
         terminated before a restart mints its new generation — not a
-        mathematically perfect one.
+        mathematically perfect one. The fencing read itself fails CLOSED:
+        a transient durable-read failure raises (via ``get_run_generation_strict``)
+        rather than silently defaulting to the most permissive generation,
+        which could otherwise mask a genuinely higher current generation and
+        let a stale write land.
     """
     from investment_team.api.main import _persist_run_state
-    from investment_team.strategy_lab.run_state import get_run_generation
+    from investment_team.strategy_lab.run_state import get_run_generation_strict
     from shared.fencing import check_fencing_token
 
     try:
@@ -201,7 +216,7 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
             agent_id=run_id,
             resource="strategy_lab_run",
             provided_token=generation,
-            current_token=get_run_generation(run_id),
+            current_token=get_run_generation_strict(run_id),
         )
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
@@ -643,11 +658,13 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         dump>}`` — the same record with ``paper_trading_*`` resolved and
         durably persisted. Raises ``ApplicationError`` on any other unexpected
         exception (paper-trading failures are already non-fatal inside the
-        helper).
+        helper). The fencing read itself fails CLOSED: a transient durable-read
+        failure raises (via ``get_run_generation_strict``) rather than silently
+        defaulting to the most permissive generation.
     """
     from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
-    from investment_team.strategy_lab.run_state import get_run_generation
+    from investment_team.strategy_lab.run_state import get_run_generation_strict
     from shared.fencing import check_fencing_token
 
     record = StrategyLabRecord.parse_persisted(params["record"])
@@ -658,7 +675,7 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 agent_id=run_id,
                 resource="strategy_lab_run",
                 provided_token=params.get("generation", 1),
-                current_token=get_run_generation(run_id),
+                current_token=get_run_generation_strict(run_id),
             )
         finalized = _finalize_strategy_lab_cycle_record(
             record,

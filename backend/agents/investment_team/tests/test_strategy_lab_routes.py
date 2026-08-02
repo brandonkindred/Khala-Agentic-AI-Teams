@@ -426,6 +426,33 @@ def test_restart_strategy_lab_run_mints_new_generation(
     assert stub.by_id["run-gen"]["generation"] == 4
 
 
+def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A run created before generation fencing shipped has no generation field in
+    its persisted record at all. Its first post-upgrade restart must mint
+    generation 2, not 1 -- 1 is what a pre-upgrade in-flight activity (which
+    omits generation entirely) is treated as presenting, and
+    check_fencing_token accepts equal tokens, so minting exactly 1 would fence
+    nothing for that stale activity."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-legacy"] = {
+        "run_id": "run-legacy",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        # No "generation" key at all -- simulates a run created before this change.
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-legacy"}])  # likewise no "generation" field
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-legacy/restart")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-legacy"]["generation"] == 2
+    assert stub.by_id["run-legacy"]["generation"] == 2
+
+
 def test_restart_strategy_lab_run_returns_503_when_generation_mint_fails(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

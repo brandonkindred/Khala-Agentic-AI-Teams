@@ -2810,9 +2810,25 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # already-dispatched, non-heartbeating activity) is fenced instead of
         # silently landing. Atomic increment-and-read-back mirrors
         # software_engineering_team/job_store.py's claim_resume.
+        #
+        # A run created before generation fencing shipped has no "generation"
+        # field in its persisted record at all, and the job service's atomic
+        # increment treats an absent field as 0 -- so a plain +1 would mint
+        # generation 1 for such a run's first restart. That's exactly the
+        # default persist_run_state_activity/finalize_cycle_record_activity
+        # fall back to for a caller that omits generation entirely (an
+        # activity scheduled before the field existed), and check_fencing_token
+        # accepts equal tokens -- so that stale activity would pass fencing
+        # again. Jump straight to generation 2 in that one case so it strictly
+        # exceeds the legacy default; a run that already has an explicit
+        # generation field (every run created after this change, and any
+        # legacy run past its first post-upgrade restart) increments normally.
+        generation_increment = 2 if "generation" not in state else 1
         client = _get_lab_run_job_client()
         try:
-            updated_generation_record = client.apply_and_get(run_id, increment={"generation": 1})
+            updated_generation_record = client.apply_and_get(
+                run_id, increment={"generation": generation_increment}
+            )
         except Exception as exc:
             # apply_and_get raises on a transport failure (connection refused,
             # timeout, ...) rather than returning None — only a falsy return
