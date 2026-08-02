@@ -61,7 +61,7 @@ entirely. See `strategy_lab/quality_gates/alignment_checks.py`,
 
 The pipeline lives in
 [`api/main.py::_run_one_strategy_lab_cycle`](../api/main.py) and
-[`api/main.py::_strategy_lab_worker`](../api/main.py).
+[`strategy_lab/temporal/workflows.py::StrategyLabBatchWorkflow`](../strategy_lab/temporal/workflows.py).
 
 ## Winner label vs publishable gate
 

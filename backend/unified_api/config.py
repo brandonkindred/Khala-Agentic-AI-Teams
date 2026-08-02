@@ -46,9 +46,11 @@ UNIFIED_API_SANDBOX_TEMPORAL_WORKER = os.getenv("UNIFIED_API_SANDBOX_TEMPORAL_WO
 )
 
 # Team-assistant conversational sub-apps: when True (default), unified-api
-# mounts every TEAM_ASSISTANT_CONFIGS sub-app at startup. Set false to skip
-# the mount loop entirely (zero assistant sub-apps mounted); team proxy
-# routes and health checks are unaffected.
+# registers every TEAM_ASSISTANT_CONFIGS entry into a mount-spec registry at
+# startup; each team's assistant sub-app is then actually constructed and
+# mounted lazily, on that team's first `{prefix}/assistant` request. Set
+# false to skip registration entirely (no assistant sub-app is ever mounted,
+# regardless of traffic); team proxy routes and health checks are unaffected.
 UNIFIED_API_TEAM_ASSISTANTS_ENABLED = os.getenv("UNIFIED_API_TEAM_ASSISTANTS_ENABLED", "true").lower() in (
     "true",
     "1",

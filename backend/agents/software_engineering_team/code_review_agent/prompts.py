@@ -75,28 +75,29 @@ Include exactly one verdict per finding index. Do not omit any, and do not add i
 # since it must describe the combined two-key schema instead of either
 # pass's standalone one-key schema. See models.py's
 # MergedArchitectureSideEffectResponse for the corresponding merged schema
-# design; neither is wired into architecture_consistency_pass.py,
-# side_effect_impact_pass.py, coordinator.py, or temporal/workflows.py yet --
-# that wiring is tracked separately.
+# design. The merged prompt is wired into coordinator.py via
+# merged_architecture_side_effect_pass (which splits findings back into the
+# architecture and side-effect lists). The standalone pass modules and
+# temporal/workflows.py remain on the separate Temporal path.
 # ---------------------------------------------------------------------------
 
 _ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running a whole-codebase check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could not check whether the change fits the established system architecture, or whether it duplicates a capability that already exists elsewhere in the repository. That is your one job here.
 
 **You are given:**
-- The full architecture document for this system (module/service boundaries, established patterns, architecture decisions).
+- An architecture document / structured architecture context for this system when one was provided (module/service boundaries, established patterns, architecture decisions). When none is provided, you are told so explicitly — in that case you MUST derive architecture expectations from the repository's established structure and patterns via tools, not invent a phantom document.
 - The complete set of changed files in this submission.
 - Tools to inspect the rest of the repository: `list_files()` (lists every file, including ones outside this submission) and `read_file(path)` (reads any of them). `search_codebase(query)` and `find_function_at_line(path, line_number)` only search/inspect the current submission (plus any existing-codebase excerpt provided) — they do NOT reach files outside this submission, so use `list_files()`/`read_file()` to check whether a capability already exists elsewhere in the repository.
 
 **Your one job:** identify NEW findings the per-file review could not have found, in exactly two categories:
 
-1. **Architecture contradiction** (`category: "architecture"`) — the changed code violates a boundary, pattern, or decision the architecture document explicitly states, in a way that would cause a real integration break (e.g. it bypasses the architecture's stated data-access layer and writes directly to a store another component owns, or violates a stated tenancy/reliability boundary). Do NOT flag a merely different-but-compatible approach, and do NOT flag anything the architecture document does not actually say — quote or closely paraphrase the specific architecture statement the change contradicts.
+1. **Architecture contradiction** (`category: "architecture"`) — the changed code violates a boundary, pattern, or decision that is either (a) explicitly stated in the architecture document/context when one was provided, or (b) clearly established by how this repository is already structured (module/service boundaries, layering, ownership patterns) — whether or not a formal architecture document is also present — in a way that would cause a real integration break. Do NOT flag a merely different-but-compatible approach. When citing a document, quote or closely paraphrase the specific statement. When citing repository structure, name the concrete existing modules/files/patterns you verified with tools. Do NOT invent an architecture rule from naming alone.
 
 2. **Cross-codebase redundancy** (`category: "refactor"`) — the changed code re-implements a capability that ALREADY EXISTS elsewhere in the repository (a second job queue, a second HTTP client wrapper, a second auth check, a second implementation of the same helper). Before flagging this, you MUST use `list_files()`/`read_file()` to confirm the existing capability actually exists elsewhere in the repository and does the same thing — `search_codebase` only searches this submission, so it cannot by itself confirm or rule out something existing outside it. Never flag redundancy from a guess or from the finding text alone. Cite the exact file/function that already provides the capability.
 
 **Hard rules:**
 - Every finding must be tool-verified: you actually read the architecture document section and/or the existing code you are citing, not inferred from naming alone.
 - Do NOT re-review anything the per-file review already covers (naming, structure, documentation, tests, spec compliance, generic code quality, single-file logic bugs) — only architecture contradictions and cross-codebase redundancy.
-- Do NOT invent an architecture rule that is not actually in the document, and do NOT invent a duplicate that does not actually exist in the repository.
+- Do NOT invent an architecture rule that is not actually in the document (when one was provided) and is not evidenced by the repository's established structure; do NOT invent a duplicate that does not actually exist in the repository.
 - If you find nothing in either category, return an empty findings list — an empty list is a valid and expected outcome, not a failure.
 - Default severity is `"medium"`; use `"high"`/`"critical"` ONLY when the contradiction or duplication would cause a real integration break or production risk, never merely because a cleaner or more consistent alternative exists."""
 
@@ -210,6 +211,49 @@ MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT = (
     + _MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT
     + JSON_OUTPUT_INSTRUCTION
 )
+
+
+def build_merged_architecture_side_effect_prompt(*, arch_on: bool, side_on: bool) -> str:
+    """Build the merged-pass system prompt for the halves that are actually enabled.
+
+    Preconditions:
+        - At least one of ``arch_on`` / ``side_on`` is True.
+
+    Postconditions:
+        - When both halves are on, returns ``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``.
+        - When only one half is on, omits the disabled half's instruction body and
+          explicitly requires its dual-key array to be ``[]``, so the model does
+          not spend tool iterations or output capacity on a discarded check.
+        - Always uses the dual-key output format so the merged pass parser stays
+          unchanged.
+    """
+    if not arch_on and not side_on:
+        raise ValueError("build_merged_architecture_side_effect_prompt requires arch_on or side_on")
+    if arch_on and side_on:
+        return MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT
+
+    parts: list[str] = []
+    if arch_on:
+        parts.append(
+            "You are running ONLY the architecture-consistency / cross-codebase-redundancy "
+            "check on top of an already-completed per-file code review. Do NOT perform "
+            "side-effect / blast-radius analysis — return "
+            '"side_effect_findings": [] unchanged.'
+        )
+        parts.append("\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n")
+        parts.append(_ARCHITECTURE_CONSISTENCY_BODY)
+    else:
+        parts.append(
+            "You are running ONLY the side-effect / blast-radius check on top of an "
+            "already-completed per-file code review. Do NOT perform architecture-consistency "
+            "or cross-codebase-redundancy analysis — return "
+            '"architecture_findings": [] unchanged.'
+        )
+        parts.append("\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n")
+        parts.append(_SIDE_EFFECT_IMPACT_BODY)
+    parts.append(_MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT)
+    parts.append(JSON_OUTPUT_INSTRUCTION)
+    return "".join(parts)
 
 
 REVIEW_SYNTHESIS_PROMPT = (

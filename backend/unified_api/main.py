@@ -16,6 +16,7 @@ import os
 import sys
 from concurrent import futures
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,35 @@ TEAM_SERVICE_URL_ENVS: dict[str, str] = {
     "deepthought": "DEEPTHOUGHT_SERVICE_URL",
     "job_matching": "JOB_MATCHING_SERVICE_URL",
 }
+
+
+@dataclass(frozen=True)
+class AssistantMountSpec:
+    """Everything needed to mount one team's assistant sub-app, deferred.
+
+    Built by ``_build_assistant_registry`` without ever constructing the
+    FastAPI sub-app or calling ``app.mount`` — that step (``mount_assistant_app``)
+    is invoked later, on demand, once the request-path lazy-mount hook exists.
+    """
+
+    team_key: str
+    mount_path: str
+    assistant_config: Any
+
+
+# Registry of assistant mount specs, keyed by team_key. Populated at startup
+# by _maybe_register_team_assistants (registration only — no sub-app is
+# constructed or mounted here); consumed on demand by _ensure_assistant_mounted.
+_ASSISTANT_REGISTRY: dict[str, AssistantMountSpec] = {}
+
+# team_keys whose assistant sub-app has actually been constructed and mounted
+# (the idempotency marker consulted by _ensure_assistant_mounted).
+_MOUNTED_ASSISTANTS: set[str] = set()
+
+# One asyncio.Lock per team_key, created lazily. Concurrent first-requests for
+# different teams don't serialize against each other; concurrent first-requests
+# for the SAME team queue behind one mount.
+_ASSISTANT_MOUNT_LOCKS: dict[str, asyncio.Lock] = {}
 
 # Track which teams were successfully registered (for health endpoint).
 _registered_teams: dict[str, bool] = {}
@@ -266,59 +296,174 @@ async def _maybe_start_sandbox_reaper() -> asyncio.Task | None:
         return None
 
 
-def _mount_team_assistants(app: FastAPI) -> int:
-    """Mount team assistant conversational sub-apps for every configured team.
+def _build_assistant_registry() -> dict[str, AssistantMountSpec]:
+    """Build assistant mount specs for every configured team, without
+    constructing or mounting any sub-app.
 
     Preconditions:
         * None.
     Postconditions:
-        * Returns the number of assistant sub-apps mounted.
+        * Returns one AssistantMountSpec per team_key present in both
+          TEAM_ASSISTANT_CONFIGS and TEAM_CONFIGS. No FastAPI sub-app is
+          created and app.mount is never called — this is registration
+          only; a future first-request hook (mount_assistant_app) does the
+          actual mount.
     """
-    from team_assistant.api import create_assistant_app
     from team_assistant.config import TEAM_ASSISTANT_CONFIGS
 
-    assistant_count = 0
+    registry: dict[str, AssistantMountSpec] = {}
     for team_key, assistant_config in TEAM_ASSISTANT_CONFIGS.items():
         team_cfg = TEAM_CONFIGS.get(team_key)
         if team_cfg:
-            assistant_app = create_assistant_app(assistant_config)
-            assistant_app.add_middleware(
-                CORSMiddleware,
-                allow_origins=["*"],
-                allow_credentials=True,
-                allow_methods=["*"],
-                allow_headers=["*"],
+            registry[team_key] = AssistantMountSpec(
+                team_key=team_key,
+                mount_path=f"{team_cfg.prefix}/assistant",
+                assistant_config=assistant_config,
             )
-            app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
-            assistant_count += 1
-    return assistant_count
+    return registry
 
 
-def _maybe_mount_team_assistants(app: FastAPI) -> int:
-    """Mount team assistant sub-apps unless disabled via
+def mount_assistant_app(app: FastAPI, spec: AssistantMountSpec) -> None:
+    """Construct and mount one team's assistant sub-app from its registry spec.
+
+    Preconditions:
+        * spec came from _ASSISTANT_REGISTRY (or _build_assistant_registry).
+    Postconditions:
+        * The assistant sub-app for spec.team_key is mounted at
+          spec.mount_path with the standard permissive CORS middleware.
+
+    Called by _ensure_assistant_mounted, the first-request lazy-mount hook —
+    never call this directly, it does not check or update _MOUNTED_ASSISTANTS
+    and is not safe to call twice for the same team_key.
+    """
+    from team_assistant.api import create_assistant_app
+
+    assistant_app = create_assistant_app(spec.assistant_config)
+    assistant_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.mount(spec.mount_path, assistant_app)
+
+
+async def _ensure_assistant_mounted(team_key: str) -> bool:
+    """Idempotently, thread/async-safely mount team_key's assistant sub-app on
+    its first request.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns True if the team's assistant sub-app is mounted (whether by
+          this call or an earlier one). Returns False if team_key has no
+          registry entry (assistants disabled, or no assistant configured for
+          that team), or if mounting raised — the failure is logged and
+          swallowed so the request path never 500s on this, and the NEXT
+          request for team_key retries the mount (self-healing; team_key is
+          only added to _MOUNTED_ASSISTANTS on success).
+        * On first successful mount, the newly-added route is moved to the
+          front of app.routes so it takes priority over that team's
+          already-registered proxy catch-all route (`{prefix}/{path:path}`)
+          — Starlette matches app.routes in list order and the catch-all,
+          registered at lifespan startup, would otherwise always shadow a
+          Mount appended later. The reorder is scoped to this one team's own
+          anchored Mount pattern and cannot affect unrelated routes.
+
+    No `await` occurs between the mount and the reorder (mount_assistant_app
+    and everything it calls are synchronous), so this critical section runs
+    atomically w.r.t. the event loop even across different teams' locks.
+    """
+    if team_key in _MOUNTED_ASSISTANTS:
+        return True
+    spec = _ASSISTANT_REGISTRY.get(team_key)
+    if spec is None:
+        return False
+    lock = _ASSISTANT_MOUNT_LOCKS.setdefault(team_key, asyncio.Lock())
+    async with lock:
+        if team_key in _MOUNTED_ASSISTANTS:
+            return True
+        try:
+            mount_assistant_app(app, spec)
+            mounted_route = app.routes[-1]
+            app.routes.remove(mounted_route)
+            app.routes.insert(0, mounted_route)
+        except Exception:
+            logger.warning("Could not mount assistant sub-app for %s", team_key, exc_info=True)
+            return False
+        _MOUNTED_ASSISTANTS.add(team_key)
+        logger.info("Mounted assistant sub-app for %s at %s", team_key, spec.mount_path)
+        return True
+
+
+def _match_unmounted_assistant_prefix(path: str) -> str | None:
+    """Return the team_key whose assistant mount_path is a prefix of path and
+    is not yet mounted, or None.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Boundary-safe: "/api/blogging/assistant-x" does not match the
+          "/api/blogging/assistant" mount_path (plain str.startswith would
+          false-match here). Exact-equal and "/"-separated child paths match.
+    """
+    for team_key, spec in _ASSISTANT_REGISTRY.items():
+        if team_key in _MOUNTED_ASSISTANTS:
+            continue
+        if path == spec.mount_path or path.startswith(spec.mount_path + "/"):
+            return team_key
+    return None
+
+
+class AssistantLazyMountMiddleware:
+    """ASGI middleware: mounts a team's assistant sub-app on its first request.
+
+    Defined here (not unified_api/middleware/) because it needs the real
+    FastAPI `app` singleton to mount into — the `app` an ASGI middleware
+    receives via __init__ is just the next inner ASGI layer, never the
+    FastAPI instance itself — and because it is tightly coupled to this
+    module's own registry/state (_ASSISTANT_REGISTRY, _MOUNTED_ASSISTANTS).
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            team_key = _match_unmounted_assistant_prefix(scope.get("path") or "")
+            if team_key is not None:
+                await _ensure_assistant_mounted(team_key)
+        await self.app(scope, receive, send)
+
+
+def _maybe_register_team_assistants() -> int:
+    """Register team assistant mount specs unless disabled via
     UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
 
     Preconditions:
         * None.
     Postconditions:
-        * Returns the number of assistant sub-apps mounted: 0 when the flag
-          is false, or when _mount_team_assistants raises (logged as a
-          warning; startup is not aborted, matching every other lifespan
-          startup step).
+        * Populates _ASSISTANT_REGISTRY (cleared first) and returns its
+          size: 0 when the flag is false, or when _build_assistant_registry
+          raises (logged as a warning; startup is not aborted, matching
+          every other lifespan startup step). No sub-app is constructed or
+          mounted — that happens later, on demand.
     """
+    _ASSISTANT_REGISTRY.clear()
     if not UNIFIED_API_TEAM_ASSISTANTS_ENABLED:
-        logger.info("Team assistant sub-apps disabled (UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false)")
+        logger.info("Team assistant registration disabled (UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false)")
         return 0
     try:
-        count = _mount_team_assistants(app)
-        logger.info("Mounted %d team assistant sub-apps", count)
-        return count
+        _ASSISTANT_REGISTRY.update(_build_assistant_registry())
+        logger.info("Registered %d team assistant mount specs (not yet mounted)", len(_ASSISTANT_REGISTRY))
+        return len(_ASSISTANT_REGISTRY)
     except Exception:
-        logger.warning("Could not mount team assistant sub-apps", exc_info=True)
+        logger.warning("Could not register team assistant mount specs", exc_info=True)
         return 0
 
 
-async def _health_check_loop() -> None:
+async def _health_check_loop() -> None:  # pragma: no cover - infinite bg loop, live lifespan only
     """Periodically probe all registered teams' health endpoints.
 
     Also retries schema registration for in-process teams whose startup
@@ -472,12 +617,9 @@ def _start_agent_studio_temporal_worker() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot
-    """Application lifespan: register own Postgres schemas, mount assistant sub-apps,
-    then register proxy routes.
-
-    Order matters: assistant sub-apps must be mounted before proxy catch-all routes,
-    otherwise the proxy's ``/{path:path}`` pattern swallows assistant requests.
+async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot  # pragma: no cover - startup requires live Postgres schema registration, Temporal worker boot, and sub-app mounting
+    """Application lifespan: register own Postgres schemas, register assistant
+    mount specs (no sub-apps mounted yet), then register proxy routes.
     """
     global _registered_teams
     logger.info("Starting Unified API Server...")
@@ -523,21 +665,28 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     except Exception:
         logger.exception("agent_registry postgres schema registration failed")
 
-    try:
-        from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
-        from shared.postgres import register_team_schemas
+    # Gate on the team's `enabled` flag, same rationale as product_delivery
+    # below: disabling agent_studio must also disable its startup side
+    # effects (schema DDL, failure logs), not just leave the schema import
+    # to run unconditionally regardless of config.
+    if TEAM_CONFIGS["agent_studio"].enabled:
+        try:
+            from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
+            from shared.postgres import register_team_schemas
 
-        register_team_schemas(AGENT_STUDIO_SCHEMA)
-    except Exception:
-        logger.exception("agent_studio postgres schema registration failed")
+            register_team_schemas(AGENT_STUDIO_SCHEMA)
+        except Exception:
+            logger.exception("agent_studio postgres schema registration failed")
 
-    try:
-        from shared.postgres import register_team_schemas
-        from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
+    # Gate on the team's `enabled` flag (same rationale as agent_studio above).
+    if TEAM_CONFIGS["user_profile"].enabled:
+        try:
+            from shared.postgres import register_team_schemas
+            from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
 
-        register_team_schemas(USER_PROFILE_SCHEMA)
-    except Exception:
-        logger.exception("user_profile postgres schema registration failed")
+            register_team_schemas(USER_PROFILE_SCHEMA)
+        except Exception:
+            logger.exception("user_profile postgres schema registration failed")
 
     try:
         from agent_cognition.postgres import SCHEMA as AGENT_COGNITION_SCHEMA
@@ -584,11 +733,12 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
             logger.exception("product_delivery postgres schema registration failed")
             _in_process_schema_failures.add("product_delivery")
 
-    # 1. Mount team assistant conversational sub-apps (before proxy routes),
-    #    unless disabled via UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
-    _maybe_mount_team_assistants(app)
+    # 1. Register team assistant mount specs (no sub-apps constructed or
+    #    mounted yet — see _ASSISTANT_REGISTRY), unless disabled via
+    #    UNIFIED_API_TEAM_ASSISTANTS_ENABLED.
+    _maybe_register_team_assistants()
 
-    # 2. Register proxy routes for all team containers (after assistant mounts).
+    # 2. Register proxy routes for all team containers.
     _registered_teams = _register_proxy_routes(app)
     ok = sum(1 for v in _registered_teams.values() if v)
     total = len(get_enabled_teams())
@@ -710,6 +860,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Lazy-mount team assistant sub-apps on first request. Registered here (after
+# CORS, before Security) so that — since Starlette's add_middleware makes the
+# LAST-added middleware outermost/first-to-run — Security still runs before
+# any mount attempt (a request Security 403s never triggers a wasted mount),
+# while this still runs before the router resolves the route.
+app.add_middleware(AssistantLazyMountMiddleware)
+
 # Security gateway
 from unified_api.middleware import SecurityGatewayMiddleware
 
@@ -759,7 +916,6 @@ from unified_api.routes.llm_config import router as llm_config_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
 from unified_api.routes.sandboxes import router as sandboxes_router
-from unified_api.routes.user_profile import router as user_profile_router
 
 app.include_router(integrations_router)
 app.include_router(llm_config_router)
@@ -771,10 +927,13 @@ app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
 app.include_router(cognition_router)
-# Honor the user_profile team's `enabled` flag (it has a TEAM_CONFIGS entry),
-# matching the product_delivery gate below: disabling the team must make
-# /api/user-profile/* stop answering, not just disappear from /teams.
+# Honor the in-process team's `enabled` flag and gate the import too (same
+# rationale as product_delivery below): disabling the team via TEAM_CONFIGS
+# must make /api/user-profile/* stop answering AND keep user_profile out of
+# the module graph, not just disappear from /teams.
 if TEAM_CONFIGS["user_profile"].enabled:
+    from unified_api.routes.user_profile import router as user_profile_router
+
     app.include_router(user_profile_router)
 # Honor the in-process team's `enabled` flag: an operator that disables
 # the team via TEAM_CONFIGS expects /api/product-delivery/* to stop
@@ -883,7 +1042,7 @@ def _shutdown_probe_executor() -> None:
         _PROBE_EXECUTOR = None
 
 
-async def _probe_postgres_live() -> bool:
+async def _probe_postgres_live() -> bool:  # pragma: no cover - requires a live Postgres connection
     """Run ``SELECT 1`` against the shared pool with a short timeout.
 
     Used by the in-process team health branch so a runtime Postgres
@@ -949,7 +1108,7 @@ def _expected_tables_for(team_key: str) -> list[str]:
     return []
 
 
-async def _verify_in_process_schema_present(team_key: str) -> bool:
+async def _verify_in_process_schema_present(team_key: str) -> bool:  # pragma: no cover - needs live Postgres
     """Check that the team's expected tables still exist in Postgres.
 
     Codex flagged that ``SELECT 1`` alone proves connectivity but
@@ -1008,7 +1167,7 @@ async def _verify_in_process_schema_present(team_key: str) -> bool:
         return False
 
 
-def _retry_in_process_schema_registration(team_key: str) -> bool:
+def _retry_in_process_schema_registration(team_key: str) -> bool:  # pragma: no cover - needs live Postgres
     """Re-run schema registration for a team after a transient outage.
 
     Called from `/health` when the live DB probe succeeds for a team
@@ -1106,12 +1265,12 @@ async def health() -> UnifiedHealthResponse:
                 # intentional and should not flip overall health.
                 status = "unavailable"
                 intentionally_unavailable = True
-            elif key in _in_process_schema_failures:
+            elif key in _in_process_schema_failures:  # pragma: no cover - only reached with POSTGRES_HOST set
                 # Background loop may have already cleared this; if
                 # we're still in the set, persistence is still broken.
                 # Read-only: don't trigger a retry from this handler.
                 status = "unhealthy"
-            else:
+            else:  # pragma: no cover - only reached with POSTGRES_HOST set (live DB probe branch)
                 if db_live is None:
                     db_live = await _probe_postgres_live()
                 if not db_live:
@@ -1161,16 +1320,16 @@ async def list_teams() -> dict[str, Any]:
     """List all available teams with their proxy status."""
     teams = {}
     for key, config in TEAM_CONFIGS.items():
-        registered = _registered_teams.get(key, False)
+        mounted = _registered_teams.get(key, False)
         # In-process teams piggy-back on the unified API's `/docs` —
         # they don't expose a `/api/<team>/docs` endpoint themselves,
         # so don't advertise one (it would 404).
-        per_team_docs = registered and not config.in_process
+        per_team_docs = mounted and not config.in_process
         teams[key] = {
             "name": config.name,
             "prefix": config.prefix,
             "description": config.description,
-            "registered": registered,
+            "mounted": mounted,
             "enabled": config.enabled,
             "docs_url": f"{config.prefix}/docs" if per_team_docs else None,
         }

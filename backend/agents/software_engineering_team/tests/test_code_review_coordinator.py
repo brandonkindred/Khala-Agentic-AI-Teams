@@ -16,7 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
+from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
@@ -35,6 +35,7 @@ from code_review_agent.coordinator import (
     run_coordinator,
     split_block_into_segments,
 )
+from code_review_agent.mapping import _bisect_halves_run_sequentially, _run_reviewer_call
 from code_review_agent.models import (
     ChunkReviewOutput,
     CodeReviewInput,
@@ -1150,6 +1151,130 @@ class _FailNTimes(DummyLLMClient):
         return super().complete_json(prompt, **kwargs)
 
 
+class _HalfTimingDummyDelegate:
+    """Inner delegate for a non-``DummyLLMClient`` stand-in (see
+    ``_NonDummyLLMClient`` further below in this file): forces the combined
+    a.py+b.py chunk review to fail (triggering bisection), returns a distinct
+    low-severity issue per single-file chunk-review half (so a test can
+    inspect merge order), and records each half's call interval — sleeping
+    first if a delay was configured for that half — so a test can prove or
+    control relative timing. Every other prompt (the tail passes) is
+    delegated to a real ``DummyLLMClient``.
+    """
+
+    def __init__(self, delays: dict[str, float] | None = None) -> None:
+        self._inner = DummyLLMClient()
+        self.delays = delays or {}
+        self._lock = threading.Lock()
+        self.intervals: dict[str, tuple[float, float]] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward anything not overridden below (get_max_context_tokens,
+        # update_config, get_config, structured_output, stream, chat, ...) to
+        # the real DummyLLMClient — _NonDummyLLMClient calls those directly.
+        return getattr(self._inner, name)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
+        if is_chunk_review and has_a and has_b:
+            raise _bisecting_failure("no content")  # force bisection
+        if is_chunk_review and (has_a or has_b):
+            key = "a" if has_a else "b"
+            start = time.monotonic()
+            time.sleep(self.delays.get(key, 0.0))
+            end = time.monotonic()
+            with self._lock:
+                self.intervals[key] = (start, end)
+            return {
+                "approved": True,
+                "issues": [
+                    {
+                        "severity": "low",
+                        "category": "general",
+                        "file_path": f"{key}.py",
+                        "line": 1,
+                        "description": f"finding-{key}",
+                        "suggestion": "n/a",
+                    }
+                ],
+                "summary": f"summary-{key}",
+                "spec_compliance_notes": "",
+            }
+        return self._inner.complete_json(prompt, **kwargs)
+
+
+class _MultiFileFirstCallFailsDelegate:
+    """Inner delegate for a non-``DummyLLMClient`` stand-in (see
+    ``_NonDummyLLMClient``): the FIRST chunk-review call naming a given
+    top-level file path fails (forcing that chunk to bisect); every later
+    call naming that path succeeds but blocks on ``release`` while tracking
+    how many chunk-review calls are simultaneously in flight, so a test can
+    observe the true PEAK concurrency across several top-level chunks that
+    bisect at the same time -- not just within one chunk's own bisection.
+    Every other prompt (the tail passes) is delegated to a real
+    ``DummyLLMClient``.
+    """
+
+    def __init__(self, paths: list[str], release: threading.Event) -> None:
+        self._inner = DummyLLMClient()
+        self._paths = paths
+        self._release = release
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+        self.current = 0
+        self.peak = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        path = next((p for p in self._paths if f"### {p} ###" in prompt), None)
+        if is_chunk_review and path is not None:
+            with self._lock:
+                first = path not in self._seen
+                self._seen.add(path)
+            if first:
+                raise _bisecting_failure("no content")  # force this chunk to bisect
+            with self._lock:
+                self.current += 1
+                self.peak = max(self.peak, self.current)
+            self._release.wait(timeout=5)
+            with self._lock:
+                self.current -= 1
+        return self._inner.complete_json(prompt, **kwargs)
+
+
+class _TimedDummyHalfClient(DummyLLMClient):
+    """``DummyLLMClient`` subclass with the same combined-fails/per-half-timing
+    behavior as ``_HalfTimingDummyDelegate``, but reached as a bare
+    ``DummyLLMClient`` instance (not wrapped) — used to prove the two halves
+    still run strictly sequentially for a scripted double, exactly as before
+    this fan-out existed.
+    """
+
+    def __init__(self, delay: float = 0.0) -> None:
+        super().__init__()
+        self.delay = delay
+        self._lock = threading.Lock()
+        self.intervals: dict[str, tuple[float, float]] = {}
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+        has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
+        if is_chunk_review and has_a and has_b:
+            raise _bisecting_failure("no content")
+        if is_chunk_review and (has_a or has_b):
+            key = "a" if has_a else "b"
+            start = time.monotonic()
+            time.sleep(self.delay)
+            end = time.monotonic()
+            with self._lock:
+                self.intervals[key] = (start, end)
+        return super().complete_json(prompt, **kwargs)
+
+
 def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
     """A chunk whose combined review fails is bisected per segment; both halves
     succeed individually, so the review completes normally."""
@@ -1177,7 +1302,7 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
     )
     # combined fail + two single-file successes + 1 reduce-phase synthesis pass
     # (two recovered sub-reviews → one findings-only synthesis call) + 1
-    # side-effect/blast-radius pass call (its single prompt also inlines both
+    # merged architecture/side-effect pass call (its single prompt also inlines both
     # files together, so it hits the same synthetic failure and fails safe).
     assert client.calls == 5
     assert result.approved is True
@@ -1197,7 +1322,7 @@ def test_transient_failure_recovers_via_same_input_retry() -> None:
         ),
     )
     assert result.approved is True
-    # initial failure + successful retry + 1 side-effect/blast-radius pass call
+    # initial failure + successful retry + 1 merged architecture/side-effect pass call
     # (additive, runs once per submission after the map phase completes).
     assert len(client.prompts) == 3
 
@@ -1234,10 +1359,128 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
     assert result.approved is True
     # combined fail + a fail + a retry success + b success
     # + 1 reduce-phase synthesis pass (two recovered sub-reviews)
-    # + 1 side-effect/blast-radius pass call (its single prompt also inlines
+    # + 1 merged architecture/side-effect pass call (its single prompt also inlines
     # both files together, so it hits the same combined-fail branch and fails
     # safe).
     assert client.calls == 6
+
+
+def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:
+    """Mirrors ``_tail_passes_run_sequentially``: True for a bare
+    ``DummyLLMClient`` and for a wrapper exposing a ``.client`` attribute
+    pointing at one; False for anything else."""
+    assert _bisect_halves_run_sequentially(DummyLLMClient()) is True
+    assert _bisect_halves_run_sequentially(MagicMock()) is False
+
+    class _Wrapper:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+
+    assert _bisect_halves_run_sequentially(_Wrapper(DummyLLMClient())) is True
+    assert _bisect_halves_run_sequentially(_Wrapper(MagicMock())) is False
+
+
+def test_run_reviewer_call_acquires_and_always_releases_the_run_limiter() -> None:
+    """``_run_reviewer_call`` is the single choke point every actual chunk
+    review passes through: it must acquire the given semaphore before calling
+    ``reviewer.run`` and release it afterward on both success and failure, so
+    a permit is never leaked and the next caller (a sibling top-level chunk or
+    a bisection half) can always proceed once this call finishes."""
+
+    class _Stub:
+        def run(self, chunk_input: Any, **kwargs: Any) -> Any:
+            return ("ok", kwargs)
+
+    limiter = threading.Semaphore(1)
+    assert _run_reviewer_call(_Stub(), object(), limiter) == ("ok", {})
+    # Released after success: the sole permit is available again.
+    assert limiter.acquire(blocking=False) is True
+    limiter.release()
+
+    class _Raises:
+        def run(self, chunk_input: Any, **kwargs: Any) -> Any:
+            raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        _run_reviewer_call(_Raises(), object(), limiter)
+    # Released after a failure too -- never leaked on the exception path.
+    assert limiter.acquire(blocking=False) is True
+    limiter.release()
+
+
+def test_run_reviewer_call_with_no_limiter_is_a_passthrough() -> None:
+    """``run_limiter=None`` (a direct caller, a test double, or the Temporal
+    per-activity call path -- none of which share a limiter object) skips the
+    semaphore entirely and just forwards to ``reviewer.run``."""
+
+    class _Stub:
+        def run(self, chunk_input: Any, **kwargs: Any) -> Any:
+            return kwargs
+
+    assert _run_reviewer_call(_Stub(), object(), None, think=False) == {"think": False}
+
+
+def test_bisected_halves_reviewed_concurrently_for_non_dummy_client() -> None:
+    """When the LLM is not a scripted ``DummyLLMClient`` double, the two
+    bisected halves are reviewed concurrently instead of strictly
+    sequentially: each half's call sleeps briefly, and their recorded
+    intervals must overlap — sequential calls could never produce that."""
+    delegate = _HalfTimingDummyDelegate(delays={"a": 0.05, "b": 0.05})
+    stand_in = _NonDummyLLMClient(delegate)
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    assert result.approved is True
+    a_start, a_end = delegate.intervals["a"]
+    b_start, b_end = delegate.intervals["b"]
+    assert a_start < b_end and b_start < a_end
+
+
+def test_bisected_halves_stay_sequential_for_dummy_llm_client() -> None:
+    """Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe
+    response index, so the two bisected halves must still run one at a
+    time for them: each half's call sleeps briefly, and their recorded
+    intervals must NOT overlap."""
+    client = _TimedDummyHalfClient(delay=0.05)
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    assert result.approved is True
+    a_start, a_end = client.intervals["a"]
+    b_start, b_end = client.intervals["b"]
+    assert a_end <= b_start or b_end <= a_start
+
+
+def test_bisection_absorb_preserves_halves_order_regardless_of_completion_order() -> None:
+    """halves[1] (b.py) finishes first — its call has no delay while halves[0]
+    (a.py) sleeps — but the merged outcome must still list a.py's finding
+    before b.py's: ``.absorb()`` merge order is fixed by input order, not by
+    which concurrent branch actually completes first."""
+    delegate = _HalfTimingDummyDelegate(delays={"a": 0.08, "b": 0.0})
+    stand_in = _NonDummyLLMClient(delegate)
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    a_start, a_end = delegate.intervals["a"]
+    b_start, b_end = delegate.intervals["b"]
+    assert b_end <= a_end  # sanity check: b genuinely finished first
+    findings = [i.description for i in result.issues if i.description.startswith("finding-")]
+    assert findings == ["finding-a", "finding-b"]
 
 
 def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> None:
@@ -1421,7 +1664,9 @@ def test_partial_terminal_failure_degrades_gracefully_without_blocking(monkeypat
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM  # forces the two files into separate chunks
+
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1599,7 +1844,9 @@ def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
+
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1627,7 +1874,9 @@ def test_truncated_chunk_review_degrades_not_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
+
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1654,7 +1903,9 @@ def test_not_reviewed_ranges_populated_and_not_in_issues(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
+
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1675,7 +1926,9 @@ def test_block_on_unreviewed_env_restores_fail_closed(monkeypatch) -> None:
     monkeypatch.setenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", "true")
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
+
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1701,7 +1954,9 @@ def test_total_failure_still_raises_even_with_graceful_default(monkeypatch) -> N
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
+
     # Two separate chunks, BOTH carrying the failure marker → nothing reviewed.
     files = {
         "bad1.py": "FAILME = True\n" + ("x = 1\n" * 20),
@@ -2160,9 +2415,11 @@ def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) 
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     files = {
         f"f{i}.py": f"x = {i}\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#") for i in range(5)
     }
+
     client = _ConcurrencyProbe()
     threading.Thread(target=_release_soon, daemon=True).start()
     try:
@@ -2195,12 +2452,62 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
+
     files = {
         f"f{i}.py": f"x = {i}\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#") for i in range(3)
     }
+
     client = _ConcurrencyProbe()
     run_coordinator(client, CodeReviewInput(files=files, task_description="t", language="python"))
     assert 2 <= state["peak"] <= 3
+
+
+def test_run_wide_limiter_caps_concurrent_bisection_across_top_level_chunks(monkeypatch) -> None:
+    """Two top-level chunks that bisect AT THE SAME TIME must not push the
+    total number of concurrent ``reviewer.run()`` calls above
+    CODE_REVIEW_MAP_PARALLELISM: each top-level worker's bisection halves
+    share one review-run-scoped limiter with the outer fan-out and with every
+    other chunk's bisection, rather than each spinning up its own independent
+    2-worker budget on top of whatever else is in flight. With 2 top-level
+    chunks (workers=2) each bisecting into 2 concurrent halves, an unbounded
+    (pre-fix) run could reach 4 concurrent chunk-review calls even though the
+    ceiling here is 2.
+    """
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "2")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "10")  # not the binding constraint here
+
+    budget = compute_code_review_map_chunk_chars(DummyLLMClient())
+    # Each file sized into the bisect window but comfortably more than half the
+    # map-chunk budget, so the two files never pack into one top-level chunk
+    # (build_review_chunks flushes a new chunk once the running total would
+    # exceed the cap) -- two independent, simultaneously-bisecting chunks.
+    content_a = _failme_content_in_bisect_window(budget)
+    content_b = _failme_content_in_bisect_window(budget)
+
+    release = threading.Event()
+    delegate = _MultiFileFirstCallFailsDelegate(["big_a.py", "big_b.py"], release)
+    stand_in = _NonDummyLLMClient(delegate)
+
+    def _release_soon() -> None:
+        time.sleep(0.3)
+        release.set()
+
+    threading.Thread(target=_release_soon, daemon=True).start()
+    try:
+        result = run_coordinator(
+            stand_in,
+            CodeReviewInput(
+                files={"big_a.py": content_a, "big_b.py": content_b},
+                task_description="t",
+                language="python",
+            ),
+        )
+    finally:
+        release.set()
+
+    assert result.approved is True
+    assert delegate.peak <= 2, "run-wide limiter must cap concurrent bisection calls at the ceiling"
+    assert delegate.peak >= 1  # sanity: the concurrent path (not the sequential fallback) ran
 
 
 def test_headerless_code_reviews_as_single_unnamed_block() -> None:
@@ -2220,6 +2527,8 @@ def test_headerless_code_reviews_as_single_unnamed_block() -> None:
 
 
 def test_normalize_issue_path_blank_and_suffix_cases() -> None:
+    """_normalize_issue_path maps blank inputs and (lines X-Y of Z) labels
+    back to the underlying file path."""
     from code_review_agent.coordinator import _normalize_issue_path
 
     seg = FileSegment(path="a.py", content="x = 1", start_line=501, total_lines=900)
@@ -2228,7 +2537,14 @@ def test_normalize_issue_path_blank_and_suffix_cases() -> None:
     assert _normalize_issue_path("a.py (lines 501-505 of 900)", chunk) == "a.py"
     two = ReviewChunk(segments=[seg, FileSegment(path="b.py", content="y = 2", total_lines=1)])
     assert _normalize_issue_path("", two) == ""
-    # Non-dict issue entries are skipped defensively.
+
+
+def test_issues_from_chunk_output_skips_non_dict_entries() -> None:
+    """_issues_from_chunk_output defensively ignores non-dict LLM items."""
+    from code_review_agent.coordinator import _issues_from_chunk_output
+
+    seg = FileSegment(path="a.py", content="x = 1", start_line=501, total_lines=900)
+    chunk = ReviewChunk(segments=[seg])
     assert _issues_from_chunk_output(chunk, ["not-a-dict"]) == []
 
 
@@ -2327,28 +2643,33 @@ def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     assert [i.pre_existing for i in issues] == [True, True, False, False]
 
 
+_NO_OP_SUGGESTIONS = [
+    "No changes needed.",
+    "no changes needed",
+    "No change required",
+    "no change is required",
+    "No code changes needed.",
+    "No action needed.",
+    "no action is required",
+    "No fix needed",
+    "no fixes required",
+    "Nothing to change.",
+    "nothing to fix",
+    "Nothing to do",
+]
+
+
 @pytest.mark.parametrize(
     "suggestion",
-    [
-        "No changes needed.",
-        "no changes needed",
-        "No change required",
-        "no change is required",
-        "No code changes needed.",
-        "No action needed.",
-        "no action is required",
-        "No fix needed",
-        "no fixes required",
-        "Nothing to change.",
-        "nothing to fix",
-        "Nothing to do",
-    ],
+    _NO_OP_SUGGESTIONS,
 )
 def test_is_no_op_suggestion_matches_known_phrasings(suggestion: str) -> None:
+    """Known no-op phrasings are classified as no-ops."""
     assert is_no_op_suggestion(suggestion) is True
 
 
 def test_is_no_op_suggestion_spares_blank_and_substantive_text() -> None:
+    """Blank and substantive strings are not treated as no-ops."""
     assert is_no_op_suggestion("") is False
     assert is_no_op_suggestion(None) is False
     assert is_no_op_suggestion("   ") is False
@@ -2362,20 +2683,7 @@ def test_is_no_op_suggestion_spares_blank_and_substantive_text() -> None:
 
 @pytest.mark.parametrize(
     "suggestion",
-    [
-        "No changes needed.",
-        "no changes needed",
-        "No change required",
-        "no change is required",
-        "No code changes needed.",
-        "No action needed.",
-        "no action is required",
-        "No fix needed",
-        "no fixes required",
-        "Nothing to change.",
-        "nothing to fix",
-        "Nothing to do",
-    ],
+    _NO_OP_SUGGESTIONS,
 )
 def test_issue_with_no_op_suggestion_is_dropped(suggestion: str) -> None:
     """A finding whose suggested fix says, in full, that nothing needs to
@@ -2436,7 +2744,7 @@ def test_coerce_bool_recognizes_truthy_tokens_only() -> None:
     assert _coerce_bool("true") is True
     assert _coerce_bool("YES") is True
     assert _coerce_bool("1") is True
-    # Falsey / unrecognized string tokens (note: bare bool("false") would be True).
+    # Falsy / unrecognized string tokens (note: bare bool("false") would be True).
     assert _coerce_bool("false") is False
     assert _coerce_bool("no") is False
     assert _coerce_bool("") is False
@@ -2668,7 +2976,9 @@ def test_coordinator_single_chunk_propagates_notes() -> None:
     )
     result = run_coordinator(
         client,
-        CodeReviewInput(code="### a.py ###\ndef a(): pass", task_description="t"),
+        CodeReviewInput(
+            code="### a.py ###\ndef a(): pass", task_description="t", language="python"
+        ),
     )
     assert result.spec_compliance_notes == "Meets all acceptance criteria."
 
@@ -2680,8 +2990,8 @@ def test_coordinator_multi_chunk_synthesizes_notes() -> None:
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     files = {
-        "a.py": "a = 1\n".ljust(cap - 1_000, "#"),
-        "b.py": "b = 2\n".ljust(cap - 1_000, "#"),
+        "a.py": "a = 1\n".ljust(max(0, cap - 1_000), "#"),
+        "b.py": "b = 2\n".ljust(max(0, cap - 1_000), "#"),
     }
     # The scripted client answers both chunk reviews and the synthesis pass with
     # the same canned payload, so the synthesized notes are "chunk notes" (one
@@ -2696,7 +3006,9 @@ def test_coordinator_multi_chunk_synthesizes_notes() -> None:
             }
         ]
     )
-    result = run_coordinator(client, CodeReviewInput(files=files, task_description="t"))
+    result = run_coordinator(
+        client, CodeReviewInput(files=files, task_description="t", language="python")
+    )
     assert result.approved is True
     assert result.spec_compliance_notes == "chunk notes"
 
@@ -2829,8 +3141,12 @@ def test_large_synthetic_input_is_fully_covered_with_bounded_prompts() -> None:
     # Every file appears in at least one map prompt.
     for path in files:
         assert any(f"### {path} ###" in p for p in client.prompts)
-    # Every prompt is bounded: chunk cap plus the fixed instruction overhead.
-    assert all(len(p) <= cap + 2_000 for p in client.prompts)
+    # Map prompts are bounded: chunk cap plus the fixed instruction overhead.
+    # (Tail-pass prompts — false-positive filter / merged architecture+side-effect —
+    # intentionally use their own budgets and are not subject to this map-call bound.)
+    chunk_prompts = [p for p in client.prompts if CHUNK_REVIEW_NOTE in p]
+    assert chunk_prompts
+    assert all(len(p) <= cap + 2_000 for p in chunk_prompts)
 
 
 # ---------------------------------------------------------------------------
@@ -2972,9 +3288,9 @@ def test_coordinator_runs_with_submission_cache_disabled(monkeypatch) -> None:
 
 def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
     """The submission is parsed into a ``CodebaseIndex`` exactly once per
-    ``run_coordinator`` call, and the same instance is forwarded to the
-    false-positive filter, architecture-consistency pass, and side-effect
-    pass (rather than each independently rebuilding it from the same input)."""
+    ``run_coordinator`` call, and the same instance is forwarded to both the
+    false-positive filter and the merged architecture/side-effect pass (rather
+    than each independently rebuilding it from the same input)."""
     import code_review_agent.coordinator as coord
     from code_review_agent.false_positive_filter import CodebaseIndex
 
@@ -2998,17 +3314,12 @@ def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> No
         received_indexes.append(index)
         return issues
 
-    def _arch_spy(llm, input_data, repo_reader=None, index=None):
+    def _merged_spy(llm, input_data, repo_reader=None, index=None):
         received_indexes.append(index)
-        return []
-
-    def _side_effect_spy(llm, input_data, repo_reader=None, index=None):
-        received_indexes.append(index)
-        return []
+        return [], []
 
     monkeypatch.setattr(coord, "filter_false_positives", _filter_spy)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch_spy)
-    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect_spy)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged_spy)
 
     run_coordinator(
         DummyLLMClient(),
@@ -3016,7 +3327,7 @@ def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> No
     )
 
     assert len(build_calls) == 1, "CodebaseIndex.from_input should be called exactly once"
-    assert received_indexes == [build_calls[0], build_calls[0], build_calls[0]]
+    assert received_indexes == [build_calls[0], build_calls[0]]
 
 
 def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> None:
@@ -3035,7 +3346,9 @@ def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> Non
         description="Duplicates the existing `Widget` service.",
     )
     monkeypatch.setattr(
-        coord, "find_architecture_and_redundancy_issues", lambda *a, **kw: [arch_issue]
+        coord,
+        "find_architecture_and_side_effect_issues",
+        lambda *a, **kw: ([arch_issue], []),
     )
 
     synth_calls: list = []
@@ -3059,7 +3372,7 @@ def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> Non
 def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None:
     """Regression test: the same gap as
     ``test_single_chunk_summary_reflects_architecture_findings``, but for the
-    side-effect/blast-radius pass -- ``_merge_narrative`` was only ever told
+    merged architecture/side-effect pass -- ``_merge_narrative`` was only ever told
     about ``architecture_findings``, so a single-chunk review whose only new
     findings come from the side-effect pass silently dropped them from the
     narrative (returning the map phase's chunk summary verbatim, which never
@@ -3074,7 +3387,9 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
         description="bar() no longer raises ValueError; app/caller.py still catches it.",
     )
     monkeypatch.setattr(
-        coord, "find_side_effect_impact_issues", lambda *a, **kw: [side_effect_issue]
+        coord,
+        "find_architecture_and_side_effect_issues",
+        lambda *a, **kw: ([], [side_effect_issue]),
     )
 
     synth_calls: list = []
@@ -3156,19 +3471,29 @@ class _NonDummyLLMClient(LLMClient, Model):
         return self._inner.get_max_context_tokens()
 
 
+def _noop_filter(llm, input_data, issues, repo_reader=None, index=None):
+    """Shared stub: return findings unchanged (false-positive filter no-op)."""
+    return list(issues)
+
+
+def _noop_merged(llm, input_data, repo_reader=None, index=None):
+    """Shared stub: merged architecture/side-effect pass finds nothing."""
+    return [], []
+
+
 def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None:
-    """With a non-``DummyLLMClient`` ``llm``, the three tail passes run at once:
-    each stub records its arrival then blocks on a 3-party barrier, so the call
-    only completes if all three are in flight together -- a fallback to
-    sequential execution would deadlock the first stub and the test would fail
-    on the barrier timeout. The recorded arrivals additionally prove, without
-    relying on that implicit timeout/exception behavior, that all three stubs
-    actually ran."""
+    """With a non-``DummyLLMClient`` ``llm``, the two tail passes (false-positive
+    filter and merged architecture/side-effect pass) run concurrently: each stub
+    records its arrival then blocks on a 2-party barrier, so the call only
+    completes if both are in flight together -- a fallback to sequential
+    execution would deadlock the first stub and the test would fail on the
+    barrier timeout. The recorded arrivals additionally prove, without relying
+    on that implicit timeout/exception behavior, that both stubs actually ran."""
     import code_review_agent.coordinator as coord
 
     arrivals: list[str] = []
     lock = threading.Lock()
-    barrier = threading.Barrier(3, timeout=5)
+    barrier = threading.Barrier(2, timeout=5)
 
     def _record(name: str) -> None:
         with lock:
@@ -3179,19 +3504,13 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
         barrier.wait()
         return list(issues)
 
-    def _arch(llm, input_data, repo_reader=None, index=None):
-        _record("architecture")
+    def _merged(llm, input_data, repo_reader=None, index=None):
+        _record("merged")
         barrier.wait()
-        return []
-
-    def _side_effect(llm, input_data, repo_reader=None, index=None):
-        _record("side_effect")
-        barrier.wait()
-        return []
+        return [], []
 
     monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
-    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
 
     stand_in = _NonDummyLLMClient(DummyLLMClient())
     try:
@@ -3201,12 +3520,12 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
         )
     finally:
         # Leaves no party waiting on the barrier even if run_coordinator raises
-        # before all three stubs reach it, so a failure here can't wedge a
-        # later test sharing the same worker process.
+        # before both stubs reach it, so a failure here can't wedge a later
+        # test sharing the same worker process.
         barrier.abort()
 
     assert isinstance(result, CodeReviewOutput)
-    assert sorted(arrivals) == ["architecture", "filter", "side_effect"]
+    assert sorted(arrivals) == ["filter", "merged"]
 
 
 def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch) -> None:
@@ -3240,17 +3559,12 @@ def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch
         _track()
         return list(issues)
 
-    def _arch(llm, input_data, repo_reader=None, index=None):
+    def _merged(llm, input_data, repo_reader=None, index=None):
         _track()
-        return []
-
-    def _side_effect(llm, input_data, repo_reader=None, index=None):
-        _track()
-        return []
+        return [], []
 
     monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
-    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
 
     stand_in = _NonDummyLLMClient(DummyLLMClient())
     result = run_coordinator(
@@ -3265,9 +3579,9 @@ def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch
 def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypatch) -> None:
     """The concurrent branch (non-``DummyLLMClient`` ``llm``) and the sequential
     branch (``DummyLLMClient``) must produce a byte-identical merged
-    ``CodeReviewOutput`` for the same input -- the tail passes are independent
-    and additive, so fanning them out must not change the result, only the
-    wall-clock order in which they run."""
+    ``CodeReviewOutput`` for the same input -- the two tail passes are
+    independent and additive, so fanning them out must not change the result,
+    only the wall-clock order in which they run."""
     import code_review_agent.coordinator as coord
     from code_review_agent.models import CodeReviewIssue
 
@@ -3284,18 +3598,11 @@ def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypa
         description="bar() no longer raises ValueError; app/caller.py still catches it.",
     )
 
-    def _filter(llm, input_data, issues, repo_reader=None, index=None):
-        return list(issues)
+    def _merged(llm, input_data, repo_reader=None, index=None):
+        return [arch_issue], [side_effect_issue]
 
-    def _arch(llm, input_data, repo_reader=None, index=None):
-        return [arch_issue]
-
-    def _side_effect(llm, input_data, repo_reader=None, index=None):
-        return [side_effect_issue]
-
-    monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
-    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+    monkeypatch.setattr(coord, "filter_false_positives", _noop_filter)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
 
     script = [
         {

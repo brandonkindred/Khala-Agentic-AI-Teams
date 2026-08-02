@@ -1,13 +1,11 @@
 """SE team API — backend/frontend code-v2 sub-team run and status routes."""
 
 import logging
-import threading
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from software_engineering_team.api import main as _main
 from software_engineering_team.api.models import (
     BackendCodeV2RunRequest,
     BackendCodeV2RunResponse,
@@ -33,8 +31,9 @@ router = APIRouter()
     "/frontend-code-v2/run",
     response_model=FrontendCodeV2RunResponse,
     summary="Run frontend-code-v2 agent team",
-    description="Submit a task and repo path. Starts the frontend-code-v2 6-phase workflow in the background. "
-    "Returns job_id immediately. Poll GET /frontend-code-v2/status/{job_id} for progress.",
+    description="Submit a task and repo path. Dispatches the frontend-code-v2 6-phase "
+    "workflow to Temporal. Returns job_id immediately. Poll GET /frontend-code-v2/status/{job_id} "
+    "for progress.",
 )
 def run_frontend_code_v2(request: FrontendCodeV2RunRequest) -> FrontendCodeV2RunResponse:
     """Start the frontend-code-v2 team on a task."""
@@ -48,31 +47,17 @@ def run_frontend_code_v2(request: FrontendCodeV2RunRequest) -> FrontendCodeV2Run
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="frontend_code_v2")
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or frontend-code-v2 thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.constants import STANDALONE_TYPE_FRONTEND
         from software_engineering_team.temporal.start_workflow import start_standalone_workflow
 
-        if is_temporal_enabled():
-            start_standalone_workflow(
-                STANDALONE_TYPE_FRONTEND,
-                job_id,
-                request.repo_path,
-                task_dict=request.task.model_dump(),
-                architecture_overview=request.architecture or "",
-            )
-        else:
-            thread = threading.Thread(
-                target=_main._run_frontend_code_v2_background,
-                args=(
-                    job_id,
-                    request.repo_path,
-                    request.task.model_dump(),
-                    request.architecture or "",
-                ),
-            )
-            thread.daemon = True
-            thread.start()
+        start_standalone_workflow(
+            STANDALONE_TYPE_FRONTEND,
+            job_id,
+            request.repo_path,
+            task_dict=request.task.model_dump(),
+            architecture_overview=request.architecture or "",
+        )
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -126,8 +111,9 @@ def get_frontend_code_v2_status(job_id: str) -> FrontendCodeV2StatusResponse:
     "/backend-code-v2/run",
     response_model=BackendCodeV2RunResponse,
     summary="Run backend-code-v2 agent team",
-    description="Submit a task and repo path. Starts the backend-code-v2 5-phase workflow in the background. "
-    "Returns job_id immediately. Poll GET /backend-code-v2/status/{job_id} for progress.",
+    description="Submit a task and repo path. Dispatches the backend-code-v2 5-phase "
+    "workflow to Temporal. Returns job_id immediately. Poll GET /backend-code-v2/status/{job_id} "
+    "for progress.",
 )
 def run_backend_code_v2(request: BackendCodeV2RunRequest) -> BackendCodeV2RunResponse:
     """Start the backend-code-v2 team on a task."""
@@ -141,31 +127,17 @@ def run_backend_code_v2(request: BackendCodeV2RunRequest) -> BackendCodeV2RunRes
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="backend_code_v2")
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or backend-code-v2 thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.constants import STANDALONE_TYPE_BACKEND
         from software_engineering_team.temporal.start_workflow import start_standalone_workflow
 
-        if is_temporal_enabled():
-            start_standalone_workflow(
-                STANDALONE_TYPE_BACKEND,
-                job_id,
-                request.repo_path,
-                task_dict=request.task.model_dump(),
-                architecture_overview=request.architecture or "",
-            )
-        else:
-            thread = threading.Thread(
-                target=_main._run_backend_code_v2_background,
-                args=(
-                    job_id,
-                    request.repo_path,
-                    request.task.model_dump(),
-                    request.architecture or "",
-                ),
-            )
-            thread.daemon = True
-            thread.start()
+        start_standalone_workflow(
+            STANDALONE_TYPE_BACKEND,
+            job_id,
+            request.repo_path,
+            task_dict=request.task.model_dump(),
+            architecture_overview=request.architecture or "",
+        )
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block

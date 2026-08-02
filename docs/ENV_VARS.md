@@ -253,7 +253,7 @@ LLM activity emits `activity.heartbeat` so Temporal can detect a hung activity
 faster than its full timeout. The ceiling is one third of the fixed 180s
 activity heartbeat timeout, guaranteeing at least ~3 beats per window regardless
 of configuration — so a mis-set value can never make a healthy activity
-heartbeat-timeout. Parsed via the shared `env_float` (unset/garbage/non-finite →
+heartbeat-timeout window. Parsed via the shared `env_float` (unset/garbage/non-finite →
 default, with a warning on a set-but-unparseable value).
 
 ### MARKET_RESEARCH_TEMPORAL_HEARTBEAT_INTERVAL_S
@@ -328,11 +328,13 @@ the sandbox reaper or its Temporal worker thread at all.
 
 ### UNIFIED_API_TEAM_ASSISTANTS_ENABLED
 Team-assistant conversational sub-app mount toggle (default: true). When
-true, the unified-api `lifespan` mounts every team's assistant chat sub-app
-(`<team-prefix>/assistant`) at startup. Set to `false`/`0`/`no` to skip the
-mount loop entirely (zero assistant sub-apps mounted) — team proxy routes and
-health checks are unaffected. Lazy mount-on-first-request when enabled is
-tracked separately.
+true, the unified-api `lifespan` registers every team's assistant chat
+sub-app (`<team-prefix>/assistant`) into a mount-spec registry at startup —
+each sub-app is then actually constructed and mounted lazily, on that team's
+first matching request (a cold-request mount cost, paid once per team, only
+for teams that receive assistant traffic). Set to `false`/`0`/`no` to skip
+registration entirely (no assistant sub-app is ever mounted, regardless of
+traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
 Agent Studio Temporal worker toggle (default: true). When true, the
@@ -684,6 +686,53 @@ via an in-process `ThreadPoolExecutor` (even under Temporal, inside the
 single verify activity — see `CODE_REVIEW_VERIFY_TIMEOUT_SECONDS` below), so
 this ceiling still bounds *verification* concurrency in all dispatch modes.
 
+**Bisection-recovery concurrency.** A chunk whose review fails a recoverable
+content error (`mapping._review_chunk_with_recovery`) is retried by splitting
+it in half and reviewing both halves concurrently. Those bisection-halves
+calls are also `reviewer.run()` calls, so this knob's enforcement contract
+covers them too, but the two dispatch modes differ in *how* it is enforced:
+
+- **Thread-mode fallback** (in-process `run_coordinator`): a single
+  `threading.Semaphore`, sized to `_map_parallelism()` (`min(CODE_REVIEW_MAP_PARALLELISM,
+  LLM_MAX_CONCURRENCY)`, floored at 1) and created once per review run, is
+  threaded through the whole map phase — `_map_chunks` → `_cached_review_chunk`
+  → `_review_chunk_with_recovery` — and acquired around every actual
+  `reviewer.run()` call: the top-level chunk review, any same-input retry, the
+  thinking-off retry, and both bisection halves. Unlike the outer map-phase fan-out
+  width, this size is **not** further clamped to `chunk_count`: a review with a
+  single top-level chunk that bisects can still issue up to `_map_parallelism()`
+  concurrent `reviewer.run()` calls (e.g. both halves at once), not artificially
+  limited to 1. This makes `CODE_REVIEW_MAP_PARALLELISM` a true **run-wide**
+  ceiling: the total number of concurrent chunk-review LLM calls for one run —
+  top-level fan-out plus every bisection recursion combined, at any depth —
+  never exceeds it, even when several top-level chunks bisect at the same time
+  (previously, each bisecting worker added its own independent 2-worker pool on
+  top of whatever else was in flight, so two simultaneously-bisecting top-level
+  chunks could issue four concurrent recovery calls even with this knob set to
+  `2`).
+- **Temporal mode**: only the top-level chunk fan-out is split across
+  independent activities — `temporal/workflows.py` schedules one
+  `review_chunk_activity` per prepared chunk. A chunk's bisection recursion is
+  **not** its own activity: `review_chunk_activity` calls
+  `mapping._cached_review_chunk` once (`temporal/activities.py`), and any
+  bisection halves it triggers run as nested, in-process calls inside that
+  same activity, exactly like the thread-mode recursion but with no run-scoped
+  semaphore threaded in (an activity has no reference to another activity's
+  in-process objects, so `run_coordinator`'s semaphore can't reach across
+  them, and no per-activity equivalent is constructed either). Concurrency
+  within one activity's bisection is therefore bounded only by the fixed
+  2-worker pool per split point and the process-wide `LLM_MAX_CONCURRENCY`
+  semaphore (every provider client call still acquires it) — **not** by the
+  Temporal worker's activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`
+  (below), which bounds how many *top-level* chunk activities run concurrently,
+  not the nested bisection calls inside any single one of them. This is an
+  accepted, documented gap rather than a bug: it only matters for an operator
+  who sets `CODE_REVIEW_MAP_PARALLELISM` *below* `LLM_MAX_CONCURRENCY`
+  specifically for a stricter per-review budget (cost control, or a provider
+  tier that throttles below the global default), and even then concurrent
+  bisections can only transiently exceed the ceiling they configured, never
+  cause literal overload beyond the still-enforced global limit.
+
 ### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
 Int (default `3600`, floor `1`). Per-group timeout for the false-positive
 verification phase's LLM calls (one call per cited file, fanned out across
@@ -919,35 +968,58 @@ fail-safe (a read failure only ever keeps a finding).
 
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
-pass. After the false-positive filter runs, this pass makes exactly one
-additional LLM call for the whole submission (never once per chunk) with
-read access to the rest of the repository (the same `read_file`/`list_files`/
-`search_codebase`/`find_function_at_line` tools the false-positive filter
-uses), given the full architecture document. It can only ADD findings, in
-two categories: `architecture` (the change contradicts a stated boundary/
-pattern/decision in a way that would break integration) and `refactor` (the
-change duplicates a capability that already exists elsewhere in the
-repository, tool-verified before it is flagged — never guessed from naming
+pass. This toggle enables the architecture half of the in-process coordinator's
+merged whole-submission tail pass (`merged_architecture_side_effect_pass`).
+In the in-process coordinator path, when either architecture and/or side-effect
+toggle is enabled, the coordinator makes a single merged LLM call and splits
+`architecture_findings` back into this category. In Temporal execution mode
+(standalone activities), enabling this toggle controls the
+architecture-consistency activity independently (one additional LLM call).
+
+An architecture document on `CodeReviewInput.architecture` is optional:
+when present (document, overview, components, and/or decisions), it is inlined
+in full when context allows; when absent, the pass still runs and the model must
+derive expectations from established repository structure and patterns. The
+in-process merged call budgets the changed-file path manifest, architecture
+body, and code inlining against the (half-filtered) system prompt and a
+dual-array response reserve that shrinks on small contexts — and skips the call
+entirely when even an empty payload cannot fit. Disabled halves are omitted from
+the system/user prompt (not merely discarded after the fact). It can only ADD
+findings, in two categories: `architecture` (the change contradicts a stated or
+established boundary/pattern/decision in a way that would break integration) and
+`refactor` (the change duplicates a capability that already exists elsewhere in
+the repository, tool-verified before it is flagged — never guessed from naming
 alone). It never removes or alters any finding the map phase or the
-false-positive filter already produced. Requires
-`CodeReviewInput.architecture` to carry an `architecture_document`,
-`overview`, `components`, or `decisions` — the pass renders whichever of
-these are present; runs as a no-op (no LLM call) when none are. Any setup
-or LLM failure is fail-safe: it is logged and yields no additional findings,
-so a broken pass never blocks or changes the rest of the review. Set to
-`false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
-enabled).
+false-positive filter already produced. Any setup or LLM failure is fail-safe:
+it is logged and yields no additional findings, so a broken pass never blocks or
+changes the rest of the review. Set to `false`/`0`/`no` to disable the pass
+(any other value, or unset, leaves it enabled).
 
 ### CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS
-Default-on toggle for the side-effect / blast-radius pass. After the
-architecture-consistency pass runs, this pass makes exactly one additional LLM
-call for the whole submission (never once per chunk) with read access to the
-rest of the repository (the same `read_file`/`list_files`/`search_codebase`/
-`find_function_at_line` tools the false-positive filter and architecture pass
-use, plus a new `search_repository` tool that searches the REST of the
-repository — beyond the submission — for a substring, capped well below the
-GitHub PR-review path's shared per-review fetch budget since three passes draw
-from the same budget and this one runs last). It can only ADD findings, in two
+Default-on toggle for the side-effect / blast-radius pass. This toggle enables
+the side-effect half of the in-process coordinator's merged whole-submission
+tail pass. In the in-process coordinator path, when either architecture and/or
+side-effect toggle is enabled, the coordinator makes a single merged LLM call
+and splits `side_effect_findings` back into this category. In Temporal
+execution mode (standalone activities), enabling this toggle controls the
+side-effect-impact activity independently (one additional LLM call).
+
+In Temporal mode this pass makes exactly one additional LLM call (never once
+per chunk). In the in-process coordinator it shares a single merged LLM call
+with the architecture-consistency pass, with `side_effect_findings` split back
+out after the call. That merged call raises a tight `LLM_MAX_TOKENS` (when set
+below 8192) to the dual-array output floor so both finding lists can fit in one
+completion; unset / already-generous caps keep the provider default. Either
+way it has read access to the rest of the repository
+(the same `read_file`/`list_files`/`search_codebase`/`find_function_at_line`
+tools the false-positive filter and architecture pass use, plus a new
+`search_repository` tool that searches the REST of the repository — beyond the
+submission — for a substring, capped well below the GitHub PR-review path's
+shared per-review fetch budget since the in-process coordinator's tail passes
+share a single prompt budget across `filter_false_positives` and the merged
+tail pass).
+
+It can only ADD findings, in two
 categories: `side-effects` — a genuine side effect with an unintended logical
 consequence, where the current implementation's behavior (return value,
 exceptions, mutation of shared/passed-in state, I/O, ordering/timing) breaks a

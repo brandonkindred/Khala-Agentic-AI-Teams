@@ -7,7 +7,6 @@ on the app these routers are mounted onto (``software_engineering_team.api.main`
 from __future__ import annotations
 
 import logging
-import threading
 import uuid
 from datetime import datetime, timezone
 from typing import List
@@ -29,67 +28,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _temporal_dispatch(job_id: str, request: RunRequest) -> bool:
-    """Dispatch the job to Temporal when enabled; return True if it was dispatched.
-
-    Preconditions:
-        - ``job_id`` names a job row that already exists (the caller ran
-          ``create_job``); ``request.plan_input`` is non-null.
-    Postconditions:
-        - Returns True and starts ``CodingTeamWorkflow`` when ``TEMPORAL_ADDRESS``
-          is set and the worker is reachable.
-        - Returns False (dispatching nothing) only when the Temporal path is not
-          taken at all — Temporal disabled, or its modules unavailable — so the
-          caller runs the thread path.
-        - Raises (does NOT return False) when Temporal is enabled but the
-          dispatch itself fails, e.g. the worker client is not ready
-          (``start_workflow_sync`` raises ``RuntimeError``/``TimeoutError``). We
-          deliberately do not silently fall back to the thread path here: a
-          ``TimeoutError`` can fire after the workflow was already scheduled, so
-          a second in-process run would duplicate side effects (branch/commit/PR).
-          The caller marks the job failed and surfaces the error instead.
-    """
-    try:
-        from shared.temporal import is_temporal_enabled
-    except ImportError:
-        return False
-    if not is_temporal_enabled():
-        return False
-    try:
-        from software_engineering_team.temporal.coding_team_start_workflow import (
-            start_coding_team_workflow,
-        )
-    except ImportError:
-        # Temporal enabled but the team's dispatch module can't be imported: this
-        # is a real misconfiguration on a durable deployment, not a reason to
-        # silently run non-durably. Surface it rather than hiding it.
-        logger.exception("Temporal enabled but coding_team dispatch module failed to import")
-        raise
-    start_coding_team_workflow(job_id, request.repo_path, request.plan_input)
-    logger.info("Coding team job dispatched via Temporal: job_id=%s", job_id)
-    return True
-
-
 @router.post("/run", response_model=RunResponse)
 def post_run(request: RunRequest) -> RunResponse:
-    """Start a coding_team job. If plan_input is provided, runs orchestrator in background.
+    """Start a coding_team job. If plan_input is provided, dispatches to Temporal.
 
-    Dispatches through Temporal (durable, restart-survivable) when
-    ``TEMPORAL_ADDRESS`` is set; otherwise runs the orchestrator in a daemon
-    thread. Both paths return the same ``job_id`` for the client to poll.
+    Dispatch is unconditionally through Temporal (durable, restart-survivable);
+    a plan-less request just creates a pending row for the caller to fill in later.
     """
     job_id = str(uuid.uuid4())
     _main.create_job(job_id=job_id, repo_path=request.repo_path, plan_input=request.plan_input)
     if request.plan_input:
         try:
-            dispatched = _temporal_dispatch(job_id, request)
+            from software_engineering_team.temporal.coding_team_start_workflow import (
+                start_coding_team_workflow,
+            )
+
+            start_coding_team_workflow(job_id, request.repo_path, request.plan_input)
+            logger.info("Coding team job dispatched via Temporal: job_id=%s", job_id)
         except Exception as e:
-            # Temporal was enabled but the dispatch failed (worker not ready,
-            # start timeout, bad config). Mark the freshly-created row failed so
-            # it is not orphaned in 'pending', and surface a retryable error
-            # instead of an opaque 500. We do not fall back to the thread path:
-            # the workflow may already be scheduled, and a second run would
-            # duplicate side effects.
+            # Dispatch failed (worker not ready, start timeout, bad config). Mark
+            # the freshly-created row failed so it is not orphaned in 'pending',
+            # and surface a retryable error instead of an opaque 500.
             logger.exception("Coding team Temporal dispatch failed: %s", e)
             _main.update_job(
                 job_id,
@@ -101,30 +60,11 @@ def post_run(request: RunRequest) -> RunResponse:
                 status_code=503,
                 detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
             ) from e
-        if dispatched:
-            return RunResponse(
-                job_id=job_id,
-                status=JobStatus.RUNNING.value,
-                message="Job started (Temporal). Poll GET /status/{job_id} for progress.",
-            )
-        plan = _main.plan_from_input(request.plan_input, request.repo_path)
-
-        def run() -> None:
-            _main._register_run_thread(job_id)
-            try:
-                _main.run_orchestrator_wired(job_id, request.repo_path, plan)
-            except Exception as e:
-                logger.exception("Coding team orchestrator failed: %s", e)
-                # current_activity=None: a crash skips the in-flow clears, and a
-                # failed job must not keep serving a frozen mid-review sub-bar.
-                _main.update_job(
-                    job_id, status=JobStatus.FAILED.value, error=str(e), current_activity=None
-                )
-            finally:
-                _main._clear_run_thread(job_id)
-
-        t = threading.Thread(target=run, daemon=True)
-        t.start()
+        return RunResponse(
+            job_id=job_id,
+            status=JobStatus.RUNNING.value,
+            message="Job started (Temporal). Poll GET /status/{job_id} for progress.",
+        )
     return RunResponse(job_id=job_id, status="pending")
 
 

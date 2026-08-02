@@ -37,16 +37,23 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
         Returns a JSON-shaped ``batch_input`` dict with every key
         ``StrategyLabBatchWorkflow.run`` reads (``run_id``, ``config``,
         ``batch_size``/``batch_count``/``max_parallel``, ``benchmark_symbol``,
-        ``exclude_asset_classes``, paper-trading flags, ``start_cycle_offset``).
+        ``exclude_asset_classes``, paper-trading flags, ``start_cycle_offset``,
+        and the resume-seed counters ``skipped_cycles``/``errored_cycles``/
+        ``errored_details``/``tracker_merge_error_count``/
+        ``completed_record_ids``).
     """
-    # ``clamp_max_parallel``/``rehydrate_active_run_offset`` live in the shared
-    # ``strategy_lab.config``/``strategy_lab.run_state`` modules (also imported by
-    # ``api.main``) so the Temporal batch runs with byte-for-byte the same
-    # offset/clamp the thread-mode worker uses, without reaching into api.main's
-    # private module state.
+    # ``clamp_max_parallel``/``rehydrate_active_run_offset``/
+    # ``get_resume_seed_counters`` live in the shared ``strategy_lab.config``/
+    # ``strategy_lab.run_state`` modules (also imported by ``api.main``) so the
+    # Temporal batch runs with byte-for-byte the same offset/clamp/counters the
+    # thread-mode worker uses, without reaching into api.main's private module
+    # state.
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab.config import clamp_max_parallel
-    from investment_team.strategy_lab.run_state import rehydrate_active_run_offset
+    from investment_team.strategy_lab.run_state import (
+        get_resume_seed_counters,
+        rehydrate_active_run_offset,
+    )
     from investment_team.strategy_lab_context import excluded_for_allowed
 
     config = BacktestConfig(
@@ -74,6 +81,7 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
         "paper_trading_enabled": request.paper_trading_enabled,
         "paper_trading_lookback_days": request.paper_trading_lookback_days,
         "start_cycle_offset": rehydrate_active_run_offset(run_id),
+        **get_resume_seed_counters(run_id),
     }
 
 

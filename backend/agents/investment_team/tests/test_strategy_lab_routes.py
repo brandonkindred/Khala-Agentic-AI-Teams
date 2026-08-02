@@ -4,7 +4,7 @@ Targets the routes that interact with the in-memory ``_active_runs``
 dict and the ``_get_lab_run_job_client`` shim:
 
 * ``run_strategy_lab`` — 409 when a run is already active.
-* ``run_strategy_lab`` — happy path (worker thread is stubbed so the
+* ``run_strategy_lab`` — happy path (Temporal dispatch is stubbed so the
   route can return immediately).
 * ``resume_strategy_lab_run`` — 404 + 400 + 409 + happy paths.
 * ``restart_strategy_lab_run`` — 404 + 400 + 409 + happy paths.
@@ -15,7 +15,7 @@ dict and the ``_get_lab_run_job_client`` shim:
   load-from-job-service fallback.
 * ``stream_strategy_lab_run`` — terminal-state short-circuit + 404.
 
-Every test patches the JobService shim and the worker so no real
+Every test patches the JobService shim and the Temporal dispatch so no real
 strategy-lab cycles execute.
 """
 
@@ -82,8 +82,18 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api_main, "_active_runs", shared_runs)
     monkeypatch.setattr(_run_state, "active_runs", shared_runs)
 
-    # Stop real threads from spawning.
-    monkeypatch.setattr(api_main, "_strategy_lab_worker", lambda *a, **k: None)
+    # Stub the Temporal dispatch so no real workflow start is attempted.
+    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", lambda *a, **k: None)
+
+    # restart_strategy_lab_run calls _require_temporal() and
+    # terminate_and_await_workflow_sync() directly (to resolve any prior
+    # execution before resetting state), independent of the dispatch stub
+    # above — stub those too so restart's happy path doesn't need a real
+    # Temporal worker either.
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
     # Stub the persistence calls so they don't try to reach the job service.
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
@@ -763,6 +773,28 @@ def test_stream_strategy_lab_run_terminal_short_circuit(
     }
     resp = api_client.get("/strategy-lab/runs/done/stream")
     # Terminal runs return a complete SSE response synchronously.
+    assert resp.status_code == 200
+    body = resp.text
+    assert "snapshot" in body
+    assert "done" in body
+
+
+def test_stream_strategy_lab_run_terminal_short_circuit_completed_with_errors(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``completed_with_errors`` must also be treated as terminal so a
+    reconnecting client gets snapshot + done instead of hanging in 'running'."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["done-with-errors"] = {
+        "run_id": "done-with-errors",
+        "status": "completed_with_errors",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 1,
+        "completed_cycles": 1,
+        "errored_cycles": 1,
+    }
+    resp = api_client.get("/strategy-lab/runs/done-with-errors/stream")
     assert resp.status_code == 200
     body = resp.text
     assert "snapshot" in body

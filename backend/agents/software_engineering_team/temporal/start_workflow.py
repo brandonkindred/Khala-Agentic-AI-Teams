@@ -43,34 +43,55 @@ def _run_async(coro: Any) -> Any:
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
 
+def is_workflow_v2_enabled() -> bool:
+    """Whether ``SE_WORKFLOW_V2`` selects ``RunTeamWorkflowV2`` for ``start_run_team_workflow``.
+
+    Exposed so callers (e.g. the jobs API) can reject sprint-scoped requests
+    before dispatch when V2 is selected — ``RunTeamWorkflowV2`` doesn't accept
+    ``sprint_id`` yet, so silently proceeding would either fail asynchronously
+    in the orchestrator or, if a stale on-disk spec exists, run the wrong scope.
+    """
+    import os
+
+    return os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
+
+
 def start_run_team_workflow(
     job_id: str,
     repo_path: str,
     spec_content_override: Optional[str] = None,
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
+    sprint_id: Optional[str] = None,
 ) -> None:
-    """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id."""
-    import os
+    """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id.
 
+    ``sprint_id`` is forwarded only on the V1 path (``RunTeamWorkflow``), which
+    accepts it as a trailing positional arg; ``RunTeamWorkflowV2`` does not yet
+    support sprint-scoped runs, so it is omitted from the V2 args entirely.
+    """
     workflow_id = f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"
     client = get_temporal_client()
     if client is None:
         raise RuntimeError("Temporal client not available")
 
-    use_v2 = os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
+    use_v2 = is_workflow_v2_enabled()
     workflow_cls = RunTeamWorkflowV2 if use_v2 else RunTeamWorkflow
+
+    args: List[Any] = [
+        job_id,
+        repo_path,
+        spec_content_override,
+        resolved_questions_override,
+        planning_only,
+    ]
+    if not use_v2:
+        args.append(sprint_id)
 
     _run_async(
         client.start_workflow(
             workflow_cls.run,
-            args=[
-                job_id,
-                repo_path,
-                spec_content_override,
-                resolved_questions_override,
-                planning_only,
-            ],
+            args=args,
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )

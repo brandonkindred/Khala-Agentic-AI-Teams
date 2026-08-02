@@ -1,7 +1,6 @@
 """SE team API — run-team job lifecycle routes (create, upload, list, status, retry, cancel, delete, resume, restart, llm-recheck)."""
 
 import logging
-import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +9,6 @@ from typing import Any, Dict
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from shared.hitl.status import pending_questions_from_raw
-from software_engineering_team.api import main as _main
 from software_engineering_team.api.models import (
     CancelJobResponse,
     DeleteJobResponse,
@@ -83,21 +81,29 @@ def _resolve_repo_path(repo_path: str | Path, sprint_id: Any) -> Path:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-def _reject_sprint_under_temporal(temporal_enabled: bool, sprint_id: Any, *, detail: str) -> None:
-    """Reject a sprint-mode job under Temporal with a 400 before any state mutation.
+def _reject_sprint_under_workflow_v2(sprint_id: Any, *, detail: str) -> None:
+    """Reject a sprint-mode job when the V2 workflow pipeline is selected, before any state mutation.
 
-    sprint_id under Temporal is not yet plumbed; this is a client-input error, not
-    infrastructure, so callers invoke it *before* create_job / the launch
-    try-except (whose broad ``except`` would otherwise re-wrap the 400 as a 503).
+    ``RunTeamWorkflowV2`` doesn't accept ``sprint_id`` (V2 pipeline support is
+    separate, out-of-scope work) — dispatching it anyway would either fail
+    asynchronously once the orchestrator hits a missing/wrong spec, or, if a
+    stale on-disk spec exists, silently run the wrong scope. This is a
+    client-input error, not infrastructure, so callers invoke it *before*
+    create_job / the launch try-except (whose broad ``except`` would otherwise
+    re-wrap the 400 as a 503).
 
     Preconditions:
-        - ``temporal_enabled`` reflects ``is_temporal_enabled()``; ``detail`` is the
-          caller-specific 400 message.
+        - ``detail`` is the caller-specific 400 message.
     Postconditions:
-        - Raises ``HTTPException(400, detail)`` when Temporal is enabled and
-          ``sprint_id`` is not ``None``; returns ``None`` otherwise.
+        - Raises ``HTTPException(400, detail)`` when ``sprint_id`` is not
+          ``None`` and ``SE_WORKFLOW_V2`` selects the V2 pipeline; returns
+          ``None`` otherwise.
     """
-    if temporal_enabled and sprint_id is not None:
+    if sprint_id is None:
+        return
+    from software_engineering_team.temporal.start_workflow import is_workflow_v2_enabled
+
+    if is_workflow_v2_enabled():
         raise HTTPException(status_code=400, detail=detail)
 
 
@@ -112,21 +118,13 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     """Start the software engineering team on a work folder."""
     repo_path = _resolve_repo_path(request.repo_path, request.sprint_id)
 
-    # Reject sprint_id under Temporal *before* create_job and *outside*
-    # the launch try/except — otherwise the broad `except Exception`
-    # below catches the 400 and re-wraps it as a 503 "Failed to start
-    # workflow". Temporal-mode plumbing for sprint_id is a follow-up;
-    # this is a client-input error, not infra.
-    from software_engineering_team.temporal.client import is_temporal_enabled
-
-    temporal_enabled = is_temporal_enabled()
-    _reject_sprint_under_temporal(
-        temporal_enabled,
+    # Reject sprint_id under the V2 pipeline *before* create_job and *outside*
+    # the launch try/except — otherwise the broad `except Exception` below
+    # catches the 400 and re-wraps it as a 503. RunTeamWorkflowV2 doesn't
+    # accept sprint_id yet; V1 (the default) does.
+    _reject_sprint_under_workflow_v2(
         request.sprint_id,
-        detail=(
-            "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
-            "run without Temporal or omit sprint_id."
-        ),
+        detail="sprint_id is not supported under SE_WORKFLOW_V2; omit sprint_id.",
     )
 
     # Validate `sprint_id` exists *and has planned scope* before
@@ -142,26 +140,17 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     job_id = str(uuid.uuid4())
     create_job(job_id, str(repo_path), job_type="run_team")
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         # Persist sprint_id inside the launch try so a transient
         # job-service failure on the update doesn't leave a pending
-        # job with no thread/workflow running. `None` is written explicitly
+        # job with no workflow running. `None` is written explicitly
         # so non-sprint runs don't carry a stale value from a previous job
         # that reused the same row (defense in depth — create_job mints a fresh uuid).
         update_job(job_id, sprint_id=request.sprint_id)
 
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if temporal_enabled:
-            start_run_team_workflow(job_id, str(repo_path))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(repo_path)),
-                kwargs={"sprint_id": request.sprint_id},
-            )
-            thread.daemon = True
-            thread.start()
+        start_run_team_workflow(job_id, str(repo_path), sprint_id=request.sprint_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -208,19 +197,10 @@ async def run_team_upload(
     job_id = str(uuid.uuid4())
     create_job(job_id, str(workspace), job_type="run_team")
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if is_temporal_enabled():
-            start_run_team_workflow(job_id, str(workspace))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(workspace)),
-            )
-            thread.daemon = True
-            thread.start()
+        start_run_team_workflow(job_id, str(workspace))
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -357,16 +337,10 @@ def retry_failed_tasks(job_id: str) -> RetryResponse:
 
     failed_ids = [ft.get("task_id", "") for ft in failed_tasks]
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or retry thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.start_workflow import start_retry_failed_workflow
 
-        if is_temporal_enabled():
-            start_retry_failed_workflow(job_id)
-        else:
-            thread = threading.Thread(target=_main._run_retry_background, args=(job_id,))
-            thread.daemon = True
-            thread.start()
+        start_retry_failed_workflow(job_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -489,20 +463,12 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
     # to the orchestrator/workflow from the value persisted at creation.
     _resolve_repo_path(repo_path, sprint_id)
 
-    # Same Temporal+sprint_id guard as POST /run-team: validate BEFORE
-    # flipping the job to running, so the guard firing can't leave the
-    # job stuck in `running` with no workflow/thread (recoverable only
-    # via the stale-job monitor).
-    from software_engineering_team.temporal.client import is_temporal_enabled
-
-    temporal_enabled = is_temporal_enabled()
-    _reject_sprint_under_temporal(
-        temporal_enabled,
+    # Same V2 guard as POST /run-team: validate BEFORE flipping the job to
+    # running, so the guard firing can't leave the job stuck in `running`
+    # with no workflow running (recoverable only via the stale-job monitor).
+    _reject_sprint_under_workflow_v2(
         sprint_id,
-        detail=(
-            "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
-            "this job was created with sprint_id and cannot be resumed under Temporal."
-        ),
+        detail="sprint_id is not supported under SE_WORKFLOW_V2; this job was created with sprint_id and cannot be resumed.",
     )
 
     # Re-validate the sprint scope on resume — the sprint may have been
@@ -522,25 +488,17 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         current_activity=None,
     )
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread for resume
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow for resume
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        # Pass previously submitted answers so the orchestrator doesn't re-ask questions
+        # Pass previously submitted answers so the orchestrator doesn't re-ask questions.
         submitted_answers = data.get("submitted_answers") or None
-
-        if temporal_enabled:
-            start_run_team_workflow(job_id, str(repo_path))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(repo_path)),
-                kwargs={
-                    "resolved_questions_override": submitted_answers,
-                    "sprint_id": sprint_id,
-                },
-                daemon=True,
-            )
-            thread.start()
+        start_run_team_workflow(
+            job_id,
+            str(repo_path),
+            resolved_questions_override=submitted_answers,
+            sprint_id=sprint_id,
+        )
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -603,16 +561,10 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     # sprint-scoped restart goes back through the synthesized-spec
     # path instead of silently falling back to repo spec parsing.
 
-    from software_engineering_team.temporal.client import is_temporal_enabled
-
-    temporal_enabled = is_temporal_enabled()
-    _reject_sprint_under_temporal(
-        temporal_enabled,
+    # Same V2 guard as POST /run-team.
+    _reject_sprint_under_workflow_v2(
         sprint_id,
-        detail=(
-            "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
-            "this job was created with sprint_id and cannot be restarted under Temporal."
-        ),
+        detail="sprint_id is not supported under SE_WORKFLOW_V2; this job was created with sprint_id and cannot be restarted.",
     )
 
     # Re-validate the sprint scope BEFORE `reset_job` — otherwise a
@@ -623,19 +575,10 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     reset_job(job_id, str(repo_path), job_type="run_team")
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None, sprint_id=sprint_id)
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread for restart
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow for restart
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        if temporal_enabled:
-            start_run_team_workflow(job_id, str(repo_path))
-        else:
-            thread = threading.Thread(
-                target=_main._run_orchestrator_background,
-                args=(job_id, str(repo_path)),
-                kwargs={"sprint_id": sprint_id},
-                daemon=True,
-            )
-            thread.start()
+        start_run_team_workflow(job_id, str(repo_path), sprint_id=sprint_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -678,16 +621,10 @@ def resume_after_llm_check(job_id: str) -> RetryResponse:
 
     update_job(job_id, status="running", error=None)
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or retry thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.start_workflow import start_retry_failed_workflow
 
-        if is_temporal_enabled():
-            start_retry_failed_workflow(job_id)
-        else:
-            thread = threading.Thread(target=_main._run_retry_background, args=(job_id,))
-            thread.daemon = True
-            thread.start()
+        start_retry_failed_workflow(job_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block

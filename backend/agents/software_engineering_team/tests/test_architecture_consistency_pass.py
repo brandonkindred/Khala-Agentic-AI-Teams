@@ -36,6 +36,9 @@ from software_engineering_team.shared.models import ArchitectureComponent, Syste
 # false-positive filter's established rationale for avoiding system-prompt
 # scanning cross-contamination).
 _ARCH_PASS_ANCHOR = '"findings" array as instructed'
+_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+
+_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
 
 
 def _arch(
@@ -436,10 +439,32 @@ def test_returns_empty_when_disabled_via_env(monkeypatch: pytest.MonkeyPatch) ->
     assert result == []
 
 
-def test_returns_empty_when_no_architecture_document_or_overview() -> None:
+def test_runs_when_no_architecture_document_or_overview() -> None:
+    """Blank overview/document must not skip the pass — architecture review
+    can use established repository structure without a formal document when
+    repository evidence (e.g. existing_codebase) is available."""
     arch = SystemArchitecture(overview="", architecture_document="")
-    result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=arch))
+    prompts: list = []
+
+    class _EmptyFindings(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _EmptyFindings(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            architecture=arch,
+            existing_codebase="existing/shared_helper.py\n",
+        ),
+    )
     assert result == []
+    assert len(prompts) == 1
+    assert "no formal" in prompts[0].lower() or "not provided" in prompts[0].lower()
 
 
 def test_runs_when_only_components_present_with_no_overview_or_document() -> None:
@@ -466,8 +491,41 @@ def test_runs_when_only_components_present_with_no_overview_or_document() -> Non
     assert "auth-service" in prompts[0]
 
 
-def test_returns_empty_when_no_architecture_at_all() -> None:
-    result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=None))
+def test_runs_when_no_architecture_at_all() -> None:
+    prompts: list = []
+
+    class _EmptyFindings(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    # No formal architecture document, but an existing-codebase excerpt gives
+    # the pass repository evidence to derive established structure from.
+    result = find_architecture_and_redundancy_issues(
+        _EmptyFindings(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            architecture=None,
+            existing_codebase="existing/shared_helper.py\n",
+        ),
+    )
+    assert result == []
+    assert len(prompts) == 1
+
+
+def test_skips_when_no_architecture_evidence() -> None:
+    """Without a document, repo_reader, or existing_codebase, tools only see
+    the changed submission — do not ask the model to invent architecture rules."""
+
+    class _FailIfAsked(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(_FailIfAsked(), _input(architecture=None))
     assert result == []
 
 
@@ -593,23 +651,31 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
 
 
 def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
-    """The pass fires exactly once per submission, regardless of chunk count."""
-    calls = {"arch_pass": 0, "chunk_review": 0}
+    """The merged pass runs once per submission; standalone tail passes are not invoked."""
+    calls = {"merged_pass": 0, "arch_pass": 0, "side_effect_pass": 0, "chunk_review": 0}
 
     class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                calls["merged_pass"] += 1
+                return {"architecture_findings": [], "side_effect_findings": []}
             if _ARCH_PASS_ANCHOR in prompt:
                 calls["arch_pass"] += 1
+                return {"findings": []}
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                calls["side_effect_pass"] += 1
                 return {"findings": []}
             calls["chunk_review"] += 1
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     # Two files -> at least the map phase runs more than once; the false-positive
-    # filter is disabled by default (its own env toggle) so this isolates the count.
+    # filter is disabled by default (its own env toggle) so this isolates tail-call count.
     files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
     run_coordinator(_CountingClient(), CodeReviewInput(files=files, architecture=_arch()))
 
-    assert calls["arch_pass"] == 1
+    assert calls["merged_pass"] == 1
+    assert calls["arch_pass"] == 0
+    assert calls["side_effect_pass"] == 0
 
 
 def test_coordinator_merges_architecture_findings_into_final_output() -> None:
@@ -619,9 +685,9 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
 
     class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in prompt:
                 return {
-                    "findings": [
+                    "architecture_findings": [
                         {
                             "severity": "medium",
                             "category": "refactor",
@@ -629,7 +695,8 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
                             "description": "duplicates the existing HttpClient wrapper",
                             "suggestion": "reuse shared.http_client.HttpClient",
                         }
-                    ]
+                    ],
+                    "side_effect_findings": [],
                 }
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -643,17 +710,56 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
     )
 
 
-def test_coordinator_skips_pass_with_no_architecture() -> None:
-    """No architecture on the input -> the pass contributes nothing (no extra
-    LLM call beyond the ordinary map-phase chunk review)."""
+def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
+    """A side-effect finding emitted by the merged pass is split into
+    the coordinator's final issues list."""
 
-    class _FailIfAskedClient(DummyLLMClient):
+    class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [],
+                    "side_effect_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "mutates shared cache without notifying callers",
+                            "suggestion": "emit a cache-invalidation event after mutation",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
-    result = run_coordinator(_FailIfAskedClient(), CodeReviewInput(code="def f():\n    return 1\n"))
+    result = run_coordinator(
+        _FindingsClient(),
+        CodeReviewInput(files={"app/main.py": "def bar():\n    return 1\n"}, architecture=_arch()),
+    )
+    assert result.approved  # medium findings never block approval alone
+    assert any(i.category == "side-effects" and "cache" in i.description for i in result.issues)
+
+
+def test_coordinator_runs_pass_with_no_architecture() -> None:
+    """No architecture on the input -> the merged additive pass still runs
+    (document is optional); it must not be short-circuited before the LLM call.
+    Uses ``files=`` (not ``code=``) so ``CodebaseIndex`` has readable submission
+    files — the same shape production reviews use for this pass."""
+    prompts: list = []
+
+    class _CountingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = run_coordinator(
+        _CountingClient(),
+        CodeReviewInput(files={"app/main.py": "def f():\n    return 1\n"}),
+    )
     assert result.approved
+    assert len(prompts) == 1
 
 
 def test_run_pass_inlines_full_arch_doc_without_shrinking_code_budget(

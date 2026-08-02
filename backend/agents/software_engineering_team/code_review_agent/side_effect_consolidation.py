@@ -167,9 +167,7 @@ class _ConstructResolver:
         if not content:
             return None
         stripped, physical, mapper = strip_numbered_prefixes(content, line)
-        construct = enclosing_construct(
-            stripped, physical, annotated_hunks=mapper is not None
-        )
+        construct = enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
         if construct is None:
             return None
         return (canonical, construct.start_line)
@@ -313,7 +311,9 @@ def _merge_group(
         if _canonical_path(shared_index, issue.file_path or "") == majority_file
         and issue.line is not None
     ]
-    starts = [issue.start_line if issue.start_line is not None else issue.line for issue in majority_lines]
+    starts = [
+        issue.start_line if issue.start_line is not None else issue.line for issue in majority_lines
+    ]
     ends = [issue.line for issue in majority_lines]
     line = max(ends) if ends else None
     earliest_start = min(starts) if starts else None
