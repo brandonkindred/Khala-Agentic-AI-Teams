@@ -223,6 +223,11 @@ def _submission_cache_size() -> int:
           default) — same as any other floor. An explicit or clamped-to 0
           disables the short-circuit; ``0`` is load-bearing: callers treat it
           as "no submission cache", so every review runs in full.
+        - The return value is always a non-negative ``int`` (never ``None``,
+          never negative, never a non-int): ``parse_env_int`` never raises for
+          a hostile environment value and always clamps to the given floor
+          before returning, so callers (e.g. ``run_coordinator``'s eviction
+          loop) may treat this value as pre-validated and need not re-check it.
     """
     return parse_env_int("CODE_REVIEW_SUBMISSION_CACHE_SIZE", DEFAULT_SUBMISSION_CACHE_SIZE, 0)
 
@@ -624,6 +629,10 @@ def run_coordinator(
           call at all — unless a ``repo_reader`` is given, in which case this
           short-circuit never fires (a verdict that reads the rest of the
           repository cannot be safely reproduced from an input-only cache key).
+          The cache-hit check, its LRU touch, and the served copy all happen
+          under a single ``_SUBMISSION_OUTCOME_CACHE_LOCK`` acquisition, so a
+          concurrent write-back (see below) can never interleave with a hit
+          being served.
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -644,7 +653,11 @@ def run_coordinator(
         CodeReviewUnavailableError: when the review model is unavailable
             (an infrastructure failure: rate limit, unreachable endpoint, or
             auth/config error), or when *no* chunk could be reviewed at all —
-            the run never renders a verdict on a submission it did not see.
+            the run never renders a verdict on a submission it did not see. In
+            the latter case, ``unreviewed`` names only the not-reviewed range
+            labels recorded before the failure — never genuine reviewer
+            findings, none of which can exist in this branch (a chunk that
+            fails contributes no ``issues`` entry; see ``_ChunkOutcome``).
         Exception: an unexpected reviewer defect (not a known LLM content
             failure) propagates unchanged, failing closed so the bug surfaces
             instead of being masked as a not-reviewed finding.
@@ -673,15 +686,16 @@ def run_coordinator(
             cached = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
             if cached is not None:
                 _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)
-        if cached is not None:
-            logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
-            notify_review_progress(
-                progress_callback,
-                "done",
-                "identical approved submission; review skipped",
-                _PROGRESS_DONE,
-            )
-            return cached.model_copy(deep=True)
+                logger.info(
+                    "CodeReviewCoordinator: submission cache hit; skipping review (approved)"
+                )
+                notify_review_progress(
+                    progress_callback,
+                    "done",
+                    "identical approved submission; review skipped",
+                    _PROGRESS_DONE,
+                )
+                return cached.model_copy(deep=True)
 
     notify_review_progress(
         progress_callback, "preparing", "preparing review input", _PROGRESS_PREPARING_INPUT
@@ -800,7 +814,7 @@ def run_coordinator(
     if not outcome.approved_flags:
         raise CodeReviewUnavailableError(
             "No chunk could be reviewed after recovery; no verdict was produced for this submission.",
-            unreviewed=[i.description for i in (outcome.not_reviewed_issues + outcome.issues)],
+            unreviewed=[i.description for i in outcome.not_reviewed_issues],
         )
 
     # False-positive verification: re-check each genuine reviewer finding against
@@ -877,7 +891,9 @@ def run_coordinator(
     # defect). They are still surfaced non-blockingly via ``not_reviewed_ranges``
     # below and in the telemetry log. Set CODE_REVIEW_BLOCK_ON_UNREVIEWED to
     # restore the legacy fail-closed behavior where they block the merge.
-    not_reviewed_ranges = [_not_reviewed_range_label(i) for i in outcome.not_reviewed_issues]
+    not_reviewed_ranges: List[str] = [
+        _not_reviewed_range_label(i) for i in outcome.not_reviewed_issues
+    ]
     if _block_on_unreviewed():
         deduped = _dedupe_issues([*tail_pass_issues, *outcome.not_reviewed_issues, *skipped_issues])
     else:
@@ -890,7 +906,8 @@ def run_coordinator(
             )
         deduped = _dedupe_issues([*tail_pass_issues, *skipped_issues])
     deduped = _cap_issues(deduped)
-    assert outcome.approved_flags, "unreachable: guarded by the total-failure check above"
+    # outcome.approved_flags is non-empty here: the total-failure guard above
+    # already raised otherwise, and nothing between there and here mutates it.
     all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
@@ -931,10 +948,12 @@ def run_coordinator(
     # reviewed (a semantic-exhaustion/truncation hiccup may not recur), matching
     # the map-phase rule that degraded chunk outcomes are never cached. Store a
     # clone so a later hit can be mutated freely without corrupting the entry.
-    if submission_key is not None and result.approved and not not_reviewed_ranges:
+    if submission_key is not None and result.approved and len(not_reviewed_ranges) == 0:
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
             _SUBMISSION_OUTCOME_CACHE[submission_key] = result.model_copy(deep=True)
             _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)
+            # submission_size is a validated non-negative int by
+            # _submission_cache_size()'s postcondition — no re-check needed here.
             while len(_SUBMISSION_OUTCOME_CACHE) > submission_size:
                 _SUBMISSION_OUTCOME_CACHE.popitem(last=False)
     return result
