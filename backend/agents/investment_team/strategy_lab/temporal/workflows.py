@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from investment_team.strategy_lab.temporal import activities as act
 from investment_team.strategy_lab.temporal.dto import (
@@ -485,12 +486,23 @@ class StrategyLabBatchWorkflow:
                             underlying: BaseException = result
                             while underlying.__cause__ is not None:
                                 underlying = underlying.__cause__
+                            # The terminal cause is usually the ApplicationError
+                            # _map_exception_to_application_error produced, whose
+                            # actionable classification lives in ``.type`` (e.g.
+                            # "ValueError" or an LLM outcome like "fatal") — the
+                            # Python class name itself is just "ApplicationError"
+                            # for every such failure and would defeat the point
+                            # of walking the chain.
+                            if isinstance(underlying, ApplicationError) and underlying.type:
+                                exception_type = underlying.type
+                            else:
+                                exception_type = type(underlying).__name__
                             errored_details.append(
                                 {
                                     "cycle_index": cycle_index + 1,
                                     "batch_index": batch_idx + 1,
                                     "error": str(underlying),
-                                    "exception_type": type(underlying).__name__,
+                                    "exception_type": exception_type,
                                 }
                             )
                         continue

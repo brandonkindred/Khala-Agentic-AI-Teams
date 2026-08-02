@@ -402,6 +402,28 @@ def test_errored_details_walks_full_cause_chain_to_terminal_failure():
     ]
 
 
+def test_errored_details_uses_application_error_type_not_class_name():
+    """The real terminal cause is usually the ApplicationError
+    ``_map_exception_to_application_error`` produced, whose actionable
+    classification lives in ``.type`` (e.g. "ValueError" or an LLM outcome) —
+    the Python class name is just "ApplicationError" for every such failure,
+    which would defeat the whole point of walking the chain."""
+    from temporalio.exceptions import ApplicationError
+
+    terminal = ApplicationError("bad json", type="ValueError", non_retryable=True)
+    middle = Exception("activity task failed")
+    middle.__cause__ = terminal
+    outer = Exception("child workflow execution failed")
+    outer.__cause__ = middle
+
+    harness = _Harness(
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"][0]["exception_type"] == "ValueError"
+
+
 def test_errored_details_cap_enforced():
     n = 55
     child_results = {f"run-1-c{i}": RuntimeError(f"boom-{i}") for i in range(n)}
