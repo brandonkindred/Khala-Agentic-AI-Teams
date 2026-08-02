@@ -214,9 +214,13 @@ The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
   activity persists `waiting_for_answers=True` to the job record (and a
   client can act on that) before the activity call itself returns — so an
   early signal can arrive before `self._active_resume_token` is even set. In
-  that case the handler buffers `payload`; once the workflow observes
-  "paused" and learns the token, it checks the buffer for a match before
-  waiting.
+  that case the handler buffers `payload` — but only if nothing is already
+  buffered (`self._buffered_signal is None`); two valid submissions racing in
+  during this same early window must not let the second overwrite the
+  first, or the same delivery-order-dependent race the check above prevents
+  reappears in the narrower window before `_active_resume_token` exists. Once
+  the workflow observes "paused" and learns the token, it checks the buffer
+  for a match before waiting.
 - `@workflow.query pending_questions() -> list` / `status() -> dict` — for
   polling clients, mirroring `CodeReviewWorkflow.progress()`. `status()`
   derives `waiting_for_answers` as
@@ -479,6 +483,20 @@ while True:
     gains an `acknowledged_resume_token: Optional[str] = None` parameter
     alongside the others, since it has no `request` dict for the workflow to
     set a bare key on.
+  - **Nor does setting a bare `request["acknowledged_resume_token"]` reach the
+    standalone `CodingTeamWorkflow` path either.** `run_pipeline_activity`
+    validates its payload as `RunRequest` (fields: `repo_path`, `plan_input`
+    only — `api/coding_team_models.py:28-35`) and calls
+    `run_orchestrator_wired(job_id, repo_path, plan)`
+    (`api/orchestration.py:57`), neither of which has anywhere for an
+    acknowledgement to land; an extra top-level request key is simply
+    dropped by `RunRequest(**request)` parsing, just as `resolved_answers`
+    was in an earlier draft of this contract. `RunRequest` must gain its own
+    `acknowledged_resume_token: Optional[str] = None` field, and
+    `run_pipeline_activity` must forward it through `run_orchestrator_wired`
+    into the orchestrator re-entry check in §1 — without this, the
+    standalone path's every normal resume is indistinguishable from a
+    pre-work activity retry and re-pauses indefinitely.
 
 ## Decided: source-of-truth ownership
 
