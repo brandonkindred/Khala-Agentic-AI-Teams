@@ -227,6 +227,7 @@ while True:
                 "reason": pause_cycle._format_decisions(task_resolved),
                 "requested_changes": [],
                 "decisions": task_resolved,
+                "resume_token": self._active_resume_token,  # idempotency key, see §3
             }
             for task_id, task_resolved in by_task.items()
         }
@@ -247,20 +248,28 @@ while True:
   re-derive "the current" token at submission time. `resume_token` is
   returned to the client as part of the pause notification (the job
   record's `pending_questions` / status payload) when the pause first
-  becomes visible. `SubmitAnswersRequest` gains a required `resume_token`
-  field; the answers route uses *that* value, not whatever `resume_token`
-  happens to be current in the job record at submission time. Otherwise a
-  delayed or retried submission for pause A that arrives after pause B has
-  already started would get tagged with B's (now-current) token by the
-  server and pass the workflow's token check despite answering the wrong
-  pause.
-- **Both** answers-submission surfaces must dispatch a signal to their
-  matching workflow type, not just the coding-team one — and both need an
-  explicit mode branch, since `run-from-github` and other callers can still
-  be thread-mode jobs with no workflow to signal at all:
-  - **Temporal-mode jobs:** signal without touching the job record's pause
-    envelope (per the idempotency note in §1 — clearing it is the
-    orchestrator's job alone, once it actually consumes the answer).
+  becomes visible. Otherwise a delayed or retried submission for pause A
+  that arrives after pause B has already started would get tagged with B's
+  (now-current) token by the server and pass the workflow's token check
+  despite answering the wrong pause.
+  - `SubmitAnswersRequest` (`api/coding_team_state.py`) is a **shared**
+    model already consumed by three routes: coding-team's
+    `/run/{job_id}/answers`, SE's `/run-team/{job_id}/answers`, and the
+    unrelated `product_analysis.submit_product_analysis_answers` — none of
+    which have any concept of a resume token today, and none of which are
+    always native-Temporal-signal-capable (see the mode branch below). The
+    field must therefore be added as `resume_token: Optional[str] = None`,
+    not required — a required field would 422 every one of today's
+    callers. Each route enforces its presence explicitly (a plain check,
+    not Pydantic validation) only in the native-Temporal-signal branch.
+- **Both coding-team and SE answers routes need a three-way mode branch**,
+  not a binary Temporal/thread split — a Temporal-mode job is not
+  automatically signal-capable:
+  - **Native-signal-capable Temporal workflows** (`CodingTeamWorkflow`, and
+    `RunTeamWorkflowV2` when `SE_WORKFLOW_V2` selects it): signal without
+    touching the job record's pause envelope (per the idempotency note in
+    §1 — clearing it is the orchestrator's job alone, once it actually
+    consumes the answer).
     - `POST /run/{job_id}/answers` (coding-team-only jobs,
       `api/routes/coding_team_hitl.py`) signals the `CodingTeamWorkflow` run,
       whose workflow ID is `f"{WORKFLOW_ID_PREFIX}{job_id}"` using the
@@ -279,13 +288,24 @@ while True:
       client_resume_token, "answers": answers})` — a single dict payload,
       using the client-echoed token described above and matching this
       repo's single-payload signal convention.
-  - **Thread-mode jobs** (e.g. the still-threaded `run-from-github` flow):
-    keep today's existing behavior unchanged — write `submitted_answers` and
-    clear `waiting_for_answers` in the job record directly, since that is
-    exactly what unblocks `hitl.wait_for_answers`'s poll loop and there is no
-    Temporal workflow to signal (attempting one would target a workflow ID
-    that doesn't exist). The route must check the job's mode before choosing
-    a branch.
+  - **Everything else keeps today's store-and-clear behavior unchanged** —
+    write `submitted_answers` and clear `waiting_for_answers` in the job
+    record directly, since there is no signal handler to reach:
+    - **Thread-mode jobs** (e.g. the still-threaded `run-from-github` flow),
+      where `hitl.wait_for_answers`'s poll loop is exactly what the
+      store-and-clear write unblocks.
+    - **SE V1 Temporal jobs** — when `SE_WORKFLOW_V2` is unset/false,
+      `/run-team` launches `RunTeamWorkflow` (`temporal/workflows.py:40`),
+      whose activity still blocks in the SE `orchestrator.py`'s own
+      `_wait_for_user_answers` poll loop and whose workflow defines no
+      `submit_answers` signal at all. Signaling a V1 job would target a
+      workflow with no such handler; it must keep writing to the job store
+      like today until V1 is migrated or removed.
+    The route must check both the job's mode (thread vs. Temporal) *and*,
+    for Temporal jobs, whether the actual running workflow is
+    signal-capable (V2) before choosing a branch — attempting a signal
+    against a workflow ID that doesn't define `submit_answers`, or that
+    isn't the one actually running, silently fails to unblock it.
 - `POST /run/{job_id}/resume`'s cross-worker lease mechanism
   (`resume_claim_at` / `resume_claim_seq` in `job_store.py`) becomes
   unnecessary for Temporal-mode jobs — Temporal itself durably tracks a
@@ -305,20 +325,29 @@ while True:
     `task_decision_overrides: Dict[str, dict]` (task ID → a single feedback
     entry already shaped like `_escalate_decision`'s existing `user_decision`
     envelope: `{"source": "user_decision", "reason": ..., "requested_changes":
-    [], "decisions": [...]}` — not a bare list of resolved records, which
-    `v2_team_worker._feedback_lines()` cannot render (it reads `reason`/
-    `error`/`message`/`requested_changes`, none of which exist on a raw
-    `hitl.answers_to_resolved()` record) and which would also break the
-    existing per-task escalation-cap accounting that counts `source ==
-    "user_decision"` entries. Immediately after `graph.restore()` on
-    re-entry, the orchestrator appends the matching override to that
-    restored task's `revision_feedback` *before* the task is handed to
-    `run_implement` again, then **consumes** it — the orchestrator must not
-    re-emit the same `task_decision_overrides` entry on a later invocation
-    (the workflow already replaces rather than accumulates it per round, per
-    §2, but the orchestrator side must not persist it back into the
-    snapshot either), or a later resume / activity retry would apply the
-    same decision to the task twice.
+    [], "decisions": [...], "resume_token": ...}` — not a bare list of
+    resolved records, which `v2_team_worker._feedback_lines()` cannot render
+    (it reads `reason`/`error`/`message`/`requested_changes`, none of which
+    exist on a raw `hitl.answers_to_resolved()` record) and which would also
+    break the existing per-task escalation-cap accounting that counts
+    `source == "user_decision"` entries. The envelope's `resume_token` field
+    (new — not read by `_feedback_lines()`, purely an idempotency key) is
+    what makes application itself retry-safe: `TaskGraphService.snapshot()`
+    serializes `revision_feedback`, and `GraphPersistCoordinator` persists
+    that snapshot after every graph mutation — so if the activity appends
+    this envelope and then fails before returning, a Temporal retry would
+    restore a snapshot that *already* contains it, and re-appending on top
+    would duplicate the entry. Immediately after `graph.restore()` on
+    re-entry, the orchestrator checks the restored task's `revision_feedback`
+    for an existing entry with this same `resume_token` before appending —
+    skip if already present, append otherwise — then hands the task to
+    `run_implement` again. The orchestrator must not re-emit the same
+    `task_decision_overrides` entry on a later invocation for a *different*
+    pause round either (the workflow already replaces rather than
+    accumulates it per round, per §2, but the orchestrator side must not
+    persist it back into the snapshot as a pending override), or a later
+    resume could apply the same decision to the task twice under a
+    different guise.
   - **This field alone does not reach `RunTeamWorkflowV2`.** Its activity,
     `execute_coding_team_activity(job_id, repo_path, plan_result,
     resolved_questions_override=None, trace_id="")`
