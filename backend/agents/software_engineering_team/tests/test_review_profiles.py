@@ -172,6 +172,14 @@ def test_registry_exhausts_all_profiles() -> None:
     assert set(REVIEW_PROFILES) == set(ReviewProfile)
 
 
+def test_criteria_block_ends_without_trailing_newline() -> None:
+    """Every profile's criteria_block ends without a trailing newline (the
+    _ProfileSpec invariant), so it composes cleanly into _SHARED_OUTPUT_SECTION
+    without introducing extra blank lines."""
+    for profile, spec in REVIEW_PROFILES.items():
+        assert not spec.criteria_block.endswith("\n"), profile
+
+
 # ---------------------------------------------------------------------------
 # Threading: the engine routes the selected profile to the chunk reviewer.
 # ---------------------------------------------------------------------------
