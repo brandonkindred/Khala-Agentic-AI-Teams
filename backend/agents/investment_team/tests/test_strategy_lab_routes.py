@@ -392,10 +392,12 @@ def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_re
 ) -> None:
     """Regression: even after reading the durable generation, resume's own
     _persist_run_state write must not clobber a NEWER durable value minted by
-    a concurrent restart on another process/replica in the gap between that
-    read and this write. Simulated by bumping the stub's durable generation
-    right after resume's one-and-only read of it, mimicking a same-request
-    race window rather than a pre-existing stale cache."""
+    a concurrent restart on another process/replica in the gap between the
+    initial read and this write. Simulated by bumping the stub's durable
+    generation on every read, mimicking a same-request race window rather
+    than a pre-existing stale cache. (Resume performs two durable reads --
+    the initial carry-forward read and a pre-dispatch revalidation read --
+    both are exercised here.)"""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-race"] = _resumable_state("run-race", generation=1)
@@ -418,10 +420,60 @@ def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_re
     resp = api_client.post("/strategy-lab/runs/run-race/resume")
 
     assert resp.status_code == 200
-    assert read_calls == ["run-race"]  # confirms the race was injected at the right point
+    assert read_calls == ["run-race", "run-race"]  # confirms the race was injected at both reads
     # The durable value must still be 5 -- resume's write must not have
     # regressed it back down to the stale 1 it read moments earlier.
     assert stub.by_id["run-race"]["generation"] == 5
+
+
+def test_resume_strategy_lab_run_dispatches_with_revalidated_generation_not_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a concurrent restart on another process/replica can mint (and
+    dispatch under) a newer generation between resume's initial durable read
+    and its dispatch call. Dispatching this resume's workflow under the
+    earlier, now-stale snapshot would permanently fence out its own
+    activities (the only live workflow for this run) the moment they tried
+    to persist anything -- so the value actually handed to
+    _dispatch_strategy_lab_run must reflect a revalidated read taken as
+    close to dispatch as possible, not the earlier snapshot."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-revalidate"] = _resumable_state("run-revalidate", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-revalidate", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_bumping_generation_after_first_read(jid: str):
+        read_calls.append(jid)
+        result = real_get_job(jid)
+        # Simulate a concurrent restart minting (and dispatching under)
+        # generation 5 durably, right after this resume's *first* read of
+        # the generation (used to build/persist its own state) but before
+        # its second, pre-dispatch revalidation read.
+        if len(read_calls) == 1:
+            stub.by_id[jid]["generation"] = 5
+        return result
+
+    monkeypatch.setattr(stub, "get_job", _get_job_bumping_generation_after_first_read)
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main,
+        "_dispatch_strategy_lab_run",
+        lambda run_id, request, *, generation, allow_already_started=True: captured.update(
+            generation=generation
+        ),
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-revalidate/resume")
+
+    assert resp.status_code == 200
+    assert read_calls == ["run-revalidate", "run-revalidate"]  # both reads happened
+    assert captured["generation"] == 5  # revalidated value, not the stale snapshot of 1
+    assert api_main._active_runs["run-revalidate"]["generation"] == 5
 
 
 def test_resume_strategy_lab_run_returns_503_when_generation_lookup_fails(
@@ -442,6 +494,40 @@ def test_resume_strategy_lab_run_returns_503_when_generation_lookup_fails(
     assert resp.status_code == 503
     assert "generation" in resp.json()["detail"].lower()
     assert api_main._active_runs["run-k"]["status"] == "interrupted"  # unchanged, no partial resume
+
+
+def test_resume_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The pre-dispatch revalidation read (added alongside the initial
+    carry-forward read) must also fail closed -- and, unlike the initial
+    read's failure (which happens before any state mutation), this failure
+    happens after resume already wrote "running" state, so it must also
+    mark the run "failed" rather than leaving it wedged as "running" with
+    no workflow ever dispatched."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-revalidate-fail"] = _resumable_state("run-revalidate-fail", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-revalidate-fail", "generation": 1}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_failing_on_second_read(jid: str):
+        read_calls.append(jid)
+        if len(read_calls) == 2:
+            raise ConnectionError("connection refused")
+        return real_get_job(jid)
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing_on_second_read)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-revalidate-fail/resume")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert read_calls == ["run-revalidate-fail", "run-revalidate-fail"]
+    assert api_main._active_runs["run-revalidate-fail"]["status"] == "failed"
 
 
 def test_restart_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:

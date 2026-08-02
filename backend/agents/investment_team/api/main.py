@@ -2610,6 +2610,14 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           another process/replica could mint a newer durable value in the
           gap before this write lands, so this write must never be able to
           regress the durable generation back down to that stale snapshot.
+        - Re-reads the durable generation once more immediately before
+          dispatch and, if it has since advanced past the earlier snapshot
+          (a concurrent restart on another process/replica minted a newer
+          one in the gap), dispatches with the newer value instead —
+          narrowing, not eliminating, the window in which this resume's
+          workflow could otherwise be dispatched carrying a generation that
+          is already stale, which would permanently fence out its own
+          activities.
         - Dispatches the durable Temporal workflow from the first
           not-yet-contiguously-completed cycle, so no already-persisted cycle
           is re-run (and thus never duplicated).
@@ -2622,9 +2630,13 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
           dict.
         - ``HTTPException`` 409: another transition for this run_id is
-          already in flight (#4028), or another run is already ``"running"``.
-        - ``HTTPException`` 503: reading the current durable generation to
-          carry forward failed (job service unavailable).
+          already in flight, or another run is already ``"running"``.
+        - ``HTTPException`` 503: reading the current durable generation —
+          either the initial carry-forward read or the pre-dispatch
+          revalidation — failed (job service unavailable). The
+          revalidation failure additionally marks the run ``"failed"``
+          (state was already written by this point, so leaving it
+          ``"running"`` with no workflow ever dispatched would wedge it).
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged).
@@ -2704,6 +2716,36 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # so omitting the key here means this write can never regress the
         # durable generation back down to a stale snapshot.
         _persist_run_state(run_id, resumed_state, exclude_fields=frozenset({"generation"}))
+
+        # Revalidate the generation immediately before dispatch: `current_generation`
+        # above is a snapshot from before this request's own state write, and a
+        # concurrent restart on another process/replica could have minted (and
+        # already dispatched under) a newer generation in that gap. Dispatching
+        # this resume's workflow under the stale value would permanently fence
+        # out its own activities the moment it tried to persist anything -- the
+        # only live workflow for this run, wedged with no way to make progress.
+        # Re-reading here narrows that window to the residual gap between this
+        # read and the dispatch call itself; closing it fully would need
+        # cross-replica atomic coordination over both generation selection and
+        # workflow-id dispatch ownership, which is the same out-of-scope
+        # multi-process limitation already accepted for the per-run_id
+        # transition lock.
+        try:
+            dispatch_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception as exc:
+            _fail_strategy_lab_run(run_id, f"Failed to revalidate generation before dispatch: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to revalidate the current generation before resuming; job service unavailable.",
+            ) from exc
+        if dispatch_generation != resumed_state["generation"]:
+            # `resumed_state` is the same dict object installed at
+            # `_active_runs[run_id]` above, so mutating it in place keeps
+            # both in sync -- guard the mutation with `_lock` since a
+            # concurrent same-process reader (e.g. the run-status endpoint)
+            # may be iterating `_active_runs` at the same time.
+            with _lock:
+                resumed_state["generation"] = dispatch_generation
 
         # The Temporal activity derives its resume offset from the persisted
         # contiguous-cycle count (set above), so a durable resume picks up where the
