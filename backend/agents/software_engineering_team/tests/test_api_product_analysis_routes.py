@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,6 +24,21 @@ app = _api_main.app
 @pytest.fixture(autouse=True)
 def _autouse_patched_job_store(patched_job_store):
     return patched_job_store
+
+
+@pytest.fixture(autouse=True)
+def _stub_background_workflow(monkeypatch):
+    """Stub the Temporal dispatch call the run/start-from-spec routes make.
+
+    Both routes call start_standalone_workflow unconditionally — no thread
+    fallback. Without a real Temporal client that raises, which the route's
+    try/except turns into a 503. Stubbing it to a no-op keeps these unit
+    tests' endpoint-contract assertions meaningful without a live Temporal
+    deployment.
+    """
+    import software_engineering_team.temporal.start_workflow as _start_workflow
+
+    monkeypatch.setattr(_start_workflow, "start_standalone_workflow", lambda *a, **k: None)
 
 
 @pytest.fixture
@@ -60,22 +74,44 @@ def test_run_product_analysis_accepts_provided_spec_content(client, tmp_path: Pa
     """When spec_content is provided, the endpoint reaches the launch try-block."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    # Patch the launch to a no-op so we don't spawn a worker thread
-    with (
-        patch.object(_api_main, "_run_product_analysis_background"),
-        patch(
-            "software_engineering_team.temporal.client.is_temporal_enabled",
-            return_value=False,
-        ),
-    ):
-        resp = client.post(
-            "/product-analysis/run",
-            json={"repo_path": str(repo), "spec_content": "# Spec"},
-        )
+    resp = client.post(
+        "/product-analysis/run",
+        json={"repo_path": str(repo), "spec_content": "# Spec"},
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "running"
     assert body["job_id"]
+
+
+def test_run_product_analysis_dispatches_to_temporal_even_when_disabled(
+    client, tmp_path: Path, monkeypatch
+):
+    """No thread fallback: start_standalone_workflow is called regardless of is_temporal_enabled()."""
+    import software_engineering_team.temporal.start_workflow as start_workflow
+    from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("software_engineering_team.temporal.client.is_temporal_enabled", lambda: False)
+    dispatched: dict = {}
+    monkeypatch.setattr(
+        start_workflow,
+        "start_standalone_workflow",
+        lambda standalone_type, job_id, repo_path, **kw: dispatched.update(
+            standalone_type=standalone_type, job_id=job_id
+        ),
+    )
+
+    resp = client.post(
+        "/product-analysis/run",
+        json={"repo_path": str(repo), "spec_content": "# Spec"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "running"
+    assert dispatched["standalone_type"] == STANDALONE_TYPE_PRODUCT_ANALYSIS
+    assert dispatched["job_id"] == resp.json()["job_id"]
 
 
 def test_start_from_spec_400_for_invalid_project_name(client):
@@ -91,17 +127,10 @@ def test_start_from_spec_400_for_invalid_project_name(client):
 def test_start_from_spec_creates_project_and_starts(monkeypatch, tmp_path: Path, client):
     """start_from_spec writes the spec file and reaches the launch try-block."""
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-    with (
-        patch.object(_api_main, "_run_product_analysis_background"),
-        patch(
-            "software_engineering_team.temporal.client.is_temporal_enabled",
-            return_value=False,
-        ),
-    ):
-        resp = client.post(
-            "/product-analysis/start-from-spec",
-            json={"project_name": "myproj", "spec_content": "# Spec\nFeature"},
-        )
+    resp = client.post(
+        "/product-analysis/start-from-spec",
+        json={"project_name": "myproj", "spec_content": "# Spec\nFeature"},
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["job_id"]
@@ -109,6 +138,34 @@ def test_start_from_spec_creates_project_and_starts(monkeypatch, tmp_path: Path,
     proj_dir = tmp_path / "projects" / "myproj"
     assert proj_dir.exists()
     assert (proj_dir / _api_main.SPEC_FILENAME).read_text(encoding="utf-8").startswith("# Spec")
+
+
+def test_start_from_spec_dispatches_to_temporal_even_when_disabled(
+    monkeypatch, tmp_path: Path, client
+):
+    """No thread fallback: start_standalone_workflow is called regardless of is_temporal_enabled()."""
+    import software_engineering_team.temporal.start_workflow as start_workflow
+    from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr("software_engineering_team.temporal.client.is_temporal_enabled", lambda: False)
+    dispatched: dict = {}
+    monkeypatch.setattr(
+        start_workflow,
+        "start_standalone_workflow",
+        lambda standalone_type, job_id, repo_path, **kw: dispatched.update(
+            standalone_type=standalone_type, job_id=job_id
+        ),
+    )
+
+    resp = client.post(
+        "/product-analysis/start-from-spec",
+        json={"project_name": "myproj2", "spec_content": "# Spec\nFeature"},
+    )
+
+    assert resp.status_code == 200
+    assert dispatched["standalone_type"] == STANDALONE_TYPE_PRODUCT_ANALYSIS
+    assert dispatched["job_id"] == resp.json()["job_id"]
 
 
 def test_start_from_spec_400_when_project_already_exists(monkeypatch, tmp_path: Path, client):
