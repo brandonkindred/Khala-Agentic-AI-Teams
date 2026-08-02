@@ -54,9 +54,15 @@ instead returns immediately from the activity with a discriminated result:
 {
     "outcome": "paused",
     "job_id": str,
+    "resume_token": str,              # unique PER PAUSE ROUND (e.g. f"{job_id}:{pause_seq}"),
+                                       # NOT job_id -- correlates a submitted answer batch with
+                                       # the specific pause it answers (see wait_condition race below)
+    "pause_kind": str,                # "entry" | "tech_lead_clarify" | "worker_escalation"
+    "pause_context": {"task_id": str} | None,  # set for "worker_escalation": identifies which
+                                                # task raised the question, so its answer can be
+                                                # attached to that task specifically on resume
     "pending_questions": [...],       # same structured shape hitl.py already produces
     "task_graph_snapshot": {...},     # already persisted; included for the caller's convenience
-    "resume_token": str,              # opaque; == job_id today, reserved for future use
 }
 
 # Finished normally:
@@ -80,12 +86,19 @@ needs to cover hours of waiting.
 
 The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
 
-- `@workflow.signal submit_answers(answers: list)` — sets
+- `@workflow.signal submit_answers(resume_token: str, answers: list)` — if
+  `resume_token != self._active_resume_token`, the signal is a stale or
+  duplicate submission (e.g. a retried HTTP call, or an answer to a pause
+  that already resolved) and must be **ignored**, not applied. Otherwise sets
   `self._submitted_answers = answers`. This is the *only* state the wait
-  condition gates on; the signal handler must not depend on the workflow
-  having already observed the "paused" outcome, since the activity persists
+  condition gates on; the handler must not depend on the workflow having
+  already observed the "paused" outcome, since the activity persists
   `waiting_for_answers=True` to the job record (and a client can act on
-  that) before the activity call itself returns.
+  that) before the activity call itself returns — so an early signal can
+  arrive before `self._active_resume_token` is even set. In that case the
+  handler buffers the `(resume_token, answers)` pair; once the workflow
+  observes "paused" and learns the token, it checks the buffer for a match
+  before waiting.
 - `@workflow.query pending_questions() -> list` / `status() -> dict` — for
   polling clients, mirroring `CodeReviewWorkflow.progress()`. `status()`
   derives `waiting_for_answers` as
@@ -106,28 +119,65 @@ while True:
     # unconditionally rearm a separate "waiting" flag, or that early signal
     # is silently lost and wait_condition never resolves. Gate on the answers
     # themselves, not on a flag the pause and the signal both mutate.
+    self._active_resume_token = result["resume_token"]
     self._pending_questions = result["pending_questions"]
+    self._check_buffered_signal_for(self._active_resume_token)  # apply a signal that beat us here
     await workflow.wait_condition(lambda: self._submitted_answers is not None)
-    request = {**request, "job_id": result["job_id"],
-               "resolved_answers": self._submitted_answers}
+
+    # Convert to resolved-question records (same shape hitl.answers_to_resolved
+    # produces) and merge them into the ACTUAL activity input rather than
+    # attaching a bare extra field -- run_pipeline_activity parses its payload
+    # strictly as RunRequest, which has no "resolved_answers" field and would
+    # silently discard one. Where the merge target lives depends on pause_kind:
+    resolved = to_resolved_records(self._submitted_answers)
+    if result["pause_kind"] == "worker_escalation":
+        # Must land on the specific paused task's revision_feedback, not the
+        # plan-level list -- run_implement reads a task's own
+        # revision_feedback, not plan_input.resolved_questions, so a
+        # plan-level-only merge lets the worker re-ask the same question.
+        task_id = result["pause_context"]["task_id"]
+        request = attach_task_decision(request, task_id, resolved)
+    else:  # "entry" | "tech_lead_clarify"
+        request = merge_resolved_questions(request, resolved)
+    request["job_id"] = result["job_id"]
+
     self._submitted_answers = None
     self._pending_questions = None
+    self._active_resume_token = None
 ```
 
 ### 3. Resume contract
 
-- `POST /run/{job_id}/answers` becomes a thin signal dispatch
-  (`handle.signal("submit_answers", answers)`) instead of a raw job-record
-  write.
+- **Both** answers-submission surfaces must dispatch a signal to their
+  matching workflow type, not just the coding-team one:
+  - `POST /run/{job_id}/answers` (coding-team-only jobs,
+    `api/routes/coding_team_hitl.py`) signals the `CodingTeamWorkflow` run.
+  - `POST /run-team/{job_id}/answers` (SE-level jobs,
+    `api/routes/hitl.py`) currently only writes to the job store; it must
+    equally be updated to signal the corresponding `RunTeamWorkflowV2` run.
+    Missing this means SE Temporal jobs would have their job-store
+    `waiting_for_answers` flag cleared but their workflow never learns of
+    it, and it waits indefinitely. Both routes resolve their target workflow
+    by a documented workflow-ID convention (e.g.
+    `f"coding-team-{job_id}"` / `f"se-team-{job_id}"`) and call
+    `handle.signal("submit_answers", resume_token, answers)`, where
+    `resume_token` is read back from the job record's persisted
+    `pending_questions`/pause metadata (not re-derived from `job_id` alone —
+    see the per-pause `resume_token` in the activity return contract above).
 - `POST /run/{job_id}/resume`'s cross-worker lease mechanism
   (`resume_claim_at` / `resume_claim_seq` in `job_store.py`) becomes
   unnecessary for Temporal-mode jobs — Temporal itself durably tracks a
   waiting workflow across worker restarts — and is retained only for
   thread-mode jobs.
 - Orchestrator re-entry still loads `task_graph_snapshot` via
-  `graph.restore()` + `reset_in_flight()` exactly as today, folding the
-  signaled answers directly into `plan_input.resolved_questions` rather than
-  re-reading `submitted_answers` back from the job record.
+  `graph.restore()` + `reset_in_flight()` exactly as today. The signaled
+  answers are converted to resolved-question records and merged into the
+  next activity request as described in the workflow contract above — into
+  `plan_input.resolved_questions` for entry/Tech-Lead pauses, or attached to
+  the specific paused task's `revision_feedback` for worker-escalation
+  pauses — rather than re-reading `submitted_answers` back from the job
+  record, and rather than passing them as an extra field the activity's
+  `RunRequest` parsing would silently ignore.
 
 ## Open questions (flagged, not resolved by this spike)
 
