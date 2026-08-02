@@ -458,7 +458,7 @@ software_engineering_team/
 
 The Tech Lead invokes planning agents (backend, frontend, data, test, performance, documentation, quality gates) internally when creating task details and aligning with Architecture.
 
-Leaf agents (direct children of `software_engineering_team/`, e.g. `qa_agent/`, `security_agent/`, `tech_lead_agent/`) typically follow a three-file convention:
+Leaf agents (direct children of `software_engineering_team/`, e.g. `qa_agent/`, `security_agent/`, `accessibility_agent/`) typically follow a three-file convention:
 - `agent.py` – Core logic
 - `models.py` – Input/output Pydantic models
 - `prompts.py` – LLM prompt templates
