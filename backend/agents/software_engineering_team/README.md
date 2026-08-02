@@ -162,7 +162,7 @@ All planning artifacts are written to a `plan/` folder at the project root (work
 5. **Planning agents** (API Contract, Data Architecture, UI/UX, Infrastructure, Frontend Architecture, DevOps, QA Test Strategy, Security, Observability, Performance) produce additional artifacts in `plan/`.
 6. **Planning consolidation** produces `plan/master_plan.md` with risk register and ship checklist.
 7. **Tech Lead** generates a complete build plan and assigns tasks (git_setup, devops, backend, frontend).
-5. **Backend and Frontend workers** run in parallel. Each task follows a unified workflow:
+8. **Backend and Frontend workers** run in parallel. Each task follows a unified workflow:
    - Create feature branch
    - **Per-task planning** – Review codebase, produce implementation plan (feature intent, what to change, algorithms/data structures, tests needed). The plan drives the implementation; code generation must realize the plan's what_changes and tests_needed.
    - Generate code (with clarification loop via Tech Lead if needed)
@@ -458,10 +458,17 @@ software_engineering_team/
 
 The Tech Lead invokes planning agents (backend, frontend, data, test, performance, documentation, quality gates) internally when creating task details and aligning with Architecture.
 
-Each agent has:
+Leaf agents (single-purpose agent directories directly under
+`software_engineering_team/`, e.g. `qa_agent/`, `security_agent/`,
+`code_review_agent/`, `accessibility_agent/`) typically follow a three-file
+convention:
 - `agent.py` – Core logic
 - `models.py` – Input/output Pydantic models
 - `prompts.py` – LLM prompt templates
+
+Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`,
+`devops_team/`, `ai_agent_development_team/`, etc.) instead use
+`orchestrator.py`, `phases/`, and `tool_agents/`.
 
 ## DevOps Engineering Team (`devops_team/`)
 
