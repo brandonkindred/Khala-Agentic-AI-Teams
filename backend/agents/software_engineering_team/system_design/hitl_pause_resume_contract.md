@@ -62,7 +62,11 @@ instead returns immediately from the activity with a discriminated result:
                                                 # that escalated into THIS pause round (usually one,
                                                 # but see concurrent-escalation note below), so each
                                                 # answer can be attached to its own task on resume
-    "pending_questions": [...],       # same structured shape hitl.py already produces
+    "pending_questions": [...],       # hitl.py's structured question shape; for "worker_escalation"
+                                       # each question dict also carries "task_id" (a new field,
+                                       # since neither this shape nor hitl.answers_to_resolved()'s
+                                       # output otherwise identifies which task asked it) so a
+                                       # batched multi-worker pause can be partitioned back out
     "task_graph_snapshot": {...},     # already persisted; included for the caller's convenience
 }
 
@@ -184,25 +188,48 @@ while True:
     self._check_buffered_signal_for(self._active_resume_token)  # apply a signal that beat us here
     await workflow.wait_condition(lambda: self._submitted_answers is not None)
 
-    # Convert to resolved-question records (same shape hitl.answers_to_resolved
-    # produces) and merge them into fields the activity's RunRequest/
-    # CodingTeamPlanInput actually define -- not a bare extra key, which
-    # run_pipeline_activity's RunRequest parsing would silently discard.
-    resolved = to_resolved_records(self._submitted_answers)  # each record retains its task_id
+    # hitl.answers_to_resolved(submitted_answers, pending_questions) needs BOTH
+    # args -- it recovers question_text/answer labels from pending_questions;
+    # a submitted answer only carries question_id + a selected option. Passing
+    # just the answers can't produce a real resolved record, and
+    # hitl.unanswered_questions() (text-matched) would then treat the decision
+    # as still-unanswered and re-ask it next round.
+    resolved = hitl.answers_to_resolved(self._submitted_answers, self._pending_questions)
     if result["pause_kind"] == "worker_escalation":
         # Must land on each paused task's own revision_feedback, not the
         # plan-level list -- run_implement reads a task's own
         # revision_feedback, not plan_input.resolved_questions, so a
         # plan-level-only merge lets the worker re-ask the same question.
-        # task_decision_overrides is a new CodingTeamPlanInput field (see
-        # resume contract below); the orchestrator applies it to each
-        # restored task right after graph.restore(). result["pause_context"]
-        # ["task_ids"] may list more than one task if several workers
-        # escalated into this same drained pause round.
-        overrides = dict(request["plan_input"].get("task_decision_overrides", {}))
-        for task_id in result["pause_context"]["task_ids"]:
-            overrides[task_id] = [r for r in resolved if r["task_id"] == task_id]
-        request["plan_input"]["task_decision_overrides"] = overrides
+        # resolved records carry no task_id of their own (see
+        # hitl.answers_to_resolved's fields) -- partition them by mapping
+        # question_id -> task_id from self._pending_questions instead, using
+        # the "task_id" field added to each worker-escalation question above.
+        question_task_id = {q["id"]: q["task_id"] for q in self._pending_questions}
+        by_task: Dict[str, list] = {}
+        for r in resolved:
+            by_task.setdefault(question_task_id[r["question_id"]], []).append(r)
+        # task_decision_overrides carries the SAME feedback envelope shape
+        # _escalate_decision already builds (pause_cycle.py / swarm_implementation.py)
+        # -- {"source": "user_decision", "reason": _format_decisions(...), 
+        # "requested_changes": [], "decisions": ...} -- not the raw resolved
+        # records: v2_team_worker._feedback_lines() only renders "reason" /
+        # "error" / "message" / "requested_changes", none of which exist on a
+        # bare resolved record, so the worker would never actually see the
+        # answer text and could repeat the same decision. Reusing this exact
+        # shape also keeps the existing per-task escalation-cap accounting
+        # (which counts entries with source == "user_decision") intact.
+        # Replaced, not merged, on every round: an override is consumed by the
+        # orchestrator on the very next invocation, so carrying a prior
+        # round's entry forward would reapply it and duplicate history.
+        request["plan_input"]["task_decision_overrides"] = {
+            task_id: {
+                "source": "user_decision",
+                "reason": pause_cycle._format_decisions(task_resolved),
+                "requested_changes": [],
+                "decisions": task_resolved,
+            }
+            for task_id, task_resolved in by_task.items()
+        }
     else:  # "entry" | "tech_lead_clarify"
         request["plan_input"]["resolved_questions"] = (
             request["plan_input"].get("resolved_questions", []) + resolved
@@ -228,24 +255,37 @@ while True:
   server and pass the workflow's token check despite answering the wrong
   pause.
 - **Both** answers-submission surfaces must dispatch a signal to their
-  matching workflow type, not just the coding-team one:
-  - `POST /run/{job_id}/answers` (coding-team-only jobs,
-    `api/routes/coding_team_hitl.py`) signals the `CodingTeamWorkflow` run,
-    whose workflow ID is `f"{WORKFLOW_ID_PREFIX}{job_id}"` using the existing
-    `WORKFLOW_ID_PREFIX = "coding_team-"` constant
-    (`temporal/coding_team_constants.py`).
-  - `POST /run-team/{job_id}/answers` (SE-level jobs,
-    `api/routes/hitl.py`) currently only writes to the job store; it must
-    equally be updated to signal the corresponding `RunTeamWorkflowV2` run,
-    whose workflow ID is `f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"` using the
-    existing `WORKFLOW_ID_PREFIX_RUN_TEAM = "se-run-team-"` constant
-    (`temporal/constants.py`) — not an invented prefix. Missing this means SE
-    Temporal jobs would have their job-store `waiting_for_answers` flag
-    cleared but their workflow never learns of it, and it waits indefinitely.
-  - Both routes `await handle.signal("submit_answers", {"resume_token":
-    client_resume_token, "answers": answers})` — a single dict payload, using
-    the client-echoed token described above and matching this repo's
-    single-payload signal convention.
+  matching workflow type, not just the coding-team one — and both need an
+  explicit mode branch, since `run-from-github` and other callers can still
+  be thread-mode jobs with no workflow to signal at all:
+  - **Temporal-mode jobs:** signal without touching the job record's pause
+    envelope (per the idempotency note in §1 — clearing it is the
+    orchestrator's job alone, once it actually consumes the answer).
+    - `POST /run/{job_id}/answers` (coding-team-only jobs,
+      `api/routes/coding_team_hitl.py`) signals the `CodingTeamWorkflow` run,
+      whose workflow ID is `f"{WORKFLOW_ID_PREFIX}{job_id}"` using the
+      existing `WORKFLOW_ID_PREFIX = "coding_team-"` constant
+      (`temporal/coding_team_constants.py`).
+    - `POST /run-team/{job_id}/answers` (SE-level jobs, `api/routes/hitl.py`)
+      currently only writes to the job store; it must equally be updated to
+      signal the corresponding `RunTeamWorkflowV2` run, whose workflow ID is
+      `f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"` using the existing
+      `WORKFLOW_ID_PREFIX_RUN_TEAM = "se-run-team-"` constant
+      (`temporal/constants.py`) — not an invented prefix. Missing this means
+      SE Temporal jobs would have their job-store `waiting_for_answers` flag
+      cleared but their workflow never learns of it, and it waits
+      indefinitely.
+    - Both `await handle.signal("submit_answers", {"resume_token":
+      client_resume_token, "answers": answers})` — a single dict payload,
+      using the client-echoed token described above and matching this
+      repo's single-payload signal convention.
+  - **Thread-mode jobs** (e.g. the still-threaded `run-from-github` flow):
+    keep today's existing behavior unchanged — write `submitted_answers` and
+    clear `waiting_for_answers` in the job record directly, since that is
+    exactly what unblocks `hitl.wait_for_answers`'s poll loop and there is no
+    Temporal workflow to signal (attempting one would target a workflow ID
+    that doesn't exist). The route must check the job's mode before choosing
+    a branch.
 - `POST /run/{job_id}/resume`'s cross-worker lease mechanism
   (`resume_claim_at` / `resume_claim_seq` in `job_store.py`) becomes
   unnecessary for Temporal-mode jobs — Temporal itself durably tracks a
@@ -262,13 +302,23 @@ while True:
     `CodingTeamPlanInput` and the orchestrator already reads it) before the
     next `run_pipeline_activity` call.
   - **Worker-escalation pauses:** `CodingTeamPlanInput` gains a new field,
-    `task_decision_overrides: Dict[str, List[dict]]` (task ID → resolved
-    answer records). Immediately after `graph.restore()` on re-entry, the
-    orchestrator applies each override to the matching restored task's
-    `revision_feedback` *before* that task is handed to `run_implement`
-    again — this is a new, explicit contract field, not a bare pass-through
-    of an ad hoc object the activity's existing parsing would silently
-    ignore.
+    `task_decision_overrides: Dict[str, dict]` (task ID → a single feedback
+    entry already shaped like `_escalate_decision`'s existing `user_decision`
+    envelope: `{"source": "user_decision", "reason": ..., "requested_changes":
+    [], "decisions": [...]}` — not a bare list of resolved records, which
+    `v2_team_worker._feedback_lines()` cannot render (it reads `reason`/
+    `error`/`message`/`requested_changes`, none of which exist on a raw
+    `hitl.answers_to_resolved()` record) and which would also break the
+    existing per-task escalation-cap accounting that counts `source ==
+    "user_decision"` entries. Immediately after `graph.restore()` on
+    re-entry, the orchestrator appends the matching override to that
+    restored task's `revision_feedback` *before* the task is handed to
+    `run_implement` again, then **consumes** it — the orchestrator must not
+    re-emit the same `task_decision_overrides` entry on a later invocation
+    (the workflow already replaces rather than accumulates it per round, per
+    §2, but the orchestrator side must not persist it back into the
+    snapshot either), or a later resume / activity retry would apply the
+    same decision to the task twice.
   - **This field alone does not reach `RunTeamWorkflowV2`.** Its activity,
     `execute_coding_team_activity(job_id, repo_path, plan_result,
     resolved_questions_override=None, trace_id="")`
