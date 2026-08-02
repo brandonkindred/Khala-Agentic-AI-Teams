@@ -224,10 +224,14 @@ The paper-trading (`/strategy-lab/paper-trade`, `/stop`), Strategy Lab run
 (`/strategy-lab/run`, `/strategy-lab/runs/{id}/resume`,
 `/strategy-lab/runs/{id}/restart`), and orchestrator/advisor endpoints
 (`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
-`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset (or no
-connected worker) they return HTTP 503 rather than falling back to in-process
-execution. Only the ad hoc `POST /backtests` endpoint keeps a thread
-fallback.
+`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset or the
+shared client unreachable they return HTTP 503 rather than falling back to
+in-process execution. Only the ad hoc `POST /backtests` endpoint keeps a thread
+fallback. Note the 503 only covers a missing/unreachable *client* — dispatch waits
+for the server to accept the workflow start, not for a worker to actually be
+polling the target queue, so a dead queue-specific worker (e.g. `strategy-lab-queue`)
+with the shared client still connected returns 200 with the workflow left queued
+(see `strategy_lab/README.md`'s "Temporal dispatch" section for detail).
 
 ### INVESTMENT_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Ceiling on how many `investment-queue` activities
