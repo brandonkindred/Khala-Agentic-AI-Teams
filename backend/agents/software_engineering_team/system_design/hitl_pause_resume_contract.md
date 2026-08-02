@@ -90,6 +90,21 @@ match, not be rejected forever by the token check because a retry silently
 started a second pause. A fresh `resume_token` is minted only when persisting
 a genuinely new pause.
 
+This idempotency check is only correct if the job record's pause envelope
+(`waiting_for_answers`, `pending_questions`, `resume_token`, `pause_kind`,
+`pause_context`) is the *sole* responsibility of the orchestrator, cleared
+only once it actually consumes the resolved answers on a later invocation —
+**not** by the answers-submission route itself. The route's only job is to
+signal the running workflow (see §2/§3); it must not also clear
+`waiting_for_answers` in the job record just because a client answered early
+(before the activity ever returned "paused"). Otherwise a client that answers
+in that early window, followed by a worker crash and activity retry, would
+have the retry see a job record with no unresolved pause (wrongly cleared)
+even though the workflow never received or acknowledged it — the signal is
+only buffered in workflow memory, not reflected in the job record, so the
+orchestrator would either mint a spurious new pause or proceed as if nothing
+was ever asked, silently dropping the human's answer.
+
 **Postcondition:** the activity invocation is now short-lived, bounded by
 actual planning/codegen work between pause points rather than by human
 think-time. `start_to_close_timeout` can shrink accordingly and no longer
@@ -107,9 +122,17 @@ tasks are newly assigned, and workers already mid-flight get a bounded window
 to finish or also escalate before the activity returns. Every worker that
 escalates within that window is folded into the *same* pause
 (`pause_context.task_ids` lists all of them; `pending_questions` is their
-concatenated batch) rather than each publishing a competing one. Workers that
-don't finish within the drain window are left `in_progress` and picked up
-again by the normal `reset_in_flight()` resume path.
+concatenated batch) rather than each publishing a competing one. Leaving a
+timed-out worker's task merely marked `in_progress` is not sufficient: it
+does not stop that worker's thread, which can keep mutating the task graph,
+job record, and repo worktree after the activity has already returned, while
+the *next* invocation's `reset_in_flight()` starts a second, concurrent
+attempt at the same task. Workers that exceed the drain window must instead
+be cooperatively cancelled (a cancellation signal each worker's loop checks
+between steps) and the activity must wait for actual quiescence — every
+worker either completed, escalated into the pause, or observably stopped —
+before returning `"paused"`. Only a worker that has genuinely stopped may be
+left for `reset_in_flight()` to restart on resume.
 
 ### 2. Workflow contract
 
@@ -246,6 +269,19 @@ while True:
     again — this is a new, explicit contract field, not a bare pass-through
     of an ad hoc object the activity's existing parsing would silently
     ignore.
+  - **This field alone does not reach `RunTeamWorkflowV2`.** Its activity,
+    `execute_coding_team_activity(job_id, repo_path, plan_result,
+    resolved_questions_override=None, trace_id="")`
+    (`temporal/activities.py:644`), never receives or forwards a full
+    `plan_input` dict — it rebuilds `CodingTeamPlanInput` itself via
+    `_build_coding_team_plan_input(adapter_result, path, existing_code,
+    resolved_questions_override)`, using its own individual keyword
+    argument for entry/Tech-Lead answers. `execute_coding_team_activity`
+    must gain its own new `task_decision_overrides` keyword parameter,
+    mirrored alongside `resolved_questions_override` and threaded through to
+    `_build_coding_team_plan_input`, and `RunTeamWorkflowV2`'s resume loop
+    must pass it explicitly on each activity call — adding the model field
+    fixes only the standalone `CodingTeamWorkflow` path.
 
 ## Open questions (flagged, not resolved by this spike)
 
