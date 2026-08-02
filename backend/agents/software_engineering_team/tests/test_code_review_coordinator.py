@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
+from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
@@ -865,6 +866,29 @@ def test_review_chunk_allows_distinct_paths_including_empty() -> None:
         ]
     )
     assert len(chunk.segments) == 2
+
+
+def test_bisect_segment_first_half_end_line_reflects_its_own_content(monkeypatch) -> None:
+    """Both halves of a bisected segment must report their own true range, not
+    the original segment's — end_line/is_partial are computed from
+    start_line + content on FileSegment, so model_copy(update={"content": ...})
+    alone (no explicit end_line update) already keeps them correct."""
+    monkeypatch.setenv("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", "1000")  # env floor is 1000
+    lines = [f"line{i}\n" for i in range(1, 301)]  # 300 lines, ~2.3KB, clears the 2x-floor gate
+    seg = FileSegment(path="a.py", content="".join(lines), start_line=1, total_lines=300)
+
+    halves = _bisect_segment(seg)
+    assert halves is not None
+    first, second = halves
+
+    assert first.content + second.content == seg.content
+    assert first.start_line == seg.start_line
+    assert first.end_line == seg.start_line + first.line_count - 1
+    assert first.end_line < seg.end_line
+    assert second.start_line == first.end_line + 1
+    assert second.end_line == seg.end_line
+    assert first.is_partial is True
+    assert second.is_partial is True
 
 
 # ---------------------------------------------------------------------------
