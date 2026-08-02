@@ -15,7 +15,14 @@ phase, with independent retries and resumability:
   ``architecture_consistency_pass.find_architecture_and_redundancy_issues``).
 - :func:`find_side_effect_impact_activity` — once-per-submission side-effect /
   blast-radius pass (wraps
-  ``side_effect_impact_pass.find_side_effect_impact_issues``).
+  ``side_effect_impact_pass.find_side_effect_impact_issues``). Kept alongside
+  :func:`find_architecture_and_side_effect_activity` (below) so in-flight
+  workflow histories recorded before the merged pass existed keep replaying.
+- :func:`find_architecture_and_side_effect_activity` — once-per-submission
+  merged architecture-consistency + side-effect-impact pass, one LLM call
+  (wraps
+  ``merged_architecture_side_effect_pass.find_architecture_and_side_effect_issues``).
+  Current workflow executions use this in place of the two passes above.
 - :func:`consolidate_side_effect_issues_activity` — optional merge of related
   ``side-effects`` findings after the three tail passes (wraps
   ``side_effect_consolidation.consolidate_side_effect_issues``; gated by
@@ -401,6 +408,67 @@ def find_side_effect_impact_activity(
         )
         return []
     return [i.model_dump(mode="json") for i in findings]
+
+
+@activity.defn(name="code_review_merged_architecture_side_effect")
+def find_architecture_and_side_effect_activity(
+    review_input: Dict[str, Any],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Once-per-submission merged architecture-consistency + side-effect pass.
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict
+          (the same one every other activity in this module reconstructs from).
+
+    Postconditions:
+        - Returns ``{"architecture_findings": [...], "side_effect_findings": [...]}``,
+          each a list of zero or more NEW ``CodeReviewIssue`` dicts in the same
+          shapes :func:`find_architecture_and_redundancy_activity` /
+          :func:`find_side_effect_impact_activity` return; never mutates or
+          removes any finding from the caller's perspective — this activity is
+          purely additive, mirroring
+          ``find_architecture_and_side_effect_issues``'s own contract (one LLM
+          call covering both checks instead of two). When
+          ``review_input.repo_root`` names a disk checkout reachable by this
+          worker, a ``DiskRepoReader`` is rebuilt from it (via
+          ``_repo_reader_from_input``, the same helper the other tail-pass
+          activities use) so both halves regain the off-diff read access they
+          have in thread mode; otherwise the reader is ``None`` and each half
+          degrades exactly as its standalone counterpart does.
+        - Never raises: the wrapped function is itself fail-safe (disabled via
+          env, wrong profile, or any setup/LLM failure all degrade to
+          ``([], [])``) -- and so is this activity as a whole, including
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client both happen
+          BEFORE the wrapped function's own env/profile early-return checks
+          run, so without this activity's own try/except a validation or
+          client-resolution failure (e.g. malformed payload, no LLM provider
+          configured) would raise even when this optional, additive pass
+          would have no-op'd anyway -- turning an inapplicable pass into a
+          failure of the whole durable review. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
+    """
+    from ..merged_architecture_side_effect_pass import find_architecture_and_side_effect_issues
+    from ..models import CodeReviewInput
+
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        llm = _resolve_llm()
+        architecture_findings, side_effect_findings = find_architecture_and_side_effect_issues(
+            llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
+        logger.warning(
+            "MergedArchitectureSideEffectPass: activity failed (%s: %s); "
+            "returning no additional findings",
+            type(exc).__name__,
+            exc,
+        )
+        return {"architecture_findings": [], "side_effect_findings": []}
+    return {
+        "architecture_findings": [i.model_dump(mode="json") for i in architecture_findings],
+        "side_effect_findings": [i.model_dump(mode="json") for i in side_effect_findings],
+    }
 
 
 @activity.defn(name="code_review_side_effect_consolidation")

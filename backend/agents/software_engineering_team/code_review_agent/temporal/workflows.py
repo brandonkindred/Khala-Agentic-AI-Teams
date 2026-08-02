@@ -6,30 +6,35 @@ resumable computation. It orchestrates the review as: prepare → map fan-out
 ``asyncio.gather(..., return_exceptions=True)``, then a fixed-order scan
 re-raises the earliest-index exception; pre-migration histories keep the
 original unconstrained ``asyncio.gather`` without ``return_exceptions``) →
-three tail passes run concurrently via the same return_exceptions idiom
-(false-positive verify, architecture-consistency / redundancy, side-effect /
-blast-radius; scan order is verify → architecture → side-effect) → optional
+tail passes run concurrently via the same return_exceptions idiom → optional
 side-effect consolidation → deterministic gate → (conditional) narrative
 synthesis — so a worker restart mid-review re-runs only the unfinished
 activities instead of re-reviewing the whole submission. New concurrent
 fan-outs await every sibling and re-raise in list order so completion-order
 races never pick the surfaced exception or abandon an activity.
 
-The tail passes have no cross-pass data dependency (each reads only
-``review_input`` and/or the map phase's aggregated ``issues``, never another
-pass's output), mirroring ``coordinator._run_tail_passes``'s identical
-concurrent fan-out in thread mode.
+For current executions (under ``_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH``)
+the tail passes are two slots — false-positive verify and a single merged
+architecture-consistency + side-effect-impact pass (one LLM call) — mirroring
+``coordinator._run_tail_passes``'s identical "filter" + "merged" concurrent
+fan-out in thread mode. Histories recorded before that patch existed keep
+replaying the original three-slot gather (verify → architecture →
+side-effect, as two independent additive activities); see that patch's
+docstring for the deprecation plan. Either way, the tail passes have no
+cross-pass data dependency (each reads only ``review_input`` and/or the map
+phase's aggregated ``issues``, never another pass's output).
 
 Every phase calls the same underlying coordinator functions (through
 :mod:`.activities`): the map unit is ``mapping._cached_review_chunk``,
-verification is ``false_positive_filter.filter_false_positives``, the additive
-architecture pass is
-``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
-additive side-effect pass is
-``side_effect_impact_pass.find_side_effect_impact_issues``, optional
-consolidation of related ``side-effects`` findings is
+verification is ``false_positive_filter.filter_false_positives``, the merged
+additive architecture + side-effect pass is
+``merged_architecture_side_effect_pass.find_architecture_and_side_effect_issues``
+(pre-merged-pass histories instead call the standalone
+``architecture_consistency_pass.find_architecture_and_redundancy_issues`` and
+``side_effect_impact_pass.find_side_effect_impact_issues`` as two activities),
+optional consolidation of related ``side-effects`` findings is
 ``side_effect_consolidation.consolidate_side_effect_issues`` (between the
-side-effect pass and finalize), the gate is
+tail passes and finalize), the gate is
 ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
 ``synthesis.synthesize_review_findings`` with the same deterministic-concat
 fallback. The verdict is NOT identical to the default thread-mode
@@ -146,6 +151,26 @@ _ADAPTIVE_FANOUT_PATCH = "code-review-adaptive-fanout-width"
 # the Temporal UI), then deprecate the marker with
 # ``workflow.deprecate_patch(_CONCURRENT_TAIL_PASSES_PATCH)`` before deleting it.
 _CONCURRENT_TAIL_PASSES_PATCH = "code-review-concurrent-tail-passes"
+
+# Replay-compatibility gate for replacing the separate architecture-consistency
+# and side-effect-impact activities with a single merged-pass activity within
+# the concurrent tail-pass gather (see ``run``), mirroring the in-process
+# coordinator's ``_run_tail_passes`` (one merged call instead of two additive
+# calls). Only consulted once ``_CONCURRENT_TAIL_PASSES_PATCH`` is already
+# True, since the merged pass is a refinement of the concurrent scheduling
+# path, not the pre-migration sequential one. A history recorded before this
+# activity existed has no marker for it, so ``workflow.patched`` returns False
+# on replay and that history's original two-activity gather is reproduced
+# exactly; a new execution records the marker and always takes the new,
+# single-activity path.
+# TODO: Remove this gate (and always call the merged activity unconditionally,
+# dropping the two-activity branch and _ARCHITECTURE_PASS_PATCH /
+# _SIDE_EFFECT_PASS_PATCH along with it) once no pre-migration
+# CodeReviewWorkflow histories remain open (confirm via the Temporal UI), then
+# deprecate the marker with
+# ``workflow.deprecate_patch(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH)``
+# before deleting it.
+_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH = "code-review-merged-architecture-side-effect-pass"
 
 
 @workflow.defn(name="CodeReviewWorkflow")
@@ -349,6 +374,18 @@ class CodeReviewWorkflow:
                 retry_policy=_LLM_RETRY,
             )
 
+        def _merged_architecture_side_effect() -> Any:
+            return workflow.execute_activity(
+                A.find_architecture_and_side_effect_activity,
+                args=[review_input],
+                task_queue=TASK_QUEUE,
+                # Same timeout/retry ceiling as the two standalone activities
+                # above: this replaces two LLM calls with one, so neither a
+                # longer timeout nor a different retry policy is warranted.
+                start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=_LLM_RETRY,
+            )
+
         # Architecture-consistency / cross-codebase-redundancy pass and
         # side-effect / blast-radius pass are both additive, once per
         # submission (not once per chunk), matching thread mode's
@@ -369,58 +406,90 @@ class CodeReviewWorkflow:
             return []
 
         if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):
-            # None of the three tail passes reads another's output (see
-            # coordinator._run_tail_passes), so they can be scheduled as
-            # concurrent activities instead of three sequential round-trips —
-            # same "create the coroutine, gather later" idiom as the map
-            # fan-out above. Safe to evaluate _ARCHITECTURE_PASS_PATCH /
-            # _SIDE_EFFECT_PASS_PATCH up front here: this branch is only
-            # reached by a brand-new execution or one that already recorded
-            # the _CONCURRENT_TAIL_PASSES_PATCH marker (and therefore already
-            # evaluated those two markers at these same positions).
-            run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
-            run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+            if workflow.patched(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH):
+                # Architecture-consistency and side-effect-impact are now one
+                # merged additive pass (one LLM call), mirroring
+                # coordinator._run_tail_passes's "filter" + "merged" scheduling
+                # — same return_exceptions + fixed-order re-raise idiom as the
+                # three-slot gather below, just with two slots instead of three.
+                calls = [_verify(), _merged_architecture_side_effect()]
+                results = await asyncio.gather(*calls, return_exceptions=True)
+                verify_result, merged_result = results
 
-            calls = [
-                _verify(),
-                _architecture() if run_architecture else _empty_tail_pass(),
-                _side_effect() if run_side_effect else _empty_tail_pass(),
-            ]
-            # return_exceptions=True: wait for every tail pass to finish
-            # (success or failure) instead of asyncio.gather's default of
-            # raising as soon as the first exception surfaces and leaving
-            # the others un-awaited -- that default would leave a sibling
-            # activity un-awaited from the workflow's point of view (an
-            # orphaned command Temporal's workflow sandbox does not
-            # tolerate) and pick whichever exception happens to resolve
-            # first in real time, which is not guaranteed to match on
-            # replay. Unpack each slot into its own local (fixed
-            # verify/architecture/side-effect order) BEFORE checking for
-            # exceptions, so a failed slot's exception object is read once
-            # as itself and never mistaken for (and spread as) a findings
-            # list; only once every local holds its plain result value do
-            # we re-raise the first exception found, in that same fixed
-            # order -- reproducing sequential execution's deterministic
-            # error precedence (verify's failure, if any, always wins) and
-            # total-failure semantics (a tail-pass failure aborts the whole
-            # review before any result is used, exactly as it would if the
-            # later passes were never reached). The gather always has a
-            # uniform three-coroutine shape via ``_empty_tail_pass`` so
-            # disabled passes do not change command count.
-            results = await asyncio.gather(*calls, return_exceptions=True)
-            verify_result, architecture_result, side_effect_result = results
+                first_exception = next((r for r in results if isinstance(r, BaseException)), None)
+                if first_exception is not None:
+                    raise first_exception
 
-            first_exception = next((r for r in results if isinstance(r, BaseException)), None)
-            if first_exception is not None:
-                raise first_exception
+                verified = verify_result
+                architecture_result = merged_result.get("architecture_findings") or []
+                side_effect_result = merged_result.get("side_effect_findings") or []
+                if architecture_result:
+                    verified = [*verified, *architecture_result]
+                    has_architecture_findings = True
+                if side_effect_result:
+                    verified = [*verified, *side_effect_result]
+                    has_side_effect_findings = True
+            else:
+                # Pre-merged-pass history: reproduce the original three-slot
+                # concurrent gather exactly (see
+                # _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH) — a history
+                # recorded under the old code has no marker for the merged
+                # pass, so this branch's command sequence (two separate
+                # activities, not one) must stay unchanged.
+                #
+                # None of the three tail passes reads another's output (see
+                # coordinator._run_tail_passes), so they can be scheduled as
+                # concurrent activities instead of three sequential round-trips —
+                # same "create the coroutine, gather later" idiom as the map
+                # fan-out above. Safe to evaluate _ARCHITECTURE_PASS_PATCH /
+                # _SIDE_EFFECT_PASS_PATCH up front here: this branch is only
+                # reached by an execution that already recorded the
+                # _CONCURRENT_TAIL_PASSES_PATCH marker without the merged-pass
+                # marker (and therefore already evaluated those two markers at
+                # these same positions).
+                run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
+                run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
 
-            verified = verify_result
-            if architecture_result:
-                verified = [*verified, *architecture_result]
-                has_architecture_findings = True
-            if side_effect_result:
-                verified = [*verified, *side_effect_result]
-                has_side_effect_findings = True
+                calls = [
+                    _verify(),
+                    _architecture() if run_architecture else _empty_tail_pass(),
+                    _side_effect() if run_side_effect else _empty_tail_pass(),
+                ]
+                # return_exceptions=True: wait for every tail pass to finish
+                # (success or failure) instead of asyncio.gather's default of
+                # raising as soon as the first exception surfaces and leaving
+                # the others un-awaited -- that default would leave a sibling
+                # activity un-awaited from the workflow's point of view (an
+                # orphaned command Temporal's workflow sandbox does not
+                # tolerate) and pick whichever exception happens to resolve
+                # first in real time, which is not guaranteed to match on
+                # replay. Unpack each slot into its own local (fixed
+                # verify/architecture/side-effect order) BEFORE checking for
+                # exceptions, so a failed slot's exception object is read once
+                # as itself and never mistaken for (and spread as) a findings
+                # list; only once every local holds its plain result value do
+                # we re-raise the first exception found, in that same fixed
+                # order -- reproducing sequential execution's deterministic
+                # error precedence (verify's failure, if any, always wins) and
+                # total-failure semantics (a tail-pass failure aborts the whole
+                # review before any result is used, exactly as it would if the
+                # later passes were never reached). The gather always has a
+                # uniform three-coroutine shape via ``_empty_tail_pass`` so
+                # disabled passes do not change command count.
+                results = await asyncio.gather(*calls, return_exceptions=True)
+                verify_result, architecture_result, side_effect_result = results
+
+                first_exception = next((r for r in results if isinstance(r, BaseException)), None)
+                if first_exception is not None:
+                    raise first_exception
+
+                verified = verify_result
+                if architecture_result:
+                    verified = [*verified, *architecture_result]
+                    has_architecture_findings = True
+                if side_effect_result:
+                    verified = [*verified, *side_effect_result]
+                    has_side_effect_findings = True
         else:
             # Pre-migration history: reproduce the original sequential
             # scheduling AND the original workflow.patched call positions
