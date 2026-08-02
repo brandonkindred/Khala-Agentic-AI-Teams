@@ -94,6 +94,10 @@ an implementation worker result. The job pauses with
 `status="waiting_for_user"` until answers are submitted; resolved answers are
 threaded back into subsequent planning/revision context.
 
+For the target native-Temporal (signal + `wait_condition`) pause/resume
+contract, see
+[`hitl_pause_resume_contract.md`](./hitl_pause_resume_contract.md).
+
 ## Persistence And Resume
 
 The orchestrator persists:
