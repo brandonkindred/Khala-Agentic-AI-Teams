@@ -2343,13 +2343,15 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     Raises ``HTTPException(409)`` when another run is already active, or
     (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
     when another transition for this freshly-minted run_id is already in
-    flight (#4028).
+    flight (#4028). The global check runs before minting a run_id/acquiring
+    its transition lock, so a rejected request never allocates a registry
+    entry that would otherwise never be looked up again.
     """
+    _ensure_no_active_run()
+
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     run_lock = _require_run_transition_lock(run_id)
     try:
-        _ensure_no_active_run()
-
         now = _now()
         total_cycles = request.batch_size * request.batch_count
 
@@ -2627,13 +2629,22 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Restart a strategy lab run from the beginning.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status (via
-          ``_get_run_state``) is in ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
+        - ``run_id`` identifies a run whose persisted status — read INSIDE
+          the transition lock below, not beforehand — is in
+          ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
           (completed/failed/cancelled/interrupted/agent_crash/completed_with_errors).
+          Reading it before acquiring the lock could observe another
+          transition's transiently-written "running" reset and misreport a
+          genuine in-flight-elsewhere race as a permanent 400 instead of a
+          retryable 409 ("running" is deliberately excluded from
+          ``RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
+          resolves to *some* known run) runs before the lock, so a request
+          for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
         - No other run currently has status ``"running"``.
         - No other run/resume/restart transition for this run_id is
-          currently in flight (checked first, before ``_ensure_no_active_run()``).
+          currently in flight (checked first, before re-reading state or
+          calling ``_ensure_no_active_run()``).
 
     Postconditions:
         - Any prior Temporal execution still running under this run_id's
@@ -2683,23 +2694,36 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           can still commit a cycle record or paper trade after the new
           cycle-0 workflow has started (tracked as #4029).
     """
-    state = _get_run_state(run_id)
-    # "completed_with_errors" is a terminal outcome of the same workflow as
-    # "completed" and must be restartable. Extend the shared set locally
-    # rather than leaking a lab-specific status into job_service_client.
-    _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
-    try:
-        validate_job_for_action(state, run_id, _lab_restartable, "restarted")
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
-
-    payload = state.get("request_payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available.")
+    # Cheap existence-only check (no lock): avoids growing the transition-lock
+    # registry for a run_id that was never created (or already purged),
+    # mirroring run_strategy_lab's own check-before-lock ordering.
+    if _get_run_state(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
 
     run_lock = _require_run_transition_lock(run_id)
     try:
+        # Re-read + validate state INSIDE the lock: reading it beforehand
+        # could observe a concurrent restart's transiently-written "running"
+        # reset (written while that request still holds this same lock) and
+        # incorrectly reject with 400 "not restartable" instead of the
+        # promised retryable 409 — "running" is deliberately excluded from
+        # RESTARTABLE_STATUSES, so status is only trustworthy once no other
+        # transition for this run_id can be concurrently rewriting it.
+        state = _get_run_state(run_id)
+        # "completed_with_errors" is a terminal outcome of the same workflow as
+        # "completed" and must be restartable. Extend the shared set locally
+        # rather than leaking a lab-specific status into job_service_client.
+        _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
+        try:
+            validate_job_for_action(state, run_id, _lab_restartable, "restarted")
+        except ValueError as exc:
+            code = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
+
+        payload = state.get("request_payload")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Original request payload not available.")
+
         _ensure_no_active_run()
 
         request = RunStrategyLabRequest(**payload)

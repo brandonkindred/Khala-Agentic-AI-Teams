@@ -430,6 +430,80 @@ def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
         held_lock.release()
 
 
+def test_restart_strategy_lab_run_returns_409_not_400_when_racing_transition_wrote_running(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: status must be read INSIDE the transition lock, not
+    before it. "running" is deliberately excluded from RESTARTABLE_STATUSES
+    (a genuinely still-running run can't be restarted without stopping it
+    first) — but a concurrent in-flight restart for this same run_id
+    transiently writes "running" too, while still holding the lock. Reading
+    state before attempting the lock would misread that transient write as
+    a permanently invalid status and 400 instead of the promised retryable
+    409, breaking the "retry shortly" contract this whole guard exists to
+    provide."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-racing-restart-wrote-running"
+    # Simulates the state a concurrent in-flight restart already wrote —
+    # non-restartable on its face, but only because a transition, not a
+    # genuine long-running execution, currently owns this run_id.
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+    finally:
+        held_lock.release()
+
+
+def test_restart_strategy_lab_run_404_does_not_allocate_transition_lock_entry(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a 404 for a nonexistent run_id must be rejected by the
+    cheap existence check before the transition lock is ever touched — a
+    barrage of restart requests for run_ids that don't exist must not grow
+    the (never-evicted) transition-lock registry."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-never-existed"
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+    assert resp.status_code == 404
+    assert run_id not in _run_state._run_transition_locks
+
+
+def test_run_strategy_lab_409_when_already_running_does_not_allocate_transition_lock_entry(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: run_strategy_lab mints a fresh uuid4 run_id every call, so
+    if the global 409 guard ran after minting + acquiring the transition
+    lock, every rejected /run request during a long run would leak one
+    throwaway Lock into the (never-evicted) registry forever. The global
+    check must run first."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    api_main._active_runs["existing"] = {"run_id": "existing", "status": "running"}
+    before = len(_run_state._run_transition_locks)
+
+    resp = api_client.post("/strategy-lab/run", json={})
+
+    assert resp.status_code == 409
+    assert len(_run_state._run_transition_locks) == before
+
+
 def test_resume_strategy_lab_run_returns_409_when_restart_transition_lock_held_for_same_run_id(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
