@@ -168,11 +168,13 @@ def test_start_from_spec_dispatches_to_temporal_even_when_disabled(
     assert dispatched["job_id"] == resp.json()["job_id"]
 
 
-def test_start_from_spec_rolls_back_project_dir_on_dispatch_failure(
+def test_start_from_spec_keeps_project_dir_on_dispatch_failure(
     monkeypatch, tmp_path: Path, client
 ):
-    """A dispatch failure must not leave behind a project dir that permanently
-    blocks retries under the same project_name via the "already exists" 400."""
+    """A dispatch exception (timeout, RPC error, no client, ...) never proves the
+    workflow wasn't scheduled, so the project dir is deliberately left in place —
+    deleting it could race a workflow still running against a path a retry just
+    recreated. A retry under the same name correctly 400s as "already exists"."""
     import software_engineering_team.temporal.start_workflow as start_workflow
 
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
@@ -188,47 +190,11 @@ def test_start_from_spec_rolls_back_project_dir_on_dispatch_failure(
     )
     assert resp.status_code == 503
     proj_dir = tmp_path / "projects" / "myproj3"
-    assert not proj_dir.exists()
+    assert proj_dir.exists()
 
-    # Retrying with the same project_name must not 400 on "already exists".
-    monkeypatch.setattr(start_workflow, "start_standalone_workflow", lambda *a, **k: None)
     retry_resp = client.post(
         "/product-analysis/start-from-spec",
         json={"project_name": "myproj3", "spec_content": "# Spec\nFeature"},
-    )
-    assert retry_resp.status_code == 200
-
-
-def test_start_from_spec_keeps_project_dir_on_dispatch_timeout(
-    monkeypatch, tmp_path: Path, client
-):
-    """A dispatch TimeoutError is ambiguous (the workflow may still get scheduled
-    after we return), so the project dir must NOT be rolled back — only genuine
-    dispatch failures (e.g. no Temporal client) are safe to roll back."""
-    from concurrent.futures import TimeoutError as FutureTimeoutError
-
-    import software_engineering_team.temporal.start_workflow as start_workflow
-
-    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-
-    def _raise_timeout(*a, **k):
-        raise FutureTimeoutError("start_workflow did not acknowledge in time")
-
-    monkeypatch.setattr(start_workflow, "start_standalone_workflow", _raise_timeout)
-
-    resp = client.post(
-        "/product-analysis/start-from-spec",
-        json={"project_name": "myproj4", "spec_content": "# Spec\nFeature"},
-    )
-    assert resp.status_code == 503
-    proj_dir = tmp_path / "projects" / "myproj4"
-    assert proj_dir.exists()
-
-    # A retry under the same name correctly 400s: the project is still there
-    # because we don't know whether the earlier dispatch actually succeeded.
-    retry_resp = client.post(
-        "/product-analysis/start-from-spec",
-        json={"project_name": "myproj4", "spec_content": "# Spec\nFeature"},
     )
     assert retry_resp.status_code == 400
 
