@@ -393,6 +393,12 @@ jobs:
                   "name": "Unified API",
                   "tests": "../unified_api/tests/",
                   "source": "unified_api",
+                  # This job's cwd is backend/agents, two levels below the
+                  # pyproject.toml that carries unified_api's coverage omit/
+                  # exclude_also rules (backend/pyproject.toml) — without this,
+                  # --cov-config falls back to the default .coveragerc lookup
+                  # and those rules never apply.
+                  "cov_config": "../pyproject.toml",
               },
           }
 

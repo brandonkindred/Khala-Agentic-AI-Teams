@@ -202,13 +202,18 @@ omit = [
     # unified_api: Medium auto-login drives a real headless Chromium session via
     # Playwright (see the module docstring's `playwright install chromium`
     # prerequisite) and only exercises meaningfully against the live Medium site.
-    "unified_api/medium_browser_login.py",
+    # Wildcard-prefixed (not "unified_api/...") because coverage.py resolves a
+    # relative omit pattern against the *pytest run's* cwd, not this file's own
+    # directory: `make coverage` runs from `backend/` (pattern would match) but
+    # the CI matrix job's cwd is `backend/agents` (it would not) — "*/" matches
+    # the file's absolute path regardless of which cwd invoked pytest.
+    "*/unified_api/medium_browser_login.py",
     # unified_api: this file's tests are entirely `@pytest.mark.integration` —
     # they need a live Postgres + job-service sidecar and are exercised by the
     # dedicated `test-integration` CI job (`-m integration`), not by the unit
     # gate here (`-m "not integration"`), so its statements are expected to be
     # unreached in this run.
-    "unified_api/tests/test_integration_smoke.py",
+    "*/unified_api/tests/test_integration_smoke.py",
 ]
 
 [tool.coverage.report]
