@@ -857,6 +857,13 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     # is ``run_state.load_run_from_job_service`` — patch that (not the api.main alias).
     monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: dict(state))
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    class _GenerationClient:
+        def get_job(self, jid):
+            return {"job_id": jid, "generation": 1}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _GenerationClient())
+
     started = []
     monkeypatch.setattr(
         sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req, generation: started.append(rid)

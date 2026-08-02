@@ -337,14 +337,60 @@ def test_resume_strategy_lab_run_carries_forward_generation_unchanged(
 ) -> None:
     """A resume continues the same incarnation rather than superseding one, so it
     must carry the current generation forward unchanged (unlike restart, which
-    mints a new one)."""
+    mints a new one) -- read from the DURABLE store, not the in-memory
+    snapshot (see test below for why that distinction matters)."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-i"] = _resumable_state("run-i", generation=4)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+    stub = _StubLabClient(jobs=[{"job_id": "run-i", "generation": 4}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
     resp = api_client.post("/strategy-lab/runs/run-i/resume")
     assert resp.status_code == 200
     assert api_main._active_runs["run-i"]["generation"] == 4
+
+
+def test_resume_strategy_lab_run_uses_durable_generation_not_stale_local_cache(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: in a multi-process/multi-replica deployment, a restart handled
+    by a different process already minted a newer generation durably, while
+    this process's in-memory active_runs snapshot may still show the old one.
+    Resume must carry forward the DURABLE value, not the stale local one --
+    otherwise it would regress the durable high-water mark and un-fence
+    everything the restart just fenced out."""
+    from investment_team.api import main as api_main
+
+    # In-memory snapshot is stale (generation 1); the durable store already
+    # has generation 3 from a restart this process never observed.
+    api_main._active_runs["run-j"] = _resumable_state("run-j", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-j", "generation": 3}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-j/resume")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-j"]["generation"] == 3
+    assert stub.by_id["run-j"]["generation"] == 3  # not regressed back to 1
+
+
+def test_resume_strategy_lab_run_returns_503_when_generation_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-k"] = _resumable_state("run-k", generation=1)
+
+    class _RaisingClient(_StubLabClient):
+        def get_job(self, jid):
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _RaisingClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-k/resume")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-k"]["status"] == "interrupted"  # unchanged, no partial resume
 
 
 def test_restart_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:

@@ -71,28 +71,25 @@ def acquire_run_transition_lock(run_id: str) -> Optional[threading.Lock]:
     return run_lock if run_lock.acquire(blocking=False) else None
 
 
-def get_run_generation_strict(run_id: str) -> int:
+def get_run_generation_strict(run_id: str, *, client: Any = None) -> int:
     """Return run_id's current fencing generation, propagating durable-read failures.
 
-    The sole read path for a run's fencing generation, used by the two
-    fencing checks (``persist_run_state_activity``/
-    ``finalize_cycle_record_activity``). Every OTHER caller that needs a
-    dispatch-time generation value (``run_strategy_lab``/
-    ``resume_strategy_lab_run``/``restart_strategy_lab_run``, via
-    ``build_strategy_lab_batch_input``) already has its own known/just-minted
-    value in hand and passes it through explicitly instead of calling this —
-    see ``_dispatch_strategy_lab_run``'s precondition — so there is no lenient
-    counterpart to fall back to here.
+    The sole authoritative read path for a run's fencing generation. Used by
+    the two Temporal fencing checks (``persist_run_state_activity``/
+    ``finalize_cycle_record_activity``) AND by ``resume_strategy_lab_run``
+    (to carry the generation forward from the durable store rather than a
+    possibly-stale ``active_runs`` snapshot — see its own call site for why).
+    ``run_strategy_lab``/``restart_strategy_lab_run`` don't need it: the
+    former always starts at the default, and the latter mints a fresh value
+    via an atomic increment rather than reading one.
 
     Deliberately reads the DURABLE job store directly rather than going
     through ``get_run_state`` (which prefers the process-local ``active_runs``
-    cache): the fencing checks run inside a Temporal worker, which may be a
-    different process from the API server that handled the restart. Fencing
-    exists specifically to reject a write from a superseded incarnation
-    across exactly that kind of process boundary — trusting a cached,
-    possibly stale in-memory generation here would silently defeat the whole
-    check in any deployment where the API server and the worker aren't the
-    same process.
+    cache): the Temporal fencing checks run inside a worker, which may be a
+    different process from the API server that handled a restart, and
+    ``resume_strategy_lab_run`` has the identical cross-process staleness
+    risk in a multi-replica API deployment. Trusting a cached, possibly stale
+    in-memory generation here would silently defeat fencing in either case.
 
     Fails CLOSED: a durable-read failure raises (propagates to the caller)
     rather than defaulting to the most permissive generation, which could
@@ -100,7 +97,12 @@ def get_run_generation_strict(run_id: str) -> int:
     that should have been fenced out.
 
     Preconditions:
-        - ``run_id`` names a strategy-lab run (may not exist).
+        - ``run_id`` names a strategy-lab run (may not exist). ``client``,
+          when provided, is used instead of ``get_lab_run_job_client()`` —
+          lets a caller that already has its own consistently-mockable
+          client-fetch alias (e.g. ``api.main``'s ``_get_lab_run_job_client``)
+          supply that same instance, rather than this function reaching for
+          a separate one a test wouldn't have patched.
 
     Postconditions:
         - Returns the run's durably persisted ``generation`` field, or ``1``
@@ -109,7 +111,7 @@ def get_run_generation_strict(run_id: str) -> int:
           whatever the underlying job-service client raises on a transport
           failure — callers must let this propagate, not swallow it.
     """
-    client = get_lab_run_job_client()
+    client = client or get_lab_run_job_client()
     job = client.get_job(run_id)
     if not job:
         return 1

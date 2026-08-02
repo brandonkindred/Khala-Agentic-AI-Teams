@@ -112,6 +112,9 @@ from investment_team.strategy_lab.run_state import (
     get_lab_run_job_client as _get_lab_run_job_client,
 )
 from investment_team.strategy_lab.run_state import (
+    get_run_generation_strict as _get_run_generation_strict,
+)
+from investment_team.strategy_lab.run_state import (
     get_run_state as _get_run_state,
 )
 from investment_team.strategy_lab.run_state import (
@@ -2589,6 +2592,8 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           dict.
         - ``HTTPException`` 409: another transition for this run_id is
           already in flight (#4028), or another run is already ``"running"``.
+        - ``HTTPException`` 503: reading the current durable generation to
+          carry forward failed (job service unavailable).
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged).
@@ -2619,6 +2624,21 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         total_cycles = request.batch_size * request.batch_count
         completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
 
+        # The generation carried forward must come from the DURABLE store, not
+        # `state` (which may be `_get_run_state`'s process-local `active_runs`
+        # snapshot): in a multi-process/multi-replica deployment, a restart
+        # handled by a different process already minted a newer generation
+        # there, and copying a stale locally-cached value into
+        # `_persist_run_state` below would regress the durable high-water
+        # mark, un-fencing everything that restart just fenced out.
+        try:
+            current_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to read the current generation for this resume; job service unavailable.",
+            ) from exc
+
         _ensure_no_active_run()
 
         # Re-initialize in-memory state
@@ -2638,9 +2658,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             completed_record_ids=state.get("completed_record_ids", []),
             completed_batches=completed_batches,
             # A resume continues the same incarnation rather than superseding
-            # one, so it carries the current generation forward unchanged
-            # (unlike restart, which mints a new one below).
-            generation=state.get("generation", 1),
+            # one, so it carries the current (durable, authoritative)
+            # generation forward unchanged (unlike restart, which mints a new
+            # one below).
+            generation=current_generation,
         )
         with _lock:
             _active_runs[run_id] = resumed_state
