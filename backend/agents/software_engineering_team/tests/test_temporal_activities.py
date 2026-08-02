@@ -322,20 +322,21 @@ def test_parse_spec_activity_with_sprint_id_matches_shared_helper_output(
 def test_parse_spec_activity_rejects_sprint_id_and_spec_content_override_together(
     tmp_path, patched_job_store
 ) -> None:
-    """sprint_id and spec_content_override are mutually exclusive — mirrors
-    discovery.py::resolve_spec_source's V1 guard (which returns None/marks the job
-    FAILED rather than raising, so this activity does the same rather than raising).
-    Silently picking one instead of rejecting risks executing the wrong requirements."""
+    """sprint_id and spec_content_override are mutually exclusive. Must raise (not
+    return normally) — RunTeamWorkflowV2 doesn't inspect SpecParseResult for a
+    failure sentinel, so a normal return would let the workflow barrel into
+    Phase 2/3 on an empty spec instead of stopping after this activity fails."""
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
     js.create_job("ps-both", repo_path=str(tmp_path))
-    activities.parse_spec_activity(
-        "ps-both",
-        str(tmp_path),
-        spec_content_override="explicit spec",
-        sprint_id="sprint-1",
-    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        activities.parse_spec_activity(
+            "ps-both",
+            str(tmp_path),
+            spec_content_override="explicit spec",
+            sprint_id="sprint-1",
+        )
     job = js.get_job("ps-both")
     assert job["status"] == js.JOB_STATUS_FAILED
     assert "mutually exclusive" in (job.get("error") or "")

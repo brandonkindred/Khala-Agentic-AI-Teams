@@ -407,13 +407,15 @@ def _parse_spec_activity_body(
         # the upstream Sprint Planner. Mirrors discovery.py::resolve_spec_source.
         if sprint_id is not None:
             if spec_content_override is not None:
-                err = (
+                # Raise (rather than marking the job FAILED and returning a normal
+                # result) so the activity itself fails: RunTeamWorkflowV2 doesn't
+                # inspect SpecParseResult for a failure sentinel, so a normal return
+                # here would let the workflow barrel into Phase 2/3 on an empty spec
+                # even though the job was already marked FAILED.
+                raise ValueError(
                     "parse_spec_activity received both sprint_id and "
                     "spec_content_override; they are mutually exclusive."
                 )
-                logger.error(err, extra={"trace_id": current_trace_id()})
-                update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
-                return SpecParseResult().model_dump()
 
             from software_engineering_team.shared.sprint_scope import (
                 load_requirements_from_sprint,
