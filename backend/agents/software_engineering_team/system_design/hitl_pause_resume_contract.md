@@ -154,6 +154,21 @@ worker either completed, escalated into the pause, or observably stopped —
 before returning `"paused"`. Only a worker that has genuinely stopped may be
 left for `reset_in_flight()` to restart on resume.
 
+`reset_in_flight()` (`task_graph.py:174-195`) demotes both `IN_PROGRESS`
+*and* `IN_REVIEW` tasks to unassigned `TO_DO` — an explicit postcondition
+("no task is `IN_PROGRESS` or `IN_REVIEW`"), not an oversight to work around
+quietly. If a second worker legitimately *finishes* implementation and
+reaches `IN_REVIEW` during the same drain window as another worker's
+escalation, quiescence alone isn't enough: the resumed activity's
+`reset_in_flight()` call would demote that finished task back to `TO_DO`
+too, discarding completed work and potentially churning or overwriting its
+feature branch on a redone attempt. The drain must therefore push any task
+that reaches `IN_REVIEW` during the window through its normal review/merge
+gate before the activity returns `"paused"` — quiescence means every worker
+is either still cleanly `TO_DO`-restartable, cooperatively stopped, or past
+`IN_REVIEW` entirely, never left sitting at `IN_REVIEW` for `reset_in_flight()`
+to sweep away.
+
 ### 2. Workflow contract
 
 The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
@@ -375,8 +390,18 @@ while True:
     would duplicate the entry. Immediately after `graph.restore()` on
     re-entry, the orchestrator checks the restored task's `revision_feedback`
     for an existing entry with this same `resume_token` before appending —
-    skip if already present, append otherwise — then hands the task to
-    `run_implement` again. The orchestrator must not re-emit the same
+    skip if already present, append otherwise. Before handing the task to
+    `run_implement` again, the orchestrator must also re-run
+    `_escalate_decision`'s own cap check (`swarm_implementation.py:472-491`):
+    count existing `source == "user_decision"` entries in the (now-updated)
+    `revision_feedback` against `MAX_TASK_REVISIONS`, and if the cap is
+    exceeded, mark the task `FAILED` and cascade-fail its dependents instead
+    of re-queuing it — that check lives inside `_escalate_decision`'s
+    post-pause continuation today, which this pause/resume redesign bypasses
+    entirely (the activity returns immediately rather than blocking then
+    continuing inline), so it must be re-implemented at the point overrides
+    are applied, not assumed to still run automatically. The orchestrator
+    must not re-emit the same
     `task_decision_overrides` entry on a later invocation for a *different*
     pause round either (the workflow already replaces rather than
     accumulates it per round, per §2, but the orchestrator side must not
