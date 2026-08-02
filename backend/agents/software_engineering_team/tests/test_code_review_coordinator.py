@@ -873,9 +873,9 @@ def test_bisect_segment_first_half_end_line_reflects_its_own_content(monkeypatch
     the original segment's — end_line/is_partial are computed from
     start_line + content on FileSegment, so model_copy(update={"content": ...})
     alone (no explicit end_line update) already keeps them correct."""
-    monkeypatch.setenv("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", "1")
-    lines = [f"line{i}\n" for i in range(1, 11)]  # 10 lines, original spans 1-10
-    seg = FileSegment(path="a.py", content="".join(lines), start_line=1, total_lines=10)
+    monkeypatch.setenv("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", "1000")  # env floor is 1000
+    lines = [f"line{i}\n" for i in range(1, 301)]  # 300 lines, ~2.3KB, clears the 2x-floor gate
+    seg = FileSegment(path="a.py", content="".join(lines), start_line=1, total_lines=300)
 
     halves = _bisect_segment(seg)
     assert halves is not None
