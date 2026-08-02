@@ -173,6 +173,22 @@ actual planning/codegen work between pause points rather than by human
 think-time. `start_to_close_timeout` can shrink accordingly and no longer
 needs to cover hours of waiting.
 
+Shrinking it is not free, though: unlike the worker-escalation drain (which
+gains explicit cooperative cancellation and a quiescence wait above),
+`run_pipeline_activity`'s general planning/codegen/build work has no such
+path today — the "Current mechanism" section already notes it makes no
+`activity.heartbeat()` calls at all. If a single work segment between pause
+points takes longer than `start_to_close_timeout`, Temporal schedules a
+retry, but nothing stops the original attempt's Python execution on the
+worker; it keeps running, unaware it timed out, and can now mutate the same
+job record, task graph, and repo worktree concurrently with the new retry
+attempt — silent corruption, not a clean restart. `start_to_close_timeout`
+must therefore be set with margin above the longest plausible non-pause work
+segment, not shrunk to "just enough for typical work"; if a shorter timeout
+is wanted for faster failure detection, the activity needs the same
+heartbeat-plus-cooperative-cancellation treatment given to the drain case, so
+a timed-out attempt is confirmed stopped before its retry is allowed to run.
+
 **Concurrent worker-escalation serialization:** multiple implementation
 workers can hit `needs_decision` in the same concurrent round. Today,
 `_pause_lock` serializes this only because the entire pause blocks
