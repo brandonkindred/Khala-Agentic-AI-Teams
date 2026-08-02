@@ -1,8 +1,6 @@
-"""start_run_team_workflow forwards sprint_id to RunTeamWorkflow (V1) only.
-
-RunTeamWorkflowV2 doesn't accept sprint_id yet (V2 pipeline support is
-separate, out-of-scope work), so these tests also lock in that the V2
-dispatch path is left untouched.
+"""start_run_team_workflow forwards sprint_id on both the V1 (RunTeamWorkflow) and
+V2 (RunTeamWorkflowV2) dispatch paths — both workflows accept it as their trailing
+positional arg.
 """
 
 from __future__ import annotations
@@ -43,7 +41,7 @@ def test_start_run_team_workflow_defaults_sprint_id_to_none(monkeypatch):
     assert call.kwargs["args"][-1] is None
 
 
-def test_start_run_team_workflow_v2_does_not_receive_sprint_id(monkeypatch):
+def test_start_run_team_workflow_v2_also_receives_sprint_id(monkeypatch):
     fake_client = _patch_client(monkeypatch)
     monkeypatch.setenv("SE_WORKFLOW_V2", "true")
 
@@ -51,5 +49,4 @@ def test_start_run_team_workflow_v2_does_not_receive_sprint_id(monkeypatch):
 
     call = fake_client.start_workflow.call_args
     assert call.args[0] is RunTeamWorkflowV2.run
-    assert len(call.kwargs["args"]) == 5
-    assert "sprint-123" not in call.kwargs["args"]
+    assert call.kwargs["args"][-1] == "sprint-123"
