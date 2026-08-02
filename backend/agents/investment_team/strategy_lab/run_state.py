@@ -99,6 +99,43 @@ def rehydrate_active_run_offset(run_id: str) -> int:
         return 0
 
 
+def get_resume_seed_counters(run_id: str) -> Dict[str, Any]:
+    """Return the skip/error/tracker-merge counters a resumed run should seed with.
+
+    Sibling to ``rehydrate_active_run_offset``: called from the Temporal batch
+    workflow's input builder so a resumed run's ``StrategyLabBatchWorkflow``
+    continues accumulating these counters instead of restarting them at zero —
+    mirroring the same carry-forward ``resume_strategy_lab_run`` already
+    performs on ``_active_runs``/persisted state before dispatch.
+
+    Preconditions:
+        - ``run_id`` names a strategy-lab run (may not exist).
+
+    Postconditions:
+        - Returns a dict with keys ``skipped_cycles`` (int), ``errored_cycles``
+          (int), ``errored_details`` (a fresh list, not aliasing any stored
+          list), and ``tracker_merge_error_count`` (int), read from
+          ``get_run_state(run_id)``. A fresh/unknown run (no persisted state)
+          or a missing/malformed individual field defaults to
+          ``0``/``0``/``[]``/``0`` respectively. Never raises.
+    """
+    state = get_run_state(run_id) or {}
+
+    def _int(key: str) -> int:
+        try:
+            return max(0, int(state.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    errored_details = state.get("errored_details")
+    return {
+        "skipped_cycles": _int("skipped_cycles"),
+        "errored_cycles": _int("errored_cycles"),
+        "errored_details": list(errored_details) if isinstance(errored_details, list) else [],
+        "tracker_merge_error_count": _int("tracker_merge_error_count"),
+    }
+
+
 __all__ = [
     "lock",
     "active_runs",
@@ -106,4 +143,5 @@ __all__ = [
     "load_run_from_job_service",
     "get_run_state",
     "rehydrate_active_run_offset",
+    "get_resume_seed_counters",
 ]
