@@ -168,6 +168,37 @@ def test_start_from_spec_dispatches_to_temporal_even_when_disabled(
     assert dispatched["job_id"] == resp.json()["job_id"]
 
 
+def test_start_from_spec_rolls_back_project_dir_on_dispatch_failure(
+    monkeypatch, tmp_path: Path, client
+):
+    """A dispatch failure must not leave behind a project dir that permanently
+    blocks retries under the same project_name via the "already exists" 400."""
+    import software_engineering_team.temporal.start_workflow as start_workflow
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+
+    def _raise(*a, **k):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(start_workflow, "start_standalone_workflow", _raise)
+
+    resp = client.post(
+        "/product-analysis/start-from-spec",
+        json={"project_name": "myproj3", "spec_content": "# Spec\nFeature"},
+    )
+    assert resp.status_code == 503
+    proj_dir = tmp_path / "projects" / "myproj3"
+    assert not proj_dir.exists()
+
+    # Retrying with the same project_name must not 400 on "already exists".
+    monkeypatch.setattr(start_workflow, "start_standalone_workflow", lambda *a, **k: None)
+    retry_resp = client.post(
+        "/product-analysis/start-from-spec",
+        json={"project_name": "myproj3", "spec_content": "# Spec\nFeature"},
+    )
+    assert retry_resp.status_code == 200
+
+
 def test_start_from_spec_400_when_project_already_exists(monkeypatch, tmp_path: Path, client):
     """If the project directory already exists, return 400."""
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))

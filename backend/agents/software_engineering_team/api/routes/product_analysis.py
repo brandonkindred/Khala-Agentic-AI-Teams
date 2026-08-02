@@ -1,6 +1,7 @@
 """SE team API — product-analysis (PRA) run, start-from-spec, status, answers, auto-answer and jobs routes."""
 
 import logging
+import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -158,6 +159,12 @@ def start_product_analysis_from_spec(request: StartFromSpecRequest) -> ProductAn
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start product-analysis workflow from spec")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        # Roll back the project directory this request created: dispatch is
+        # unconditional now, so "Temporal unavailable" is a routine failure
+        # mode here (not just a rare worker outage), and leaving the
+        # directory behind would permanently block retries under the same
+        # project_name via the "Project already exists" 400 above.
+        shutil.rmtree(project_dir, ignore_errors=True)
         raise HTTPException(status_code=503, detail=str(e)) from e
 
     start_job_heartbeat_thread(job_id)
