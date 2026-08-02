@@ -4,7 +4,7 @@
 (`coordinator.run_coordinator`), which bounds every LLM call independently of
 input size, re-anchors line numbers from split segments, re-checks each genuine
 finding against the whole submission to drop false positives the bounded chunk
-review could not have caught (`false_positive_filter`), and applies the
+review could not have caught (`filter_false_positives`), and applies the
 deterministic approval gate with its anti-loop safety nets. A chunk that
 cannot be reviewed after recovery degrades gracefully rather than aborting the
 run: by default it is surfaced only non-blockingly (never posted, never
@@ -42,6 +42,13 @@ logger = logging.getLogger(__name__)
 
 # Bounded walk so a cyclic/adversarial cause chain can never loop forever.
 _MAX_CAUSE_DEPTH = 12
+
+# The message substring ``_await_client`` (``shared/temporal/runner.py``) raises
+# when no worker client became available within its wait window. This is the
+# only ``RuntimeError`` ``_run_via_temporal`` may reclassify as
+# dispatch-unavailable; any other ``RuntimeError`` must propagate unchanged
+# rather than being silently downgraded into an in-process fallback.
+_CLIENT_UNAVAILABLE_MARKER = "Temporal client not available"
 
 
 def _reports_review_unavailable(exc: BaseException, marker: str) -> bool:
@@ -225,7 +232,9 @@ class CodeReviewAgent:
             CodeReviewUnavailableError: the workflow reported it could not review
                 the submission (mapped from its ``ApplicationError`` marker).
             _TemporalDispatchUnavailable: the worker/client never became available
-                (the caller falls back to in-process review).
+                (the caller falls back to in-process review). Raised only for that
+                specific condition — any other ``RuntimeError`` from the workflow
+                dispatch path propagates unchanged instead of being misclassified.
             TimeoutError: this call's own wait for the workflow result exceeded
                 the configured ceiling (``CODE_REVIEW_EXECUTE_TIMEOUT_S``); the
                 workflow may still be running, or may have completed, server-side
@@ -252,6 +261,12 @@ class CodeReviewAgent:
                 execute_timeout_s=execute_timeout_s,
             )
         except RuntimeError as exc:
+            if _CLIENT_UNAVAILABLE_MARKER not in str(exc):
+                # Not the "no worker client" condition ``_await_client`` raises —
+                # an unexpected failure inside workflow dispatch must propagate
+                # unchanged rather than being misclassified as dispatch-unavailable
+                # and silently downgraded to the in-process fallback.
+                raise
             # ``_await_client`` raises this when no worker client is available.
             raise _TemporalDispatchUnavailable(str(exc)) from exc
         except WorkflowFailureError as exc:

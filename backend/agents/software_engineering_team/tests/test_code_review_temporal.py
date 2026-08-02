@@ -1038,6 +1038,30 @@ def test_run_falls_back_to_coordinator_when_worker_unavailable(
     assert out.approved is True
 
 
+def test_run_propagates_unrelated_runtime_error_from_temporal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A RuntimeError that isn't the "no worker client" condition must not be
+    misclassified as dispatch-unavailable and silently downgraded to the
+    in-process fallback — it must propagate unchanged so the real failure is
+    never hidden.
+    """
+    monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
+    monkeypatch.setattr(
+        "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
+        lambda: True,
+    )
+
+    def _raise(payload, **kw):
+        raise RuntimeError("unexpected failure inside workflow dispatch")
+
+    monkeypatch.setattr(
+        "code_review_agent.temporal.start_workflow.execute_code_review_workflow_sync", _raise
+    )
+    with pytest.raises(RuntimeError, match="unexpected failure inside workflow dispatch"):
+        CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+
+
 def test_run_maps_workflow_unavailable_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     from temporalio.client import WorkflowFailureError
     from temporalio.exceptions import ApplicationError
