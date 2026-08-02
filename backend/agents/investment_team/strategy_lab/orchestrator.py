@@ -2014,7 +2014,6 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     _resolve_vix_provider,
     _round_demoted_conformance,
     _SynthesisEvaluateResult,
-    _SynthesisFetchResult,
     _SynthesisLoopOutcome,
     _VerificationOutcome,
     publishability_skip_reason,

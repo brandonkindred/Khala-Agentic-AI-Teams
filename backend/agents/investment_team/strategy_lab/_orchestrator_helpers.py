@@ -168,12 +168,20 @@ class _MarketDataFetch:
     reading the service attribute later) is required because the service's
     ``provider_used`` dict is mutable shared state that accumulates across
     fetches; a later cycle's fetch would otherwise pollute earlier rows.
+
+    ``should_break`` is unused by the base fetch (``_fetch_market_data``,
+    always ``False``) and is set by the synthesis loop's fetch
+    (``_fetch_market_data_for_synthesis``) to signal that the loop should
+    short-circuit — no data came back or a critical fetch-coverage failure
+    fired. Shared here rather than in a separate envelope since both
+    call sites otherwise carry identical fields.
     """
 
     data: Optional[Dict[str, List[OHLCVBar]]]
     requested_symbols: List[str]
     fetched_symbols: List[str]
     provider_used: Dict[str, str] = field(default_factory=dict)
+    should_break: bool = False
 
 
 @dataclass
@@ -913,25 +921,6 @@ class _SynthesisLoopOutcome:
     # report ``status="failed: refinement_stalled"`` distinctly from
     # ``"failed: max_refinement_rounds"``.
     refinement_stalled: bool = False
-
-
-@dataclass
-class _SynthesisFetchResult:
-    """Return envelope for the synthesis loop's one-time market-data fetch.
-
-    Mirrors the four cached fields the loop carries forward
-    (``data`` / ``requested_symbols`` / ``fetched_symbols`` / ``provider_used``)
-    plus ``should_break``: ``True`` when no data came back or a critical
-    fetch-coverage failure fired, signalling the loop to short-circuit. The
-    symbol/provider fields are populated even when ``should_break`` is set so
-    the final ``_SynthesisLoopOutcome`` carries the fetch audit trail.
-    """
-
-    data: Optional[Dict[str, List[OHLCVBar]]]
-    requested_symbols: List[str]
-    fetched_symbols: List[str]
-    provider_used: Dict[str, str]
-    should_break: bool
 
 
 @dataclass

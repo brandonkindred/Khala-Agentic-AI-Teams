@@ -57,10 +57,10 @@ from ._orchestrator_helpers import (
     _DesignPersistContext,
     _DriftCollector,
     _format_execution_diagnostics,
+    _MarketDataFetch,
     _maybe_attach_coverage_report,
     _round_demoted_conformance,
     _SynthesisEvaluateResult,
-    _SynthesisFetchResult,
     _SynthesisLoopOutcome,
 )
 from .agents._llm_budget import DesignBudgetExhausted
@@ -610,11 +610,11 @@ class SynthesisMixin:
         round_num: int,
         all_gate_results: List[QualityGateResult],
         emit: PhaseCallback,
-    ) -> _SynthesisFetchResult:
+    ) -> _MarketDataFetch:
         """Fetch market data once for the synthesis loop.
 
         Pre: only called when ``market_data`` has not yet been fetched.
-        Post: returns a ``_SynthesisFetchResult`` carrying the OHLCV payload and
+        Post: returns a ``_MarketDataFetch`` carrying the OHLCV payload and
         the symbol/provider audit trail. ``should_break=True`` when no data came
         back (records the ``market_data`` gate) or a critical fetch-coverage
         failure fired (records the coverage gates) — the caller adopts the
@@ -636,7 +636,7 @@ class SynthesisMixin:
                     refinement_round=round_num,
                 )
             )
-            return _SynthesisFetchResult(
+            return _MarketDataFetch(
                 data=market_data,
                 requested_symbols=requested_symbols,
                 fetched_symbols=fetched_symbols,
@@ -658,7 +658,7 @@ class SynthesisMixin:
         )
         self.record_gates(fetch_coverage_gates, all_gate_results, refinement_round=round_num)
         should_break = any(not g.passed and g.severity == "critical" for g in fetch_coverage_gates)
-        return _SynthesisFetchResult(
+        return _MarketDataFetch(
             data=market_data,
             requested_symbols=requested_symbols,
             fetched_symbols=fetched_symbols,
