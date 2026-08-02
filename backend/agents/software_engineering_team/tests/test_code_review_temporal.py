@@ -1624,6 +1624,12 @@ class _LegacyConcurrentThreeTailPassCodeReviewWorkflow:
         async def _empty_tail_pass() -> Any:
             return []
 
+        # Faithful reproduction requires calling patched() in the exact same
+        # order the real pre-merged-pass code did: _CONCURRENT_TAIL_PASSES_PATCH
+        # first (this synthetic workflow only ever exercises that True path —
+        # the fully-sequential False path is _LegacySequentialCodeReviewWorkflow's
+        # job, above), THEN _ARCHITECTURE_PASS_PATCH / _SIDE_EFFECT_PASS_PATCH.
+        assert _legacy_wf.patched(_cr_workflows._CONCURRENT_TAIL_PASSES_PATCH)
         run_architecture = _legacy_wf.patched(_cr_workflows._ARCHITECTURE_PASS_PATCH)
         run_side_effect = _legacy_wf.patched(_cr_workflows._SIDE_EFFECT_PASS_PATCH)
         calls = [

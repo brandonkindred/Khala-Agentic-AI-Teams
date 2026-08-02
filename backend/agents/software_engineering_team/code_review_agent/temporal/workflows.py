@@ -406,6 +406,23 @@ class CodeReviewWorkflow:
             return []
 
         if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):
+            # Evaluate _ARCHITECTURE_PASS_PATCH / _SIDE_EFFECT_PASS_PATCH
+            # UNCONDITIONALLY, in this exact position, before checking
+            # _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH below.
+            # workflow.patched(...) markers are matched against history IN
+            # THE ORDER THEY ARE CALLED, not simply by id lookup: a
+            # pre-merged-pass history recorded these two markers immediately
+            # after _CONCURRENT_TAIL_PASSES_PATCH's, so the merged-pass check
+            # must come strictly after them here too, or replaying that
+            # history hits a "non-deprecated patch marker encountered ... but
+            # there is no corresponding change command" non-determinism error
+            # (the merged-pass check would consume the architecture marker
+            # meant for _ARCHITECTURE_PASS_PATCH). A brand-new execution just
+            # records two additional (here, unused-by-the-merged-branch)
+            # markers alongside the merged-pass one -- harmless.
+            run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
+            run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+
             if workflow.patched(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH):
                 # Architecture-consistency and side-effect-impact are now one
                 # merged additive pass (one LLM call), mirroring
@@ -441,15 +458,7 @@ class CodeReviewWorkflow:
                 # coordinator._run_tail_passes), so they can be scheduled as
                 # concurrent activities instead of three sequential round-trips —
                 # same "create the coroutine, gather later" idiom as the map
-                # fan-out above. Safe to evaluate _ARCHITECTURE_PASS_PATCH /
-                # _SIDE_EFFECT_PASS_PATCH up front here: this branch is only
-                # reached by an execution that already recorded the
-                # _CONCURRENT_TAIL_PASSES_PATCH marker without the merged-pass
-                # marker (and therefore already evaluated those two markers at
-                # these same positions).
-                run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
-                run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
-
+                # fan-out above.
                 calls = [
                     _verify(),
                     _architecture() if run_architecture else _empty_tail_pass(),
