@@ -91,6 +91,13 @@ _CHILD_RETRY = RetryPolicy(maximum_attempts=1)
 # generously rather than leaving it unbounded.
 _CHILD_EXECUTION_TIMEOUT = timedelta(hours=8)
 
+# Matches thread mode's ``_ERRORED_DETAILS_MAX`` (api/main.py) — bounds memory
+# for the per-failure diagnostic list. Duplicated rather than imported from
+# ``api.main`` for the same reason as ``_MAX_DESIGN_REENTRIES_FALLBACK`` above:
+# importing api.main's transitive graph into this module would break the
+# temporalio sandbox's restricted re-import of workflow code.
+_ERRORED_DETAILS_MAX = 50
+
 
 async def _exec(
     fn: Any,
@@ -346,6 +353,9 @@ class StrategyLabBatchWorkflow:
             ``paper_trading_lookback_days`` (int, default 365): forwarded to
             ``finalize_cycle_record_activity``.
           - ``start_cycle_offset`` (int, default 0): resume anchor.
+          - ``errored_details`` (optional list, default empty): resume seed for
+            the per-failure diagnostic list, carried forward from persisted run
+            state (mirrors thread mode's ``errored_details``).
           - ``convergence_tracker_state`` (optional dto wire dict, default fresh):
             the batch-level tracker to seed from (for resume).
           - ``workflow_config`` (optional): a ``resolve_workflow_config_activity``
@@ -353,13 +363,16 @@ class StrategyLabBatchWorkflow:
             every cycle so each child need not re-resolve it.
     Postconditions:
         Returns ``{"run_id", "status", "completed_record_ids", "errored_cycles",
-        "convergence_tracker_state"}``. ``status`` is the exact external stop
-        status (``cancelled``/``failed``/``interrupted``) when one was observed
-        between waves — never forced to ``cancelled`` for an interrupt/failure —
-        else ``completed`` / ``completed_with_errors`` (the latter when ≥1 cycle
-        errored). Every completed cycle's record is finalized (paper-traded +
-        persisted) via ``finalize_cycle_record_activity`` before the batch
-        returns.
+        "errored_details", "convergence_tracker_state"}``. ``status`` is the exact
+        external stop status (``cancelled``/``failed``/``interrupted``) when one
+        was observed between waves — never forced to ``cancelled`` for an
+        interrupt/failure — else ``completed`` / ``completed_with_errors`` (the
+        latter when ≥1 cycle errored). Every completed cycle's record is
+        finalized (paper-traded + persisted) via ``finalize_cycle_record_activity``
+        before the batch returns. ``errored_details`` accumulates a capped
+        (``_ERRORED_DETAILS_MAX``), structured entry (``cycle_index``,
+        ``batch_index``, ``error``, ``exception_type``) per failed cycle, seeded
+        forward from ``batch_input`` and never truncated below what was seeded.
     Invariants:
         Each wave merges its settled cycles into the batch-level tracker in
         cycle-index order (via ``merge_wave_results_activity``), so directives are
@@ -391,6 +404,7 @@ class StrategyLabBatchWorkflow:
         completed_record_ids: List[str] = []
         completed_indices: set[int] = set(range(start_cycle_offset))
         errored = 0
+        errored_details: List[Dict[str, Any]] = list(batch_input.get("errored_details") or [])
         # The exact persisted external stop status ("cancelled"/"failed"/
         # "interrupted") observed between waves, or None if the run finished on
         # its own. Persisted verbatim as the terminal status so an external
@@ -459,6 +473,20 @@ class StrategyLabBatchWorkflow:
                 for (cycle_index, _), result in zip(handles, settled):
                     if isinstance(result, BaseException):
                         errored += 1
+                        if len(errored_details) < _ERRORED_DETAILS_MAX:
+                            # ``.cause`` unwraps Temporal's ChildWorkflowError
+                            # wrapper to the actual failure, matching thread
+                            # mode's exception_type (the real error, not the
+                            # RPC-boundary wrapper type).
+                            underlying = getattr(result, "cause", result)
+                            errored_details.append(
+                                {
+                                    "cycle_index": cycle_index + 1,
+                                    "batch_index": batch_idx + 1,
+                                    "error": str(result),
+                                    "exception_type": type(underlying).__name__,
+                                }
+                            )
                         continue
                     finalized = await _exec(
                         act.finalize_cycle_record_activity,
@@ -499,6 +527,7 @@ class StrategyLabBatchWorkflow:
                         "contiguous_cycles": _contiguous_prefix(completed_indices),
                         "completed_record_ids": list(completed_record_ids),
                         "errored_cycles": errored,
+                        "errored_details": errored_details,
                     },
                 )
 
@@ -524,6 +553,7 @@ class StrategyLabBatchWorkflow:
             "status": status,
             "completed_record_ids": completed_record_ids,
             "errored_cycles": errored,
+            "errored_details": errored_details,
             "convergence_tracker_state": primary_tracker_state,
         }
 
