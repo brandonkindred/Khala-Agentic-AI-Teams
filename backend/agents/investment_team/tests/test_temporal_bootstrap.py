@@ -382,6 +382,48 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
     assert run_id not in api_main._active_runs
 
 
+def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
+    monkeypatch,
+) -> None:
+    """If the run gets resumed (a new state object installed at run_id)
+    before the delayed cleanup fires, the stale timer must not tear down the
+    resumed run's live tracking entry or its event-bus subscribers —
+    otherwise a second run could start concurrently with the still-executing
+    resumed workflow."""
+    from investment_team.api import main as api_main
+
+    run_id = "run-resumed-before-cleanup"
+    active_runs = {run_id: {"run_id": run_id, "status": "running"}}
+    monkeypatch.setattr(api_main, "_active_runs", active_runs)
+    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+
+    captured = {}
+
+    class _FakeTimer:
+        def __init__(self, delay, callback):
+            captured["callback"] = callback
+            self.daemon = None
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+
+    api_main._fail_strategy_lab_run(run_id, "boom")
+    assert active_runs[run_id]["status"] == "failed"
+
+    # Simulate a resume: a brand-new state object replaces the failed one
+    # (mirrors resume_strategy_lab_run, which never mutates in place).
+    resumed_state = {"run_id": run_id, "status": "running"}
+    active_runs[run_id] = resumed_state
+
+    # The old timer fires; it must leave the resumed entry alone.
+    captured["callback"]()
+
+    assert active_runs[run_id] is resumed_state
+    assert active_runs[run_id]["status"] == "running"
+
+
 def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -> None:
     from investment_team.api import main as api_main
     from investment_team.models import StrategySpec
@@ -528,6 +570,13 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     monkeypatch.setattr(api_main, "_get_run_state", lambda rid: persisted)
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
+    persisted_calls = []
+    monkeypatch.setattr(
+        api_main,
+        "_persist_run_state",
+        lambda rid, state, **k: persisted_calls.append(state),
+    )
+
     def _already_started(rid, request):
         raise WorkflowAlreadyStartedError(
             workflow_id=f"strategy-lab-{rid}", run_id="prior-run", workflow_type="X"
@@ -540,6 +589,13 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     assert resp.status_code == 409
     (run_state,) = api_main._active_runs.values()
     assert run_state["status"] != "failed"
+    # The optimistic reset (status "running", contiguous_cycles=0) must be
+    # rolled back to the pre-restart snapshot, not left wedged as "running"
+    # (which would block every future run/resume/restart via
+    # _ensure_no_active_run()).
+    assert run_state is persisted
+    assert run_state["status"] == "cancelled"
+    assert persisted_calls[-1] is persisted
 
 
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(

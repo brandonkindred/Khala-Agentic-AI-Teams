@@ -1897,8 +1897,11 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
           cleanup of the ``_active_runs`` entry scheduled — the same 900s
           window ``_strategy_lab_worker``'s own failure path uses — so a
           dispatch failure that never reaches that worker (e.g. a Temporal
-          outage) doesn't leak the entry forever. A missing run and an
-          already-terminal run are both no-ops. Never raises.
+          outage) doesn't leak the entry forever. That cleanup is a no-op if
+          ``run_id`` gets resumed (and thus a new state object installed)
+          before the delay elapses, so it never tears down a live resumed
+          run. A missing run and an already-terminal run are both no-ops.
+          Never raises.
     """
     try:
         with _lock:
@@ -1914,6 +1917,13 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
 
         def _cleanup() -> None:
             with _lock:
+                # resume/restart always replace the entry with a new dict
+                # rather than mutate this one in place, so an identity check
+                # reliably detects a run that got resumed within this delay
+                # window — pop/cleanup would otherwise tear down a live,
+                # freshly-resumed run's tracking state.
+                if _active_runs.get(run_id) is not state:
+                    return
                 _active_runs.pop(run_id, None)
             cleanup_job(run_id)
 
@@ -3121,7 +3131,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
           carried forward — and persists the new state.
-        - Dispatches the durable Temporal workflow starting at cycle 0.
+        - Dispatches the durable Temporal workflow starting at cycle 0. If
+          that dispatch 409s (a prior execution for this run_id is still
+          winding down), the reset above is rolled back — both
+          ``_active_runs[run_id]`` and the persisted state are restored to
+          their pre-restart snapshot — so the run isn't left wedged showing
+          ``"running"`` and blocking every future run/resume/restart call.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
@@ -3132,7 +3147,8 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           prior execution for this run_id is still winding down under
           Temporal (a collision the dispatch layer refuses to silently
           resume — see ``_dispatch_strategy_lab_run``'s
-          ``allow_already_started`` parameter).
+          ``allow_already_started`` parameter; the optimistic reset is rolled
+          back in this case, see Postconditions).
     """
     state = _get_run_state(run_id)
     # "completed_with_errors" is a terminal outcome of the same workflow as
@@ -3174,7 +3190,19 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     # persisted state above). allow_already_started=False: unlike resume, a
     # collision here means an old, un-reset execution is still running, not
     # that the intended restart is already in flight.
-    _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+    try:
+        _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            # The reset above never actually took effect (an old execution
+            # is still running under this run_id) — restore the pre-restart
+            # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
+            # "running" entry, blocking every future run/resume/restart call
+            # until the stale execution happens to overwrite it on its own.
+            with _lock:
+                _active_runs[run_id] = state
+            _persist_run_state(run_id, state)
+        raise
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
