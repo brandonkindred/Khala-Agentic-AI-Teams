@@ -220,11 +220,13 @@ a distinct team key, since `start_team_worker` is idempotent per team key):
   messages in the same advisor session — can never collide on a live
   workflow id.
 
-The paper-trading (`/strategy-lab/paper-trade`, `/stop`) and orchestrator/advisor
-endpoints (`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
+The paper-trading (`/strategy-lab/paper-trade`, `/stop`), Strategy Lab run
+(`/strategy-lab/run`, `/strategy-lab/runs/{id}/resume`,
+`/strategy-lab/runs/{id}/restart`), and orchestrator/advisor endpoints
+(`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
 `/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset (or no
 connected worker) they return HTTP 503 rather than falling back to in-process
-execution. The backtest and Strategy Lab run endpoints keep their thread
+execution. Only the ad hoc `POST /backtests` endpoint keeps a thread
 fallback.
 
 ### INVESTMENT_MAX_CONCURRENT_ACTIVITIES

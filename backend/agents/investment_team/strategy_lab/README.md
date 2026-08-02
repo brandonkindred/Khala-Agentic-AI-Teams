@@ -16,6 +16,17 @@ reference below is the canonical home for those knobs (CLAUDE.md and `docs/ENV_V
 point here). All numeric vars parse defensively: garbage → documented default,
 out-of-range → clamped to the documented floor/ceiling unless noted.
 
+## Temporal dispatch
+
+Strategy Lab is **Temporal-only**: it requires `TEMPORAL_ADDRESS` and a connected worker
+serving `strategy-lab-queue` (booted via
+`investment_team.temporal.worker.start_investment_temporal_worker_thread`). `POST
+/strategy-lab/run`, `/strategy-lab/runs/{id}/resume`, and `/strategy-lab/runs/{id}/restart`
+all dispatch through `StrategyLabBatchWorkflow` and return HTTP 503 if Temporal is
+unavailable or the dispatch fails — there is no thread-mode fallback. This differs from the
+ad hoc `POST /backtests` endpoint, which still falls back to a daemon thread when Temporal
+is unavailable.
+
 ## Branch coverage for `coverage_probe`
 
 `coverage_probe/subcondition_visitor.py` (`SubconditionVisitor._process_if` / `_process_or_if`

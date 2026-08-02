@@ -7,10 +7,12 @@ fine-grained ``StrategyLabCycleWorkflow`` / ``StrategyLabBatchWorkflow`` run on
 their own ``strategy-lab-queue`` (see ``workflows.py``), separate from
 ``investment_team.temporal``'s coarse ``investment-queue``.
 
-Worker boot lives in ``worker.py`` (``start_strategy_lab_temporal_worker_thread``)
-and sync dispatch in ``start_workflow.py`` (``start_strategy_lab_batch_workflow``);
-neither is wired into any app lifespan or dispatch path yet — that is the Stage 5
-cutover. Importing this package must remain free of those side effects.
+Worker boot lives in ``worker.py`` (``start_strategy_lab_temporal_worker_thread``,
+called from ``investment_team.temporal.worker.start_investment_temporal_worker_thread``)
+and sync dispatch in ``start_workflow.py`` (``start_strategy_lab_batch_workflow``,
+called from ``api.main._dispatch_strategy_lab_run``). Strategy Lab dispatch is
+Temporal-only — there is no thread-mode fallback. Importing this package must
+remain free of those side effects.
 """
 
 from __future__ import annotations
