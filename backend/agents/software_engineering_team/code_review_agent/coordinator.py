@@ -629,10 +629,12 @@ def run_coordinator(
           call at all — unless a ``repo_reader`` is given, in which case this
           short-circuit never fires (a verdict that reads the rest of the
           repository cannot be safely reproduced from an input-only cache key).
-          The cache-hit check, its LRU touch, and the served copy all happen
-          under a single ``_SUBMISSION_OUTCOME_CACHE_LOCK`` acquisition, so a
-          concurrent write-back (see below) can never interleave with a hit
-          being served.
+          The cache-hit check, its LRU touch, and the deep clone of the served
+          output all happen under a single ``_SUBMISSION_OUTCOME_CACHE_LOCK``
+          acquisition, so a concurrent write-back (see below) can never
+          interleave with a hit being read; the lock is released before
+          ``progress_callback`` runs, since caller-supplied code must never
+          execute while this process-global, non-reentrant lock is held.
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -683,19 +685,27 @@ def run_coordinator(
     if submission_size > 0 and repo_reader is None:
         submission_key = _submission_fingerprint(input_data, model_fingerprint)
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
-            cached = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
-            if cached is not None:
+            hit = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
+            if hit is not None:
                 _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)
-                logger.info(
-                    "CodeReviewCoordinator: submission cache hit; skipping review (approved)"
-                )
-                notify_review_progress(
-                    progress_callback,
-                    "done",
-                    "identical approved submission; review skipped",
-                    _PROGRESS_DONE,
-                )
-                return cached.model_copy(deep=True)
+                # Clone while still locked so the served copy is independent of
+                # the cache entry; done here (not after release) keeps the
+                # dict read + LRU touch + clone as one atomic critical section.
+                cached = hit.model_copy(deep=True)
+        if cached is not None:
+            # Released the lock before this point: progress_callback is
+            # caller-supplied and may be slow (e.g. a synchronous job-service
+            # update) or re-entrant (e.g. it calls clear_submission_outcome_cache()
+            # or run_coordinator() again) -- either would deadlock against this
+            # process-global, non-reentrant lock if still held here.
+            logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
+            notify_review_progress(
+                progress_callback,
+                "done",
+                "identical approved submission; review skipped",
+                _PROGRESS_DONE,
+            )
+            return cached
 
     notify_review_progress(
         progress_callback, "preparing", "preparing review input", _PROGRESS_PREPARING_INPUT
