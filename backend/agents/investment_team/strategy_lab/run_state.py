@@ -1,6 +1,6 @@
-"""Strategy Lab in-memory run-state store, shared by ``api.main`` (thread-mode
-worker + FastAPI routes) and ``strategy_lab.temporal.start_workflow`` (the
-Temporal dispatch path).
+"""Strategy Lab in-memory run-state store, shared by ``api.main`` (FastAPI
+routes) and ``strategy_lab.temporal.start_workflow`` (the Temporal dispatch
+path).
 
 Extracted from ``investment_team.api.main`` so both callers depend on one
 public store instead of the Temporal path reaching into ``api.main``'s
@@ -23,6 +23,52 @@ lock = threading.Lock()
 
 # In-memory state for active strategy lab runs (keyed by run_id).
 active_runs: Dict[str, Dict[str, Any]] = {}
+
+# Per-run_id transition lock, serializing the run/resume/restart
+# check-then-write critical section in api.main so two concurrent
+# transitions for the SAME run_id can't both pass a stale check before
+# either writes state (see #4028). Grows monotonically (never evicted) —
+# see acquire_run_transition_lock's Invariants for why that's acceptable.
+_run_transition_locks: Dict[str, threading.Lock] = {}
+
+
+def acquire_run_transition_lock(run_id: str) -> Optional[threading.Lock]:
+    """Try to acquire run_id's run/resume/restart transition lock, non-blocking.
+
+    Serializes same-run_id run/resume/restart transitions in ``api.main`` so
+    two concurrent requests for the same run_id can't both pass a
+    check-then-act window (e.g. both pass ``_ensure_no_active_run()`` before
+    either writes ``active_runs[run_id]``) and race to mutate/dispatch
+    against the same deterministic Temporal workflow id (#4028).
+
+    Preconditions:
+        - Caller does not already hold ``lock`` (the shared module lock) or
+          this run_id's transition lock.
+
+    Postconditions:
+        - Returns the acquired ``threading.Lock`` (now held by the caller —
+          the caller MUST release it, e.g. via ``try/finally:
+          run_lock.release()``) when no other transition for this run_id is
+          currently in flight.
+        - Returns ``None`` (holds nothing) when another transition for this
+          run_id is already in flight. Never blocks.
+
+    Invariants:
+        - Exactly one ``threading.Lock`` instance ever exists per distinct
+          run_id — registry insertion is itself serialized via ``lock``, so
+          concurrent first-callers for the same run_id always contend for
+          the SAME lock object, never two different ones.
+        - ``_run_transition_locks`` only grows (entries are never evicted).
+          Acceptable here: run_ids are minted by a human-triggered action
+          (not attacker/request-volume-controlled), the existing global
+          ``_ensure_no_active_run()`` already caps the system to one
+          *active* run at a time, each entry costs one ``threading.Lock``
+          (tens of bytes), and the registry — like ``active_runs`` — is
+          in-memory only and resets on process restart.
+    """
+    with lock:
+        run_lock = _run_transition_locks.setdefault(run_id, threading.Lock())
+    return run_lock if run_lock.acquire(blocking=False) else None
 
 
 def get_lab_run_job_client():
@@ -149,6 +195,7 @@ def get_resume_seed_counters(run_id: str) -> Dict[str, Any]:
 __all__ = [
     "lock",
     "active_runs",
+    "acquire_run_transition_lock",
     "get_lab_run_job_client",
     "load_run_from_job_service",
     "get_run_state",
