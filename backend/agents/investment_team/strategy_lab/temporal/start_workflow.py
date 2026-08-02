@@ -39,7 +39,8 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
         ``batch_size``/``batch_count``/``max_parallel``, ``benchmark_symbol``,
         ``exclude_asset_classes``, paper-trading flags, ``start_cycle_offset``,
         and the resume-seed counters ``skipped_cycles``/``errored_cycles``/
-        ``errored_details``/``tracker_merge_error_count``).
+        ``errored_details``/``tracker_merge_error_count``/
+        ``completed_record_ids``).
     """
     # ``clamp_max_parallel``/``rehydrate_active_run_offset``/
     # ``get_resume_seed_counters`` live in the shared ``strategy_lab.config``/

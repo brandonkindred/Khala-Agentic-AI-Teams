@@ -114,10 +114,16 @@ def get_resume_seed_counters(run_id: str) -> Dict[str, Any]:
     Postconditions:
         - Returns a dict with keys ``skipped_cycles`` (int), ``errored_cycles``
           (int), ``errored_details`` (a fresh list, not aliasing any stored
-          list), and ``tracker_merge_error_count`` (int), read from
-          ``get_run_state(run_id)``. A fresh/unknown run (no persisted state)
-          or a missing/malformed individual field defaults to
-          ``0``/``0``/``[]``/``0`` respectively. Never raises.
+          list), ``tracker_merge_error_count`` (int), and
+          ``completed_record_ids`` (a fresh list, not aliasing any stored
+          list) — carrying forward the pre-resume completed record ids so the
+          durable ``completed_record_ids`` field isn't truncated to only
+          post-resume records the next time the batch workflow persists it
+          (``update_job`` replaces the field's value wholesale, it does not
+          append). Read from ``get_run_state(run_id)``. A fresh/unknown run
+          (no persisted state) or a missing/malformed individual field
+          defaults to ``0``/``0``/``[]``/``0``/``[]`` respectively. Never
+          raises.
     """
     state = get_run_state(run_id) or {}
 
@@ -127,12 +133,16 @@ def get_resume_seed_counters(run_id: str) -> Dict[str, Any]:
         except (TypeError, ValueError):
             return 0
 
-    errored_details = state.get("errored_details")
+    def _fresh_list(key: str) -> list:
+        value = state.get(key)
+        return list(value) if isinstance(value, list) else []
+
     return {
         "skipped_cycles": _int("skipped_cycles"),
         "errored_cycles": _int("errored_cycles"),
-        "errored_details": list(errored_details) if isinstance(errored_details, list) else [],
+        "errored_details": _fresh_list("errored_details"),
         "tracker_merge_error_count": _int("tracker_merge_error_count"),
+        "completed_record_ids": _fresh_list("completed_record_ids"),
     }
 
 

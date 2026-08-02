@@ -742,6 +742,7 @@ def test_get_resume_seed_counters_defaults_for_unknown_run(monkeypatch) -> None:
         "errored_cycles": 0,
         "errored_details": [],
         "tracker_merge_error_count": 0,
+        "completed_record_ids": [],
     }
 
 
@@ -749,6 +750,7 @@ def test_get_resume_seed_counters_reads_persisted_values(monkeypatch) -> None:
     from investment_team.strategy_lab import run_state
 
     details = [{"cycle_index": 1, "error": "boom"}]
+    record_ids = ["r1", "r2"]
     monkeypatch.setattr(
         run_state,
         "active_runs",
@@ -760,6 +762,7 @@ def test_get_resume_seed_counters_reads_persisted_values(monkeypatch) -> None:
                 "errored_cycles": 2,
                 "errored_details": details,
                 "tracker_merge_error_count": 1,
+                "completed_record_ids": record_ids,
             }
         },
     )
@@ -771,10 +774,12 @@ def test_get_resume_seed_counters_reads_persisted_values(monkeypatch) -> None:
         "errored_cycles": 2,
         "errored_details": details,
         "tracker_merge_error_count": 1,
+        "completed_record_ids": record_ids,
     }
     # A fresh list, not an alias — the caller mustn't be able to mutate the
     # live in-memory run state through the returned dict.
     assert seeded["errored_details"] is not details
+    assert seeded["completed_record_ids"] is not record_ids
 
 
 def test_get_resume_seed_counters_defensive_against_malformed_values(monkeypatch) -> None:
@@ -791,6 +796,7 @@ def test_get_resume_seed_counters_defensive_against_malformed_values(monkeypatch
                 "errored_cycles": None,
                 "errored_details": "not-a-list",
                 "tracker_merge_error_count": -5,
+                "completed_record_ids": "not-a-list-either",
             }
         },
     )
@@ -801,6 +807,7 @@ def test_get_resume_seed_counters_defensive_against_malformed_values(monkeypatch
     assert seeded["errored_cycles"] == 0
     assert seeded["errored_details"] == []
     assert seeded["tracker_merge_error_count"] == 0  # clamped, matches rehydrate's max(0, ...)
+    assert seeded["completed_record_ids"] == []
 
 
 def test_strategy_lab_run_failure_reports_only_hard_failure(monkeypatch) -> None:

@@ -377,6 +377,13 @@ class StrategyLabBatchWorkflow:
           - ``tracker_merge_error_count`` (int, default 0): resume seed for the
             count of cycles whose tracker merge (not the cycle itself) failed
             (mirrors thread mode's ``tracker_merge_error_count``).
+          - ``completed_record_ids`` (optional list, default empty): resume
+            seed for the record ids already completed before this dispatch —
+            required because ``persist_run_state_activity``'s job-service write
+            replaces the ``completed_record_ids`` field's value wholesale
+            (it does not append), so without this seed a resume would durably
+            truncate the field to only post-resume records on its first
+            mid-run persist.
           - ``convergence_tracker_state`` (optional dto wire dict, default fresh):
             the batch-level tracker to seed from (for resume).
           - ``workflow_config`` (optional): a ``resolve_workflow_config_activity``
@@ -401,7 +408,10 @@ class StrategyLabBatchWorkflow:
         from ``batch_input`` and never truncated below what was seeded. A
         tracker-merge failure is isolated to its own record (does not fail the
         wave) but still counts toward ``errored_cycles`` and
-        ``tracker_merge_error_count``.
+        ``tracker_merge_error_count``. ``completed_record_ids`` is seeded
+        forward from ``batch_input`` (the pre-resume ids) and extended with
+        every newly finalized record's id — never truncated below what was
+        seeded.
     Invariants:
         Each wave merges its settled cycles into the batch-level tracker in
         cycle-index order (via ``merge_wave_results_activity``), so directives are
@@ -430,7 +440,7 @@ class StrategyLabBatchWorkflow:
         # from the input for resume; snapshotted per cycle and merged back
         # sorted-by-cycle-index after each wave.
         primary_tracker_state: Dict[str, Any] = batch_input.get("convergence_tracker_state") or {}
-        completed_record_ids: List[str] = []
+        completed_record_ids: List[str] = list(batch_input.get("completed_record_ids") or [])
         completed_indices: set[int] = set(range(start_cycle_offset))
         errored = 0
         skipped = int(batch_input.get("skipped_cycles", 0))
