@@ -125,6 +125,25 @@ search) instead of isolated snippets.
   runtime warning when either is non-zero — treat a submission with any call
   failures as computed from fewer real samples than `--repeats` implies, not
   as a confident result.
+  **Known blind spot:** this detection is keyed on a WARNING log line, which
+  each pass only emits for a hard failure (exception, provider error). A
+  provider that returns syntactically valid JSON with a missing or
+  wrong-typed `findings`/`architecture_findings`/`side_effect_findings` array
+  degrades to `[]` silently, with no warning — indistinguishable, from
+  outside the pass, from a genuine "found nothing" result. Catching this
+  would require inspecting the raw completion before the pass's own parsing,
+  which means intercepting calls made by the `strands.Agent` tool-calling
+  loop each pass runs internally (`_build_tools`-driven `read_file`/
+  `list_files` turns, then a final JSON turn) — the harness has no reliable
+  way to tell an intermediate tool-call turn from the final findings turn
+  from outside that loop, so a naive schema check on every model call would
+  misflag legitimate tool use as a failure. Rather than ship that kind of
+  false-positive-prone instrumentation, this harness leaves the gap open and
+  documented: treat a submission with an unexpectedly low finding count on
+  one path, and no corroborating `old_call_failures`/`new_call_failures`,
+  with extra scrutiny — cross-check a sample against the raw provider
+  response (e.g. via request logging on the LLM provider side) rather than
+  trusting the finding count alone.
 - **Pass-toggle pre-flight check:** both standalone passes and the merged
   pass early-return `[]` with NO LLM call at all when their own
   `CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS`/`CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS`
@@ -234,4 +253,10 @@ What remains before this validation can be marked complete:
    non-zero count means that submission's diff was computed from fewer real
    samples than `--repeats` implies; consider re-running that submission
    before trusting its result.
-7. Record the outcome and a go/no-go recommendation in this section.
+7. For any submission where one path found conspicuously fewer findings than
+   expected but `old_call_failures`/`new_call_failures` are both zero, treat
+   it as suspicious rather than a confirmed clean result — the WARNING-based
+   failure detection has a known blind spot for silent schema-off-contract
+   responses (see the Methodology section); spot-check the raw provider
+   response for that submission/path before trusting the count.
+8. Record the outcome and a go/no-go recommendation in this section.

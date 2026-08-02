@@ -293,6 +293,18 @@ class _FailureCapturingHandler(logging.Handler):
     :func:`_call_pass_detecting_failure`), so it listens for that warning
     instead of reaching into the pass's private internals to bypass its
     fail-safe try/except.
+
+    Known blind spot: a pass only logs this warning on a hard failure
+    (exception, provider error) — a provider reply that is valid JSON but
+    missing/wrong-typed findings array degrades to ``[]`` with no warning at
+    all, and this handler cannot tell that apart from a genuine empty
+    result. Catching it would mean inspecting the raw completion before the
+    pass's own parsing, i.e. intercepting calls inside the ``strands.Agent``
+    tool-calling loop each pass runs (tool-use turns interleaved with the
+    final findings turn) — this harness has no reliable way to tell those
+    apart from outside that loop, so it does not attempt it (see
+    ``docs/snapshot-comparison-report.md``'s Methodology section for the
+    resulting review guidance).
     """
 
     def __init__(self) -> None:
