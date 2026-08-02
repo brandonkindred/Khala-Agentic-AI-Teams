@@ -561,15 +561,23 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     reconstruction of ``StrategyLabRecord``/``QualityGateResult`` and the tracker
     math stay outside the temporalio sandbox.
 
+    Mirrors thread mode's per-cycle isolation of the merge step (``api/main.py``):
+    a single record's ``merge_from`` failure is captured, not fatal — the wave's
+    other records still merge and the activity still succeeds.
+
     Preconditions:
         ``params`` = ``{"primary_tracker_state": <dto wire dict>, "wave_results":
         [{"cycle_index": int, "record": <StrategyLabRecord JSON dump>,
         "cycle_tracker_state": <dto wire dict>}, ...]}``.
     Postconditions:
-        Returns ``{"primary_tracker_state": <updated dto wire dict>}`` — the
-        primary tracker with every settled cycle in the wave merged in
-        cycle-index order (reproducible across runs). Raises ``ApplicationError``
-        on an unexpected exception.
+        Returns ``{"primary_tracker_state": <updated dto wire dict>, "merge_errors":
+        [{"cycle_index": int, "error": str, "exception_type": str, "reason":
+        "tracker_merge_failed"}, ...]}`` — the primary tracker with every settled
+        cycle in the wave recorded/merged in cycle-index order (reproducible
+        across runs), and one ``merge_errors`` entry per record whose
+        ``merge_from`` call raised (that record's ``.record(...)`` call still
+        ran). Raises ``ApplicationError`` on an exception outside the isolated
+        ``merge_from`` step (e.g. malformed input).
     """
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
@@ -577,6 +585,7 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         primary = ConvergenceTracker.from_wire_dict(params["primary_tracker_state"])
+        merge_errors: List[Dict[str, Any]] = []
         for wr in sorted(params["wave_results"], key=lambda w: w["cycle_index"]):
             record = StrategyLabRecord.parse_persisted(wr["record"])
             gate_results = [
@@ -584,10 +593,20 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 for g in record.quality_gate_results
             ]
             primary.record(record.strategy, gate_results)
-            primary.merge_from(ConvergenceTracker.from_wire_dict(wr["cycle_tracker_state"]))
+            try:
+                primary.merge_from(ConvergenceTracker.from_wire_dict(wr["cycle_tracker_state"]))
+            except Exception as exc:  # noqa: BLE001
+                merge_errors.append(
+                    {
+                        "cycle_index": wr["cycle_index"] + 1,
+                        "error": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "reason": "tracker_merge_failed",
+                    }
+                )
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
-    return {"primary_tracker_state": primary.to_wire_dict()}
+    return {"primary_tracker_state": primary.to_wire_dict(), "merge_errors": merge_errors}
 
 
 ACTIVITIES = [

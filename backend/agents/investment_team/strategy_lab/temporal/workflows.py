@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from investment_team.strategy_lab.temporal import activities as act
 from investment_team.strategy_lab.temporal.dto import (
@@ -90,6 +91,13 @@ _CHILD_RETRY = RetryPolicy(maximum_attempts=1)
 # A whole cycle (design re-entries × phase pipeline) can run for hours; bound it
 # generously rather than leaving it unbounded.
 _CHILD_EXECUTION_TIMEOUT = timedelta(hours=8)
+
+# Matches thread mode's ``_ERRORED_DETAILS_MAX`` (api/main.py) — bounds memory
+# for the per-failure diagnostic list. Duplicated rather than imported from
+# ``api.main`` for the same reason as ``_MAX_DESIGN_REENTRIES_FALLBACK`` above:
+# importing api.main's transitive graph into this module would break the
+# temporalio sandbox's restricted re-import of workflow code.
+_ERRORED_DETAILS_MAX = 50
 
 
 async def _exec(
@@ -346,6 +354,12 @@ class StrategyLabBatchWorkflow:
             ``paper_trading_lookback_days`` (int, default 365): forwarded to
             ``finalize_cycle_record_activity``.
           - ``start_cycle_offset`` (int, default 0): resume anchor.
+          - ``errored_details`` (optional list, default empty): resume seed for
+            the per-failure diagnostic list, carried forward from persisted run
+            state (mirrors thread mode's ``errored_details``).
+          - ``tracker_merge_error_count`` (int, default 0): resume seed for the
+            count of cycles whose tracker merge (not the cycle itself) failed
+            (mirrors thread mode's ``tracker_merge_error_count``).
           - ``convergence_tracker_state`` (optional dto wire dict, default fresh):
             the batch-level tracker to seed from (for resume).
           - ``workflow_config`` (optional): a ``resolve_workflow_config_activity``
@@ -353,13 +367,21 @@ class StrategyLabBatchWorkflow:
             every cycle so each child need not re-resolve it.
     Postconditions:
         Returns ``{"run_id", "status", "completed_record_ids", "errored_cycles",
-        "convergence_tracker_state"}``. ``status`` is the exact external stop
-        status (``cancelled``/``failed``/``interrupted``) when one was observed
-        between waves — never forced to ``cancelled`` for an interrupt/failure —
-        else ``completed`` / ``completed_with_errors`` (the latter when ≥1 cycle
-        errored). Every completed cycle's record is finalized (paper-traded +
-        persisted) via ``finalize_cycle_record_activity`` before the batch
-        returns.
+        "errored_details", "tracker_merge_error_count", "convergence_tracker_state"}``.
+        ``status`` is the exact external stop status (``cancelled``/``failed``/
+        ``interrupted``) when one was observed between waves — never forced to
+        ``cancelled`` for an interrupt/failure — else ``completed`` /
+        ``completed_with_errors`` (the latter when ≥1 cycle errored). Every
+        completed cycle's record is finalized (paper-traded + persisted) via
+        ``finalize_cycle_record_activity`` before the batch returns.
+        ``errored_details`` accumulates a capped (``_ERRORED_DETAILS_MAX``),
+        structured entry (``cycle_index``, ``batch_index``, ``error``,
+        ``exception_type``[, ``reason``]) per failed cycle — both a
+        child-workflow failure and a per-record tracker-merge failure reported
+        by ``merge_wave_results_activity`` — seeded forward from ``batch_input``
+        and never truncated below what was seeded. A tracker-merge failure is
+        isolated to its own record (does not fail the wave) but still counts
+        toward ``errored_cycles`` and ``tracker_merge_error_count``.
     Invariants:
         Each wave merges its settled cycles into the batch-level tracker in
         cycle-index order (via ``merge_wave_results_activity``), so directives are
@@ -391,6 +413,8 @@ class StrategyLabBatchWorkflow:
         completed_record_ids: List[str] = []
         completed_indices: set[int] = set(range(start_cycle_offset))
         errored = 0
+        errored_details: List[Dict[str, Any]] = list(batch_input.get("errored_details") or [])
+        tracker_merge_errors = int(batch_input.get("tracker_merge_error_count", 0))
         # The exact persisted external stop status ("cancelled"/"failed"/
         # "interrupted") observed between waves, or None if the run finished on
         # its own. Persisted verbatim as the terminal status so an external
@@ -459,6 +483,37 @@ class StrategyLabBatchWorkflow:
                 for (cycle_index, _), result in zip(handles, settled):
                     if isinstance(result, BaseException):
                         errored += 1
+                        if len(errored_details) < _ERRORED_DETAILS_MAX:
+                            # Walk the full Temporal cause chain to the terminal
+                            # failure — a child-workflow failure surfaces here as
+                            # ChildWorkflowError -> ActivityError -> ApplicationError
+                            # (the domain error _map_exception_to_application_error
+                            # produced), so a single ``__cause__`` hop only reaches
+                            # ActivityError's generic RPC-boundary type/message, not
+                            # the real failure. Mirrors ``_root_cause_message`` in
+                            # ``market_research_team/temporal/workflows.py``.
+                            underlying: BaseException = result
+                            while underlying.__cause__ is not None:
+                                underlying = underlying.__cause__
+                            # The terminal cause is usually the ApplicationError
+                            # _map_exception_to_application_error produced, whose
+                            # actionable classification lives in ``.type`` (e.g.
+                            # "ValueError" or an LLM outcome like "fatal") — the
+                            # Python class name itself is just "ApplicationError"
+                            # for every such failure and would defeat the point
+                            # of walking the chain.
+                            if isinstance(underlying, ApplicationError) and underlying.type:
+                                exception_type = underlying.type
+                            else:
+                                exception_type = type(underlying).__name__
+                            errored_details.append(
+                                {
+                                    "cycle_index": cycle_index + 1,
+                                    "batch_index": batch_idx + 1,
+                                    "error": str(underlying),
+                                    "exception_type": exception_type,
+                                }
+                            )
                         continue
                     finalized = await _exec(
                         act.finalize_cycle_record_activity,
@@ -491,6 +546,11 @@ class StrategyLabBatchWorkflow:
                         },
                     )
                     primary_tracker_state = merged["primary_tracker_state"]
+                    for merge_error in merged.get("merge_errors") or []:
+                        errored += 1
+                        tracker_merge_errors += 1
+                        if len(errored_details) < _ERRORED_DETAILS_MAX:
+                            errored_details.append({**merge_error, "batch_index": batch_idx + 1})
 
                 await self._persist_state(
                     run_id,
@@ -499,6 +559,8 @@ class StrategyLabBatchWorkflow:
                         "contiguous_cycles": _contiguous_prefix(completed_indices),
                         "completed_record_ids": list(completed_record_ids),
                         "errored_cycles": errored,
+                        "errored_details": errored_details,
+                        "tracker_merge_error_count": tracker_merge_errors,
                     },
                 )
 
@@ -524,6 +586,8 @@ class StrategyLabBatchWorkflow:
             "status": status,
             "completed_record_ids": completed_record_ids,
             "errored_cycles": errored,
+            "errored_details": errored_details,
+            "tracker_merge_error_count": tracker_merge_errors,
             "convergence_tracker_state": primary_tracker_state,
         }
 
