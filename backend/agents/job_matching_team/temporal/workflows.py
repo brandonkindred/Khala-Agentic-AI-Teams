@@ -283,7 +283,8 @@ def rank_activity(
 
     Preconditions:
         * ``postings`` is the list from :func:`scan_activity`; ``profile`` is a
-          serialised :class:`JobSeekerProfile`; ``top_n >= 1``.
+          serialised :class:`JobSeekerProfile`; ``top_n >= 1`` (enforced below —
+          violation raises ``ValueError``).
     Postconditions:
         * ``{"top": [...], "total_found": len(postings),
           "scanned_fingerprints": [...]}`` — ``top`` is the ranked best-first
@@ -291,6 +292,9 @@ def rank_activity(
           scanned posting; ``scanned_fingerprints`` lists all their fingerprints
           (so ``exclude_seen`` can suppress them on later runs).
     """
+    if top_n < 1:
+        raise ValueError(f"top_n must be >= 1, got {top_n}")
+
     from job_matching_team.agents.ranker import JobRankerAgent
     from job_matching_team.models import JobPosting
     from job_matching_team.profile.model import JobSeekerProfile
