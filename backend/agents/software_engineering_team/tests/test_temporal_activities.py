@@ -249,47 +249,128 @@ def test_parse_spec_activity_exception_path(
     assert failure_records[-1].trace_id == "parse-spec-trace-id"
 
 
-def test_parse_spec_activity_accepts_sprint_id_without_using_it_yet(
+def test_parse_spec_activity_with_sprint_id_matches_shared_helper_output(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """When sprint_id is set, parse_spec_activity synthesizes spec content via
+    shared.sprint_scope.load_requirements_from_sprint (same helper the V1 path
+    uses) instead of reading an on-disk spec, and skips the LLM parse + PRA agent
+    entirely — no LLM/PRA mocking is needed since neither runs on this path."""
+    from datetime import datetime, timezone
+
+    from product_delivery.models import Sprint, SprintWithStories, Story
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.shared.sprint_scope import load_requirements_from_sprint
+    from software_engineering_team.temporal import activities
+
+    def _now():
+        return datetime.now(tz=timezone.utc)
+
+    story = Story(
+        id="story-1",
+        epic_id="epic-1",
+        title="Login form",
+        user_story="As a user, I want to log in",
+        status="proposed",
+        wsjf_score=None,
+        rice_score=None,
+        estimate_points=None,
+        author="tester",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    sprint = Sprint(
+        id="sprint-1",
+        product_id="product-1",
+        name="Iteration 5",
+        capacity_points=13.0,
+        starts_at=None,
+        ends_at=None,
+        status="planned",
+        author="tester",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    sprint_view = SprintWithStories(
+        sprint=sprint, stories=[story], acceptance_criteria_by_story_id={}
+    )
+
+    class _StubStore:
+        def get_sprint_with_stories(self, sprint_id: str):
+            return sprint_view
+
+    import product_delivery as pd_mod
+
+    monkeypatch.setattr(pd_mod, "get_store", lambda: _StubStore())
+
+    js.create_job("ps-sprint", repo_path=str(tmp_path))
+    result = activities.parse_spec_activity(
+        "ps-sprint", str(tmp_path), trace_id="t1", sprint_id="sprint-1"
+    )
+
+    expected_requirements, expected_spec_content = load_requirements_from_sprint("sprint-1")
+    assert result["spec_content"] == expected_spec_content
+    assert result["requirements_title"] == expected_requirements.title
+    # Sprint path skips PRA: the synthesized spec is used as-is, no PRA iterations.
+    assert result["validated_spec"] == expected_spec_content
+    assert result["pra_iterations"] == 0
+
+    job = js.get_job("ps-sprint")
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
+def test_parse_spec_activity_rejects_sprint_id_and_spec_content_override_together(
     tmp_path, patched_job_store
 ) -> None:
-    """sprint_id is accepted by the signature (V2 prep) but not yet forwarded into
-    sprint-scope spec synthesis — passing it doesn't change behavior. Same missing-spec
-    failure as test_parse_spec_activity_exception_path, now with sprint_id supplied."""
+    """sprint_id and spec_content_override are mutually exclusive. Must raise (not
+    return normally) — RunTeamWorkflowV2 doesn't inspect SpecParseResult for a
+    failure sentinel, so a normal return would let the workflow barrel into
+    Phase 2/3 on an empty spec instead of stopping after this activity fails."""
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
-    js.create_job("ps-sprint", repo_path=str(tmp_path))
-    with pytest.raises(Exception):
+    js.create_job("ps-both", repo_path=str(tmp_path))
+    with pytest.raises(ValueError, match="mutually exclusive"):
         activities.parse_spec_activity(
-            "ps-sprint", str(tmp_path), trace_id="t1", sprint_id="sprint-1"
+            "ps-both",
+            str(tmp_path),
+            spec_content_override="explicit spec",
+            sprint_id="sprint-1",
         )
-    job = js.get_job("ps-sprint")
+    job = js.get_job("ps-both")
     assert job["status"] == js.JOB_STATUS_FAILED
+    assert "mutually exclusive" in (job.get("error") or "")
 
 
 def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:
     """Cover the outer except in plan_project_activity.
 
-    ``plan_project_activity`` calls ``parse_spec_with_llm(..., get_client("spec_intake"))``
-    before it ever reaches ``_check_cancellation``, so patching the cancellation
-    helper alone would let the activity make a real LLM call first and flake on
-    transport errors. Instead, patch ``parse_spec_with_llm`` to raise — this
-    deterministically drives the outer ``except`` branch without any network I/O.
+    Patch ``run_planning_workflow`` to raise — deterministically drives the outer
+    ``except`` branch without any network I/O. ``_get_agents`` is stubbed too since
+    it runs unconditionally before ``run_planning_workflow`` and would otherwise
+    build a real (LLM-backed) agent fleet.
     """
+    from unittest.mock import MagicMock
+
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
     js.create_job("pp-j", repo_path=str(tmp_path))
 
-    # get_client("spec_intake") is evaluated as an argument to parse_spec_with_llm
-    # before the patched boom runs; use the dummy provider so it returns a client
-    # (rather than raising LLMNotConfiguredError, which would mask the RuntimeError).
+    # get_client("project_planning") is evaluated as an argument to
+    # run_planning_workflow before the patched boom runs; use the dummy provider so
+    # it returns a client (rather than raising LLMNotConfiguredError, which would
+    # mask the RuntimeError).
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": MagicMock()},
+    )
 
     def boom(*a, **kw):
         raise RuntimeError("check failed")
 
-    monkeypatch.setattr("software_engineering_team.spec_parser.parse_spec_with_llm", boom)
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", boom)
     with pytest.raises(RuntimeError):
         activities.plan_project_activity(
             "pp-j",
@@ -333,9 +414,6 @@ def test_plan_project_activity_wires_lazy_architecture_callback(
             return arch_agent
 
     monkeypatch.setattr("software_engineering_team.orchestrator._get_agents", lambda: _Registry())
-    monkeypatch.setattr(
-        "software_engineering_team.spec_parser.parse_spec_with_llm", lambda *a, **kw: MagicMock()
-    )
 
     captured: Dict[str, Any] = {}
 
@@ -397,10 +475,6 @@ def test_plan_project_activity_records_planning_run_on_success(
     monkeypatch.setattr(
         "software_engineering_team.orchestrator._get_agents",
         lambda: {"architecture": MagicMock()},
-    )
-    monkeypatch.setattr(
-        "software_engineering_team.spec_parser.parse_spec_with_llm",
-        lambda *a, **kw: MagicMock(),
     )
 
     planning_result = {
@@ -662,22 +736,26 @@ def test_plan_project_activity_binds_the_passed_trace_id(
     monkeypatch, tmp_path, patched_job_store
 ) -> None:
     """See ``test_parse_spec_activity_binds_the_passed_trace_id``; same contract for Phase 2."""
+    from unittest.mock import MagicMock
+
     from shared.observability import current_trace_id
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
     js.create_job("pp-trace", repo_path=str(tmp_path))
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": MagicMock()},
+    )
 
     seen = {}
 
-    def fake_parse_spec_with_llm(*a, **kw):
+    def fake_run_planning_workflow(*a, **kw):
         seen["trace_id"] = current_trace_id()
         raise RuntimeError("stop after capturing trace_id")
 
-    monkeypatch.setattr(
-        "software_engineering_team.spec_parser.parse_spec_with_llm", fake_parse_spec_with_llm
-    )
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", fake_run_planning_workflow)
     with pytest.raises(RuntimeError, match="stop after capturing trace_id"):
         activities.plan_project_activity(
             "pp-trace",
