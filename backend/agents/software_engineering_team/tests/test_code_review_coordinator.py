@@ -868,6 +868,28 @@ def test_review_chunk_allows_distinct_paths_including_empty() -> None:
     assert len(chunk.segments) == 2
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "line1\nline2\nline3",  # no trailing newline
+        "line1\nline2\nline3\n",  # trailing newline terminates the last line
+        "line1\nline2\nline3\n\n",  # blank line before EOF
+    ],
+    ids=["no-trailing-newline", "trailing-newline", "blank-line-before-eof"],
+)
+def test_file_segment_line_count_matches_total_lines_convention(content: str) -> None:
+    """A whole-file segment's line_count must equal the total_lines that
+    chunking.split_block_into_segments computes for identical content (the
+    same `len(content.splitlines()) or 1` formula), so end_line always lands
+    on total_lines and is_partial is False -- regardless of a trailing
+    newline or a blank final line."""
+    total_lines = len(content.splitlines()) or 1
+    seg = FileSegment(path="a.py", content=content, start_line=1, total_lines=total_lines)
+    assert seg.line_count == total_lines
+    assert seg.end_line == total_lines
+    assert seg.is_partial is False
+
+
 def test_bisect_segment_first_half_end_line_reflects_its_own_content(monkeypatch) -> None:
     """Both halves of a bisected segment must report their own true range, not
     the original segment's — end_line/is_partial are computed from
@@ -889,6 +911,12 @@ def test_bisect_segment_first_half_end_line_reflects_its_own_content(monkeypatch
     assert second.end_line == seg.end_line
     assert first.is_partial is True
     assert second.is_partial is True
+    # Concrete cross-check against the known input (not the property under
+    # test): the split boundary derived from first.line_count must match
+    # where the original `lines` were actually cut.
+    assert first.line_count + second.line_count == seg.line_count == 300
+    assert first.content == "".join(lines[: first.line_count])
+    assert second.content == "".join(lines[first.line_count :])
 
 
 # ---------------------------------------------------------------------------
