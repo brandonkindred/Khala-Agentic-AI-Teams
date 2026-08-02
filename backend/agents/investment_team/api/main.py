@@ -2762,10 +2762,16 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - Dispatches the durable Temporal workflow starting at cycle 0. If
           that dispatch still 409s (a residual collision — e.g. a second
           restart/resume racing in after the termination check above), the
-          reset is rolled back — both ``_active_runs[run_id]`` and the
-          persisted state are restored to their pre-restart snapshot — so
-          the run isn't left wedged showing ``"running"`` and blocking every
-          future run/resume/restart call.
+          reset is rolled back — ``_active_runs[run_id]`` and the persisted
+          state are restored to their pre-restart status/counters — so the
+          run isn't left wedged showing ``"running"`` and blocking every
+          future run/resume/restart call. ``generation`` is the one field
+          NOT restored to its pre-restart value: the durable write excludes
+          it entirely, and the in-memory snapshot instead re-reads whatever
+          the durable store currently holds — never this request's own
+          (possibly superseded, in a multi-process race) mint — so a
+          concurrently-dispatched newer transition's generation can never be
+          regressed by this rollback.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
@@ -2964,11 +2970,40 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 # would let a still-in-flight activity from that terminated
                 # workflow pass fencing again, reopening the exact race
                 # generation fencing exists to close.
+                #
+                # But this restart's OWN mint (new_generation) is only correct
+                # to durably re-assert when it's still the current one. In a
+                # multi-process/multi-replica deployment (the per-run_id
+                # transition lock is process-local, see #4028's scope note),
+                # a DIFFERENT restart on another process could have raced this
+                # one, minted an even newer generation, and already dispatched
+                # successfully — that's a real, legitimate active run, not a
+                # stale leftover; overwriting its generation back down to this
+                # request's stale mint would un-fence it. Re-read the current
+                # durable value for the in-memory snapshot (falls back to this
+                # request's own mint only if even that read fails), and
+                # exclude "generation" from the durable write entirely so it
+                # can never be regressed by this rollback either way.
+                try:
+                    current_generation = _get_run_generation_strict(
+                        run_id, client=_get_lab_run_job_client()
+                    )
+                except Exception:
+                    current_generation = new_generation
                 rolled_back_state = dict(state)
-                rolled_back_state["generation"] = new_generation
+                rolled_back_state["generation"] = current_generation
                 with _lock:
                     _active_runs[run_id] = rolled_back_state
-                _persist_run_state(run_id, rolled_back_state)
+                _persist_run_state(run_id, rolled_back_state, exclude_fields=frozenset({"generation"}))
+                # Known, accepted residual limitation (matches #4028's own
+                # documented multi-process scope boundary — not new here):
+                # this rollback can still overwrite a concurrently-dispatched
+                # newer transition's status/counters with this request's
+                # stale pre-restart snapshot in that same multi-process race.
+                # Closing that fully would need real cross-process
+                # coordination (e.g. an optimistic-concurrency/conditional
+                # update on the whole record), out of scope for generation
+                # fencing specifically.
             raise
     finally:
         run_lock.release()

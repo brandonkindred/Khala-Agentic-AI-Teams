@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from investment_team.api.main import _dispatch_strategy_lab_run as _real_dispatch_strategy_lab_run
+
 
 class _InMemoryDict:
     def __init__(self) -> None:
@@ -580,6 +582,58 @@ def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
     assert resp.status_code == 200
     assert api_main._active_runs["run-legacy"]["generation"] == 2
     assert stub.by_id["run-legacy"]["generation"] == 2
+
+
+def test_restart_strategy_lab_run_rollback_does_not_regress_concurrently_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: two replicas restarting the same terminal run concurrently
+    don't serialize against each other (the per-run_id transition lock is
+    process-local). If replica A mints generation 2, then replica B mints and
+    successfully dispatches generation 3 before A's own dispatch, A's dispatch
+    collides (409) and rolls back -- that rollback must NOT durably overwrite
+    B's legitimate generation 3 with A's stale minted value of 2."""
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    import shared.temporal
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
+
+    api_main._active_runs["run-race2"] = {
+        "run_id": "run-race2",
+        "status": "cancelled",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-race2", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
+    # Override the api_client fixture's blanket _dispatch_strategy_lab_run
+    # no-op stub with the real function: this test needs its actual
+    # WorkflowAlreadyStartedError -> 409-and-rollback handling, only with
+    # the inner start_strategy_lab_batch_workflow call replaced below.
+    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", _real_dispatch_strategy_lab_run)
+
+    def _dispatch_collides_after_a_concurrent_replica_wins(rid, req, generation):
+        # Simulate replica B concurrently restarting the same run: it mints
+        # generation 3 (durably, via the same apply_and_get idiom) and
+        # successfully dispatches, all while this (replica A's) request is
+        # mid-dispatch. A's own attempt then collides with B's fresh workflow.
+        stub.by_id[rid]["generation"] = 3
+        raise WorkflowAlreadyStartedError(
+            workflow_id=f"strategy-lab-{rid}", run_id="prior-run", workflow_type="X"
+        )
+
+    monkeypatch.setattr(
+        sl_sw, "start_strategy_lab_batch_workflow", _dispatch_collides_after_a_concurrent_replica_wins
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-race2/restart")
+
+    assert resp.status_code == 409
+    # B's legitimate generation 3 must survive A's rollback untouched.
+    assert stub.by_id["run-race2"]["generation"] == 3
+    assert api_main._active_runs["run-race2"]["generation"] == 3
 
 
 def test_restart_strategy_lab_run_returns_503_when_generation_mint_fails(
