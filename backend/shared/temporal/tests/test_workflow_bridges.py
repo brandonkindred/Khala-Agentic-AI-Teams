@@ -38,6 +38,35 @@ class _FakeClient:
         return _FakeHandle(self._captured)
 
 
+class _FakeTerminateHandle:
+    """A handle whose ``terminate``/``result`` outcomes are configurable per test."""
+
+    def __init__(self, captured: dict, *, terminate_exc=None, result_exc=None) -> None:
+        self._captured = captured
+        self._terminate_exc = terminate_exc
+        self._result_exc = result_exc
+
+    async def terminate(self, *, reason=None):
+        self._captured["terminate_reason"] = reason
+        if self._terminate_exc is not None:
+            raise self._terminate_exc
+
+    async def result(self):
+        self._captured["result_called"] = True
+        if self._result_exc is not None:
+            raise self._result_exc
+
+
+class _FakeTerminateClient:
+    def __init__(self, captured: dict, handle: "_FakeTerminateHandle") -> None:
+        self._captured = captured
+        self._handle = handle
+
+    def get_workflow_handle(self, workflow_id):
+        self._captured["workflow_id"] = workflow_id
+        return self._handle
+
+
 class _FakeExecClient:
     """A client whose ``execute_workflow`` records its call and resolves to a result."""
 
@@ -87,6 +116,122 @@ def test_cancel_workflow_sync_requests_cancel(running_loop):
 
     assert captured["workflow_id"] == "wf-2"
     assert captured["cancel"] is True
+
+
+# ---------------------------------------------------------------------------
+# terminate_and_await_workflow_sync
+# ---------------------------------------------------------------------------
+
+
+def test_terminate_and_await_workflow_sync_confirms_via_failure_error(running_loop):
+    """The happy path: terminate() succeeds and result() raises
+    WorkflowFailureError (the expected shape of a terminated workflow's
+    outcome) — confirming the execution is closed."""
+    from temporalio.client import WorkflowFailureError
+
+    captured: dict = {}
+    handle = _FakeTerminateHandle(captured, result_exc=WorkflowFailureError(cause=RuntimeError("x")))
+    client_mod.set_temporal_client(_FakeTerminateClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    runner.terminate_and_await_workflow_sync("wf-3", reason="restart requested")
+
+    assert captured["workflow_id"] == "wf-3"
+    assert captured["terminate_reason"] == "restart requested"
+    assert captured["result_called"] is True
+
+
+def test_terminate_and_await_workflow_sync_noop_when_terminate_not_found(running_loop):
+    """No workflow exists under this id (already closed/GC'd) — terminate()
+    itself 404s, which must be treated as already-terminal, not an error, and
+    result() must never be called (nothing to wait on)."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    captured: dict = {}
+    handle = _FakeTerminateHandle(captured, terminate_exc=RPCError("not found", RPCStatusCode.NOT_FOUND, b""))
+    client_mod.set_temporal_client(_FakeTerminateClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    runner.terminate_and_await_workflow_sync("wf-4")
+
+    assert "result_called" not in captured
+
+
+def test_terminate_and_await_workflow_sync_noop_when_result_not_found(running_loop):
+    """The workflow closes/gets GC'd between terminate() accepting and our
+    result() call landing — also treated as confirmed-terminal."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    captured: dict = {}
+    handle = _FakeTerminateHandle(captured, result_exc=RPCError("not found", RPCStatusCode.NOT_FOUND, b""))
+    client_mod.set_temporal_client(_FakeTerminateClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    runner.terminate_and_await_workflow_sync("wf-5")
+
+    assert captured["result_called"] is True
+
+
+def test_terminate_and_await_workflow_sync_propagates_other_terminate_errors(running_loop):
+    from temporalio.service import RPCError, RPCStatusCode
+
+    captured: dict = {}
+    handle = _FakeTerminateHandle(captured, terminate_exc=RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b""))
+    client_mod.set_temporal_client(_FakeTerminateClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    with pytest.raises(RPCError):
+        runner.terminate_and_await_workflow_sync("wf-6")
+
+
+def test_terminate_and_await_workflow_sync_propagates_other_result_errors(running_loop):
+    from temporalio.service import RPCError, RPCStatusCode
+
+    captured: dict = {}
+    handle = _FakeTerminateHandle(captured, result_exc=RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b""))
+    client_mod.set_temporal_client(_FakeTerminateClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    with pytest.raises(RPCError):
+        runner.terminate_and_await_workflow_sync("wf-7")
+
+
+def test_terminate_and_await_workflow_sync_requires_non_empty_id(running_loop):
+    client_mod.set_temporal_client(_FakeClient({}))
+    client_mod.set_temporal_loop(running_loop)
+    with pytest.raises(AssertionError):
+        runner.terminate_and_await_workflow_sync("")
+
+
+def test_terminate_and_await_workflow_sync_raises_when_no_worker():
+    prev_c, prev_l = client_mod.get_temporal_client(), client_mod.get_temporal_loop()
+    client_mod.set_temporal_client(None)
+    client_mod.set_temporal_loop(None)
+    try:
+        with pytest.raises(RuntimeError, match="worker"):
+            runner.terminate_and_await_workflow_sync("wf", client_ready_timeout_s=0.05)
+    finally:
+        client_mod.set_temporal_client(prev_c)
+        client_mod.set_temporal_loop(prev_l)
+
+
+def test_terminate_and_await_workflow_sync_times_out(running_loop):
+    """A result() that never resolves within timeout_s must raise TimeoutError
+    (the terminate request was still sent — the caller decides how to handle
+    'not yet confirmed done'), not hang the caller forever."""
+
+    class _SlowHandle(_FakeTerminateHandle):
+        async def result(self):
+            self._captured["result_called"] = True
+            await asyncio.sleep(10)
+
+    captured: dict = {}
+    handle = _SlowHandle(captured)
+    client_mod.set_temporal_client(_FakeTerminateClient(captured, handle))
+    client_mod.set_temporal_loop(running_loop)
+
+    with pytest.raises(TimeoutError):
+        runner.terminate_and_await_workflow_sync("wf-8", timeout_s=0.1)
 
 
 def test_start_workflow_sync_requires_non_empty_ids():
@@ -171,6 +316,7 @@ def test_bridges_are_exported():
     assert shared.temporal.cancel_workflow_sync is runner.cancel_workflow_sync
     assert shared.temporal.execute_workflow_sync is runner.execute_workflow_sync
     assert shared.temporal.execute_workflow_async is runner.execute_workflow_async
+    assert shared.temporal.terminate_and_await_workflow_sync is runner.terminate_and_await_workflow_sync
 
 
 # ---------------------------------------------------------------------------

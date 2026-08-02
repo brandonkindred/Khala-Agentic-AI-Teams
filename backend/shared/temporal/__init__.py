@@ -50,6 +50,7 @@ from shared.temporal.runner import (
     run_team_job,
     signal_workflow_sync,
     start_workflow_sync,
+    terminate_and_await_workflow_sync,
 )
 from shared.temporal.teams_registry import TEAM_TEMPORAL_MODULES, start_all_team_workers
 from shared.temporal.worker import start_team_worker
@@ -84,6 +85,7 @@ __all__ = [
     "start_team_worker",
     "start_workflow_sync",
     "submit_input",
+    "terminate_and_await_workflow_sync",
     "translate_workflow_failure",
     "wait_for_input",
 ]

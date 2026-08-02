@@ -554,7 +554,13 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     means an old, un-reset execution is still running (not that the intended
     restart is already in flight), so it must 409 rather than silently
     succeed (which would misreport a from-scratch restart) or mark the run
-    failed (which would abort a still-healthy old execution)."""
+    failed (which would abort a still-healthy old execution).
+
+    Termination is mocked as already-succeeded here so this test exercises
+    the residual dispatch-collision path (a second restart/resume racing in
+    right after the terminate-and-wait step confirms the old execution
+    closed) rather than the terminate-first 409/503 paths, which have their
+    own dedicated tests."""
     from temporalio.exceptions import WorkflowAlreadyStartedError
 
     import shared.temporal
@@ -569,6 +575,7 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     }
     monkeypatch.setattr(api_main, "_get_run_state", lambda rid: persisted)
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
     persisted_calls = []
     monkeypatch.setattr(
@@ -596,6 +603,69 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     assert run_state is persisted
     assert run_state["status"] == "cancelled"
     assert persisted_calls[-1] is persisted
+
+
+def test_strategy_lab_restart_returns_409_when_termination_times_out(
+    monkeypatch, api_client
+) -> None:
+    """restart resolves any prior execution BEFORE writing any state, so a
+    termination that can't be confirmed within budget must 409 without ever
+    touching _active_runs or the persisted store — a stronger guarantee than
+    the post-hoc rollback the residual dispatch-collision path needs."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    run_id = "run-restart-term-timeout"
+    persisted = {
+        "run_id": run_id,
+        "status": "cancelled",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    monkeypatch.setattr(api_main, "_get_run_state", lambda rid: persisted)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    def _times_out(workflow_id, **kwargs):
+        raise TimeoutError("termination not confirmed")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _times_out)
+
+    persist_calls = []
+    monkeypatch.setattr(
+        api_main, "_persist_run_state", lambda rid, state, **k: persist_calls.append(state)
+    )
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+
+    assert resp.status_code == 409
+    assert api_main._active_runs == {}  # never written
+    assert persist_calls == []  # never written
+
+
+def test_strategy_lab_restart_returns_503_when_termination_fails(monkeypatch, api_client) -> None:
+    """A non-timeout failure resolving the prior execution (e.g. the worker
+    client never connects) surfaces as 503, distinct from the 409 'retry
+    shortly' case — nothing is written here either."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    run_id = "run-restart-term-error"
+    persisted = {
+        "run_id": run_id,
+        "status": "cancelled",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    monkeypatch.setattr(api_main, "_get_run_state", lambda rid: persisted)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(workflow_id, **kwargs):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+
+    assert resp.status_code == 503
+    assert api_main._active_runs == {}  # never written
 
 
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
@@ -735,6 +805,7 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     persisted = {}
     monkeypatch.setattr(api_main, "_persist_run_state", lambda rid, s, **k: persisted.update(s))
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
     started = []
     monkeypatch.setattr(
         sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)

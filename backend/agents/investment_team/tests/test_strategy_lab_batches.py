@@ -850,6 +850,14 @@ def test_restart_accepts_completed_with_errors(
     )
     monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
 
+    # restart_strategy_lab_run resolves any prior execution via
+    # _require_temporal()/terminate_and_await_workflow_sync() before the
+    # dispatch stub above is ever reached — stub those too.
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **kw: None)
+
     client = TestClient(lab_main.app)
     resp = client.post(f"/strategy-lab/runs/{run_id}/restart")
     # Before the fix this returned 400 ("job not restartable").

@@ -3127,28 +3127,37 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - No other run currently has status ``"running"``.
 
     Postconditions:
+        - Any prior Temporal execution still running under this run_id's
+          deterministic workflow id is terminated and confirmed closed
+          *before* any state is written — closing the window where that
+          execution could observe (and act on) a transiently-optimistic
+          "running" reset before a collision would otherwise be detected.
         - Rebuilds ``_active_runs[run_id]`` as a full reset — ``contiguous_cycles``
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
           carried forward — and persists the new state.
         - Dispatches the durable Temporal workflow starting at cycle 0. If
-          that dispatch 409s (a prior execution for this run_id is still
-          winding down), the reset above is rolled back — both
-          ``_active_runs[run_id]`` and the persisted state are restored to
-          their pre-restart snapshot — so the run isn't left wedged showing
-          ``"running"`` and blocking every future run/resume/restart call.
+          that dispatch still 409s (a residual collision — e.g. a second
+          restart/resume racing in after the termination check above), the
+          reset is rolled back — both ``_active_runs[run_id]`` and the
+          persisted state are restored to their pre-restart snapshot — so
+          the run isn't left wedged showing ``"running"`` and blocking every
+          future run/resume/restart call.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
         - ``HTTPException`` 400: the run's status is not restartable, or its
           ``request_payload`` is missing/not a dict.
-        - ``HTTPException`` 409: another run is already ``"running"``, or a
-          prior execution for this run_id is still winding down under
-          Temporal (a collision the dispatch layer refuses to silently
-          resume — see ``_dispatch_strategy_lab_run``'s
+        - ``HTTPException`` 409: another run is already ``"running"``, the
+          prior execution couldn't be confirmed terminated within budget
+          (retry shortly), or a residual dispatch collision occurred despite
+          that confirmation (a collision the dispatch layer refuses to
+          silently resume — see ``_dispatch_strategy_lab_run``'s
           ``allow_already_started`` parameter; the optimistic reset is rolled
           back in this case, see Postconditions).
+        - ``HTTPException`` 503: Temporal is disabled/unavailable, or the
+          prior execution couldn't be resolved due to a Temporal-side error.
     """
     state = _get_run_state(run_id)
     # "completed_with_errors" is a terminal outcome of the same workflow as
@@ -3169,6 +3178,34 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     request = RunStrategyLabRequest(**payload)
     total_cycles = request.batch_size * request.batch_count
+
+    # Resolve any prior execution BEFORE writing anything: a still-running
+    # workflow polls persisted status between waves (strategy_lab_external_
+    # terminal_status), so writing the optimistic "running" reset first would
+    # let it observe that transient state and run an extra wave before a
+    # dispatch collision is even detected.
+    _require_temporal()
+    from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
+    from shared.temporal import terminate_and_await_workflow_sync
+
+    try:
+        terminate_and_await_workflow_sync(
+            f"{WORKFLOW_ID_PREFIX}{run_id}",
+            reason=f"Restarted via /strategy-lab/runs/{run_id}/restart",
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A prior execution for this run is still winding down; retry shortly.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Failed to resolve the prior strategy-lab execution before "
+                "restarting; Temporal worker unavailable."
+            ),
+        ) from exc
 
     restarted_state = _build_run_state(
         run_id,

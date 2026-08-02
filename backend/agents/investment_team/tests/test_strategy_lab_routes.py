@@ -85,6 +85,16 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     # Stub the Temporal dispatch so no real workflow start is attempted.
     monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", lambda *a, **k: None)
 
+    # restart_strategy_lab_run calls _require_temporal() and
+    # terminate_and_await_workflow_sync() directly (to resolve any prior
+    # execution before resetting state), independent of the dispatch stub
+    # above — stub those too so restart's happy path doesn't need a real
+    # Temporal worker either.
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
+
     # Stub the persistence calls so they don't try to reach the job service.
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
 
