@@ -2811,7 +2811,17 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # silently landing. Atomic increment-and-read-back mirrors
         # software_engineering_team/job_store.py's claim_resume.
         client = _get_lab_run_job_client()
-        updated_generation_record = client.apply_and_get(run_id, increment={"generation": 1})
+        try:
+            updated_generation_record = client.apply_and_get(run_id, increment={"generation": 1})
+        except Exception as exc:
+            # apply_and_get raises on a transport failure (connection refused,
+            # timeout, ...) rather than returning None — only a falsy return
+            # (job not found) is the "expected" failure mode below, so a raised
+            # exception needs its own translation to the same documented 503.
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to mint a new generation for this restart; job service unavailable.",
+            ) from exc
         if not updated_generation_record:
             raise HTTPException(
                 status_code=503,
@@ -2846,12 +2856,22 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             if exc.status_code == 409:
                 # The reset above never actually took effect (an old execution
                 # is still running under this run_id) — restore the pre-restart
-                # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
-                # "running" entry, blocking every future run/resume/restart call
-                # until the stale execution happens to overwrite it on its own.
+                # status/counters so _ensure_no_active_run() doesn't wedge on a
+                # phantom "running" entry, blocking every future run/resume/
+                # restart call until the stale execution happens to overwrite it
+                # on its own. The freshly minted generation is deliberately NOT
+                # rolled back with the rest of the snapshot: the prior workflow
+                # was already confirmed terminated above, so its activities must
+                # stay fenced out regardless of whether this restart's own
+                # dispatch succeeded — reverting to the pre-restart generation
+                # would let a still-in-flight activity from that terminated
+                # workflow pass fencing again, reopening the exact race
+                # generation fencing exists to close.
+                rolled_back_state = dict(state)
+                rolled_back_state["generation"] = new_generation
                 with _lock:
-                    _active_runs[run_id] = state
-                _persist_run_state(run_id, state)
+                    _active_runs[run_id] = rolled_back_state
+                _persist_run_state(run_id, rolled_back_state)
             raise
     finally:
         run_lock.release()

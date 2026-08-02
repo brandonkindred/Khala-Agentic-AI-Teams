@@ -79,14 +79,24 @@ def get_run_generation(run_id: str) -> int:
     the persist/finalize activities' fencing checks, so both read the same
     persisted generation ``restart_strategy_lab_run`` mints on every restart.
 
+    Deliberately reads the DURABLE job store directly rather than going
+    through ``get_run_state`` (which prefers the process-local ``active_runs``
+    cache): the persist/finalize activities that call this run inside a
+    Temporal worker, which may be a different process from the API server
+    that handled the restart. Fencing exists specifically to reject a write
+    from a superseded incarnation across exactly that kind of process
+    boundary — trusting a cached, possibly stale in-memory generation here
+    would silently defeat the whole check in any deployment where the API
+    server and the worker aren't the same process.
+
     Preconditions:
         - ``run_id`` names a strategy-lab run (may not exist).
 
     Postconditions:
-        - Returns the run's persisted ``generation`` field, or ``1`` for a
-          fresh/unknown run or a missing/malformed value. Never raises.
+        - Returns the run's durably persisted ``generation`` field, or ``1``
+          for a fresh/unknown run or a missing/malformed value. Never raises.
     """
-    state = get_run_state(run_id) or {}
+    state = load_run_from_job_service(run_id) or {}
     try:
         return max(1, int(state.get("generation", 1) or 1))
     except (TypeError, ValueError):

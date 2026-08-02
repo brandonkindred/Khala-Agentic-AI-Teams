@@ -1035,14 +1035,22 @@ def test_get_run_generation_reads_persisted_value(monkeypatch: pytest.MonkeyPatc
     assert run_state.get_run_generation("run-g3") == 3
 
 
-def test_get_run_generation_reads_from_active_runs_first(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_run_generation_ignores_stale_active_runs_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: unlike get_run_state's other callers, get_run_generation must
+    NOT prefer the process-local active_runs cache. The persist/finalize
+    activities that call this run inside a Temporal worker, which may be a
+    different process than the API server that handled a restart -- if a
+    stale in-memory generation were trusted here, a restart handled elsewhere
+    would never be observed and fencing would be silently defeated."""
     from investment_team.strategy_lab import run_state
 
-    def _fail(*a, **k):
-        raise AssertionError("must not fall back to the job service when active_runs has an entry")
+    monkeypatch.setitem(run_state.active_runs, "run-live", {"generation": 1})  # stale local cache
 
-    monkeypatch.setattr(run_state, "load_run_from_job_service", _fail)
-    monkeypatch.setitem(run_state.active_runs, "run-live", {"generation": 5})
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": 5}  # authoritative durable value
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
     try:
         assert run_state.get_run_generation("run-live") == 5
     finally:

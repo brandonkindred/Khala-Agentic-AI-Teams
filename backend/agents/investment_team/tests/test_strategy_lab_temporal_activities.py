@@ -692,6 +692,44 @@ def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):
     assert out["record"] == {"lab_record_id": "rec-final"}
 
 
+def test_finalize_cycle_record_activity_tolerates_missing_run_id(monkeypatch):
+    """Backward compat: a strategy_lab_finalize_cycle_record task Temporal already
+    scheduled from a pre-upgrade workflow history (its recorded input predates
+    run_id/generation entirely) must still succeed on retry, not KeyError -- the
+    fencing check is skipped rather than enforced against a key that was never
+    part of that payload's contract."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    def _fail_if_called(run_id):
+        raise AssertionError("get_run_generation must not be called when run_id is absent")
+
+    monkeypatch.setattr(run_state, "get_run_generation", _fail_if_called)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-legacy"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    # No run_id, no generation -- exactly the pre-#4029 payload shape.
+    out = act.finalize_cycle_record_activity(
+        {
+            "record": {"lab_record_id": "raw-legacy"},
+            "signal_brief_storage": None,
+            "paper_trading_enabled": True,
+            "paper_trading_lookback_days": 365,
+        }
+    )
+    assert out["record"] == {"lab_record_id": "rec-legacy"}
+
+
 def test_merge_wave_results_activity_merges_in_cycle_index_order():
     """The activity records each cycle's spec + folds its trial-count delta,
     processing settled cycles in cycle-index order (reproducible directives)."""

@@ -455,6 +455,35 @@ def test_restart_strategy_lab_run_returns_503_when_generation_mint_fails(
     assert api_main._active_runs["run-mintfail"]["generation"] == 1
 
 
+def test_restart_strategy_lab_run_returns_503_when_generation_mint_raises(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A real job-service transport failure (connection refused, timeout, ...)
+    raises from apply_and_get rather than returning None -- must still map to
+    the documented 503, not escape as an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintraise"] = {
+        "run_id": "run-mintraise",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _RaisingClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _RaisingClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintraise/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintraise"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintraise"]["generation"] == 1
+
+
 def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -475,6 +504,11 @@ def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
     }
     stub = _StubLabClient(jobs=[{"job_id": "run-stale", "generation": 1}])
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # get_run_generation (used by the fencing checks below) reads the durable
+    # store via run_state.get_lab_run_job_client directly, not api.main's alias
+    # -- both must point at the same backing store for this test to represent
+    # one consistent durable store.
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     # Capture the pre-restart generation, as a stale in-flight activity would have.
     stale_generation = run_state.get_run_generation("run-stale")

@@ -622,21 +622,28 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
     Preconditions:
         ``params`` carries ``record`` (a ``StrategyLabRecord`` JSON dump from the
-        cycle workflow), ``run_id`` (the owning run), ``generation`` (the fencing
-        generation the calling workflow incarnation was dispatched with, default
-        ``1`` for backward compatibility), and optionally ``signal_brief_storage``
-        (dict or None), ``paper_trading_enabled`` (bool, default True), and
-        ``paper_trading_lookback_days`` (int, default 365).
+        cycle workflow), and optionally ``run_id`` (the owning run),
+        ``generation`` (the fencing generation the calling workflow incarnation
+        was dispatched with, default ``1``), ``signal_brief_storage`` (dict or
+        None), ``paper_trading_enabled`` (bool, default True), and
+        ``paper_trading_lookback_days`` (int, default 365). ``run_id`` is
+        optional — not merely defaulted — for compatibility with a
+        ``strategy_lab_finalize_cycle_record`` task Temporal already scheduled
+        from a pre-upgrade workflow history (its recorded input predates this
+        key entirely) that gets retried after a rolling deploy/worker restart;
+        such a payload skips the fencing check below rather than raising.
     Postconditions:
-        Checks ``run_id``'s fencing token first (see ``shared.fencing.
-        check_fencing_token``, same semantics as ``persist_run_state_activity``):
-        raises a non-retryable ``ApplicationError`` instead of finalizing/persisting
-        when ``generation`` is stale, so a cycle record from a superseded incarnation
-        is never durably committed. Otherwise returns
-        ``{"record": <finalized StrategyLabRecord JSON dump>}`` — the same record
-        with ``paper_trading_*`` resolved and durably persisted. Raises
-        ``ApplicationError`` on any other unexpected exception (paper-trading
-        failures are already non-fatal inside the helper).
+        When ``run_id`` is present, checks its fencing token first (see
+        ``shared.fencing.check_fencing_token``, same semantics as
+        ``persist_run_state_activity``): raises a non-retryable
+        ``ApplicationError`` instead of finalizing/persisting when ``generation``
+        is stale, so a cycle record from a superseded incarnation is never
+        durably committed. Otherwise (including when ``run_id`` is absent — see
+        Preconditions) returns ``{"record": <finalized StrategyLabRecord JSON
+        dump>}`` — the same record with ``paper_trading_*`` resolved and
+        durably persisted. Raises ``ApplicationError`` on any other unexpected
+        exception (paper-trading failures are already non-fatal inside the
+        helper).
     """
     from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
@@ -644,13 +651,15 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     from shared.fencing import check_fencing_token
 
     record = StrategyLabRecord.parse_persisted(params["record"])
+    run_id = params.get("run_id")
     try:
-        check_fencing_token(
-            agent_id=params["run_id"],
-            resource="strategy_lab_run",
-            provided_token=params.get("generation", 1),
-            current_token=get_run_generation(params["run_id"]),
-        )
+        if run_id is not None:
+            check_fencing_token(
+                agent_id=run_id,
+                resource="strategy_lab_run",
+                provided_token=params.get("generation", 1),
+                current_token=get_run_generation(run_id),
+            )
         finalized = _finalize_strategy_lab_cycle_record(
             record,
             signal_brief_storage=params.get("signal_brief_storage"),

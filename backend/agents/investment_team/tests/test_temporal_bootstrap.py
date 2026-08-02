@@ -601,12 +601,21 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     (run_state,) = api_main._active_runs.values()
     assert run_state["status"] != "failed"
     # The optimistic reset (status "running", contiguous_cycles=0) must be
-    # rolled back to the pre-restart snapshot, not left wedged as "running"
-    # (which would block every future run/resume/restart via
-    # _ensure_no_active_run()).
-    assert run_state is persisted
+    # rolled back to the pre-restart snapshot's status/counters, not left
+    # wedged as "running" (which would block every future run/resume/restart
+    # via _ensure_no_active_run()).
     assert run_state["status"] == "cancelled"
-    assert persisted_calls[-1] is persisted
+    for key, value in persisted.items():
+        if key == "generation":
+            continue
+        assert run_state[key] == value
+    # The freshly minted generation is NOT rolled back with the rest of the
+    # snapshot: the prior workflow was already confirmed terminated, so its
+    # activities must stay fenced out regardless of this dispatch collision
+    # -- reverting to the pre-restart generation would let a still-in-flight
+    # activity from that terminated workflow pass fencing again.
+    assert run_state["generation"] == 2
+    assert persisted_calls[-1] is run_state
 
 
 def test_strategy_lab_restart_returns_409_when_termination_times_out(
