@@ -149,3 +149,13 @@ def test_merged_schema_rejects_cross_part_category():
             }
         )
     assert any(err["loc"][-1] == "category" for err in exc_info.value.errors())
+
+def test_architecture_body_allows_review_without_formal_document():
+    """Architecture findings may come from established codebase structure,
+    not only from an explicit architecture document."""
+    body = _ARCHITECTURE_CONSISTENCY_BODY.lower()
+    assert "architecture document" in body
+    assert "no formal" in body or "without a formal" in body or "when none is provided" in body
+    assert "repository" in body
+    assert "pattern" in body or "boundaries" in body
+

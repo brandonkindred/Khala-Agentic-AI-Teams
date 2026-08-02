@@ -921,35 +921,58 @@ fail-safe (a read failure only ever keeps a finding).
 
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
-pass. After the false-positive filter runs, this pass makes exactly one
-additional LLM call for the whole submission (never once per chunk) with
-read access to the rest of the repository (the same `read_file`/`list_files`/
-`search_codebase`/`find_function_at_line` tools the false-positive filter
-uses), given the full architecture document. It can only ADD findings, in
-two categories: `architecture` (the change contradicts a stated boundary/
-pattern/decision in a way that would break integration) and `refactor` (the
-change duplicates a capability that already exists elsewhere in the
-repository, tool-verified before it is flagged — never guessed from naming
+pass. This toggle enables the architecture half of the in-process coordinator's
+merged whole-submission tail pass (`merged_architecture_side_effect_pass`).
+In the in-process coordinator path, when either architecture and/or side-effect
+toggle is enabled, the coordinator makes a single merged LLM call and splits
+`architecture_findings` back into this category. In Temporal execution mode
+(standalone activities), enabling this toggle controls the
+architecture-consistency activity independently (one additional LLM call).
+
+An architecture document on `CodeReviewInput.architecture` is optional:
+when present (document, overview, components, and/or decisions), it is inlined
+in full when context allows; when absent, the pass still runs and the model must
+derive expectations from established repository structure and patterns. The
+in-process merged call budgets the changed-file path manifest, architecture
+body, and code inlining against the (half-filtered) system prompt and a
+dual-array response reserve that shrinks on small contexts — and skips the call
+entirely when even an empty payload cannot fit. Disabled halves are omitted from
+the system/user prompt (not merely discarded after the fact). It can only ADD
+findings, in two categories: `architecture` (the change contradicts a stated or
+established boundary/pattern/decision in a way that would break integration) and
+`refactor` (the change duplicates a capability that already exists elsewhere in
+the repository, tool-verified before it is flagged — never guessed from naming
 alone). It never removes or alters any finding the map phase or the
-false-positive filter already produced. Requires
-`CodeReviewInput.architecture` to carry an `architecture_document`,
-`overview`, `components`, or `decisions` — the pass renders whichever of
-these are present; runs as a no-op (no LLM call) when none are. Any setup
-or LLM failure is fail-safe: it is logged and yields no additional findings,
-so a broken pass never blocks or changes the rest of the review. Set to
-`false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
-enabled).
+false-positive filter already produced. Any setup or LLM failure is fail-safe:
+it is logged and yields no additional findings, so a broken pass never blocks or
+changes the rest of the review. Set to `false`/`0`/`no` to disable the pass
+(any other value, or unset, leaves it enabled).
 
 ### CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS
-Default-on toggle for the side-effect / blast-radius pass. After the
-architecture-consistency pass runs, this pass makes exactly one additional LLM
-call for the whole submission (never once per chunk) with read access to the
-rest of the repository (the same `read_file`/`list_files`/`search_codebase`/
-`find_function_at_line` tools the false-positive filter and architecture pass
-use, plus a new `search_repository` tool that searches the REST of the
-repository — beyond the submission — for a substring, capped well below the
-GitHub PR-review path's shared per-review fetch budget since three passes draw
-from the same budget and this one runs last). It can only ADD findings, in two
+Default-on toggle for the side-effect / blast-radius pass. This toggle enables
+the side-effect half of the in-process coordinator's merged whole-submission
+tail pass. In the in-process coordinator path, when either architecture and/or
+side-effect toggle is enabled, the coordinator makes a single merged LLM call
+and splits `side_effect_findings` back into this category. In Temporal
+execution mode (standalone activities), enabling this toggle controls the
+side-effect-impact activity independently (one additional LLM call).
+
+In Temporal mode this pass makes exactly one additional LLM call (never once
+per chunk). In the in-process coordinator it shares a single merged LLM call
+with the architecture-consistency pass, with `side_effect_findings` split back
+out after the call. That merged call raises a tight `LLM_MAX_TOKENS` (when set
+below 8192) to the dual-array output floor so both finding lists can fit in one
+completion; unset / already-generous caps keep the provider default. Either
+way it has read access to the rest of the repository
+(the same `read_file`/`list_files`/`search_codebase`/`find_function_at_line`
+tools the false-positive filter and architecture pass use, plus a new
+`search_repository` tool that searches the REST of the repository — beyond the
+submission — for a substring, capped well below the GitHub PR-review path's
+shared per-review fetch budget since the in-process coordinator's tail passes
+share a single prompt budget across `filter_false_positives` and the merged
+tail pass).
+
+It can only ADD findings, in two
 categories: `side-effects` — a genuine side effect with an unintended logical
 consequence, where the current implementation's behavior (return value,
 exceptions, mutation of shared/passed-in state, I/O, ordering/timing) breaks a

@@ -1,0 +1,734 @@
+"""Tests for the merged architecture-consistency + side-effect-impact pass."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+import pytest
+from code_review_agent.merged_architecture_side_effect_pass import (
+    find_architecture_and_side_effect_issues,
+)
+from code_review_agent.models import CodeReviewInput
+from code_review_agent.profiles import ReviewProfile
+
+from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.models import SystemArchitecture
+
+_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+
+# Default off-diff excerpt so architecture/redundancy half has evidence when
+# tests do not attach a repo_reader or formal architecture document.
+_DEFAULT_EXISTING_CODEBASE = "existing/shared_helper.py already provides shared helpers\n"
+
+
+def _input(
+    files: Optional[Dict[str, str]] = None,
+    *,
+    architecture: Optional[SystemArchitecture] = None,
+    profile: ReviewProfile = ReviewProfile.CODE_REVIEW,
+    existing_codebase: Optional[str] = _DEFAULT_EXISTING_CODEBASE,
+) -> CodeReviewInput:
+    return CodeReviewInput(
+        files=files if files is not None else {"app/main.py": "def bar():\n    return 1\n"},
+        task_description="wire up bar",
+        architecture=architecture,
+        profile=profile,
+        existing_codebase=existing_codebase,
+    )
+
+
+def test_returns_empty_when_both_env_flags_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "false")
+
+    class _FailIfAsked(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_FailIfAsked(), _input())
+    assert arch == []
+    assert side == []
+
+
+def test_returns_empty_for_non_code_review_profile() -> None:
+    class _FailIfAsked(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(
+        _FailIfAsked(), _input(profile=ReviewProfile.ACCEPTANCE)
+    )
+    assert arch == []
+    assert side == []
+
+
+def test_returns_empty_when_no_readable_files() -> None:
+    arch, side = find_architecture_and_side_effect_issues(
+        DummyLLMClient(), _input(files={"empty.py": "   "})
+    )
+    assert arch == []
+    assert side == []
+
+
+def test_splits_merged_response_into_two_finding_lists() -> None:
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "bypasses the repository layer",
+                            "suggestion": "use the repository",
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "caller at other.py:3 assumes ValueError",
+                            "suggestion": "update the caller",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_FindingsClient(), _input())
+    assert len(arch) == 1
+    assert arch[0].category == "architecture"
+    assert arch[0].description == "bypasses the repository layer"
+    assert len(side) == 1
+    assert side[0].category == "side-effects"
+    assert "other.py:3" in side[0].description
+
+
+def test_fails_safe_on_llm_error() -> None:
+    class _Raiser(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise RuntimeError("boom")
+
+    arch, side = find_architecture_and_side_effect_issues(_Raiser(), _input())
+    assert arch == []
+    assert side == []
+
+
+def test_missing_half_key_does_not_discard_the_other_half() -> None:
+    """A missing/malformed sibling key must not wipe valid findings from the
+    other half — halves are validated independently."""
+
+    class _Partial(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "bypasses the repository layer",
+                            "suggestion": "use the repository",
+                        }
+                    ]
+                    # side_effect_findings deliberately omitted
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_Partial(), _input())
+    assert len(arch) == 1
+    assert arch[0].category == "architecture"
+    assert side == []
+
+
+def test_half_parse_failure_does_not_discard_the_other_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising validate/parse on one half must not wipe valid findings from the other."""
+    import code_review_agent.side_effect_impact_pass as side_pass
+
+    class _Partial(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "crosses a service boundary",
+                            "suggestion": "keep the call in the application layer",
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "breaks a caller",
+                            "suggestion": "update the caller",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    def _boom(*_a, **_k):
+        raise ValueError("malformed side-effect half")
+
+    monkeypatch.setattr(side_pass, "validate_findings", _boom)
+    arch, side = find_architecture_and_side_effect_issues(_Partial(), _input())
+    assert len(arch) == 1
+    assert arch[0].category == "architecture"
+    assert side == []
+
+
+def test_fails_safe_on_non_object_reply() -> None:
+    class _Gibberish(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return "not even a dict-shaped reply"  # type: ignore[return-value]
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_Gibberish(), _input())
+    assert arch == []
+    assert side == []
+
+
+def test_runs_without_architecture_document() -> None:
+    prompts: list = []
+
+    class _EmptyFindings(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(
+        _EmptyFindings(), _input(architecture=None)
+    )
+    assert arch == []
+    assert side == []
+    assert len(prompts) == 1
+    assert "no formal" in prompts[0].lower() or "not provided" in prompts[0].lower()
+
+
+def test_skips_architecture_half_without_repository_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no architecture payload, no repo_reader, and no existing_codebase,
+    Part 1 cannot verify established structure — disable it rather than emit
+    speculative architecture findings."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    built: Dict[str, Any] = {}
+    real_build = pass_mod.build_merged_architecture_side_effect_prompt
+
+    def _spy(*, arch_on: bool, side_on: bool) -> str:
+        built["arch_on"] = arch_on
+        built["side_on"] = side_on
+        built["prompt"] = real_build(arch_on=arch_on, side_on=side_on)
+        return built["prompt"]
+
+    monkeypatch.setattr(pass_mod, "build_merged_architecture_side_effect_prompt", _spy)
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "should be discarded — no evidence for Part 1",
+                            "suggestion": "n/a",
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "documentation",
+                            "file_path": "app/main.py",
+                            "description": "docstring says X but code does Y",
+                            "suggestion": "fix the docstring",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(
+        _Client(),
+        _input(architecture=None, existing_codebase=""),
+    )
+    assert built["arch_on"] is False
+    assert built["side_on"] is True
+    assert arch == []
+    assert len(side) == 1
+    assert "Part 1: Architecture" not in built["prompt"]
+
+
+def test_discards_disabled_half_when_only_one_flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "true")
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    built: Dict[str, Any] = {}
+    real_build = pass_mod.build_merged_architecture_side_effect_prompt
+
+    def _spy(*, arch_on: bool, side_on: bool) -> str:
+        built["arch_on"] = arch_on
+        built["side_on"] = side_on
+        built["prompt"] = real_build(arch_on=arch_on, side_on=side_on)
+        return built["prompt"]
+
+    monkeypatch.setattr(pass_mod, "build_merged_architecture_side_effect_prompt", _spy)
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "should be discarded",
+                            "suggestion": "n/a",
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "documentation",
+                            "file_path": "app/main.py",
+                            "description": "docstring says X but code does Y",
+                            "suggestion": "fix the docstring",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_FindingsClient(), _input())
+    assert arch == []
+    assert len(side) == 1
+    assert side[0].category == "documentation"
+    assert built == {
+        "arch_on": False,
+        "side_on": True,
+        "prompt": built["prompt"],
+    }
+    assert "Part 1: Architecture" not in built["prompt"]
+    assert "Part 2: Side-Effect" in built["prompt"]
+    assert "Do NOT perform architecture-consistency" in built["prompt"]
+
+
+def test_skips_side_effect_half_when_pre_numbered() -> None:
+    """Pre-numbered hunk mode keeps architecture findings but must not emit
+    side-effect findings (same guard as the standalone side-effect pass)."""
+    prompts: list = []
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "refactor",
+                            "file_path": "app/main.py",
+                            "description": "duplicates an existing helper",
+                            "suggestion": "reuse the helper",
+                        }
+                    ],
+                    "side_effect_findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "should be discarded in pre_numbered mode",
+                            "suggestion": "n/a",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
+            task_description="wire up bar",
+            pre_numbered=True,
+            existing_codebase=_DEFAULT_EXISTING_CODEBASE,
+        ),
+    )
+    assert len(prompts) == 1
+    assert len(arch) == 1
+    assert arch[0].category == "refactor"
+    assert side == []
+
+
+def test_large_architecture_document_shrinks_code_inline_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike the standalone architecture pass, the merged call must reserve
+    the architecture body in its budget so a huge document shrinks changed-file
+    inlining (and caps the document on tiny contexts) instead of overflowing."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+    original_build = pass_mod._build_prompt
+
+    def _spy(index, architecture_body, max_inline_chars, **kwargs):
+        captured["max_inline_chars"] = max_inline_chars
+        captured["max_architecture_chars"] = kwargs["max_architecture_chars"]
+        captured["architecture_body_len"] = len(architecture_body)
+        return original_build(index, architecture_body, max_inline_chars, **kwargs)
+
+    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
+
+    # Small context so a 100K architecture body cannot share the map-call code
+    # allowance without overflowing.
+    class _SmallCtx(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 16_384
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+
+    map_budget = compute_code_review_map_chunk_chars(_SmallCtx())
+    arch_doc = SystemArchitecture(overview="", architecture_document="X" * 100_000)
+    find_architecture_and_side_effect_issues(_SmallCtx(), _input(architecture=arch_doc))
+
+    assert captured["architecture_body_len"] == 100_000
+    assert captured["max_architecture_chars"] < 100_000
+    assert captured["max_inline_chars"] < map_budget
+    assert captured["max_inline_chars"] == 0
+
+
+def test_skips_call_when_context_cannot_fit_fixed_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undersized context that cannot hold the system prompt + response
+    reserve must skip the LLM call rather than inventing inline capacity."""
+    calls = {"n": 0}
+
+    class _TinyCtx(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 2_048
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            calls["n"] += 1
+            raise AssertionError("merged pass should not call the LLM")
+
+    arch, side = find_architecture_and_side_effect_issues(_TinyCtx(), _input())
+    assert arch == []
+    assert side == []
+    assert calls["n"] == 0
+
+
+def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            # Fits fixed prompt + tool transcript + a usable (shrunk) response,
+            # but leaves essentially no content room so the path list truncates.
+            return 18_000
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {f"pkg/module_{i:04d}.py": f"def f{i}():\n    return {i}\n" for i in range(400)}
+    find_architecture_and_side_effect_issues(_Client(), _input(files=files))
+    assert prompts
+    manifest_section = prompts[0].split("**Full content of the changed files:**", 1)[0]
+    assert "more changed path(s) not listed" in manifest_section
+    assert "list_changed_files" in manifest_section
+    assert manifest_section.count("pkg/module_") < 400
+
+
+def test_raises_tight_output_cap_for_dual_finding_arrays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When LLM_MAX_OUTPUT_TOKENS is set near a single-pass sizing (e.g. 4096), the
+    production LLMClientModel path must raise the merged call to the dual-array
+    floor so both finding lists can fit in one completion."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from llm_service import LLMClientModel
+    from software_engineering_team.shared.context_sizing import (
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    )
+
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "4096")
+    clones: list = []
+
+    class _Empty(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            # Dummy default is 16K; with tool-transcript headroom that shrinks
+            # the dual-array reserve. Use a window that still holds the full floor.
+            return 40_000
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    class _RecordingModel(LLMClientModel):
+        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
+            clones.append(overrides)
+            return super().clone(**overrides)
+
+    backing = _Empty()
+    base = _RecordingModel(backing, agent_key="code_review")
+    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+
+    find_architecture_and_side_effect_issues(backing, _input())
+    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
+
+
+def test_model_pin_takes_precedence_over_env_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pinned max_tokens of 4096 must be raised even when LLM_MAX_OUTPUT_TOKENS is
+    already generous — the pin is what the adapter actually sends."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from llm_service import LLMClientModel
+    from software_engineering_team.shared.context_sizing import (
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    )
+
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
+    clones: list = []
+
+    class _Empty(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 40_000
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    class _RecordingModel(LLMClientModel):
+        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
+            clones.append(overrides)
+            return super().clone(**overrides)
+
+    backing = _Empty()
+    base = _RecordingModel(backing, agent_key="code_review", max_tokens=4096)
+    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+
+    find_architecture_and_side_effect_issues(backing, _input())
+    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
+
+
+def test_clamps_oversized_cap_to_shrunk_response_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the response reserve shrinks for a small context, an oversized
+    LLM_MAX_OUTPUT_TOKENS must be clamped down to that reserve."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from llm_service import LLMClientModel
+    from software_engineering_team.shared.context_sizing import (
+        _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS,
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    )
+
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
+    clones: list = []
+
+    class _SmallCtx(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            # Large enough to run (fixed prompt + transcript + min response),
+            # small enough that the dual-array floor cannot fit in full.
+            return 18_000
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    class _RecordingModel(LLMClientModel):
+        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
+            clones.append(overrides)
+            return super().clone(**overrides)
+
+    backing = _SmallCtx()
+    base = _RecordingModel(backing, agent_key="code_review")
+    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+
+    find_architecture_and_side_effect_issues(backing, _input())
+    assert len(clones) == 1
+    assert clones[0]["max_tokens"] < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
+    assert clones[0]["max_tokens"] >= _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS
+
+
+def test_clamps_oversized_cap_to_full_dual_array_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even when the dual-array floor is selected, an oversized LLM_MAX_OUTPUT_TOKENS
+    must still be clamped to that reserved response budget."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from llm_service import LLMClientModel
+    from software_engineering_team.shared.context_sizing import (
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    )
+
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
+    clones: list = []
+
+    class _Empty(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 40_000
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    class _RecordingModel(LLMClientModel):
+        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
+            clones.append(overrides)
+            return super().clone(**overrides)
+
+    backing = _Empty()
+    base = _RecordingModel(backing, agent_key="code_review")
+    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+
+    find_architecture_and_side_effect_issues(backing, _input())
+    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
+
+
+def test_truncation_note_is_reserved_so_large_file_still_inlines() -> None:
+    """A file larger than the inline budget must keep a prefix plus note, not
+    drop the whole file (and later files) because the note overflowed."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    index = CodebaseIndex.from_input(
+        _input(files={"big.py": "X" * 5_000, "small.py": "def ok():\n    return 1\n"})
+    )
+    prompt = pass_mod._build_prompt(
+        index,
+        "",
+        400,
+        max_architecture_chars=0,
+        max_manifest_chars=2_000,
+        arch_on=False,
+        side_on=True,
+    )
+    assert "### big.py ###" in prompt
+    assert "Only the first" in prompt
+    assert "### small.py ###" in prompt or "list_changed_files" in prompt
+
+
+def test_render_manifest_emits_full_list_when_budget_matches_full_size() -> None:
+    """When max_manifest_chars equals _manifest_chars, every path must render —
+    do not reserve overflow-note room that would hide paths that already fit."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    paths = ["a", "b", "c"]
+    budget = pass_mod._manifest_chars(paths)
+    rendered = pass_mod._render_manifest(paths, budget)
+    text = "\n".join(rendered)
+    assert "a" in text and "b" in text and "c" in text
+    assert "more changed path(s) not listed" not in text
+    # ``_manifest_chars`` counts a trailing newline after the last path; join does not.
+    assert len(text) <= budget
+
+
+def test_fit_changed_file_block_shrinks_when_fence_exceeds_reserve() -> None:
+    """A full-file block whose actual fence exceeds the 8-char reserve must
+    shrink the body instead of dropping the file entirely."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    # Eight+ backticks force code_fence_for to emit a longer fence than the reserve.
+    content = "x = '''" + ("`" * 12) + "'''\n" + ("y = 1\n" * 40)
+    heading = "### fencey.py ###"
+    fence_reserve = 8
+    base_overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
+    # Budget that appears to fit under the reserve but not under the real fence.
+    remaining = base_overhead + len(content)
+    block_lines, truncated = pass_mod._fit_changed_file_block("fencey.py", content, remaining)
+    assert block_lines is not None
+    block = "\n".join(block_lines)
+    assert len(block) <= remaining
+    assert "### fencey.py ###" in block
+    # Either the full content fit with the real fence, or we shrunk with a note.
+    if truncated:
+        assert "Only the first" in block
+
+
+def test_list_changed_files_tool_returns_submission_paths_only() -> None:
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    index = CodebaseIndex.from_input(_input(files={"a.py": "a", "b.py": "b"}))
+    tools = pass_mod._build_merged_pass_tools(index, side_on=False)
+    names = {getattr(t, "__name__", getattr(t, "tool_name", "")) for t in tools}
+    # strands @tool may wrap the name on .tool_name / .name
+    tool_ids = set()
+    for t in tools:
+        tool_ids.add(getattr(t, "__name__", None) or getattr(t, "name", None) or str(t))
+    assert any("list_changed_files" in str(x) for x in tool_ids | names)
+    changed = next(
+        t
+        for t in tools
+        if "list_changed_files" in (getattr(t, "__name__", "") or getattr(t, "name", "") or str(t))
+    )
+    # Prefer calling the underlying function if strands wrapped it.
+    fn = getattr(changed, "fn", None) or getattr(changed, "_fn", None) or changed
+    result = fn() if callable(fn) else changed()
+    assert "a.py" in result and "b.py" in result
+
+
+def test_format_changed_files_page_paginates_and_hints_next_offset() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import format_changed_files_page
+
+    paths = [f"f{i:03d}.py" for i in range(25)]
+    page1 = format_changed_files_page(paths, offset=0, limit=10)
+    assert "f000.py" in page1 and "f009.py" in page1
+    assert "f010.py" not in page1
+    assert "offset=10" in page1
+    assert "of 25" in page1
+
+    page2 = format_changed_files_page(paths, offset=10, limit=10)
+    assert "f010.py" in page2 and "f019.py" in page2
+    assert "offset=20" in page2
+
+    page3 = format_changed_files_page(paths, offset=20, limit=10)
+    assert "f020.py" in page3 and "f024.py" in page3
+    assert "offset=" not in page3  # last page — no next hint
+    assert "showing paths 21-25 of 25" in page3
+
+
+def test_format_changed_files_page_bounds_by_char_budget() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import format_changed_files_page
+
+    paths = [f"dir/very_long_path_name_{i}.py" for i in range(50)]
+    page = format_changed_files_page(paths, offset=0, limit=500, max_chars=120)
+    # Must not dump the whole list when the char budget is tight.
+    assert page.count("\n") < 50
+    assert "offset=" in page
+    assert "of 50" in page
