@@ -10,7 +10,6 @@ the actual logic:
 * ``models`` — Pydantic request/response schemas.
 * ``state`` — shared mutable globals + pure parse/validation helpers.
 * ``lifecycle`` — ASGI startup/shutdown hooks.
-* ``background`` — orchestrator/runner thread targets.
 * ``api.routes.*`` — SE's own APIRouter modules, grouped by concern.
 * ``api.routes.coding_team_*`` / ``api.routes.github`` / ``api.routes.reviews``
   — the coding-team execution engine's own APIRouter modules, mounted
@@ -21,7 +20,7 @@ the actual logic:
 Every moved public symbol is re-imported here so ``from …api.main import X`` and
 ``monkeypatch.setattr(main, "X", …)`` keep working unchanged: this module remains
 the single owning namespace for the monkeypatched collaborators, which the route
-and background modules dereference at call time via ``main``.
+modules dereference at call time via ``main``.
 """
 
 import logging
@@ -30,13 +29,6 @@ import threading  # noqa: F401  (public re-export: tests patch main.threading.Th
 from fastapi.middleware.cors import CORSMiddleware
 
 from shared.app import create_team_app
-from software_engineering_team.api.background import (  # noqa: F401
-    _run_backend_code_v2_background,
-    _run_frontend_code_v2_background,
-    _run_orchestrator_background,
-    _run_product_analysis_background,
-    _run_retry_background,
-)
 
 # --- Public contract / re-exports (keep import + monkeypatch surface stable) ---
 from software_engineering_team.api.lifecycle import (  # noqa: F401
