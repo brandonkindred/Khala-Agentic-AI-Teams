@@ -1,13 +1,23 @@
 """Regression: ``product_delivery`` must stay out of the module graph when disabled.
 
-``unified_api/main.py`` gates the ``product_delivery`` router import (and its
-Postgres schema registration) behind ``TEAM_CONFIGS["product_delivery"].enabled``
-so that disabling the team via config keeps ``product_delivery`` (models, store,
-``ReleaseManagerAgent``, etc.) out of ``sys.modules`` entirely — not just unmounted
-from the app. Because other test modules in this suite already ``import
-unified_api.main`` (populating ``sys.modules`` for the rest of the pytest process),
-the only reliable way to observe this is a fresh subprocess, per the same pattern
-used by ``test_agents_route_lazy_temporal_import.py``.
+``unified_api/main.py`` gates both product_delivery import sites behind
+``TEAM_CONFIGS["product_delivery"].enabled``:
+
+* the router import at module scope (``unified_api.routes.product_delivery``,
+  pulled in when ``app.include_router(...)`` mounts it), and
+* the Postgres schema-registration import inside the ``lifespan()`` async
+  generator (``from product_delivery.postgres import SCHEMA``), which only
+  executes once the ASGI lifespan actually runs.
+
+Disabling the team must keep ``product_delivery`` (models, store,
+``ReleaseManagerAgent``, etc.) out of ``sys.modules`` entirely — not just
+unmounted from the app. Because other test modules in this suite already
+``import unified_api.main`` (populating ``sys.modules`` for the rest of the
+pytest process), the only reliable way to observe this is a fresh subprocess,
+per the same pattern used by ``test_agents_route_lazy_temporal_import.py`` —
+extended here to also enter the app's lifespan via ``TestClient`` (as
+``test_team_proxy_stream.py`` already does) so the schema-registration gate
+is exercised too, not just the router-mount gate.
 """
 
 from __future__ import annotations
@@ -48,7 +58,17 @@ def _run(script: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_product_delivery_not_imported_when_disabled() -> None:
-    """Disabling the team must keep it out of ``sys.modules`` on unified-api import.
+    """Disabling the team must keep it out of ``sys.modules`` on unified-api import
+    *and* through a full ASGI lifespan run.
+
+    ``unified_api.main`` module import only exercises the router-mount gate
+    (``main.py`` around ``if TEAM_CONFIGS["product_delivery"].enabled:`` guarding
+    the ``unified_api.routes.product_delivery`` import). The *other*
+    product_delivery import — the lifespan's Postgres schema registration
+    (``from product_delivery.postgres import SCHEMA``) — only runs once the
+    ASGI lifespan actually executes, so this test enters it via
+    ``TestClient(app)`` (the same pattern ``test_team_proxy_stream.py`` uses)
+    before asserting ``sys.modules`` absence, covering both gates.
 
     Preconditions: a fresh interpreter whose PYTHONPATH includes ``backend`` + ``agents``.
     Postconditions: subprocess exits 0; assertions inside the child pass.
@@ -69,6 +89,19 @@ assert "unified_api.routes.product_delivery" not in sys.modules, (
 assert not any(
     getattr(r, "path", "").startswith("/api/product-delivery") for r in unified_api.main.app.routes
 ), "disabled product_delivery route was still mounted"
+
+from fastapi.testclient import TestClient
+
+with TestClient(unified_api.main.app):
+    pass
+
+assert "product_delivery" not in sys.modules, (
+    f"disabled product_delivery was imported during ASGI lifespan startup: "
+    f"{[m for m in sys.modules if m == 'product_delivery' or m.startswith('product_delivery.')]}"
+)
+assert "product_delivery.postgres" not in sys.modules, (
+    "disabled product_delivery: lifespan schema registration still imported product_delivery.postgres"
+)
 print("ok")
 """
     result = _run(script)
@@ -79,7 +112,8 @@ print("ok")
 
 
 def test_product_delivery_imported_when_enabled() -> None:
-    """Default config (enabled) must preserve today's behavior: module loaded, route mounted.
+    """Default config (enabled) must preserve today's behavior: module loaded,
+    route mounted, and the lifespan's schema-registration import still runs.
 
     Preconditions: a fresh interpreter whose PYTHONPATH includes ``backend`` + ``agents``.
     Postconditions: subprocess exits 0; assertions inside the child pass.
@@ -94,6 +128,15 @@ assert "unified_api.routes.product_delivery" in sys.modules, (
 assert any(
     getattr(r, "path", "").startswith("/api/product-delivery") for r in unified_api.main.app.routes
 ), "enabled product_delivery route was not mounted"
+
+from fastapi.testclient import TestClient
+
+with TestClient(unified_api.main.app):
+    pass
+
+assert "product_delivery.postgres" in sys.modules, (
+    "enabled product_delivery: lifespan schema registration did not import product_delivery.postgres"
+)
 print("ok")
 """
     result = _run(script)
