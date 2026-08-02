@@ -58,9 +58,10 @@ instead returns immediately from the activity with a discriminated result:
                                        # NOT job_id -- correlates a submitted answer batch with
                                        # the specific pause it answers (see wait_condition race below)
     "pause_kind": str,                # "entry" | "tech_lead_clarify" | "worker_escalation"
-    "pause_context": {"task_id": str} | None,  # set for "worker_escalation": identifies which
-                                                # task raised the question, so its answer can be
-                                                # attached to that task specifically on resume
+    "pause_context": {"task_ids": [str, ...]} | None,  # set for "worker_escalation": every task
+                                                # that escalated into THIS pause round (usually one,
+                                                # but see concurrent-escalation note below), so each
+                                                # answer can be attached to its own task on resume
     "pending_questions": [...],       # same structured shape hitl.py already produces
     "task_graph_snapshot": {...},     # already persisted; included for the caller's convenience
 }
@@ -77,28 +78,64 @@ instead returns immediately from the activity with a discriminated result:
 does today) before returning `"paused"` — the activity's return value is a
 notification to the workflow, not the source of truth for pause state.
 
+**Idempotency across activity retries:** Temporal can retry
+`run_pipeline_activity` (worker crash, timeout, etc.) after the pause has
+already been persisted to the job record but before the activity call
+returned "paused" to the workflow. On (re-)entry the orchestrator must first
+check the job record for an already-persisted, unresolved pause and, if one
+exists, re-emit its exact `resume_token` / `pending_questions` / `pause_kind`
+/ `pause_context` unchanged rather than minting a new one — a client that
+already saw the original token must have its later `submit_answers` signal
+match, not be rejected forever by the token check because a retry silently
+started a second pause. A fresh `resume_token` is minted only when persisting
+a genuinely new pause.
+
 **Postcondition:** the activity invocation is now short-lived, bounded by
 actual planning/codegen work between pause points rather than by human
 think-time. `start_to_close_timeout` can shrink accordingly and no longer
 needs to cover hours of waiting.
 
+**Concurrent worker-escalation serialization:** multiple implementation
+workers can hit `needs_decision` in the same concurrent round. Today,
+`_pause_lock` serializes this only because the entire pause blocks
+synchronously while the lock is held; once the activity returns at the first
+`"paused"` result, that lock is released as the call stack unwinds, so a
+second, still-running worker could otherwise overwrite the job record's
+`pending_questions` / `resume_token` before the first pause is even resolved.
+The orchestrator must instead drain: once one worker escalates, no further
+tasks are newly assigned, and workers already mid-flight get a bounded window
+to finish or also escalate before the activity returns. Every worker that
+escalates within that window is folded into the *same* pause
+(`pause_context.task_ids` lists all of them; `pending_questions` is their
+concatenated batch) rather than each publishing a competing one. Workers that
+don't finish within the drain window are left `in_progress` and picked up
+again by the normal `reset_in_flight()` resume path.
+
 ### 2. Workflow contract
 
 The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
 
-- `@workflow.signal submit_answers(resume_token: str, answers: list)` — if
-  `resume_token != self._active_resume_token`, the signal is a stale or
-  duplicate submission (e.g. a retried HTTP call, or an answer to a pause
-  that already resolved) and must be **ignored**, not applied. Otherwise sets
-  `self._submitted_answers = answers`. This is the *only* state the wait
-  condition gates on; the handler must not depend on the workflow having
-  already observed the "paused" outcome, since the activity persists
-  `waiting_for_answers=True` to the job record (and a client can act on
-  that) before the activity call itself returns — so an early signal can
-  arrive before `self._active_resume_token` is even set. In that case the
-  handler buffers the `(resume_token, answers)` pair; once the workflow
-  observes "paused" and learns the token, it checks the buffer for a match
-  before waiting.
+- `@workflow.signal submit_answers(payload: dict)` — a single payload
+  `{"resume_token": str, "answers": list}`, matching this codebase's existing
+  signal convention of one payload argument per signal (e.g.
+  `signal_workflow_sync`'s `handle.signal(signal_name, *args)` and
+  `agentic_team_provisioning`'s `submit_input` signal, both called with at
+  most one value; the installed Temporal Python SDK's `WorkflowHandle.signal`
+  itself only takes one positional `arg`, with `args=[...]` needed for more
+  than one, so a single dict payload avoids that entirely and stays
+  consistent with how every other signal in this repo is already called). If
+  `payload["resume_token"] != self._active_resume_token`, the signal is a
+  stale or duplicate submission (e.g. a retried HTTP call, or an answer to a
+  pause that already resolved) and must be **ignored**, not applied.
+  Otherwise sets `self._submitted_answers = payload["answers"]`. This is the
+  *only* state the wait condition gates on; the handler must not depend on
+  the workflow having already observed the "paused" outcome, since the
+  activity persists `waiting_for_answers=True` to the job record (and a
+  client can act on that) before the activity call itself returns — so an
+  early signal can arrive before `self._active_resume_token` is even set. In
+  that case the handler buffers `payload`; once the workflow observes
+  "paused" and learns the token, it checks the buffer for a match before
+  waiting.
 - `@workflow.query pending_questions() -> list` / `status() -> dict` — for
   polling clients, mirroring `CodeReviewWorkflow.progress()`. `status()`
   derives `waiting_for_answers` as
@@ -128,20 +165,21 @@ while True:
     # produces) and merge them into fields the activity's RunRequest/
     # CodingTeamPlanInput actually define -- not a bare extra key, which
     # run_pipeline_activity's RunRequest parsing would silently discard.
-    resolved = to_resolved_records(self._submitted_answers)
+    resolved = to_resolved_records(self._submitted_answers)  # each record retains its task_id
     if result["pause_kind"] == "worker_escalation":
-        # Must land on the specific paused task's revision_feedback, not the
+        # Must land on each paused task's own revision_feedback, not the
         # plan-level list -- run_implement reads a task's own
         # revision_feedback, not plan_input.resolved_questions, so a
         # plan-level-only merge lets the worker re-ask the same question.
         # task_decision_overrides is a new CodingTeamPlanInput field (see
-        # resume contract below); the orchestrator applies it to the
-        # restored task right after graph.restore().
-        task_id = result["pause_context"]["task_id"]
-        request["plan_input"]["task_decision_overrides"] = {
-            **request["plan_input"].get("task_decision_overrides", {}),
-            task_id: resolved,
-        }
+        # resume contract below); the orchestrator applies it to each
+        # restored task right after graph.restore(). result["pause_context"]
+        # ["task_ids"] may list more than one task if several workers
+        # escalated into this same drained pause round.
+        overrides = dict(request["plan_input"].get("task_decision_overrides", {}))
+        for task_id in result["pause_context"]["task_ids"]:
+            overrides[task_id] = [r for r in resolved if r["task_id"] == task_id]
+        request["plan_input"]["task_decision_overrides"] = overrides
     else:  # "entry" | "tech_lead_clarify"
         request["plan_input"]["resolved_questions"] = (
             request["plan_input"].get("resolved_questions", []) + resolved
@@ -181,8 +219,10 @@ while True:
     (`temporal/constants.py`) — not an invented prefix. Missing this means SE
     Temporal jobs would have their job-store `waiting_for_answers` flag
     cleared but their workflow never learns of it, and it waits indefinitely.
-  - Both routes call `handle.signal("submit_answers", client_resume_token,
-    answers)` using the client-echoed token described above.
+  - Both routes `await handle.signal("submit_answers", {"resume_token":
+    client_resume_token, "answers": answers})` — a single dict payload, using
+    the client-echoed token described above and matching this repo's
+    single-payload signal convention.
 - `POST /run/{job_id}/resume`'s cross-worker lease mechanism
   (`resume_claim_at` / `resume_claim_seq` in `job_store.py`) becomes
   unnecessary for Temporal-mode jobs — Temporal itself durably tracks a
