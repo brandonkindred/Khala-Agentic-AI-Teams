@@ -44,8 +44,10 @@ def cap_open_questions(
     """Return at most ``limit`` open questions, preserving order.
 
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`; ``limit`` >= 0.
-    Postconditions: returns ``questions`` unchanged when ``len(questions) <= limit``,
-        otherwise the first ``limit`` items; never raises for valid inputs.
+    Postconditions: returns a shallow copy of ``questions`` when
+        ``len(questions) <= limit``, otherwise the first ``limit`` items.
+        Violating preconditions raises ``AssertionError`` (Design by Contract);
+        otherwise does not raise.
     """
     assert isinstance(questions, list), "questions must be a list"
     assert limit >= 0, f"limit must be >= 0, got {limit}"
@@ -638,10 +640,12 @@ def _coerce_list(value: Any, *, allow_str: bool = False, allow_dict: bool = Fals
     """Coerce LLM-provided list-valued output to a list.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns a new list containing the same elements; does not
-        mutate the original value. Nested objects are referenced, not deep-copied.
+    Postconditions: returns a new list; does not mutate ``value`` itself.
+        Nested objects are shallow-referenced (not deep-copied): mutating a
+        nested element of the returned list mutates the same object in ``value``
+        when ``value`` was already a list/tuple/dict.
         - None -> []
-        - list/tuple -> list(value) (shallow copy)
+        - list/tuple -> list(value) (new outer list, shared nested objects)
         - string -> [value] when ``allow_str`` is True
         - dict -> [value] when ``allow_dict`` is True
         - any other scalar -> []
@@ -661,7 +665,7 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     """Parse a single open question from LLM output.
 
     Preconditions: ``index`` is a non-negative int; ``q_data`` is the decoded item.
-    Postconditions: returns a valid :class:`OpenQuestion`.
+    Postconditions: returns a valid :class:`OpenQuestion` when parsing succeeds.
         - ``options``, ``section_impact``, and ``asked_via`` are coerced to lists
           (``None`` becomes ``[]``; only well-typed scalars are kept).
         - ``section_impact`` and ``asked_via`` elements are accepted only when they
@@ -670,16 +674,17 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
           defaulting to ``0.5`` when missing or malformed.
         - When ``q_data`` is a dict with options but no default, the
           highest-confidence option is marked default.
-        - Unsupported option list elements (non-dict / non-string) are skipped.
-        - A present non-string ``id`` or ``question_text`` raises ``ValueError``
-          (missing ``id`` / ``question_text`` still fall back to ``q{index}`` /
-          ``""``).
-        - This function has no top-level try/except of its own and may raise on
-          unanticipated input. Callers handle failures differently:
-          ``parse_spec_review_response``, ``consolidate_open_questions``, and
-          ``review_question_answer_alignment`` catch per item;
-          ``run_context_constraints_discovery`` catches per item and falls back
-          to the fixed list when none parse.
+        - Malformed option entries are skipped individually (logged); they do
+          not discard the surrounding question.
+        - Missing ``id`` / ``question_text`` fall back to ``q{index}`` / ``""``.
+    Raises:
+        ValueError: when ``id`` or ``question_text`` is present but not a ``str``,
+            or on other unanticipated malformed shapes this helper does not coerce.
+            This function has no top-level try/except. Callers handle failures
+            differently: ``parse_spec_review_response``, ``consolidate_open_questions``,
+            and ``review_question_answer_alignment`` catch per item;
+            ``run_context_constraints_discovery`` catches per item and falls back
+            to the fixed list when none parse.
     """
     if isinstance(q_data, dict):
         raw_options = _coerce_list(q_data.get("options", []), allow_str=True, allow_dict=True)
@@ -930,14 +935,19 @@ def consolidate_open_questions(
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the consolidated list, or the unmodified list on <=1
-        input or a full-batch LLM/parse failure; never raises. Items that
-        individually fail to parse are skipped and logged rather than discarding
-        the whole batch.
+        input or any failure (payload serialization, prompt formatting, LLM call,
+        or a full-batch parse failure). Items that individually fail to parse are
+        skipped and logged rather than discarding the whole batch. Never raises to
+        callers; precondition violations raise ``AssertionError``.
     """
+    assert isinstance(model, Model), "model must be a Strands Model"
+    assert isinstance(open_questions, list), "open_questions must be a list"
     if len(open_questions) <= 1:
         return list(open_questions)
 
     try:
+        # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
+        # payload in memory is intentional and cheap at that scale.
         questions_json = json.dumps(
             [
                 {
@@ -971,16 +981,12 @@ def consolidate_open_questions(
             ],
             indent=2,
         )
-    except Exception as e:
-        logger.warning("Question consolidation payload serialization failed: %s", str(e))
-        return list(open_questions)
-    prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
-    consolidated = _fetch_llm_list(
-        model, prompt, "consolidated_questions", "Question consolidation"
-    )
-    if consolidated is None:
-        return list(open_questions)
-    try:
+        prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
+        consolidated = _fetch_llm_list(
+            model, prompt, "consolidated_questions", "Question consolidation"
+        )
+        if consolidated is None:
+            return list(open_questions)
         result = []
         for i, q_data in enumerate(consolidated):
             try:
@@ -1001,10 +1007,12 @@ def review_question_answer_alignment(
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the aligned list, or the unmodified list (in its
         original order) on empty input or when no item in the batch parses
-        successfully; never raises. This is a per-question review (ids are
-        preserved): an item that individually fails to parse or that repeats
-        an id already placed in the result (a duplicate) falls back to its
-        original (unaligned) question by id, when that original id is not
+        successfully. Never raises to callers; precondition violations raise
+        ``AssertionError``. Serialization, prompt formatting, LLM, and parse
+        failures fall back to the unmodified list. This is a per-question review
+        (ids are preserved): an item that individually fails to parse or that
+        repeats an id already placed in the result (a duplicate) falls back to
+        its original (unaligned) question by id, when that original id is not
         already in the result; an item carrying an id not present in
         ``open_questions`` (a hallucinated/unrecognized id) has no original to
         fall back to and is dropped outright. Any original question whose id
@@ -1016,11 +1024,15 @@ def review_question_answer_alignment(
         exactly one entry per original id: no question is ever dropped,
         added, or duplicated.
     """
+    assert isinstance(model, Model), "model must be a Strands Model"
+    assert isinstance(open_questions, list), "open_questions must be a list"
     if len(open_questions) == 0:
         return []
     original_by_id = {q.id: q for q in open_questions}
 
     try:
+        # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
+        # payload in memory is intentional and cheap at that scale.
         questions_payload = [
             {
                 "id": q.id,
@@ -1052,16 +1064,12 @@ def review_question_answer_alignment(
             for q in open_questions
         ]
         questions_json = json.dumps(questions_payload, indent=2)
-    except Exception as e:
-        logger.warning("Question alignment payload serialization failed: %s", str(e))
-        return list(open_questions)
-    prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
-    aligned = _fetch_llm_list(
-        model, prompt, "aligned_questions", "Question-answer alignment review"
-    )
-    if aligned is None:
-        return list(open_questions)
-    try:
+        prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
+        aligned = _fetch_llm_list(
+            model, prompt, "aligned_questions", "Question-answer alignment review"
+        )
+        if aligned is None:
+            return list(open_questions)
         result = []
         seen_ids = set()
         any_parsed = False
@@ -1109,12 +1117,19 @@ def add_recommendations(
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list;
         ``spec_content`` a string.
     Postconditions: returns the list with ``recommendation`` populated where the LLM
-        supplied one, or the unmodified list on empty input or any failure; never raises.
+        supplied one, or the unmodified list on empty input or any failure
+        (payload serialization, prompt formatting, LLM call, or apply-step
+        errors). Never raises to callers; precondition violations raise
+        ``AssertionError``.
     """
+    assert isinstance(model, Model), "model must be a Strands Model"
+    assert isinstance(open_questions, list), "open_questions must be a list"
     if len(open_questions) == 0:
         return list(open_questions)
 
     try:
+        # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
+        # payload in memory is intentional and cheap at that scale.
         questions_payload = [
             {
                 "id": q.id,
@@ -1132,21 +1147,16 @@ def add_recommendations(
             for q in open_questions
         ]
         questions_json = json.dumps(questions_payload, indent=2)
-    except Exception as e:
-        logger.warning("Recommendation payload serialization failed: %s", str(e))
-        return list(open_questions)
-
-    spec_content_str = spec_content or ""
-    prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
-        spec_content=spec_content_str,
-        questions_json=questions_json,
-    )
-    recs = _fetch_llm_list(
-        model, prompt, "recommendations", "Recommendation generation", allow_empty=True
-    )
-    if recs is None:
-        return list(open_questions)
-    try:
+        spec_content_str = spec_content or ""
+        prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
+            spec_content=spec_content_str,
+            questions_json=questions_json,
+        )
+        recs = _fetch_llm_list(
+            model, prompt, "recommendations", "Recommendation generation", allow_empty=True
+        )
+        if recs is None:
+            return list(open_questions)
         rec_by_id = {
             r.get("id"): r.get("recommendation")
             for r in recs

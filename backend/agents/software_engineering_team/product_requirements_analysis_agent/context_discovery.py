@@ -33,12 +33,16 @@ def run_context_constraints_discovery(
     returns a fixed fallback list.
 
     Preconditions: ``model`` is a Strands ``Model``.
-    Postconditions: returns a non-empty question list — the LLM's when valid, else the
-        fixed fallback; never raises.
+    Postconditions: returns a non-empty question list — the LLM's parsed questions
+        when at least one item parses, otherwise the fixed fallback. Prompt
+        formatting, LLM, and parse failures are caught and also yield the
+        fallback, so this function never raises to callers. This helper does not
+        apply organizational filtering; an all-invalid parse batch falls back
+        rather than returning ``[]``.
     """
-    spec_excerpt = spec_content or ""
-    prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
     try:
+        spec_excerpt = spec_content or ""
+        prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
         parsed = call_llm_json(model, prompt)
         questions_data = parsed.get("open_questions") if isinstance(parsed, dict) else None
         if not questions_data or not isinstance(questions_data, list):
@@ -74,8 +78,9 @@ def inject_context_answers_into_spec(
     """Build '## Project context and constraints' section from Q&A and prepend to current_spec.
 
     Preconditions: ``answered_questions`` is a list of :class:`AnsweredQuestion`.
-    Postconditions: returns ``current_spec`` unchanged for an empty answer list;
-        otherwise the spec with a prepended context section.
+    Postconditions: when ``answered_questions`` is empty, returns ``current_spec``
+        unchanged (no section is prepended); otherwise returns the spec with a
+        prepended context section built from the answers.
     """
     if not answered_questions:
         return current_spec
