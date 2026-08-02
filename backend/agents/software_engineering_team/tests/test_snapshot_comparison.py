@@ -24,7 +24,10 @@ from code_review_agent.snapshot_comparison import (
     CORPUS,
     FindingDiff,
     SubmissionSpec,
+    _call_pass_detecting_failure,
+    _collapse_report,
     _dedupe_pooled,
+    _DedupeGroup,
     _finding_similarity,
     _warn_if_repeats_imbalanced,
     compare_submission,
@@ -159,6 +162,49 @@ def test_dedupe_pooled_never_collapses_two_findings_from_the_same_repeat() -> No
     assert [g.representative for g in groups2] == [finding_a, finding_b]
     assert groups2[0].collapsed == later_repeat
     assert groups2[1].collapsed == []
+
+
+def test_dedupe_pooled_consumes_at_most_one_finding_per_group_per_run() -> None:
+    """A later repeat that emits both a real recurrence of an earlier finding
+    AND an unrelated finding that also happens to resemble that same earlier
+    representative must not collapse both into it -- only the best match
+    consumes the group; the other becomes its own new representative rather
+    than being silently discarded."""
+    read_violation = _issue(description="bypasses the repository layer for reads")
+    repeat_0 = [read_violation]
+
+    recurrence = _issue(description="bypasses the repository layer for reads again")
+    write_violation = _issue(description="bypasses the repository layer for writes")
+    # Sanity: write_violation WOULD also match read_violation's group if
+    # matching weren't one-to-one within the run.
+    assert _finding_similarity(write_violation, read_violation) >= 0.45
+    repeat_1 = [recurrence, write_violation]
+
+    groups = _dedupe_pooled([repeat_0, repeat_1])
+
+    assert len(groups) == 2
+    assert groups[0].representative == read_violation
+    assert groups[0].collapsed == [recurrence]
+    assert groups[1].representative == write_violation
+    assert groups[1].collapsed == []
+
+
+def test_collapse_report_labels_each_group_with_its_source_path() -> None:
+    finding = _issue(description="bypasses the repository layer")
+    dup = _issue(description="bypasses the repository layer entirely")
+    groups = [_DedupeGroup(representative=finding, collapsed=[dup])]
+
+    report = _collapse_report(groups, path="old")
+
+    assert len(report) == 1
+    assert report[0]["path"] == "old"
+    assert report[0]["representative"] == finding.model_dump()
+    assert report[0]["collapsed"] == [dup.model_dump()]
+
+
+def test_collapse_report_omits_groups_with_nothing_collapsed() -> None:
+    groups = [_DedupeGroup(representative=_issue())]
+    assert _collapse_report(groups, path="new") == []
 
 
 def test_finding_similarity_zero_for_different_category() -> None:
@@ -451,3 +497,72 @@ def test_warn_if_repeats_imbalanced_silent_for_single_or_even_repeats(
         _warn_if_repeats_imbalanced(1)
         _warn_if_repeats_imbalanced(4)
     assert caplog.records == []
+
+
+# ---------------------------------------------------------------------------
+# _call_pass_detecting_failure / call-failure tracking
+# ---------------------------------------------------------------------------
+
+_ARCH_PASS_LOGGER = "code_review_agent.architecture_consistency_pass"
+
+
+def test_call_pass_detecting_failure_true_when_target_logger_warns() -> None:
+    def _logs_a_warning() -> list:
+        logging.getLogger(_ARCH_PASS_LOGGER).warning("ArchitectureConsistencyPass: failed (boom)")
+        return []
+
+    result, failed = _call_pass_detecting_failure(_logs_a_warning, _ARCH_PASS_LOGGER)
+    assert result == []
+    assert failed is True
+
+
+def test_call_pass_detecting_failure_false_when_silent() -> None:
+    def _clean() -> list:
+        return ["finding"]
+
+    result, failed = _call_pass_detecting_failure(_clean, _ARCH_PASS_LOGGER)
+    assert result == ["finding"]
+    assert failed is False
+
+
+def test_call_pass_detecting_failure_ignores_unrelated_loggers() -> None:
+    def _warns_elsewhere() -> list:
+        logging.getLogger("code_review_agent.side_effect_impact_pass").warning("unrelated failure")
+        return []
+
+    _, failed = _call_pass_detecting_failure(_warns_elsewhere, _ARCH_PASS_LOGGER)
+    assert failed is False
+
+
+def test_compare_submission_detects_and_counts_call_failures(tmp_path: Path) -> None:
+    """The old path's architecture call fails on every repeat (simulating a
+    real provider error) while the merged path never fails; the harness must
+    surface this rather than silently pooling the fail-safe empty result as
+    a genuine 'found nothing'."""
+    repo, sha = _init_one_commit_repo(tmp_path)
+    spec = SubmissionSpec(
+        label="synthetic-failure",
+        commit_sha=sha,
+        changed_files=("app.py",),
+        task_description="test change",
+    )
+
+    class _FlakyClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                raise RuntimeError("simulated transient failure")
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                return {"findings": []}
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = compare_submission(
+        spec, lambda: _FlakyClient(), repo, tmp_path / "worktrees", repeats=1
+    )
+
+    assert result.old_call_failures == 1  # the architecture half only; side-effect succeeded
+    assert result.new_call_failures == 0
+    import json
+
+    json.dumps(result.to_dict())  # must stay JSON-serializable

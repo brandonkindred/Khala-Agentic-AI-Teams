@@ -244,26 +244,85 @@ def cleanup_worktree(repo_path: Path, worktree_path: Path) -> None:
         logger.warning("Failed to remove worktree %s: %s", worktree_path, msg)
 
 
+class _FailureCapturingHandler(logging.Handler):
+    """Detects whether a pass logged its documented fail-safe warning.
+
+    Each pass (``architecture_consistency_pass``, ``side_effect_impact_pass``,
+    ``merged_architecture_side_effect_pass``) never raises to its caller by
+    design — a setup/LLM/parse failure is caught internally and degrades to
+    an empty finding list, logged at WARNING via that module's own
+    ``logging.getLogger(__name__)`` (a documented, stable contract, not a
+    private implementation detail). That empty list is indistinguishable
+    from a genuine "found nothing" result to a caller that only looks at the
+    return value — this harness needs the distinction (see
+    :func:`_call_pass_detecting_failure`), so it listens for that warning
+    instead of reaching into the pass's private internals to bypass its
+    fail-safe try/except.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.failed = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.failed = True
+
+
+def _call_pass_detecting_failure(fn: Callable[[], object], logger_name: str) -> Tuple[object, bool]:
+    """Call ``fn()``, reporting whether ``logger_name`` logged a WARNING during the call.
+
+    Preconditions:
+        - ``logger_name`` is the ``__name__``-derived logger of the pass module
+          ``fn`` invokes (e.g. ``"code_review_agent.architecture_consistency_pass"``).
+
+    Postconditions:
+        - Returns ``(fn()'s result, failed)`` where ``failed`` is True iff that
+          logger emitted a WARNING (or higher) during the call — the pass's own
+          fail-safe failure log line, per this module's own docstring
+          guarantee ("any setup or LLM failure is logged at warning level").
+          The temporary handler is always removed, even if ``fn`` raises
+          (it shouldn't, per that same fail-safe contract, but this must not
+          leak a handler if it ever does).
+    """
+    handler = _FailureCapturingHandler()
+    target_logger = logging.getLogger(logger_name)
+    target_logger.addHandler(handler)
+    try:
+        result = fn()
+    finally:
+        target_logger.removeHandler(handler)
+    return result, handler.failed
+
+
 def run_two_call(
     llm: object,
     input_data: CodeReviewInput,
     repo_reader: Optional[RepoReader],
     index: CodebaseIndex,
-) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
+) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue], bool, bool]:
     """Run the pre-consolidation path: two independent per-submission calls.
 
-    Postconditions: returns ``(architecture_findings, side_effect_findings)``,
-        identical in shape to :func:`run_merged_call`'s return, calling the
-        standalone passes exactly as ``coordinator._run_tail_passes`` did
-        before the merge (recoverable verbatim from commit ``358873b^``).
+    Postconditions: returns ``(architecture_findings, side_effect_findings,
+        architecture_failed, side_effect_failed)`` — finding lists identical
+        in shape to :func:`run_merged_call`'s return, calling the standalone
+        passes exactly as ``coordinator._run_tail_passes`` did before the
+        merge (recoverable verbatim from commit ``358873b^``); the two
+        ``_failed`` flags come from :func:`_call_pass_detecting_failure` and
+        are independent (either, both, or neither may be True).
     """
-    architecture = find_architecture_and_redundancy_issues(
-        llm, input_data, repo_reader=repo_reader, index=index
+    architecture, architecture_failed = _call_pass_detecting_failure(
+        lambda: find_architecture_and_redundancy_issues(
+            llm, input_data, repo_reader=repo_reader, index=index
+        ),
+        "code_review_agent.architecture_consistency_pass",
     )
-    side_effect = find_side_effect_impact_issues(
-        llm, input_data, repo_reader=repo_reader, index=index
+    side_effect, side_effect_failed = _call_pass_detecting_failure(
+        lambda: find_side_effect_impact_issues(
+            llm, input_data, repo_reader=repo_reader, index=index
+        ),
+        "code_review_agent.side_effect_impact_pass",
     )
-    return architecture, side_effect
+    return architecture, side_effect, architecture_failed, side_effect_failed
 
 
 def run_merged_call(
@@ -271,15 +330,22 @@ def run_merged_call(
     input_data: CodeReviewInput,
     repo_reader: Optional[RepoReader],
     index: CodebaseIndex,
-) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
+) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue], bool]:
     """Run the post-consolidation path: one merged per-submission call.
 
-    Postconditions: returns ``(architecture_findings, side_effect_findings)``
-        exactly as ``find_architecture_and_side_effect_issues`` does.
+    Postconditions: returns ``(architecture_findings, side_effect_findings,
+        failed)`` — finding lists exactly as
+        ``find_architecture_and_side_effect_issues`` returns them; ``failed``
+        (from :func:`_call_pass_detecting_failure`) covers BOTH halves, since
+        one LLM call produces both.
     """
-    return find_architecture_and_side_effect_issues(
-        llm, input_data, repo_reader=repo_reader, index=index
+    (architecture, side_effect), failed = _call_pass_detecting_failure(
+        lambda: find_architecture_and_side_effect_issues(
+            llm, input_data, repo_reader=repo_reader, index=index
+        ),
+        "code_review_agent.merged_architecture_side_effect_pass",
     )
+    return architecture, side_effect, failed
 
 
 @dataclass
@@ -356,16 +422,22 @@ def _dedupe_pooled(runs: Sequence[Sequence[CodeReviewIssue]]) -> List[_DedupeGro
     Postconditions:
         - Returns one :class:`_DedupeGroup` per group of cross-repeat
           duplicates, in first-seen order. A finding is folded into an
-          existing group's ``collapsed`` only when it is similar
-          (``_finding_similarity(...) >= _MATCH_TEXT_THRESHOLD``) to that
-          group's ``representative``, which must come from a STRICTLY
+          existing group's ``collapsed`` only when it is the BEST-scoring
+          still-available match (``_finding_similarity(...) >=
+          _MATCH_TEXT_THRESHOLD``, mirroring :func:`diff_findings`'s greedy
+          matcher) among groups whose representative came from a STRICTLY
           EARLIER repeat — two findings emitted by the SAME repeat are never
           compared against each other, so two genuinely distinct findings a
-          single run co-emits (e.g. two different architecture violations in
-          the same file, worded similarly enough to score above the
-          threshold) always start their own groups, never collapsing into
-          one. Without cross-repeat dedup at all, a finding one path's
-          repeats emit inconsistently (e.g. 1 of 3 runs) would pool to fewer
+          single run co-emits always start their own groups, never
+          collapsing into one. A pre-existing group can absorb AT MOST ONE
+          finding per later repeat (it is removed from consideration for the
+          rest of that repeat's findings once claimed): without this, a
+          later repeat that emits both a real recurrence AND an unrelated
+          finding that both happen to resemble the same earlier
+          representative would incorrectly collapse both into it, discarding
+          the unrelated one instead of giving it its own group. Without
+          cross-repeat dedup at all, a finding one path's repeats emit
+          inconsistently (e.g. 1 of 3 runs) would pool to fewer
           representatives than the other path's consistent emission (e.g. 3
           of 3 runs), and the 1:1 cross-path matcher in :func:`diff_findings`
           would then report the surplus as spurious ``lost``/``added`` noise
@@ -373,33 +445,42 @@ def _dedupe_pooled(runs: Sequence[Sequence[CodeReviewIssue]]) -> List[_DedupeGro
     """
     groups: List[_DedupeGroup] = []
     for run in runs:
-        representatives_before_this_run = [g.representative for g in groups]
+        available = list(groups)  # pre-existing groups only; consumed at most once each this run
         for finding in run:
-            match = next(
-                (
-                    group
-                    for group, prior in zip(groups, representatives_before_this_run)
-                    if _finding_similarity(finding, prior) >= _MATCH_TEXT_THRESHOLD
-                ),
-                None,
-            )
-            if match is None:
-                groups.append(_DedupeGroup(representative=finding))
+            best_index: Optional[int] = None
+            best_score = 0.0
+            for i, group in enumerate(available):
+                score = _finding_similarity(finding, group.representative)
+                if score > best_score:
+                    best_score = score
+                    best_index = i
+            if best_index is not None and best_score >= _MATCH_TEXT_THRESHOLD:
+                available.pop(best_index).collapsed.append(finding)
             else:
-                match.collapsed.append(finding)
+                groups.append(_DedupeGroup(representative=finding))
     return groups
 
 
-def _collapse_report(groups: Sequence[_DedupeGroup]) -> List[dict]:
+def _collapse_report(groups: Sequence[_DedupeGroup], *, path: str) -> List[dict]:
     """JSON-friendly audit trail of every group that actually collapsed >1 finding.
 
-    Postconditions: returns one ``{"representative": ..., "collapsed": [...]}``
-        dict per group with a non-empty ``collapsed`` list; groups that never
-        matched a later repeat's finding are omitted (nothing to audit).
-        Pure; never raises.
+    Preconditions:
+        - ``path`` identifies which call path ``groups`` came from (``"old"``
+          or ``"new"``) — a reviewer auditing a collapse needs to know which
+          side it happened on (a wrongly-collapsed old-path finding is a
+          candidate regression; a wrongly-collapsed new-path finding is a
+          candidate addition), which is unrecoverable once old/new reports
+          are combined without this label.
+
+    Postconditions: returns one
+        ``{"path": ..., "representative": ..., "collapsed": [...]}`` dict per
+        group with a non-empty ``collapsed`` list; groups that never matched
+        a later repeat's finding are omitted (nothing to audit). Pure; never
+        raises.
     """
     return [
         {
+            "path": path,
             "representative": g.representative.model_dump(),
             "collapsed": [f.model_dump() for f in g.collapsed],
         }
@@ -451,12 +532,16 @@ class SubmissionComparisonResult:
     new_llm_calls: int
     architecture_cross_repeat_collapses: List[dict] = field(default_factory=list)
     side_effect_cross_repeat_collapses: List[dict] = field(default_factory=list)
+    old_call_failures: int = 0
+    new_call_failures: int = 0
 
     def to_dict(self) -> dict:
         return {
             "label": self.label,
             "old_llm_calls": self.old_llm_calls,
             "new_llm_calls": self.new_llm_calls,
+            "old_call_failures": self.old_call_failures,
+            "new_call_failures": self.new_call_failures,
             "architecture": self.architecture_diff.to_dict(),
             "side_effect": self.side_effect_diff.to_dict(),
             "architecture_cross_repeat_collapses": self.architecture_cross_repeat_collapses,
@@ -494,6 +579,16 @@ def compare_submission(
           repeated finding from two distinct findings that happen to land in
           different repeats with similar wording, so that judgment call is
           never silent.
+        - ``old_call_failures``/``new_call_failures`` count how many of that
+          path's pass calls internally caught a setup/LLM/parse failure and
+          fail-safe-degraded to an empty finding list (see
+          :func:`_call_pass_detecting_failure`) — a failed call and a
+          genuine "found nothing" call both return ``[]`` to this function,
+          so a caller that ignores these counts cannot tell them apart. A
+          non-zero count means this submission's diff was computed from
+          fewer real samples than ``repeats`` implies and should be weighted
+          accordingly, not read as a confident regression/false-positive
+          result.
         - Which path runs first alternates by repeat index (old-then-new on
           even repeats, new-then-old on odd repeats), so a rate-limited or
           time-degrading provider does not systematically disadvantage
@@ -514,17 +609,36 @@ def compare_submission(
         old_side_runs: List[List[CodeReviewIssue]] = []
         new_arch_runs: List[List[CodeReviewIssue]] = []
         new_side_runs: List[List[CodeReviewIssue]] = []
+        old_call_failures = 0
+        new_call_failures = 0
         for i in range(repeats):
             steps = ["old", "new"] if i % 2 == 0 else ["new", "old"]
             for step in steps:
                 if step == "old":
-                    a, s = run_two_call(llm_factory(), input_data, repo_reader, index)
+                    a, s, arch_failed, side_failed = run_two_call(
+                        llm_factory(), input_data, repo_reader, index
+                    )
                     old_arch_runs.append(a)
                     old_side_runs.append(s)
+                    old_call_failures += int(arch_failed) + int(side_failed)
                 else:
-                    a2, s2 = run_merged_call(llm_factory(), input_data, repo_reader, index)
+                    a2, s2, merged_failed = run_merged_call(
+                        llm_factory(), input_data, repo_reader, index
+                    )
                     new_arch_runs.append(a2)
                     new_side_runs.append(s2)
+                    new_call_failures += int(merged_failed)
+        if old_call_failures or new_call_failures:
+            logger.warning(
+                "compare_submission(%r): %s old-path call failure(s), %s new-path call "
+                "failure(s) fail-safe-degraded to empty findings -- treat this "
+                "submission's diff as computed from fewer real samples than repeats=%s "
+                "implies.",
+                spec.label,
+                old_call_failures,
+                new_call_failures,
+                repeats,
+            )
         old_arch_groups = _dedupe_pooled(old_arch_runs)
         new_arch_groups = _dedupe_pooled(new_arch_runs)
         old_side_groups = _dedupe_pooled(old_side_runs)
@@ -541,11 +655,15 @@ def compare_submission(
             ),
             old_llm_calls=repeats * 2,
             new_llm_calls=repeats * 1,
+            old_call_failures=old_call_failures,
+            new_call_failures=new_call_failures,
             architecture_cross_repeat_collapses=(
-                _collapse_report(old_arch_groups) + _collapse_report(new_arch_groups)
+                _collapse_report(old_arch_groups, path="old")
+                + _collapse_report(new_arch_groups, path="new")
             ),
             side_effect_cross_repeat_collapses=(
-                _collapse_report(old_side_groups) + _collapse_report(new_side_groups)
+                _collapse_report(old_side_groups, path="old")
+                + _collapse_report(new_side_groups, path="new")
             ),
         )
     finally:
@@ -597,6 +715,8 @@ class ComparisonReport:
                 "total_cross_repeat_collapses": total_collapses,
                 "total_old_llm_calls": sum(r.old_llm_calls for r in self.results),
                 "total_new_llm_calls": sum(r.new_llm_calls for r in self.results),
+                "total_old_call_failures": sum(r.old_call_failures for r in self.results),
+                "total_new_call_failures": sum(r.new_call_failures for r in self.results),
             },
             "submissions": [r.to_dict() for r in self.results],
         }
@@ -642,7 +762,10 @@ def _render_summary(report: ComparisonReport) -> str:
         f"{summary['total_lost_findings']} lost, {summary['total_added_findings']} added, "
         f"{summary['total_cross_repeat_collapses']} cross-repeat collapse(s) to audit, "
         f"{summary['total_old_llm_calls']} old-path calls vs "
-        f"{summary['total_new_llm_calls']} new-path calls."
+        f"{summary['total_new_llm_calls']} new-path calls, "
+        f"{summary['total_old_call_failures']} old-path / "
+        f"{summary['total_new_call_failures']} new-path call failure(s) "
+        "fail-safe-degraded to empty findings."
     )
     return "\n".join(lines)
 

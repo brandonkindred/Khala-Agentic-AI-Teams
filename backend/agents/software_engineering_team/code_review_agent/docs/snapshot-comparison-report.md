@@ -93,14 +93,36 @@ search) instead of isolated snippets.
   against another finding from the SAME repeat, so two genuinely distinct
   findings one run co-emits (e.g. two different architecture violations in
   the same file, worded similarly enough to score above the match threshold)
-  are both preserved rather than being silently merged into one. This still
-  leaves one irreducible ambiguity a pure text-similarity heuristic cannot
-  resolve on its own: a finding in repeat 0 and a *different* finding in
-  repeat 1 that merely happen to be worded similarly (e.g. a read-path
-  violation, then a write-path violation) look identical to the same finding
-  recurring — so every actual collapse (not just "would-be" ones) is recorded
-  in `architecture_cross_repeat_collapses`/`side_effect_cross_repeat_collapses`
+  are both preserved rather than being silently merged into one. Matching
+  against earlier repeats is one-to-one within each later repeat (mirroring
+  `diff_findings`'s own greedy-then-consume matcher): a pre-existing group
+  can absorb at most one finding per repeat, so a later repeat that emits
+  both a real recurrence and an unrelated finding that both happen to
+  resemble the same earlier representative doesn't collapse both into it —
+  the unrelated one gets its own group. This still leaves one irreducible
+  ambiguity a pure text-similarity heuristic cannot resolve on its own: a
+  finding in repeat 0 and a *different* finding in repeat 1 that merely
+  happen to be worded similarly (e.g. a read-path violation, then a
+  write-path violation) look identical to the same finding recurring — so
+  every actual collapse (not just "would-be" ones) is recorded, labeled with
+  its source path (`old`/`new` — which side of the comparison it happened
+  on, since a wrongly-collapsed old-path finding is a candidate regression
+  while a wrongly-collapsed new-path finding is a candidate addition), in
+  `architecture_cross_repeat_collapses`/`side_effect_cross_repeat_collapses`
   in the report for a human to re-judge, rather than silently trusted.
+- **Call-failure tracking:** each pass (`find_architecture_and_redundancy_issues`,
+  `find_side_effect_impact_issues`, `find_architecture_and_side_effect_issues`)
+  is fail-safe by design in production — a setup/LLM/parse failure is caught
+  internally, logged at WARNING via that module's own logger, and degrades to
+  an empty finding list indistinguishable from a genuine "found nothing"
+  result. Left unaddressed, a transient failure on one side would read as a
+  false `lost`/`added` result, and a failure on both sides could produce a
+  false clean report. The harness listens for each pass's own documented
+  failure-warning log line (not private internals) and counts failures per
+  path in `old_call_failures`/`new_call_failures` on every submission, with a
+  runtime warning when either is non-zero — treat a submission with any call
+  failures as computed from fewer real samples than `--repeats` implies, not
+  as a confident result.
 - **What counts as a candidate regression:** a `lost` entry (old path found
   it, new path didn't) on any submission is the signal this whole exercise
   exists to catch, and an `added` entry (new path found it, old path didn't)
@@ -195,5 +217,10 @@ What remains before this validation can be marked complete:
    `side_effect_cross_repeat_collapses` — each is a case where the harness
    folded a later repeat's finding into an earlier one as a likely duplicate;
    confirm it actually was one, not two distinct findings that happened to
-   land in different repeats.
-6. Record the outcome and a go/no-go recommendation in this section.
+   land in different repeats. Each entry's `path` says which side it
+   happened on.
+6. Check `old_call_failures`/`new_call_failures` on every submission — any
+   non-zero count means that submission's diff was computed from fewer real
+   samples than `--repeats` implies; consider re-running that submission
+   before trusting its result.
+7. Record the outcome and a go/no-go recommendation in this section.
