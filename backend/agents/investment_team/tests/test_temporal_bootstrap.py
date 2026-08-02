@@ -436,6 +436,39 @@ def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_
     assert run_state["status"] == "failed"
 
 
+def test_strategy_lab_dispatch_treats_already_started_workflow_as_success(
+    monkeypatch, api_client
+) -> None:
+    """A collision with an already-running workflow (e.g. resume issued after
+    an API-process restart, while the durable workflow itself survived) must
+    be treated as a successful dispatch, not a failure — marking the run
+    "failed" here would be observed by that still-running workflow as an
+    external stop signal and abort a healthy run."""
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    import shared.temporal
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    def _already_started(run_id, request):
+        raise WorkflowAlreadyStartedError(
+            workflow_id=f"strategy-lab-{run_id}", run_id="prior-run", workflow_type="X"
+        )
+
+    monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _already_started)
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 1, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+
+    assert resp.status_code == 200
+    (run_state,) = api_main._active_runs.values()
+    assert run_state["status"] == "running"
+
+
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
     monkeypatch, api_client
 ) -> None:

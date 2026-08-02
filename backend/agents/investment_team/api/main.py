@@ -1919,10 +1919,15 @@ def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> N
           persisted (the activity reads its resume offset from that state).
 
     Postconditions:
-        - The durable workflow is started. On any failure (Temporal
-          disabled/unavailable, or the start RPC raising), ``run_id`` is
-          marked ``"failed"`` via ``_fail_strategy_lab_run`` and
-          ``HTTPException(503)`` is raised — never spawns a thread.
+        - The durable workflow is started. A collision with an already-running
+          workflow under this run_id's deterministic id (e.g. a resume issued
+          after an API-process restart, while the durable workflow itself kept
+          running) is treated as a successful dispatch — a no-op — since the
+          run is already active; it is NOT marked failed. On any other
+          failure (Temporal disabled/unavailable, or the start RPC raising for
+          any other reason), ``run_id`` is marked ``"failed"`` via
+          ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised —
+          never spawns a thread.
     """
     try:
         _require_temporal()
@@ -1932,6 +1937,22 @@ def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> N
 
         start_strategy_lab_batch_workflow(run_id, request)
     except Exception as exc:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+
+        if isinstance(exc, WorkflowAlreadyStartedError):
+            # The durable workflow for this run_id is already running (most
+            # commonly: resume was called after an API-process restart wiped
+            # _active_runs, but the workflow itself survived). Marking the run
+            # "failed" here would be observed by that still-running workflow
+            # as an external stop signal (via
+            # strategy_lab_external_terminal_status) and abort a healthy run,
+            # so treat the collision as the dispatch already having succeeded.
+            logger.info(
+                "Strategy-lab workflow for run %s is already running; "
+                "treating dispatch as a no-op success.",
+                run_id,
+            )
+            return
         _fail_strategy_lab_run(
             run_id, "Failed to start the strategy-lab workflow (Temporal unavailable)."
         )
