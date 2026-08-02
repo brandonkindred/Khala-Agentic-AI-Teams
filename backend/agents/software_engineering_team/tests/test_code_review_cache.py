@@ -215,6 +215,30 @@ def test_changed_model_invalidates_cache(monkeypatch: pytest.MonkeyPatch) -> Non
     assert client.map_calls == 2
 
 
+class _EnumLike:
+    """Minimal stand-in for an enum member: exposes ``.value``, nothing else."""
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+def test_context_fingerprint_normalizes_non_profile_enum_values() -> None:
+    """Every ``base_input`` field is ``.value``-normalized, not only ``profile``."""
+    plain = {"task_description": "shared", "language": "python", "profile": "code_review"}
+    with_enum = {**plain, "language": _EnumLike("python")}
+
+    # An enum-like value whose .value matches the plain string hashes identically.
+    assert mapping._context_fingerprint(plain, "model-A") == mapping._context_fingerprint(
+        with_enum, "model-A"
+    )
+
+    # A different underlying .value still invalidates the digest.
+    different_enum = {**plain, "language": _EnumLike("typescript")}
+    assert mapping._context_fingerprint(plain, "model-A") != mapping._context_fingerprint(
+        different_enum, "model-A"
+    )
+
+
 def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
     """A hit reuses the stored findings even if the model would now differ."""
     high_issue = {
@@ -667,6 +691,47 @@ def test_waiter_reraises_resolved_inflight_exception() -> None:
     with pytest.raises(CodeReviewUnavailableError):
         mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
     assert reviewer.calls == 0
+
+
+def test_clear_chunk_outcome_cache_empties_registries() -> None:
+    """A clear empties both the outcome cache and the in-flight registry."""
+    chunk = _single_chunk()
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+    mapping._CHUNK_OUTCOME_CACHE[key] = _simple_outcome()
+    mapping._CHUNK_INFLIGHT[key] = Future()
+
+    mapping.clear_chunk_outcome_cache()
+
+    assert mapping._CHUNK_OUTCOME_CACHE == {}
+    assert mapping._CHUNK_INFLIGHT == {}
+
+
+def test_clear_mid_flight_does_not_prevent_leader_from_caching() -> None:
+    """Clearing while a leader is in flight does not stop it from later caching.
+
+    Pins the corrected postcondition on ``clear_chunk_outcome_cache``: the
+    guaranteed-miss promise holds only when no review of that chunk is already
+    in flight. A leader in flight when the clear runs holds no lock across its
+    LLM call, so it can still publish its outcome afterward — reproduced here
+    by publishing the leader's result the same way ``_cached_review_chunk``'s
+    finally-block does, after the clear has already returned.
+    """
+    chunk = _single_chunk()
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+    mapping._CHUNK_INFLIGHT[key] = Future()  # a leader is in flight
+
+    mapping.clear_chunk_outcome_cache()
+    assert key not in mapping._CHUNK_OUTCOME_CACHE
+
+    # The in-flight leader (unaware of the clear) now completes and caches its
+    # outcome, exactly as it would outside a test.
+    outcome = _simple_outcome()
+    with mapping._CHUNK_OUTCOME_CACHE_LOCK:
+        mapping._CHUNK_OUTCOME_CACHE[key] = outcome
+
+    assert key in mapping._CHUNK_OUTCOME_CACHE  # the "guaranteed miss" did not hold
 
 
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
