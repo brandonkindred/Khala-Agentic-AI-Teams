@@ -357,6 +357,9 @@ class StrategyLabBatchWorkflow:
           - ``errored_details`` (optional list, default empty): resume seed for
             the per-failure diagnostic list, carried forward from persisted run
             state (mirrors thread mode's ``errored_details``).
+          - ``tracker_merge_error_count`` (int, default 0): resume seed for the
+            count of cycles whose tracker merge (not the cycle itself) failed
+            (mirrors thread mode's ``tracker_merge_error_count``).
           - ``convergence_tracker_state`` (optional dto wire dict, default fresh):
             the batch-level tracker to seed from (for resume).
           - ``workflow_config`` (optional): a ``resolve_workflow_config_activity``
@@ -364,16 +367,21 @@ class StrategyLabBatchWorkflow:
             every cycle so each child need not re-resolve it.
     Postconditions:
         Returns ``{"run_id", "status", "completed_record_ids", "errored_cycles",
-        "errored_details", "convergence_tracker_state"}``. ``status`` is the exact
-        external stop status (``cancelled``/``failed``/``interrupted``) when one
-        was observed between waves — never forced to ``cancelled`` for an
-        interrupt/failure — else ``completed`` / ``completed_with_errors`` (the
-        latter when ≥1 cycle errored). Every completed cycle's record is
-        finalized (paper-traded + persisted) via ``finalize_cycle_record_activity``
-        before the batch returns. ``errored_details`` accumulates a capped
-        (``_ERRORED_DETAILS_MAX``), structured entry (``cycle_index``,
-        ``batch_index``, ``error``, ``exception_type``) per failed cycle, seeded
-        forward from ``batch_input`` and never truncated below what was seeded.
+        "errored_details", "tracker_merge_error_count", "convergence_tracker_state"}``.
+        ``status`` is the exact external stop status (``cancelled``/``failed``/
+        ``interrupted``) when one was observed between waves — never forced to
+        ``cancelled`` for an interrupt/failure — else ``completed`` /
+        ``completed_with_errors`` (the latter when ≥1 cycle errored). Every
+        completed cycle's record is finalized (paper-traded + persisted) via
+        ``finalize_cycle_record_activity`` before the batch returns.
+        ``errored_details`` accumulates a capped (``_ERRORED_DETAILS_MAX``),
+        structured entry (``cycle_index``, ``batch_index``, ``error``,
+        ``exception_type``[, ``reason``]) per failed cycle — both a
+        child-workflow failure and a per-record tracker-merge failure reported
+        by ``merge_wave_results_activity`` — seeded forward from ``batch_input``
+        and never truncated below what was seeded. A tracker-merge failure is
+        isolated to its own record (does not fail the wave) but still counts
+        toward ``errored_cycles`` and ``tracker_merge_error_count``.
     Invariants:
         Each wave merges its settled cycles into the batch-level tracker in
         cycle-index order (via ``merge_wave_results_activity``), so directives are
@@ -406,6 +414,7 @@ class StrategyLabBatchWorkflow:
         completed_indices: set[int] = set(range(start_cycle_offset))
         errored = 0
         errored_details: List[Dict[str, Any]] = list(batch_input.get("errored_details") or [])
+        tracker_merge_errors = int(batch_input.get("tracker_merge_error_count", 0))
         # The exact persisted external stop status ("cancelled"/"failed"/
         # "interrupted") observed between waves, or None if the run finished on
         # its own. Persisted verbatim as the terminal status so an external
@@ -537,6 +546,11 @@ class StrategyLabBatchWorkflow:
                         },
                     )
                     primary_tracker_state = merged["primary_tracker_state"]
+                    for merge_error in merged.get("merge_errors") or []:
+                        errored += 1
+                        tracker_merge_errors += 1
+                        if len(errored_details) < _ERRORED_DETAILS_MAX:
+                            errored_details.append({**merge_error, "batch_index": batch_idx + 1})
 
                 await self._persist_state(
                     run_id,
@@ -546,6 +560,7 @@ class StrategyLabBatchWorkflow:
                         "completed_record_ids": list(completed_record_ids),
                         "errored_cycles": errored,
                         "errored_details": errored_details,
+                        "tracker_merge_error_count": tracker_merge_errors,
                     },
                 )
 
@@ -572,6 +587,7 @@ class StrategyLabBatchWorkflow:
             "completed_record_ids": completed_record_ids,
             "errored_cycles": errored,
             "errored_details": errored_details,
+            "tracker_merge_error_count": tracker_merge_errors,
             "convergence_tracker_state": primary_tracker_state,
         }
 
