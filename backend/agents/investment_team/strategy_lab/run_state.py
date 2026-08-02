@@ -71,6 +71,28 @@ def acquire_run_transition_lock(run_id: str) -> Optional[threading.Lock]:
     return run_lock if run_lock.acquire(blocking=False) else None
 
 
+def get_run_generation(run_id: str) -> int:
+    """Return run_id's current fencing generation, defaulting to 1.
+
+    Sibling to ``get_resume_seed_counters``: called from the Temporal batch
+    workflow's input builder (``build_strategy_lab_batch_input``) and from
+    the persist/finalize activities' fencing checks, so both read the same
+    persisted generation ``restart_strategy_lab_run`` mints on every restart.
+
+    Preconditions:
+        - ``run_id`` names a strategy-lab run (may not exist).
+
+    Postconditions:
+        - Returns the run's persisted ``generation`` field, or ``1`` for a
+          fresh/unknown run or a missing/malformed value. Never raises.
+    """
+    state = get_run_state(run_id) or {}
+    try:
+        return max(1, int(state.get("generation", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def get_lab_run_job_client():
     """Return a JobServiceClient scoped to strategy lab runs."""
     from job_service_client import JobServiceClient
@@ -196,6 +218,7 @@ __all__ = [
     "lock",
     "active_runs",
     "acquire_run_transition_lock",
+    "get_run_generation",
     "get_lab_run_job_client",
     "load_run_from_job_service",
     "get_run_state",

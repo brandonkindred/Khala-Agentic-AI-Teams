@@ -35,19 +35,20 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
         ``StrategyLabBatchWorkflow.run`` reads (``run_id``, ``config``,
         ``batch_size``/``batch_count``/``max_parallel``, ``benchmark_symbol``,
         ``exclude_asset_classes``, paper-trading flags, ``start_cycle_offset``,
-        and the resume-seed counters ``skipped_cycles``/``errored_cycles``/
-        ``errored_details``/``tracker_merge_error_count``/
+        ``generation``, and the resume-seed counters ``skipped_cycles``/
+        ``errored_cycles``/``errored_details``/``tracker_merge_error_count``/
         ``completed_record_ids``).
     """
     # ``clamp_max_parallel``/``rehydrate_active_run_offset``/
-    # ``get_resume_seed_counters`` live in the shared ``strategy_lab.config``/
-    # ``strategy_lab.run_state`` modules (also imported by ``api.main``) so this
-    # reads the same offset/clamp/counters state without reaching into
-    # api.main's private module state.
+    # ``get_resume_seed_counters``/``get_run_generation`` live in the shared
+    # ``strategy_lab.config``/``strategy_lab.run_state`` modules (also
+    # imported by ``api.main``) so this reads the same offset/clamp/counters/
+    # generation state without reaching into api.main's private module state.
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab.config import clamp_max_parallel
     from investment_team.strategy_lab.run_state import (
         get_resume_seed_counters,
+        get_run_generation,
         rehydrate_active_run_offset,
     )
     from investment_team.strategy_lab_context import excluded_for_allowed
@@ -77,6 +78,7 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
         "paper_trading_enabled": request.paper_trading_enabled,
         "paper_trading_lookback_days": request.paper_trading_lookback_days,
         "start_cycle_offset": rehydrate_active_run_offset(run_id),
+        "generation": get_run_generation(run_id),
         **get_resume_seed_counters(run_id),
     }
 

@@ -431,6 +431,12 @@ class StrategyLabBatchWorkflow:
         paper_trading_enabled = batch_input.get("paper_trading_enabled", True)
         paper_trading_lookback_days = batch_input.get("paper_trading_lookback_days", 365)
         start_cycle_offset = int(batch_input.get("start_cycle_offset", 0))
+        # Fencing generation for this incarnation (minted by restart_strategy_lab_run
+        # on a restart, carried forward unchanged by resume, defaulting to 1 for a
+        # fresh run) — threaded into every persist/finalize activity call below so a
+        # stale activity from a since-superseded incarnation is rejected instead of
+        # silently committing (shared.fencing.check_fencing_token).
+        generation = int(batch_input.get("generation", 1))
 
         wf_config = batch_input.get("workflow_config")
         if wf_config is None:
@@ -459,7 +465,7 @@ class StrategyLabBatchWorkflow:
         for batch_idx in range(start_batch_idx, batch_count):
             within_start = start_within_batch if batch_idx == start_batch_idx else 0
 
-            await self._persist_state(run_id, {"current_batch": batch_idx + 1})
+            await self._persist_state(run_id, {"current_batch": batch_idx + 1}, generation)
 
             # ── Per-batch signal-brief refresh (batch N sees batches 1..N-1) ──
             brief = await _exec(
@@ -555,6 +561,8 @@ class StrategyLabBatchWorkflow:
                     finalized = await _exec(
                         act.finalize_cycle_record_activity,
                         params={
+                            "run_id": run_id,
+                            "generation": generation,
                             "record": result["record"],
                             "signal_brief_storage": signal_brief_storage,
                             "paper_trading_enabled": paper_trading_enabled,
@@ -600,6 +608,7 @@ class StrategyLabBatchWorkflow:
                         "errored_details": errored_details,
                         "tracker_merge_error_count": tracker_merge_errors,
                     },
+                    generation,
                 )
 
                 # External stop is checked only between waves, mirroring thread
@@ -613,12 +622,12 @@ class StrategyLabBatchWorkflow:
 
             if external_terminal_status is not None:
                 break
-            await self._persist_state(run_id, {"completed_batches": batch_idx + 1})
+            await self._persist_state(run_id, {"completed_batches": batch_idx + 1}, generation)
 
         status = external_terminal_status or (
             "completed_with_errors" if errored else "completed"
         )
-        await self._persist_state(run_id, {"status": status})
+        await self._persist_state(run_id, {"status": status}, generation)
         return {
             "run_id": run_id,
             "status": status,
@@ -630,17 +639,22 @@ class StrategyLabBatchWorkflow:
             "convergence_tracker_state": primary_tracker_state,
         }
 
-    async def _persist_state(self, run_id: str, state: Dict[str, Any]) -> None:
+    async def _persist_state(self, run_id: str, state: Dict[str, Any], generation: int) -> None:
         """Persist a run-state delta via ``persist_run_state_activity``.
 
-        ``persist_run_state_activity`` takes ``(run_id, state, create)`` — three
-        positional args — so it can't go through :func:`_exec` (single-``params``);
+        ``persist_run_state_activity`` takes ``(run_id, state, create, generation)`` —
+        four positional args — so it can't go through :func:`_exec` (single-``params``);
         call ``workflow.execute_activity`` directly with the same retry/timeout.
-        Never raises (the underlying helper swallows job-service failures).
+
+        Raises when ``persist_run_state_activity`` rejects ``generation`` as stale
+        (a non-retryable ``ApplicationError`` — a fenced write means this incarnation
+        has been superseded by a restart and this workflow should stop, so letting the
+        error propagate and fail the workflow is correct, not a bug to swallow).
+        Otherwise never raises (the underlying helper swallows job-service failures).
         """
         await workflow.execute_activity(
             act.persist_run_state_activity,
-            args=[run_id, state, False],
+            args=[run_id, state, False, generation],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_ACTIVITY_RETRY,
         )

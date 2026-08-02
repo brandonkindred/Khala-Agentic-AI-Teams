@@ -18,6 +18,24 @@ modules regardless, mirroring
 (and its ``ACTIVITIES`` list) importable without pulling in the full
 strategy-lab dependency graph (strands, market-data providers, ...) at
 worker-process boot.
+
+Generation fencing: ``persist_run_state_activity`` and
+``finalize_cycle_record_activity`` are the only two activities that write
+durable state tied to a run, so they're the only two that check a fencing
+token (``shared.fencing.check_fencing_token``) before writing. A restart
+mints a new "generation" for the fresh incarnation it dispatches
+(``investment_team.api.main.restart_strategy_lab_run``); a write carrying
+an older generation than the run's current persisted one is rejected —
+closing the window where an already-dispatched, non-heartbeating activity
+from a just-terminated workflow finishes *after* a restart and silently
+commits stale progress or a stale cycle record. This is honestly a
+check-then-write, not an atomic compare-and-swap: the fencing read and the
+eventual write are two separate job-service calls, so a restart racing
+exactly between them is (rarely) still possible. It also only fences the
+*write* — it does not stop the stale activity's *computation*, which can
+still run to completion (burning time/cost) before its write is rejected;
+cooperative cancellation would close that remaining gap and is tracked as a
+separate, deliberately deferred optimization.
 """
 
 from __future__ import annotations
@@ -148,19 +166,45 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
 
 
 @activity.defn(name="strategy_lab_persist_run_state")
-def persist_run_state_activity(run_id: str, state: dict, create: bool = False) -> None:
+def persist_run_state_activity(run_id: str, state: dict, create: bool = False, generation: int = 1) -> None:
     """Persist strategy-lab run/batch progress to the durable job store.
 
     Preconditions:
         ``run_id`` is a non-empty run identifier; ``state`` is a JSON-shaped
-        dict of run-state fields.
+        dict of run-state fields; ``generation`` is the fencing generation
+        the calling workflow incarnation was dispatched with (default ``1``
+        for backward compatibility with a workflow-history replay predating
+        this parameter).
     Postconditions:
-        Delegates to ``investment_team.api.main._persist_run_state``
-        verbatim, which never raises (it logs and swallows any job-service
-        failure internally) — so this activity likewise never raises.
+        Checks ``run_id``'s fencing token first (see ``shared.fencing.
+        check_fencing_token``): raises a non-retryable ``ApplicationError``
+        instead of writing when ``generation`` is older than the run's
+        current persisted generation — a later restart has already minted a
+        newer one, so this write belongs to a superseded incarnation and
+        must not land. Otherwise delegates to ``investment_team.api.main.
+        _persist_run_state`` verbatim, which never raises on its own (it
+        logs and swallows any job-service failure internally).
+
+        Not a fully atomic check-then-write: the fencing read and the
+        eventual write are two separate job-service calls, so a restart
+        racing exactly between them is (rarely) still possible. This closes
+        the realistic window — the prior workflow is already confirmed
+        terminated before a restart mints its new generation — not a
+        mathematically perfect one.
     """
     from investment_team.api.main import _persist_run_state
+    from investment_team.strategy_lab.run_state import get_run_generation
+    from shared.fencing import check_fencing_token
 
+    try:
+        check_fencing_token(
+            agent_id=run_id,
+            resource="strategy_lab_run",
+            provided_token=generation,
+            current_token=get_run_generation(run_id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
     _persist_run_state(run_id, state, create=create)
 
 
@@ -578,20 +622,35 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
     Preconditions:
         ``params`` carries ``record`` (a ``StrategyLabRecord`` JSON dump from the
-        cycle workflow), and optionally ``signal_brief_storage`` (dict or None),
-        ``paper_trading_enabled`` (bool, default True), and
+        cycle workflow), ``run_id`` (the owning run), ``generation`` (the fencing
+        generation the calling workflow incarnation was dispatched with, default
+        ``1`` for backward compatibility), and optionally ``signal_brief_storage``
+        (dict or None), ``paper_trading_enabled`` (bool, default True), and
         ``paper_trading_lookback_days`` (int, default 365).
     Postconditions:
-        Returns ``{"record": <finalized StrategyLabRecord JSON dump>}`` — the same
-        record with ``paper_trading_*`` resolved and durably persisted. Raises
-        ``ApplicationError`` on an unexpected exception (paper-trading failures are
-        already non-fatal inside the helper).
+        Checks ``run_id``'s fencing token first (see ``shared.fencing.
+        check_fencing_token``, same semantics as ``persist_run_state_activity``):
+        raises a non-retryable ``ApplicationError`` instead of finalizing/persisting
+        when ``generation`` is stale, so a cycle record from a superseded incarnation
+        is never durably committed. Otherwise returns
+        ``{"record": <finalized StrategyLabRecord JSON dump>}`` — the same record
+        with ``paper_trading_*`` resolved and durably persisted. Raises
+        ``ApplicationError`` on any other unexpected exception (paper-trading
+        failures are already non-fatal inside the helper).
     """
     from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.run_state import get_run_generation
+    from shared.fencing import check_fencing_token
 
     record = StrategyLabRecord.parse_persisted(params["record"])
     try:
+        check_fencing_token(
+            agent_id=params["run_id"],
+            resource="strategy_lab_run",
+            provided_token=params.get("generation", 1),
+            current_token=get_run_generation(params["run_id"]),
+        )
         finalized = _finalize_strategy_lab_cycle_record(
             record,
             signal_brief_storage=params.get("signal_brief_storage"),

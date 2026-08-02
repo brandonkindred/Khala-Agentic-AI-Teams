@@ -2074,6 +2074,7 @@ def _build_run_state(
     tracker_merge_error_count: int = 0,
     completed_record_ids: Optional[List[Any]] = None,
     completed_batches: int = 0,
+    generation: int = 1,
 ) -> Dict[str, Any]:
     """Build a strategy-lab run-state dict, shared by run/resume/restart.
 
@@ -2086,9 +2087,13 @@ def _build_run_state(
     Postconditions:
         - Returns a new dict with ``status == "running"``. The ``contiguous_cycles``
           key is present iff ``contiguous_cycles`` is not ``None`` (the initial run
-          omits it; resume sets the offset; restart resets it to ``0``). Mutable
-          defaults (``errored_details``, ``completed_record_ids``) become fresh lists
-          when not supplied. Does not mutate its arguments.
+          omits it; resume sets the offset; restart resets it to ``0``). ``generation``
+          is always present (default ``1`` for a fresh run; resume carries the prior
+          value forward unchanged; restart passes a freshly minted value) — it fences
+          stale writes from a terminated incarnation's still-in-flight activities, see
+          ``shared.fencing.check_fencing_token``. Mutable defaults (``errored_details``,
+          ``completed_record_ids``) become fresh lists when not supplied. Does not
+          mutate its arguments.
     """
     state: Dict[str, Any] = {
         "run_id": run_id,
@@ -2108,6 +2113,7 @@ def _build_run_state(
         "batch_count": batch_count,
         "completed_batches": completed_batches,
         "current_batch": None,
+        "generation": generation,
     }
     if contiguous_cycles is not None:
         state["contiguous_cycles"] = contiguous_cycles
@@ -2620,6 +2626,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
             completed_record_ids=state.get("completed_record_ids", []),
             completed_batches=completed_batches,
+            # A resume continues the same incarnation rather than superseding
+            # one, so it carries the current generation forward unchanged
+            # (unlike restart, which mints a new one below).
+            generation=state.get("generation", 1),
         )
         with _lock:
             _active_runs[run_id] = resumed_state
@@ -2675,7 +2685,10 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - Rebuilds ``_active_runs[run_id]`` as a full reset — ``contiguous_cycles``
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
-          carried forward — and persists the new state.
+          carried forward — and persists the new state. A freshly minted
+          ``generation`` (atomically incremented in the job store) is set on
+          the new state, fencing out any write a still-in-flight activity
+          from the just-terminated workflow attempts afterward.
         - Dispatches the durable Temporal workflow starting at cycle 0. If
           that dispatch still 409s (a residual collision — e.g. a second
           restart/resume racing in after the termination check above), the
@@ -2697,22 +2710,35 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           silently resume — see ``_dispatch_strategy_lab_run``'s
           ``allow_already_started`` parameter; the optimistic reset is rolled
           back in this case, see Postconditions).
-        - ``HTTPException`` 503: Temporal is disabled/unavailable, or the
-          prior execution couldn't be resolved due to a Temporal-side error.
+        - ``HTTPException`` 503: Temporal is disabled/unavailable, the prior
+          execution couldn't be resolved due to a Temporal-side error, or
+          minting the new generation failed (job service unavailable).
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
     ``_require_run_transition_lock``, which reserves this run_id for the
     whole check→terminate→write→dispatch sequence below).
 
-    Known, accepted residual race (requires multiple unlikely events to
-    align; closing it is a real feature, not a quick patch — tracked as a
-    follow-up rather than fixed here):
-        - Confirming the old *workflow* terminated does not guarantee an
-          already in-flight, non-heartbeating *activity* has stopped —
-          Strategy Lab's activities aren't cooperatively cancellable, so one
-          can still commit a cycle record or paper trade after the new
-          cycle-0 workflow has started (tracked as #4029).
+    Generation fencing closes the durable-write side of the race left by
+    confirming the old *workflow* terminated: that confirmation alone does
+    not guarantee an already in-flight, non-heartbeating *activity* has
+    stopped — Strategy Lab's activities aren't cooperatively cancellable —
+    so without fencing one could still commit a cycle record or persist
+    progress after the new cycle-0 workflow has started. The generation
+    minted above is threaded through the new workflow's persist/finalize
+    activities (see ``shared.fencing.check_fencing_token``), so a stale
+    activity's write is rejected instead of silently landing.
+
+    Known, accepted residual limitation (the write is fenced, the
+    computation itself is not — closing that remaining gap is a real
+    feature, not a quick patch, tracked as a separate follow-up rather than
+    fixed here): a stale in-flight activity from the terminated incarnation
+    can still run to completion — burning time and cost on an LLM call or a
+    backtest — before its write is rejected as fenced; it just can no
+    longer corrupt the freshly restarted run's state. Cooperative
+    cancellation (checking ``activity.is_cancelled()``/heartbeating so a
+    terminated workflow's activities actually stop executing) would close
+    this remaining gap.
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged),
@@ -2777,6 +2803,22 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 ),
             ) from exc
 
+        # Mint a new generation for this incarnation: the fresh cycle-0
+        # workflow started below carries it through every persist/finalize
+        # activity, so a stale write from the just-terminated workflow's
+        # still-in-flight activity (terminating the workflow doesn't stop an
+        # already-dispatched, non-heartbeating activity) is fenced instead of
+        # silently landing. Atomic increment-and-read-back mirrors
+        # software_engineering_team/job_store.py's claim_resume.
+        client = _get_lab_run_job_client()
+        updated_generation_record = client.apply_and_get(run_id, increment={"generation": 1})
+        if not updated_generation_record:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to mint a new generation for this restart; job service unavailable.",
+            )
+        new_generation = int(updated_generation_record.get("generation", 1))
+
         restarted_state = _build_run_state(
             run_id,
             started_at=_now(),
@@ -2788,6 +2830,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # restart re-runs from cycle 0 instead of resuming a prior run's
             # contiguous-cycle count persisted on this run_id.
             contiguous_cycles=0,
+            generation=new_generation,
         )
         with _lock:
             _active_runs[run_id] = restarted_state

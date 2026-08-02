@@ -575,6 +575,12 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
+    class _GenerationClient:
+        def apply_and_get(self, jid, **kwargs):
+            return {"generation": 2}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _GenerationClient())
+
     persisted_calls = []
     monkeypatch.setattr(
         api_main,
@@ -883,6 +889,13 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     monkeypatch.setattr(api_main, "_persist_run_state", lambda rid, s, **k: persisted.update(s))
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
+
+    class _GenerationClient:
+        def apply_and_get(self, jid, **kwargs):
+            return {"generation": 2}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _GenerationClient())
+
     started = []
     monkeypatch.setattr(
         sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)

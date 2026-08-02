@@ -127,6 +127,31 @@ class _StubLabClient:
         self.deleted.append(jid)
         return jid in self.by_id
 
+    def apply_and_get(
+        self,
+        jid: str,
+        *,
+        merge_fields: Optional[Dict[str, Any]] = None,
+        merge_nested: Optional[Dict[str, Any]] = None,
+        append_to: Optional[Dict[str, List[Any]]] = None,
+        increment: Optional[Dict[str, int]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Minimal stand-in for JobServiceClient.apply_and_get's increment-and-read-back.
+
+        Auto-vivifies an entry for jid rather than requiring get_job/create_job to have
+        been called first (this stub's other write paths, e.g. update_job/create_job,
+        aren't implemented at all — callers rely on _persist_run_state swallowing that
+        AttributeError), so tests exercising restart's generation mint don't need to
+        separately seed the job store.
+        """
+        record = self.by_id.setdefault(jid, {"job_id": jid})
+        if increment:
+            for key, delta in increment.items():
+                record[key] = (record.get(key) or 0) + delta
+        if merge_fields:
+            record.update(merge_fields)
+        return dict(record)
+
 
 # ---------------------------------------------------------------------------
 # _StubLabClient.get_job contract
@@ -176,6 +201,22 @@ def test_run_strategy_lab_starts_run_when_idle(monkeypatch: pytest.MonkeyPatch, 
     assert body["total_cycles"] == 2
     # The run was registered.
     assert body["run_id"] in api_main._active_runs
+
+
+def test_run_strategy_lab_initial_state_has_generation_one(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A fresh run's initial state carries generation 1 — the default incarnation
+    a restart later mints a superseding value against."""
+    from investment_team.api import main as api_main
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    assert api_main._active_runs[run_id]["generation"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +332,21 @@ def test_resume_strategy_lab_run_carries_forward_tracker_merge_error_count(
     assert api_main._active_runs["run-h"]["errored_cycles"] == 3
 
 
+def test_resume_strategy_lab_run_carries_forward_generation_unchanged(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A resume continues the same incarnation rather than superseding one, so it
+    must carry the current generation forward unchanged (unlike restart, which
+    mints a new one)."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-i"] = _resumable_state("run-i", generation=4)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+    resp = api_client.post("/strategy-lab/runs/run-i/resume")
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-i"]["generation"] == 4
+
+
 def test_restart_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
@@ -344,6 +400,114 @@ def test_restart_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, ap
     body = resp.json()
     assert body["run_id"] == "run-g"
     assert "restarted" in body["message"]
+
+
+def test_restart_strategy_lab_run_mints_new_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Restart mints a fresh generation (atomically incremented, not just reset to
+    a fixed value) so the new incarnation's writes fence out any stale activity
+    still in flight from the terminated one."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-gen"] = {
+        "run_id": "run-gen",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 3,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-gen", "generation": 3}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-gen/restart")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-gen"]["generation"] == 4
+    assert stub.by_id["run-gen"]["generation"] == 4
+
+
+def test_restart_strategy_lab_run_returns_503_when_generation_mint_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A job-service hiccup during the generation mint must not silently restart
+    without a fenced generation — it should fail loudly (503) instead."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintfail"] = {
+        "run_id": "run-mintfail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _NoApplyClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):  # simulates job-service unavailability
+            return None
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _NoApplyClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintfail/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    # State was not overwritten by a partial restart.
+    assert api_main._active_runs["run-mintfail"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintfail"]["generation"] == 1
+
+
+def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """End-to-end regression (the literal acceptance criterion): a stale activity
+    from the pre-restart incarnation — captured with the OLD generation before the
+    restart happened — must be rejected by both persist_run_state_activity and
+    finalize_cycle_record_activity after the restart, proving it can no longer
+    corrupt the freshly restarted run's state."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+    from investment_team.strategy_lab.temporal import activities as act
+
+    api_main._active_runs["run-stale"] = {
+        "run_id": "run-stale",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-stale", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    # Capture the pre-restart generation, as a stale in-flight activity would have.
+    stale_generation = run_state.get_run_generation("run-stale")
+    assert stale_generation == 1
+
+    resp = api_client.post("/strategy-lab/runs/run-stale/restart")
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-stale"]["generation"] == 2
+
+    from temporalio.exceptions import ApplicationError
+
+    with pytest.raises(ApplicationError) as persist_exc:
+        act.persist_run_state_activity(
+            "run-stale", {"status": "running"}, generation=stale_generation
+        )
+    assert persist_exc.value.type == "StaleFencingTokenError"
+
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+    with pytest.raises(ApplicationError) as finalize_exc:
+        act.finalize_cycle_record_activity(
+            {
+                "run_id": "run-stale",
+                "generation": stale_generation,
+                "record": {"lab_record_id": "stale-record"},
+            }
+        )
+    assert finalize_exc.value.type == "StaleFencingTokenError"
+
+    # The stale record never got as far as being persisted.
+    assert "stale-record" not in api_main._active_runs["run-stale"].get("completed_record_ids", [])
 
 
 # ---------------------------------------------------------------------------

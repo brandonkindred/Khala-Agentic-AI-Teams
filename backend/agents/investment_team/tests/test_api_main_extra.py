@@ -1008,6 +1008,90 @@ def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch)
     assert out["status"] == "completed"
 
 
+# ---------------------------------------------------------------------------
+# get_run_generation + _build_run_state's generation field (#4029)
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_generation_defaults_to_one_for_unknown_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    assert run_state.get_run_generation("run-unknown") == 1
+
+
+def test_get_run_generation_reads_persisted_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": 3}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation("run-g3") == 3
+
+
+def test_get_run_generation_reads_from_active_runs_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    def _fail(*a, **k):
+        raise AssertionError("must not fall back to the job service when active_runs has an entry")
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", _fail)
+    monkeypatch.setitem(run_state.active_runs, "run-live", {"generation": 5})
+    try:
+        assert run_state.get_run_generation("run-live") == 5
+    finally:
+        del run_state.active_runs["run-live"]
+
+
+@pytest.mark.parametrize("bad_value", [None, "not-a-number", [], 0, -1])
+def test_get_run_generation_malformed_or_nonpositive_value_defaults_to_one(
+    monkeypatch: pytest.MonkeyPatch, bad_value
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": bad_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation("run-bad") == 1
+
+
+def test_build_run_state_generation_defaults_to_one() -> None:
+    from investment_team.api import main as api_main
+
+    state = api_main._build_run_state(
+        "run-fresh",
+        started_at="2024-01-01T00:00:00Z",
+        total_cycles=1,
+        batch_size=1,
+        batch_count=1,
+        request_payload={},
+    )
+    assert state["generation"] == 1
+
+
+def test_build_run_state_generation_override_is_carried_through() -> None:
+    from investment_team.api import main as api_main
+
+    state = api_main._build_run_state(
+        "run-restarted",
+        started_at="2024-01-01T00:00:00Z",
+        total_cycles=1,
+        batch_size=1,
+        batch_count=1,
+        request_payload={},
+        generation=7,
+    )
+    assert state["generation"] == 7
+
+
 def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     from investment_team.api import main as api_main
 

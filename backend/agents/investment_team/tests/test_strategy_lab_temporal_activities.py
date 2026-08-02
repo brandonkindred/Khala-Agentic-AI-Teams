@@ -183,6 +183,76 @@ def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
     assert captured == {"run_id": "run-1", "state": {"status": "running"}, "create": True}
 
 
+# ---------------------------------------------------------------------------
+# Generation fencing (#4029)
+# ---------------------------------------------------------------------------
+
+
+def test_persist_run_state_activity_rejects_stale_generation(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+
+    persisted = []
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.persist_run_state_activity("run-1", {"status": "running"}, generation=1)
+
+    assert exc_info.value.non_retryable is True
+    assert exc_info.value.type == "StaleFencingTokenError"
+    assert persisted == []  # the write never happened
+
+
+def test_persist_run_state_activity_accepts_current_or_newer_generation(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+
+    captured = {}
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_persist_run_state",
+        lambda run_id, state, *, create=False: captured.update(
+            run_id=run_id, state=state, create=create
+        ),
+    )
+
+    # Same generation: accepted (fan-out from the same incarnation).
+    act.persist_run_state_activity("run-1", {"status": "running"}, generation=2)
+    assert captured["state"] == {"status": "running"}
+
+    # Newer generation: also accepted.
+    act.persist_run_state_activity("run-1", {"status": "completed"}, generation=3)
+    assert captured["state"] == {"status": "completed"}
+
+
+def test_persist_run_state_activity_default_generation_backward_compat(monkeypatch):
+    """Omitting generation entirely (a pre-fencing caller) defaults to 1, which is
+    accepted against a fresh run's persisted generation of 1."""
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 1)
+
+    captured = {}
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_persist_run_state",
+        lambda run_id, state, *, create=False: captured.update(state=state),
+    )
+
+    act.persist_run_state_activity("run-1", {"status": "running"})
+    assert captured["state"] == {"status": "running"}
+
+
 def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
     from investment_team.api import main as api_main
     from investment_team.models import StrategyLabRecord
@@ -556,6 +626,8 @@ def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
 
     out = act.finalize_cycle_record_activity(
         {
+            "run_id": "run-final-1",
+            "generation": 1,
             "record": {"lab_record_id": "raw-1"},
             "signal_brief_storage": {"s": 1},
             "paper_trading_enabled": False,
@@ -567,6 +639,57 @@ def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
     assert captured["signal_brief_storage"] == {"s": 1}
     assert captured["paper_trading_enabled"] is False
     assert captured["paper_trading_lookback_days"] == 90
+
+
+def test_finalize_cycle_record_activity_rejects_stale_generation(monkeypatch):
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+
+    finalize_calls = []
+    monkeypatch.setattr(
+        api_main,
+        "_finalize_strategy_lab_cycle_record",
+        lambda *a, **k: finalize_calls.append((a, k)),
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.finalize_cycle_record_activity(
+            {"run_id": "run-final-2", "generation": 1, "record": {"lab_record_id": "raw-1"}}
+        )
+
+    assert exc_info.value.non_retryable is True
+    assert exc_info.value.type == "StaleFencingTokenError"
+    assert finalize_calls == []  # the durable record write never happened
+
+
+def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation", lambda run_id: 2)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-final"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    out = act.finalize_cycle_record_activity(
+        {"run_id": "run-final-3", "generation": 2, "record": {"lab_record_id": "raw-1"}}
+    )
+    assert out["record"] == {"lab_record_id": "rec-final"}
 
 
 def test_merge_wave_results_activity_merges_in_cycle_index_order():
