@@ -1833,11 +1833,37 @@ def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
     return _strategy_lab_external_terminal_status(run_id) is not None
 
 
-def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = False) -> None:
-    """Write the run state to the job service so it survives restarts."""
+def _persist_run_state(
+    run_id: str,
+    state: Dict[str, Any],
+    *,
+    create: bool = False,
+    exclude_fields: frozenset = frozenset(),
+) -> None:
+    """Write the run state to the job service so it survives restarts.
+
+    Preconditions:
+        - ``exclude_fields`` names keys of ``state`` to omit from the write
+          entirely (beyond the always-omitted ``run_id``/``status``).
+    Postconditions:
+        - ``update_job``/``create_job`` merge the written fields into the
+          job's durable data (a partial merge, not a full replace — see
+          ``job_service.db.update_job``): any field named in
+          ``exclude_fields`` is therefore left at whatever value the durable
+          store already holds, not overwritten with this call's (possibly
+          stale) snapshot. ``resume_strategy_lab_run`` relies on this for
+          ``generation``: it already read the current durable value before
+          calling this, but a concurrent restart on another process/replica
+          could mint a newer one in the gap between that read and this
+          write; omitting ``generation`` here means such a write can never
+          regress the durable high-water mark back down, without needing an
+          atomic conditional-write primitive the job service doesn't expose.
+    """
     try:
         client = _get_lab_run_job_client()
-        fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
+        fields = {
+            k: v for k, v in state.items() if k not in ("run_id", "status") and k not in exclude_fields
+        }
         if create:
             client.create_job(run_id, status=state.get("status", "running"), **fields)
         else:
@@ -2578,7 +2604,12 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
           progress — ``completed_record_ids``/``errored_cycles``/
           ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
-          — and persists the new state.
+          — and persists the new state. The durable write omits
+          ``generation`` (see ``_persist_run_state``'s ``exclude_fields``):
+          the value read above is a snapshot, and a concurrent restart on
+          another process/replica could mint a newer durable value in the
+          gap before this write lands, so this write must never be able to
+          regress the durable generation back down to that stale snapshot.
         - Dispatches the durable Temporal workflow from the first
           not-yet-contiguously-completed cycle, so no already-persisted cycle
           is re-run (and thus never duplicated).
@@ -2665,7 +2696,14 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         )
         with _lock:
             _active_runs[run_id] = resumed_state
-        _persist_run_state(run_id, resumed_state)
+        # Exclude "generation" from this write: current_generation above is a
+        # snapshot from just before this point, and a concurrent restart on
+        # another process/replica could mint a newer durable value in the gap
+        # between that read and this write. update_job/create_job merge
+        # fields into the durable record rather than replacing it wholesale,
+        # so omitting the key here means this write can never regress the
+        # durable generation back down to a stale snapshot.
+        _persist_run_state(run_id, resumed_state, exclude_fields=frozenset({"generation"}))
 
         # The Temporal activity derives its resume offset from the persisted
         # contiguous-cycle count (set above), so a durable resume picks up where the

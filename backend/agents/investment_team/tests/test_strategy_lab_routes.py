@@ -152,6 +152,18 @@ class _StubLabClient:
             record.update(merge_fields)
         return dict(record)
 
+    def update_job(self, jid: str, *, heartbeat: bool = True, **fields: Any) -> None:
+        """Minimal stand-in for JobServiceClient.update_job's partial merge.
+
+        Merges only the explicitly-provided fields into the record (matching
+        job_service.db.update_job's "merge fields into the job's data" partial
+        semantics, not a full replace) -- a field _persist_run_state's
+        exclude_fields omitted from this call is left untouched, exactly as
+        the real job service behaves.
+        """
+        record = self.by_id.setdefault(jid, {"job_id": jid})
+        record.update(fields)
+
 
 # ---------------------------------------------------------------------------
 # _StubLabClient.get_job contract
@@ -371,6 +383,43 @@ def test_resume_strategy_lab_run_uses_durable_generation_not_stale_local_cache(
     assert resp.status_code == 200
     assert api_main._active_runs["run-j"]["generation"] == 3
     assert stub.by_id["run-j"]["generation"] == 3  # not regressed back to 1
+
+
+def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_request(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: even after reading the durable generation, resume's own
+    _persist_run_state write must not clobber a NEWER durable value minted by
+    a concurrent restart on another process/replica in the gap between that
+    read and this write. Simulated by bumping the stub's durable generation
+    right after resume's one-and-only read of it, mimicking a same-request
+    race window rather than a pre-existing stale cache."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-race"] = _resumable_state("run-race", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-race", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_with_concurrent_restart(jid: str):
+        read_calls.append(jid)
+        result = real_get_job(jid)
+        # Simulate a restart on another replica minting generation 5 in the
+        # durable store immediately after this resume's read of it.
+        stub.by_id[jid]["generation"] = 5
+        return result
+
+    monkeypatch.setattr(stub, "get_job", _get_job_with_concurrent_restart)
+
+    resp = api_client.post("/strategy-lab/runs/run-race/resume")
+
+    assert resp.status_code == 200
+    assert read_calls == ["run-race"]  # confirms the race was injected at the right point
+    # The durable value must still be 5 -- resume's write must not have
+    # regressed it back down to the stale 1 it read moments earlier.
+    assert stub.by_id["run-race"]["generation"] == 5
 
 
 def test_resume_strategy_lab_run_returns_503_when_generation_lookup_fails(
