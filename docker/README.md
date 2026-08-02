@@ -143,6 +143,19 @@ the proxy process's own cold path, instead of the full
 
 See [`docs/UNIFIED_API_DEPENDENCY_AUDIT.md`](../docs/UNIFIED_API_DEPENDENCY_AUDIT.md) for the full package-by-package audit behind this split.
 
+## Team-assistant kill-switch and lazy mount
+
+Team-assistant conversational sub-apps (`<team-prefix>/assistant`) are never
+all mounted eagerly at `khala` startup. Each one is registered as a
+lightweight mount spec and only actually constructed and mounted on that
+team's first matching request — a cold-request cost paid once per team, only
+for teams that receive assistant traffic. Set
+`UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false` (`docker/.env.example`) to skip
+registration entirely: zero assistant sub-apps are ever mounted, regardless
+of traffic, while team proxy routes and health checks stay unaffected. See
+[`docs/ENV_VARS.md`](../docs/ENV_VARS.md#unified_api_team_assistants_enabled)
+for full detail.
+
 ## Agents and Postgres
 
 When running in this stack, the **khala** service uses the **stack’s Postgres** (database `khala`, user `khala`) via **POSTGRES_HOST=postgres**. The container does not start its own PostgreSQL. The init script in `docker/postgres/init/` creates the `khala` database and user on first run.
