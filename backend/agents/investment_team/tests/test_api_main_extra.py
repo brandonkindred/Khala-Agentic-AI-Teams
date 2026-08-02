@@ -22,11 +22,13 @@ fixtures. Targets:
 * ``delete_strategy_lab_record`` success path.
 * ``complete_advisor_session`` happy path.
 * ``RunStrategyLabRequest`` batch_size/batch_count bounds.
+* ``acquire_run_transition_lock`` per-run_id serialization primitive.
 """
 
 from __future__ import annotations
 
 import threading
+import uuid
 from typing import Any, Dict, List
 
 import pytest
@@ -162,6 +164,116 @@ def test_env_positive_int_returns_parsed_value(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setenv("MY_TEST_INT", "42")
     assert env_positive_int("MY_TEST_INT", 1) == 42
+
+
+# ---------------------------------------------------------------------------
+# acquire_run_transition_lock
+# ---------------------------------------------------------------------------
+#
+# Each test uses a fresh uuid4 run_id so tests never contend with each other
+# via the shared (never-evicted) run_state._run_transition_locks registry.
+
+
+def _fresh_run_id() -> str:
+    return f"run-transition-lock-test-{uuid.uuid4().hex}"
+
+
+def test_acquire_run_transition_lock_returns_lock_when_free() -> None:
+    from investment_team.strategy_lab.run_state import acquire_run_transition_lock
+
+    run_id = _fresh_run_id()
+    run_lock = acquire_run_transition_lock(run_id)
+    assert run_lock is not None
+    assert run_lock.locked()
+    run_lock.release()
+
+
+def test_acquire_run_transition_lock_returns_none_when_already_held() -> None:
+    from investment_team.strategy_lab.run_state import acquire_run_transition_lock
+
+    run_id = _fresh_run_id()
+    first = acquire_run_transition_lock(run_id)
+    assert first is not None
+    try:
+        second = acquire_run_transition_lock(run_id)
+        assert second is None
+    finally:
+        first.release()
+
+
+def test_acquire_run_transition_lock_reacquire_after_release() -> None:
+    from investment_team.strategy_lab.run_state import acquire_run_transition_lock
+
+    run_id = _fresh_run_id()
+    first = acquire_run_transition_lock(run_id)
+    assert first is not None
+    first.release()
+
+    second = acquire_run_transition_lock(run_id)
+    assert second is not None
+    second.release()
+
+
+def test_acquire_run_transition_lock_different_run_ids_independent() -> None:
+    from investment_team.strategy_lab.run_state import acquire_run_transition_lock
+
+    run_id_a = _fresh_run_id()
+    run_id_b = _fresh_run_id()
+    lock_a = acquire_run_transition_lock(run_id_a)
+    lock_b = acquire_run_transition_lock(run_id_b)
+    try:
+        assert lock_a is not None
+        assert lock_b is not None
+        assert lock_a is not lock_b
+    finally:
+        lock_a.release()
+        lock_b.release()
+
+
+def test_acquire_run_transition_lock_same_run_id_returns_same_object() -> None:
+    """Regression guard for the registry's core invariant: two callers for
+    the same run_id must contend for the SAME Lock instance, not two
+    different ones — otherwise both would "acquire" independently and the
+    guard would silently stop serializing anything."""
+    from investment_team.strategy_lab.run_state import (
+        _run_transition_locks,
+        acquire_run_transition_lock,
+    )
+
+    run_id = _fresh_run_id()
+    run_lock = acquire_run_transition_lock(run_id)
+    assert run_lock is not None
+    try:
+        assert _run_transition_locks[run_id] is run_lock
+    finally:
+        run_lock.release()
+
+
+def test_acquire_run_transition_lock_concurrent_same_run_id_exactly_one_wins() -> None:
+    """Real multi-thread contention test of the primitive itself (not a
+    probabilistic torn-read — this is the one case where actual OS-thread
+    concurrency is the right tool, since acquire(blocking=False) is meant to
+    behave correctly under genuine simultaneous callers)."""
+    from investment_team.strategy_lab.run_state import acquire_run_transition_lock
+
+    run_id = _fresh_run_id()
+    n_threads = 16
+    barrier = threading.Barrier(n_threads)
+    results: List[Any] = [None] * n_threads
+
+    def _worker(idx: int) -> None:
+        barrier.wait()
+        results[idx] = acquire_run_transition_lock(run_id)
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    winners = [r for r in results if r is not None]
+    assert len(winners) == 1
+    winners[0].release()
 
 
 # ---------------------------------------------------------------------------
