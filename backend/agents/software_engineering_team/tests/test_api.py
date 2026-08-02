@@ -715,24 +715,3 @@ def test_resolve_repo_path_invalid_path_is_400() -> None:
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path("/nonexistent/xyz", None)
     assert exc.value.status_code == 400
-
-
-def test_reject_sprint_under_temporal_raises_when_both_set() -> None:
-    """Temporal + sprint_id is a 400 client-input error."""
-    from fastapi import HTTPException
-
-    from software_engineering_team.api.routes.jobs import _reject_sprint_under_temporal
-
-    with pytest.raises(HTTPException) as exc:
-        _reject_sprint_under_temporal(True, "sprint-1", detail="nope")
-    assert exc.value.status_code == 400
-    assert exc.value.detail == "nope"
-
-
-def test_reject_sprint_under_temporal_noop_when_not_both() -> None:
-    """No rejection when Temporal is off, or when sprint_id is absent."""
-    from software_engineering_team.api.routes.jobs import _reject_sprint_under_temporal
-
-    assert _reject_sprint_under_temporal(False, "sprint-1", detail="nope") is None
-    assert _reject_sprint_under_temporal(True, None, detail="nope") is None
-    assert _reject_sprint_under_temporal(False, None, detail="nope") is None

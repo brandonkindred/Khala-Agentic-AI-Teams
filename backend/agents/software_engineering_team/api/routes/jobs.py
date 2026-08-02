@@ -81,25 +81,6 @@ def _resolve_repo_path(repo_path: str | Path, sprint_id: Any) -> Path:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-def _reject_sprint_under_temporal(temporal_enabled: bool, sprint_id: Any, *, detail: str) -> None:
-    """Reject a sprint-mode job under Temporal with a 400 before any state mutation.
-
-    sprint_id under Temporal is not yet plumbed; this is a client-input error, not
-    infrastructure, so callers invoke it *before* create_job / the launch
-    try-except (whose broad ``except`` would otherwise re-wrap the 400 as a 503).
-
-    Preconditions:
-        - ``temporal_enabled`` is ``True`` when the caller's dispatch path is
-          Temporal (currently always, since dispatch is unconditional);
-          ``detail`` is the caller-specific 400 message.
-    Postconditions:
-        - Raises ``HTTPException(400, detail)`` when ``temporal_enabled`` is
-          ``True`` and ``sprint_id`` is not ``None``; returns ``None`` otherwise.
-    """
-    if temporal_enabled and sprint_id is not None:
-        raise HTTPException(status_code=400, detail=detail)
-
-
 @router.post(
     "/run-team",
     response_model=RunTeamResponse,
@@ -110,20 +91,6 @@ def _reject_sprint_under_temporal(temporal_enabled: bool, sprint_id: Any, *, det
 def run_team(request: RunTeamRequest) -> RunTeamResponse:
     """Start the software engineering team on a work folder."""
     repo_path = _resolve_repo_path(request.repo_path, request.sprint_id)
-
-    # Reject sprint_id *before* create_job and *outside* the launch
-    # try/except — otherwise the broad `except Exception` below catches
-    # the 400 and re-wraps it as a 503 "Failed to start workflow". Dispatch
-    # is unconditionally Temporal now, and start_run_team_workflow's input
-    # has no sprint_id, so this rejects regardless of is_temporal_enabled()
-    # (unlike the pre-unconditional-dispatch check this replaces). Plumbing
-    # sprint_id through Temporal is a follow-up; this is a client-input
-    # error, not infra.
-    _reject_sprint_under_temporal(
-        True,
-        request.sprint_id,
-        detail="sprint_id is not yet supported; omit sprint_id.",
-    )
 
     # Validate `sprint_id` exists *and has planned scope* before
     # enqueuing the job — otherwise a typo, a deleted sprint, or a
@@ -148,7 +115,7 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
 
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        start_run_team_workflow(job_id, str(repo_path))
+        start_run_team_workflow(job_id, str(repo_path), sprint_id=request.sprint_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -461,17 +428,6 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
     # to the orchestrator/workflow from the value persisted at creation.
     _resolve_repo_path(repo_path, sprint_id)
 
-    # Same sprint_id guard as POST /run-team: validate BEFORE flipping the
-    # job to running, so the guard firing can't leave the job stuck in
-    # `running` with no workflow running (recoverable only via the
-    # stale-job monitor). Dispatch is unconditionally Temporal now, so this
-    # rejects regardless of is_temporal_enabled().
-    _reject_sprint_under_temporal(
-        True,
-        sprint_id,
-        detail="sprint_id is not yet supported; this job was created with sprint_id and cannot be resumed.",
-    )
-
     # Re-validate the sprint scope on resume — the sprint may have been
     # deleted or unplanned since the job was created. Surfaces synchronously
     # before flipping the job to `running` (Codex review on PR #396).
@@ -495,7 +451,10 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         # Pass previously submitted answers so the orchestrator doesn't re-ask questions.
         submitted_answers = data.get("submitted_answers") or None
         start_run_team_workflow(
-            job_id, str(repo_path), resolved_questions_override=submitted_answers
+            job_id,
+            str(repo_path),
+            resolved_questions_override=submitted_answers,
+            sprint_id=sprint_id,
         )
     except (
         Exception
@@ -559,14 +518,6 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     # sprint-scoped restart goes back through the synthesized-spec
     # path instead of silently falling back to repo spec parsing.
 
-    # Dispatch is unconditionally Temporal now, so this rejects regardless
-    # of is_temporal_enabled().
-    _reject_sprint_under_temporal(
-        True,
-        sprint_id,
-        detail="sprint_id is not yet supported; this job was created with sprint_id and cannot be restarted.",
-    )
-
     # Re-validate the sprint scope BEFORE `reset_job` — otherwise a
     # restart with a deleted/unplanned sprint would discard the prior
     # job state, then fail asynchronously. Codex review on PR #396.
@@ -578,7 +529,7 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     try:  # pragma: no cover  # integration-only: spawns Temporal workflow for restart
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
-        start_run_team_workflow(job_id, str(repo_path))
+        start_run_team_workflow(job_id, str(repo_path), sprint_id=sprint_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
