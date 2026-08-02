@@ -41,9 +41,10 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
     - package.json with @angular/core or @angular/common -> Angular
     - package.json with react or react-dom -> React
     - package.json with vue -> Vue
-    - vue.config.js, vite.config.ts, or vite.config.js, plus a *.vue file -> Vue
-    - vue.config.js, vite.config.ts, or vite.config.js, with no *.vue file but a
-      *.jsx or *.tsx file -> React (a Vite project defaults to React tooling)
+    - vue.config.js (Vue CLI-specific) -> Vue
+    - vite.config.ts or vite.config.js, plus a *.vue file -> Vue
+    - vite.config.ts or vite.config.js, with no *.vue file but a *.jsx or *.tsx
+      file -> React (Vite is framework-agnostic, unlike vue.config.js)
 
     An unreadable directory encountered while scanning for these markers is treated
     as "no framework detected" rather than raising.
@@ -82,17 +83,15 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             pass
 
-    # Check for framework-specific files (Vite or Vue-CLI config)
-    if (
-        (repo_path / "vue.config.js").exists()
-        or (repo_path / "vite.config.ts").exists()
-        or (repo_path / "vite.config.js").exists()
-    ):
+    # vue.config.js is Vue CLI-specific (unlike Vite, no other framework uses it)
+    if (repo_path / "vue.config.js").exists():
+        return "vue"
+
+    # vite.config.ts/js is framework-agnostic; check for Vue markers, then React
+    if (repo_path / "vite.config.ts").exists() or (repo_path / "vite.config.js").exists():
         try:
-            # Could be React or Vue with Vite; check for Vue-specific markers first
             if any(repo_path.rglob("*.vue")):
                 return "vue"
-            # If no Vue markers, look for React-specific markers
             if any(repo_path.rglob("*.jsx")) or any(repo_path.rglob("*.tsx")):
                 return "react"
         except (OSError, UnicodeDecodeError):

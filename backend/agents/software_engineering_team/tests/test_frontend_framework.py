@@ -146,6 +146,14 @@ def test_detect_framework_from_project_react_via_vite_config(tmp_path: Path) -> 
     assert detect_framework_from_project(tmp_path) == "react"
 
 
+def test_detect_framework_from_project_vue_config_with_jsx_stays_vue(tmp_path: Path) -> None:
+    """vue.config.js is Vue-specific: a Vue CLI project rendering via JSX/TSX (no *.vue
+    files) must still resolve to Vue, not fall through to the React marker fallback."""
+    (tmp_path / "vue.config.js").write_text("")
+    (tmp_path / "App.tsx").write_text("export default {}")
+    assert detect_framework_from_project(tmp_path) == "vue"
+
+
 def test_detect_framework_from_project_vite_config_no_markers(tmp_path: Path) -> None:
     """Vite config with no Vue or React markers returns None (no false positive)."""
     (tmp_path / "vite.config.ts").write_text("")
