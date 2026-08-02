@@ -249,6 +249,24 @@ def test_parse_spec_activity_exception_path(
     assert failure_records[-1].trace_id == "parse-spec-trace-id"
 
 
+def test_parse_spec_activity_accepts_sprint_id_without_using_it_yet(
+    tmp_path, patched_job_store
+) -> None:
+    """sprint_id is accepted by the signature (V2 prep) but not yet forwarded into
+    sprint-scope spec synthesis — passing it doesn't change behavior. Same missing-spec
+    failure as test_parse_spec_activity_exception_path, now with sprint_id supplied."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ps-sprint", repo_path=str(tmp_path))
+    with pytest.raises(Exception):
+        activities.parse_spec_activity(
+            "ps-sprint", str(tmp_path), trace_id="t1", sprint_id="sprint-1"
+        )
+    job = js.get_job("ps-sprint")
+    assert job["status"] == js.JOB_STATUS_FAILED
+
+
 def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:
     """Cover the outer except in plan_project_activity.
 
