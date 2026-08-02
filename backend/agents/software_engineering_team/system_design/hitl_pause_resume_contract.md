@@ -334,10 +334,19 @@ while True:
       SE Temporal jobs would have their job-store `waiting_for_answers` flag
       cleared but their workflow never learns of it, and it waits
       indefinitely.
-    - Both `await handle.signal("submit_answers", {"resume_token":
-      client_resume_token, "answers": answers})` — a single dict payload,
-      using the client-echoed token described above and matching this
-      repo's single-payload signal convention.
+    - Both routes are plain synchronous `def` handlers today
+      (`coding_team_hitl.py:23`, `hitl.py:42`), and the Temporal client is
+      owned by the *worker's* event loop, not the FastAPI request loop —
+      `await handle.signal(...)` directly in the route is both invalid
+      syntax in a sync `def` and, even made `async`, would use a client
+      bound to the wrong loop. Use the existing cross-loop bridge this repo
+      already built for exactly this: `signal_workflow_sync(workflow_id,
+      "submit_answers", {"resume_token": client_resume_token, "answers":
+      answers})` (`shared/temporal/runner.py:270-300`, which schedules
+      `handle.signal` onto the worker loop via
+      `asyncio.run_coroutine_threadsafe` and blocks for delivery) — a single
+      dict payload, using the client-echoed token described above and
+      matching this repo's single-payload signal convention.
   - **Everything else keeps today's store-and-clear behavior unchanged** —
     write `submitted_answers` and clear `waiting_for_answers` in the job
     record directly, since there is no signal handler to reach:
@@ -426,30 +435,42 @@ while True:
     alongside the others, since it has no `request` dict for the workflow to
     set a bare key on.
 
+## Decided: source-of-truth ownership
+
+Earlier drafts of this contract left ownership open, but everything in §§1-3
+above — the idempotent-retry rule, early-signal buffering, the
+`acknowledged_resume_token` protocol, the mode-branched answers routes, and
+`resume_token` in status responses — is written assuming one specific answer,
+so it is decided here rather than left ambiguous: **the job-store record
+stays authoritative for pause state.** The workflow's `submit_answers`
+signal and `pending_questions`/`status` query are thin, workflow-local
+proxies (buffered/gated state for correctness across the pause boundary),
+not an alternate source of truth — the job record is what a retried
+activity, a polling REST client, and the existing thread-mode/audit surface
+all agree on. A workflow-owned alternative (durable workflow state as the
+source of truth, job-store as an async mirror) is a materially different
+design that would invalidate every mechanism above; if a future sub-issue
+wants to pursue it, that is a new contract, not an extension of this one.
+
 ## Open questions (flagged, not resolved by this spike)
 
-1. **Source-of-truth ownership.** Does the job-store record stay authoritative
-   for pause state (workflow signal/query handlers just proxy reads/writes to
-   it), or does pause state move into the workflow's own durable state, with
-   the job-store record becoming an async mirror kept only for the existing
-   REST/audit surface?
-2. **`wait_condition` timeout.** Does it get a timeout mirroring today's
+1. **`wait_condition` timeout.** Does it get a timeout mirroring today's
    fail-closed `hitl.answer_wait_timeout_s()` (timeout → job fails), or does
    it wait indefinitely and rely on some other mechanism (e.g. a workflow
    timer signal) for staleness handling?
-3. **Round-trip granularity.** One signal round-trip per pause point (matches
+2. **Round-trip granularity.** One signal round-trip per pause point (matches
    today's three independent `_run_pause_cycle` call sites), or batch
    multiple pending questions into a single richer payload? Recommendation:
    one round-trip per pause point — the entry gate, Tech Lead clarify loop,
    and per-worker escalation are already independent call sites with
    different resume semantics, and worker-level escalation in particular is
    concurrent with other in-flight work.
-4. **GitHub-hook flow.** Should posting the pause as a GitHub issue comment
+3. **GitHub-hook flow.** Should posting the pause as a GitHub issue comment
    (`run-from-github`'s `on_pause` callback, `hitl._format_questions_comment`)
    move into an activity invoked right after the workflow observes
    `"paused"` (so it's retryable/durable like other Temporal activities), or
    stay driven inline from the orchestrator as it is today?
-5. **Duplicate poll loops.** `hitl.py`, SE `orchestrator.py`'s
+4. **Duplicate poll loops.** `hitl.py`, SE `orchestrator.py`'s
    `_wait_for_user_answers`, and PRA's `user_communication.wait_for_answers`
    are three independently-implemented, near-duplicate poll loops. Consolidating
    them is out of scope for the coding-team-focused redesign under #3968 and
