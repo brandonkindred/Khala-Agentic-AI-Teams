@@ -79,11 +79,17 @@ search) instead of isolated snippets.
   time-degrading real provider does not systematically disadvantage
   whichever path always ran second — repeating with a fixed order would
   otherwise amplify that bias instead of averaging it out. Each path's
-  pooled findings are deduplicated independently (`_dedupe_pooled`) before
-  the cross-path diff, so a finding one path emits in every repeat and the
-  other emits in only one repeat still counts as a single match — without
-  this, the unequal pooled counts would surface as spurious `lost`/`added`
-  noise rather than the one real (in)consistency signal.
+  findings are deduplicated across repeats independently (`_dedupe_pooled`)
+  before the cross-path diff, so a finding one path emits in every repeat and
+  the other emits in only one repeat still counts as a single match — without
+  this, the unequal counts would surface as spurious `lost`/`added` noise
+  rather than the one real (in)consistency signal. Deduplication is
+  repeat-aware: it only collapses a finding against one already kept from a
+  STRICTLY EARLIER repeat, never against another finding from the SAME
+  repeat, so two genuinely distinct findings one run co-emits (e.g. two
+  different architecture violations in the same file, worded similarly
+  enough to score above the match threshold) are both preserved rather than
+  being silently merged into one.
 - **What counts as a candidate regression:** a `lost` entry (old path found
   it, new path didn't) on any submission is the signal this whole exercise
   exists to catch, and an `added` entry (new path found it, old path didn't)

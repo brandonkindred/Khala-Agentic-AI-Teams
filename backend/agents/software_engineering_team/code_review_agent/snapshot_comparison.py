@@ -323,17 +323,26 @@ def _finding_similarity(a: CodeReviewIssue, b: CodeReviewIssue) -> float:
     return score
 
 
-def _dedupe_pooled(findings: Sequence[CodeReviewIssue]) -> List[CodeReviewIssue]:
-    """Collapse near-duplicate findings pooled across repeats of one path.
+def _dedupe_pooled(runs: Sequence[Sequence[CodeReviewIssue]]) -> List[CodeReviewIssue]:
+    """Collapse cross-repeat duplicate findings for one path, one repeat at a time.
 
     Preconditions:
-        - ``findings`` are all from the SAME path (old or new) and the SAME
-          category axis, pooled across some number of repeated runs.
+        - ``runs`` holds one inner sequence per repeat, each the findings that
+          SINGLE repeat emitted for one path and one category axis (repeat
+          provenance must be preserved by the caller — flattening repeats
+          into one list before calling this loses the information this
+          function needs).
 
     Postconditions:
-        - Returns one representative per group of mutually similar findings
-          (``_finding_similarity(...) >= _MATCH_TEXT_THRESHOLD`` against the
-          group's first-seen member), in first-seen order. Without this, a
+        - Returns one representative per group of cross-repeat duplicates, in
+          first-seen order. A finding is dropped only when it is similar
+          (``_finding_similarity(...) >= _MATCH_TEXT_THRESHOLD``) to a finding
+          already kept from a STRICTLY EARLIER repeat — two findings emitted
+          by the SAME repeat are never compared against each other, so two
+          genuinely distinct findings a single run co-emits (e.g. two
+          different architecture violations in the same file, worded
+          similarly enough to score above the threshold) are both kept, never
+          silently collapsed into one. Without cross-repeat dedup at all, a
           finding one path's repeats emit inconsistently (e.g. 1 of 3 runs)
           would pool to fewer copies than the other path's consistent
           emission (e.g. 3 of 3 runs), and the 1:1 cross-path matcher in
@@ -341,11 +350,17 @@ def _dedupe_pooled(findings: Sequence[CodeReviewIssue]) -> List[CodeReviewIssue]
           spurious ``lost``/``added`` noise instead of one real match. Pure;
           never raises.
     """
-    deduped: List[CodeReviewIssue] = []
-    for finding in findings:
-        if not any(_finding_similarity(finding, kept) >= _MATCH_TEXT_THRESHOLD for kept in deduped):
-            deduped.append(finding)
-    return deduped
+    kept: List[CodeReviewIssue] = []
+    for run in runs:
+        kept_before_this_run = list(kept)
+        for finding in run:
+            already_seen = any(
+                _finding_similarity(finding, prior) >= _MATCH_TEXT_THRESHOLD
+                for prior in kept_before_this_run
+            )
+            if not already_seen:
+                kept.append(finding)
+    return kept
 
 
 def diff_findings(old: Sequence[CodeReviewIssue], new: Sequence[CodeReviewIssue]) -> FindingDiff:
@@ -417,12 +432,13 @@ def compare_submission(
 
     Postconditions:
         - Returns a result whose ``architecture_diff``/``side_effect_diff``
-          are computed over the POOLED findings across all ``repeats`` runs of
-          each path, each path's pool independently deduplicated via
-          :func:`_dedupe_pooled` before the cross-path diff — so a finding
-          one path emits in every repeat and the other emits in only one
-          still counts as a single match, not surplus ``lost``/``added``
-          noise from the unequal repeat counts.
+          are computed over each path's ``repeats`` runs, deduplicated via
+          :func:`_dedupe_pooled` (which preserves repeat provenance, so two
+          distinct findings co-emitted by the SAME repeat are never collapsed
+          into each other) before the cross-path diff — so a finding one path
+          emits in every repeat and the other emits in only one still counts
+          as a single match, not surplus ``lost``/``added`` noise from the
+          unequal repeat counts.
         - Which path runs first alternates by repeat index (old-then-new on
           even repeats, new-then-old on odd repeats), so a rate-limited or
           time-degrading provider does not systematically disadvantage
@@ -435,25 +451,29 @@ def compare_submission(
     input_data, repo_reader, worktree_path = materialize_submission(spec, repo_path, worktree_root)
     try:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
-        old_arch: List[CodeReviewIssue] = []
-        old_side: List[CodeReviewIssue] = []
-        new_arch: List[CodeReviewIssue] = []
-        new_side: List[CodeReviewIssue] = []
+        old_arch_runs: List[List[CodeReviewIssue]] = []
+        old_side_runs: List[List[CodeReviewIssue]] = []
+        new_arch_runs: List[List[CodeReviewIssue]] = []
+        new_side_runs: List[List[CodeReviewIssue]] = []
         for i in range(repeats):
             steps = ["old", "new"] if i % 2 == 0 else ["new", "old"]
             for step in steps:
                 if step == "old":
                     a, s = run_two_call(llm_factory(), input_data, repo_reader, index)
-                    old_arch.extend(a)
-                    old_side.extend(s)
+                    old_arch_runs.append(a)
+                    old_side_runs.append(s)
                 else:
                     a2, s2 = run_merged_call(llm_factory(), input_data, repo_reader, index)
-                    new_arch.extend(a2)
-                    new_side.extend(s2)
+                    new_arch_runs.append(a2)
+                    new_side_runs.append(s2)
         return SubmissionComparisonResult(
             label=spec.label,
-            architecture_diff=diff_findings(_dedupe_pooled(old_arch), _dedupe_pooled(new_arch)),
-            side_effect_diff=diff_findings(_dedupe_pooled(old_side), _dedupe_pooled(new_side)),
+            architecture_diff=diff_findings(
+                _dedupe_pooled(old_arch_runs), _dedupe_pooled(new_arch_runs)
+            ),
+            side_effect_diff=diff_findings(
+                _dedupe_pooled(old_side_runs), _dedupe_pooled(new_side_runs)
+            ),
             old_llm_calls=repeats * 2,
             new_llm_calls=repeats * 1,
         )

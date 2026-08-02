@@ -110,22 +110,38 @@ def test_diff_findings_greedily_pairs_best_scoring_candidate() -> None:
     assert len(result.added) == 1
 
 
-def test_dedupe_pooled_collapses_similar_findings_to_one_representative() -> None:
-    findings = [
-        _issue(description="bypasses the repository layer"),
-        _issue(description="bypasses the repository layer entirely"),
-        _issue(description="bypasses the repository layer here too"),
-    ]
-    deduped = _dedupe_pooled(findings)
-    assert deduped == [findings[0]]
+def test_dedupe_pooled_collapses_the_same_finding_repeated_across_repeats() -> None:
+    repeat_0 = [_issue(description="bypasses the repository layer")]
+    repeat_1 = [_issue(description="bypasses the repository layer entirely")]
+    repeat_2 = [_issue(description="bypasses the repository layer here too")]
+    deduped = _dedupe_pooled([repeat_0, repeat_1, repeat_2])
+    assert deduped == [repeat_0[0]]
 
 
 def test_dedupe_pooled_keeps_genuinely_different_findings_separate() -> None:
-    findings = [
+    repeat_0 = [
         _issue(description="bypasses the repository layer"),
         _issue(description="stale docstring drift on an unrelated function"),
     ]
-    assert _dedupe_pooled(findings) == findings
+    assert _dedupe_pooled([repeat_0]) == repeat_0
+
+
+def test_dedupe_pooled_never_collapses_two_findings_from_the_same_repeat() -> None:
+    """A single run can legitimately emit two distinct findings that happen to
+    share wording (e.g. the same violation on two different code paths in one
+    file) -- these must both survive, even though they score above the match
+    threshold against each other. Only a finding from a LATER repeat may
+    collapse against one already kept from an earlier repeat."""
+    finding_a = _issue(description="bypasses the repository layer for reads")
+    finding_b = _issue(description="bypasses the repository layer for writes")
+    assert _finding_similarity(finding_a, finding_b) >= 0.45  # sanity: they WOULD collide
+
+    same_repeat = [finding_a, finding_b]
+    assert _dedupe_pooled([same_repeat]) == [finding_a, finding_b]
+
+    # But a near-duplicate of finding_a from a later, separate repeat still collapses.
+    later_repeat = [_issue(description="bypasses the repository layer for reads, too")]
+    assert _dedupe_pooled([same_repeat, later_repeat]) == [finding_a, finding_b]
 
 
 def test_finding_similarity_zero_for_different_category() -> None:
