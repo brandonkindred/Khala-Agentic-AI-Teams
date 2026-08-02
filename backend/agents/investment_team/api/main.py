@@ -1885,27 +1885,133 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
         return False
 
 
-def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> bool:
-    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal.
+def _fail_strategy_lab_run(run_id: str, error: str) -> None:
+    """Mark a strategy-lab run "failed" (best-effort, idempotent).
+
+    Preconditions:
+        - ``run_id`` may or may not exist in ``_active_runs``.
+    Postconditions:
+        - If the run exists and isn't already in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
+          with ``error`` recorded, the new state persisted, and a delayed
+          cleanup of the ``_active_runs`` entry scheduled — the same 900s
+          window ``_strategy_lab_worker``'s own failure path uses — so a
+          dispatch failure that never reaches that worker (e.g. a Temporal
+          outage) doesn't leak the entry forever. That cleanup is a no-op if
+          ``run_id`` gets resumed (and thus a new state object installed)
+          before the delay elapses, so it never tears down a live resumed
+          run. A missing run and an already-terminal run are both no-ops.
+          Never raises.
+    """
+    try:
+        with _lock:
+            state = _active_runs.get(run_id)
+            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            state["status"] = "failed"
+            state["error"] = error
+            state["current_cycle"] = None
+            _persist_run_state(run_id, state)
+
+        from investment_team.api.job_event_bus import cleanup_job
+
+        def _cleanup() -> None:
+            with _lock:
+                # resume/restart always replace the entry with a new dict
+                # rather than mutate this one in place, so an identity check
+                # reliably detects a run that got resumed within this delay
+                # window — pop/cleanup would otherwise tear down a live,
+                # freshly-resumed run's tracking state.
+                if _active_runs.get(run_id) is not state:
+                    return
+                _active_runs.pop(run_id, None)
+            cleanup_job(run_id)
+
+        timer = threading.Timer(900.0, _cleanup)
+        timer.daemon = True
+        timer.start()
+    except Exception:
+        logger.warning(
+            "Failed to mark strategy-lab run %s failed: %s", run_id, error, exc_info=True
+        )
+
+
+def _dispatch_strategy_lab_run(
+    run_id: str, request: RunStrategyLabRequest, *, allow_already_started: bool = True
+) -> None:
+    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
 
     Preconditions:
         - ``run_id``'s state is already registered in ``_active_runs`` and
           persisted (the activity reads its resume offset from that state).
 
     Postconditions:
-        - Returns ``True`` iff the durable workflow was started; ``False`` (with
-          the failure logged) when Temporal is disabled/unavailable, so the
-          caller falls back to its daemon-thread path. Never raises.
+        - The durable workflow is started. A collision with an already-running
+          workflow under this run_id's deterministic id (e.g. a resume issued
+          after an API-process restart, while the durable workflow itself kept
+          running) is handled per ``allow_already_started``:
+          - ``True`` (the default — used by the initial run and resume,
+            whose intent matches what's already running): treated as a
+            successful dispatch, a no-op; the run is NOT marked failed.
+          - ``False`` (used by restart, whose reset-to-cycle-0 intent does
+            NOT match a lingering old execution): raises
+            ``HTTPException(409)`` instead — also without marking the run
+            failed, since the old workflow may still be healthy and marking
+            it failed would cause that workflow to observe the status and
+            abort itself.
+          On any other failure (Temporal disabled/unavailable, or the start
+          RPC raising for any other reason), ``run_id`` is marked ``"failed"``
+          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised
+          — never spawns a thread.
     """
-
-    def _start() -> None:
+    try:
+        _require_temporal()
         from investment_team.strategy_lab.temporal.start_workflow import (
             start_strategy_lab_batch_workflow,
         )
 
         start_strategy_lab_batch_workflow(run_id, request)
+    except Exception as exc:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
 
-    return _dispatch_via_temporal(_start)
+        if isinstance(exc, WorkflowAlreadyStartedError):
+            if allow_already_started:
+                # The durable workflow for this run_id is already running
+                # (most commonly: resume was called after an API-process
+                # restart wiped _active_runs, but the workflow itself
+                # survived). Marking the run "failed" here would be observed
+                # by that still-running workflow as an external stop signal
+                # (via strategy_lab_external_terminal_status) and abort a
+                # healthy run, so treat the collision as the dispatch
+                # already having succeeded.
+                logger.info(
+                    "Strategy-lab workflow for run %s is already running; "
+                    "treating dispatch as a no-op success.",
+                    run_id,
+                )
+                return
+            # Restart's reset-to-cycle-0 intent does NOT match a lingering
+            # old execution the way resume's does — silently succeeding
+            # would tell the caller "restarted from scratch" while the old
+            # execution (old input, old progress) is what's actually still
+            # running. Reject distinctly from a real Temporal-down 503 so
+            # callers can tell "retry shortly" from "Temporal is down", and
+            # don't mark the run failed — the old workflow may still be
+            # healthy, and failing it would cause it to observe that status
+            # and abort itself.
+            raise HTTPException(
+                status_code=409,
+                detail="A prior execution for this run is still winding down; retry shortly.",
+            ) from exc
+        _fail_strategy_lab_run(
+            run_id, "Failed to start the strategy-lab workflow (Temporal unavailable)."
+        )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to start the strategy-lab workflow; Temporal worker unavailable.",
+        ) from exc
 
 
 def _ensure_no_active_run() -> None:
@@ -1982,41 +2088,6 @@ def _build_run_state(
     if contiguous_cycles is not None:
         state["contiguous_cycles"] = contiguous_cycles
     return state
-
-
-def _dispatch_or_thread(
-    run_id: str,
-    request: RunStrategyLabRequest,
-    *,
-    thread_name: str,
-    start_cycle_offset: Optional[int] = None,
-) -> None:
-    """Dispatch a run via Temporal, else fall back to an in-process daemon thread.
-
-    Shared dispatch path for the run/resume/restart endpoints.
-
-    Preconditions:
-        - ``run_id``'s state is already registered in ``_active_runs`` and persisted.
-
-    Postconditions:
-        - When ``_dispatch_strategy_lab_run`` starts the durable workflow, returns
-          without spawning a thread. Otherwise a daemon ``threading.Thread`` running
-          ``_strategy_lab_worker`` is started; ``start_cycle_offset`` is passed to the
-          worker only when not ``None`` (so initial/restart start from cycle 0).
-    """
-    if _dispatch_strategy_lab_run(run_id, request):
-        return
-    kwargs = {}
-    if start_cycle_offset is not None:
-        kwargs["start_cycle_offset"] = start_cycle_offset
-    thread = threading.Thread(
-        target=_strategy_lab_worker,
-        args=(run_id, request),
-        kwargs=kwargs,
-        name=thread_name,
-        daemon=True,
-    )
-    thread.start()
 
 
 def _dispatch_backtest_run(
@@ -2796,10 +2867,9 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
         _active_runs[run_id] = initial_state
     _persist_run_state(run_id, initial_state, create=True)
 
-    # When Temporal is enabled, dispatch the run as a durable workflow so it
-    # survives a worker/process restart and is visible in the Temporal UI; on
-    # any dispatch failure fall back to the in-process daemon thread.
-    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-{run_id}")
+    # Dispatch the run as a durable Temporal workflow so it survives a
+    # worker/process restart and is visible in the Temporal UI.
+    _dispatch_strategy_lab_run(run_id, request)
 
     return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
 
@@ -2973,7 +3043,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           progress — ``completed_record_ids``/``errored_cycles``/
           ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
           — and persists the new state.
-        - Dispatches the worker (Temporal or a daemon thread) from the first
+        - Dispatches the durable Temporal workflow from the first
           not-yet-contiguously-completed cycle, so no already-persisted cycle
           is re-run (and thus never duplicated).
         - Returns the run's start response with the resume offset and total
@@ -3030,13 +3100,8 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     # The Temporal activity derives its resume offset from the persisted
     # contiguous-cycle count (set above), so a durable resume picks up where the
-    # run left off. Fall back to the daemon thread with an explicit offset.
-    _dispatch_or_thread(
-        run_id,
-        request,
-        thread_name=f"strategy-lab-resume-{run_id}",
-        start_cycle_offset=contiguous_cycles,
-    )
+    # run left off.
+    _dispatch_strategy_lab_run(run_id, request)
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
@@ -3062,19 +3127,51 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - No other run currently has status ``"running"``.
 
     Postconditions:
+        - Any prior Temporal execution still running under this run_id's
+          deterministic workflow id is terminated and confirmed closed
+          *before* any state is written — closing the window where that
+          execution could observe (and act on) a transiently-optimistic
+          "running" reset before a collision would otherwise be detected.
         - Rebuilds ``_active_runs[run_id]`` as a full reset — ``contiguous_cycles``
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
           carried forward — and persists the new state.
-        - Dispatches the worker (Temporal or a daemon thread) starting at
-          cycle 0.
+        - Dispatches the durable Temporal workflow starting at cycle 0. If
+          that dispatch still 409s (a residual collision — e.g. a second
+          restart/resume racing in after the termination check above), the
+          reset is rolled back — both ``_active_runs[run_id]`` and the
+          persisted state are restored to their pre-restart snapshot — so
+          the run isn't left wedged showing ``"running"`` and blocking every
+          future run/resume/restart call.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
         - ``HTTPException`` 400: the run's status is not restartable, or its
           ``request_payload`` is missing/not a dict.
-        - ``HTTPException`` 409: another run is already ``"running"``.
+        - ``HTTPException`` 409: another run is already ``"running"``, the
+          prior execution couldn't be confirmed terminated within budget
+          (retry shortly), or a residual dispatch collision occurred despite
+          that confirmation (a collision the dispatch layer refuses to
+          silently resume — see ``_dispatch_strategy_lab_run``'s
+          ``allow_already_started`` parameter; the optimistic reset is rolled
+          back in this case, see Postconditions).
+        - ``HTTPException`` 503: Temporal is disabled/unavailable, or the
+          prior execution couldn't be resolved due to a Temporal-side error.
+
+    Known, accepted residual races (each requires multiple unlikely events
+    to align; closing either is a real feature, not a quick patch — tracked
+    as follow-ups rather than fixed here):
+        - Two concurrent restart/resume calls for the *same* run_id both
+          pass ``_ensure_no_active_run()`` before either writes state (it's
+          check-then-release, not a reservation) — the second's termination
+          call can then target the *first's* freshly-started workflow
+          instead of the stale one it meant to clean up (tracked as #4028).
+        - Confirming the old *workflow* terminated does not guarantee an
+          already in-flight, non-heartbeating *activity* has stopped —
+          Strategy Lab's activities aren't cooperatively cancellable, so one
+          can still commit a cycle record or paper trade after the new
+          cycle-0 workflow has started (tracked as #4029).
     """
     state = _get_run_state(run_id)
     # "completed_with_errors" is a terminal outcome of the same workflow as
@@ -3096,6 +3193,34 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     request = RunStrategyLabRequest(**payload)
     total_cycles = request.batch_size * request.batch_count
 
+    # Resolve any prior execution BEFORE writing anything: a still-running
+    # workflow polls persisted status between waves (strategy_lab_external_
+    # terminal_status), so writing the optimistic "running" reset first would
+    # let it observe that transient state and run an extra wave before a
+    # dispatch collision is even detected.
+    _require_temporal()
+    from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
+    from shared.temporal import terminate_and_await_workflow_sync
+
+    try:
+        terminate_and_await_workflow_sync(
+            f"{WORKFLOW_ID_PREFIX}{run_id}",
+            reason=f"Restarted via /strategy-lab/runs/{run_id}/restart",
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A prior execution for this run is still winding down; retry shortly.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Failed to resolve the prior strategy-lab execution before "
+                "restarting; Temporal worker unavailable."
+            ),
+        ) from exc
+
     restarted_state = _build_run_state(
         run_id,
         started_at=_now(),
@@ -3112,9 +3237,23 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         _active_runs[run_id] = restarted_state
     _persist_run_state(run_id, restarted_state)
 
-    # Restart from scratch through Temporal when enabled (offset 0, per the
-    # reset persisted state above); else fall back to the daemon thread.
-    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-restart-{run_id}")
+    # Restart from scratch through Temporal (offset 0, per the reset
+    # persisted state above). allow_already_started=False: unlike resume, a
+    # collision here means an old, un-reset execution is still running, not
+    # that the intended restart is already in flight.
+    try:
+        _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            # The reset above never actually took effect (an old execution
+            # is still running under this run_id) — restore the pre-restart
+            # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
+            # "running" entry, blocking every future run/resume/restart call
+            # until the stale execution happens to overwrite it on its own.
+            with _lock:
+                _active_runs[run_id] = state
+            _persist_run_state(run_id, state)
+        raise
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
