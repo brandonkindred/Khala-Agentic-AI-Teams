@@ -1941,6 +1941,38 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "production"
 
+    def test_build_legacy_spec_without_authorization_still_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-cond-2",
+            task_description="Do not deploy to production without authorization",
+            requirements="Require sign-off before prod",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_pending_authorization_still_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-cond-3",
+            task_description="Hold production deploy pending authorization",
+            requirements="Wait for approval",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_production_is_not_allowed_is_staging(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-post-1",
+            task_description="Production is not allowed; use staging",
+            requirements="Keep all traffic in staging",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_production_is_prohibited_is_staging(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-post-2",
+            task_description="Production is prohibited",
+            requirements="Staging only",
+        )
+        assert spec.environment == "staging"
+
     def test_build_legacy_spec_missing_production_approval_still_production(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-neg-safeguard",

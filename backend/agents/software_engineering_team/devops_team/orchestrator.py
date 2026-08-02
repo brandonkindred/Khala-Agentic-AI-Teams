@@ -107,6 +107,10 @@ _PROD_SAFEGUARD_TOKENS = frozenset(
         "requirement",
         "requirements",
         "signoff",
+        "authorization",
+        "authorized",
+        "permission",
+        "permissions",
     }
 )
 # With a safeguard noun, these mark an explicit prohibition → still staging.
@@ -210,8 +214,13 @@ def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
     if neg == "non":
         return True
     window = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
-    # Conditional gate: "do not deploy to production until approved".
+    # Conditional gate: "do not deploy to production until/unless approved"
+    # or "… without/pending authorization".
     if any(t in ("until", "unless") for t in window):
+        return False
+    if any(t in ("without", "pending") for t in window) and any(
+        t in _PROD_SAFEGUARD_TOKENS for t in window
+    ):
         return False
     # Attribute negation: "no production downtime" / "no production traffic interruption".
     if any(t in _PROD_ATTRIBUTE_TOKENS for t in window) and not any(
@@ -234,6 +243,29 @@ def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
     return False
 
 
+def _is_post_token_exclusion(tokens: List[str], prod_index: int) -> bool:
+    """Return True when production is excluded by a following prohibition predicate.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
+        - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
+          ``prod`` or ``production``.
+    Postconditions:
+        - True for patterns like ``production is not allowed``,
+          ``production is prohibited``, ``prod is forbidden``.
+        - False when no such post-token prohibition is present.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
+    after = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
+    if not after or not any(t in _PROD_PROHIBITION_TOKENS for t in after):
+        return False
+    # Require a copula / negation bridge so we do not treat
+    # "production approval allowed" as an exclusion.
+    bridge = {"is", "are", "was", "were", "be", "being", "not", "no"}
+    return after[0] in bridge or after[0] in _PROD_PROHIBITION_TOKENS
+
+
 def _clause_implies_production(clause: str) -> bool:
     """Return True when a single clause positively implies production.
 
@@ -246,6 +278,8 @@ def _clause_implies_production(clause: str) -> bool:
         if token not in ("prod", "production"):
             continue
         if _is_environment_negation(tokens, i):
+            continue
+        if _is_post_token_exclusion(tokens, i):
             continue
         return True
     return False
