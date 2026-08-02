@@ -341,6 +341,7 @@ def parse_spec_activity(
     repo_path: str,
     spec_content_override: Optional[str] = None,
     trace_id: str = "",
+    sprint_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Phase 1: Parse spec + run Product Requirements Analysis.
 
@@ -348,6 +349,11 @@ def parse_spec_activity(
     generated when blank) is bound for the duration of this activity — this activity
     runs in its own process/thread, so unlike the thread-mode orchestrator the id
     must be passed explicitly rather than inherited via contextvars.
+
+    Postconditions:
+        ``sprint_id`` is accepted so ``RunTeamWorkflowV2`` can carry it end to end,
+        but is not yet forwarded into sprint-scope spec synthesis — that wiring is
+        separate follow-up work. Passing it doesn't change this activity's behavior.
     """
     with bind_trace_id(trace_id or new_trace_id()):
         return _parse_spec_activity_body(job_id, repo_path, spec_content_override)
