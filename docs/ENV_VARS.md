@@ -328,11 +328,13 @@ the sandbox reaper or its Temporal worker thread at all.
 
 ### UNIFIED_API_TEAM_ASSISTANTS_ENABLED
 Team-assistant conversational sub-app mount toggle (default: true). When
-true, the unified-api `lifespan` mounts every team's assistant chat sub-app
-(`<team-prefix>/assistant`) at startup. Set to `false`/`0`/`no` to skip the
-mount loop entirely (zero assistant sub-apps mounted) — team proxy routes and
-health checks are unaffected. Lazy mount-on-first-request when enabled is
-tracked separately.
+true, the unified-api `lifespan` registers every team's assistant chat
+sub-app (`<team-prefix>/assistant`) into a mount-spec registry at startup —
+each sub-app is then actually constructed and mounted lazily, on that team's
+first matching request (a cold-request mount cost, paid once per team, only
+for teams that receive assistant traffic). Set to `false`/`0`/`no` to skip
+registration entirely (no assistant sub-app is ever mounted, regardless of
+traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
 Agent Studio Temporal worker toggle (default: true). When true, the
