@@ -142,7 +142,23 @@ tasks are newly assigned, and workers already mid-flight get a bounded window
 to finish or also escalate before the activity returns. Every worker that
 escalates within that window is folded into the *same* pause
 (`pause_context.task_ids` lists all of them; `pending_questions` is their
-concatenated batch) rather than each publishing a competing one. Leaving a
+concatenated batch) rather than each publishing a competing one.
+
+Concatenating batches is not safe as-is: `hitl.convert_to_structured_questions()`
+preserves a question's `id` verbatim when the caller already supplied one
+(`hitl.py:234`), only auto-generating a `uuid4`-suffixed id otherwise. Two
+independent workers can plausibly emit the same explicit id (e.g. both just
+call their single escalated question `"q1"`), which was harmless when each
+question set was scoped to one worker's own pause but collides once
+concatenated: `hitl.answers_to_resolved()`'s `by_id` lookup and this
+contract's own `question_task_id` mapping (§2) are both keyed by `id`, so a
+duplicate silently keeps only the last worker's entry — the other worker's
+answer is dropped and it can pause on the same question repeatedly. When
+combining batches, the orchestrator must therefore namespace each question's
+`id` by its originating task (e.g. `f"{task_id}:{original_id}"`) before
+concatenating, not merely concatenate the raw per-worker batches, while still
+using the same namespaced id in `pending_questions` and in the `task_id`
+attribution added below — the two must agree. Leaving a
 timed-out worker's task merely marked `in_progress` is not sufficient: it
 does not stop that worker's thread, which can keep mutating the task graph,
 job record, and repo worktree after the activity has already returned, while
@@ -185,8 +201,15 @@ The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
   `payload["resume_token"] != self._active_resume_token`, the signal is a
   stale or duplicate submission (e.g. a retried HTTP call, or an answer to a
   pause that already resolved) and must be **ignored**, not applied.
-  Otherwise sets `self._submitted_answers = payload["answers"]`. This is the
-  *only* state the wait condition gates on; the handler must not depend on
+  Otherwise, only if `self._submitted_answers is None` (this token's first
+  valid batch), sets `self._submitted_answers = payload["answers"]` — a
+  second matching-token signal (a double-submit, or two clients racing to
+  answer the same pause) must be ignored too, not silently overwrite the
+  first. Temporal can deliver both signals before the workflow task next
+  runs and observes `wait_condition`, so an unconditional overwrite would
+  make which human answer "wins" depend on delivery order rather than
+  first-submission-wins. This is the *only* state the wait condition gates on;
+  the handler must not depend on
   the workflow having already observed the "paused" outcome, since the
   activity persists `waiting_for_answers=True` to the job record (and a
   client can act on that) before the activity call itself returns — so an
