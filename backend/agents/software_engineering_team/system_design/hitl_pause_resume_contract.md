@@ -80,10 +80,17 @@ needs to cover hours of waiting.
 
 The workflow (`CodingTeamWorkflow`, and SE's `RunTeamWorkflowV2`) gains:
 
-- `@workflow.signal submit_answers(answers: list)` — records answers into
-  workflow-local state and clears the local waiting flag.
+- `@workflow.signal submit_answers(answers: list)` — sets
+  `self._submitted_answers = answers`. This is the *only* state the wait
+  condition gates on; the signal handler must not depend on the workflow
+  having already observed the "paused" outcome, since the activity persists
+  `waiting_for_answers=True` to the job record (and a client can act on
+  that) before the activity call itself returns.
 - `@workflow.query pending_questions() -> list` / `status() -> dict` — for
-  polling clients, mirroring `CodeReviewWorkflow.progress()`.
+  polling clients, mirroring `CodeReviewWorkflow.progress()`. `status()`
+  derives `waiting_for_answers` as
+  `self._pending_questions is not None and self._submitted_answers is None`
+  rather than tracking a separately-mutated boolean.
 
 Its main loop becomes:
 
@@ -94,13 +101,17 @@ while True:
     )
     if result["outcome"] in ("completed", "failed"):
         return result
-    # outcome == "paused"
-    self._waiting_for_answers = True
+    # outcome == "paused". self._submitted_answers may already be populated
+    # here if a client signaled before this call returned - do not
+    # unconditionally rearm a separate "waiting" flag, or that early signal
+    # is silently lost and wait_condition never resolves. Gate on the answers
+    # themselves, not on a flag the pause and the signal both mutate.
     self._pending_questions = result["pending_questions"]
-    await workflow.wait_condition(lambda: not self._waiting_for_answers)
+    await workflow.wait_condition(lambda: self._submitted_answers is not None)
     request = {**request, "job_id": result["job_id"],
                "resolved_answers": self._submitted_answers}
-    self._submitted_answers = []
+    self._submitted_answers = None
+    self._pending_questions = None
 ```
 
 ### 3. Resume contract
