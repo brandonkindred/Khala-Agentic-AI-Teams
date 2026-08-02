@@ -114,14 +114,14 @@ The Unified API (`khala` on 8888) only registers each team’s `/api/...` route 
 
 ## Resource limits (khala)
 
-The **khala** service is configured for 8 vCPUs and 2G memory (`deploy.resources` plus legacy `cpus` / `mem_limit`). After changing these in `docker-compose.yml`, recreate the container so limits apply:
+The **khala** service is configured for 8 vCPUs and 1G memory (`deploy.resources` plus legacy `cpus` / `mem_limit` / `mem_reservation`). 1G/512M reservation reflects a measured single-worker RSS floor of ~140 MiB post the workers=1 / Pattern-A-boot / Strands-import-edge fixes (see the comment above the `khala` service in `docker-compose.yml`); raise it if `docker stats` shows sustained pressure closer to the limit in a real deployment. After changing these in `docker-compose.yml`, recreate the container so limits apply:
 
 ```bash
 docker compose -f docker/docker-compose.yml down khala
 docker compose -f docker/docker-compose.yml --env-file docker/.env up -d khala
 ```
 
-On **macOS** with Docker Desktop, container memory is capped by the VM's memory limit (Docker Desktop → Settings → Resources). If 2G is not applied, raise the VM limit and restart Docker.
+On **macOS** with Docker Desktop, container memory is capped by the VM's memory limit (Docker Desktop → Settings → Resources). If 1G is not applied, raise the VM limit and restart Docker.
 
 ## Unified API image (slim dependencies)
 

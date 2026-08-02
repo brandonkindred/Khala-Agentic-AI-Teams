@@ -19,9 +19,8 @@
 # auto-login feature, and its absence there was a pre-existing gap rather than
 # an intentional exclusion.
 #
-# NOTE: backend/Dockerfile does not install this file yet -- it still installs
-# backend/agents/requirements.txt. Wiring the Dockerfile to this file is a
-# separate follow-up.
+# backend/Dockerfile installs this file (not backend/agents/requirements.txt,
+# which every per-team container installs instead).
 
 pydantic>=2.12,<3.0
 # Direct dep: agent_registry.models imports jsonschema at module load to validate

@@ -820,7 +820,22 @@ services:
 
   # ── Unified API (router/proxy) ──────────────────────────────────────────────
   # Inherits image CMD (run_unified_api.py --workers 1). Do not override to N>1
-  # without raising mem_limit; each worker re-imports the ~200 MB agent graph.
+  # without raising mem_limit; each worker re-imports the full agent graph.
+  #
+  # mem_limit was 2G, sized for the pre-fix process: 4 uvicorn workers plus an
+  # eager Strands/botocore import and a duplicate Temporal worker boot on
+  # import (see the workers=1, Pattern-A-boot, and Strands-import-edge fixes).
+  # Measured post-fix (this repo's Docker Hub pulls are blocked by org egress
+  # policy in this environment, so this ran the unified-api process directly
+  # via a local venv rather than the built container): single worker idle RSS
+  # ~137 MiB, ~139-140 MiB under light /health + /api/agents load, vs. the
+  # pre-fix 4-worker process totaling ~600 MiB idle / ~610 MiB under the same
+  # load. Both figures exclude live Postgres/Temporal connections (not wired
+  # up in the isolated measurement), so treat them as the process/import-graph
+  # floor, not full production RSS. 1G / 512M leaves several times that floor
+  # as headroom for the real Postgres pool, Temporal client, and request
+  # bursts; re-check with `docker stats` once deployed somewhere with
+  # registry access, and raise these back if that shows sustained pressure.
 
   khala:
     build:
@@ -858,10 +873,11 @@ services:
       - "8888:8080"
     deploy:
       resources:
-        limits: { cpus: "4", memory: 2G }
-        reservations: { memory: 2G }
+        limits: { cpus: "4", memory: 1G }
+        reservations: { memory: 512M }
     cpus: "4"
-    mem_limit: 2g
+    mem_limit: 1g
+    mem_reservation: 512m
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
