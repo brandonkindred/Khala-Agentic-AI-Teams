@@ -13,6 +13,7 @@ Callers should handle None appropriately (e.g., ask user or use their own defaul
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -36,11 +37,17 @@ _ANGULAR_PATTERN = re.compile(
 _IGNORED_MARKER_DIRS = frozenset({"node_modules", "dist", "build", ".git"})
 
 
-def _has_first_party_marker(repo_path: Path, pattern: str) -> bool:
-    """True if a file matching `pattern` exists outside dependency/build directories."""
-    for match in repo_path.rglob(pattern):
-        parents = match.relative_to(repo_path).parts[:-1]
-        if not _IGNORED_MARKER_DIRS.intersection(parents):
+def _has_first_party_marker(repo_path: Path, suffix: str) -> bool:
+    """True if a file whose name ends with `suffix` exists outside dependency/build
+    directories.
+
+    Prunes ignored directories during the walk (rather than post-filtering matches
+    from Path.rglob) so large or unreadable dependency trees are never descended
+    into; os.walk silently skips a directory it can't list rather than raising.
+    """
+    for _dirpath, dirnames, filenames in os.walk(repo_path):
+        dirnames[:] = [d for d in dirnames if d not in _IGNORED_MARKER_DIRS]
+        if any(name.endswith(suffix) for name in filenames):
             return True
     return False
 
@@ -117,10 +124,10 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
                 return "vue"
             if "@vitejs/plugin-react" in config_content:
                 return "react"
-            if _has_first_party_marker(repo_path, "*.vue"):
+            if _has_first_party_marker(repo_path, ".vue"):
                 return "vue"
-            if _has_first_party_marker(repo_path, "*.jsx") or _has_first_party_marker(
-                repo_path, "*.tsx"
+            if _has_first_party_marker(repo_path, ".jsx") or _has_first_party_marker(
+                repo_path, ".tsx"
             ):
                 return "react"
         except (OSError, UnicodeDecodeError):

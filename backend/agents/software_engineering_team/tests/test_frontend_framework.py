@@ -199,15 +199,31 @@ def test_detect_framework_from_project_unreadable_directory_returns_none(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """An unreadable subdirectory during marker scanning degrades to None, not a crash."""
+    """An unexpected OSError during marker scanning degrades to None, not a crash."""
+    import os
 
     (tmp_path / "vite.config.ts").write_text("")
 
-    def _raise_permission_error(self, pattern):
+    def _raise_permission_error(*_args, **_kwargs):
         raise PermissionError("simulated unreadable directory")
 
-    monkeypatch.setattr(Path, "rglob", _raise_permission_error)
+    monkeypatch.setattr(os, "walk", _raise_permission_error)
     assert detect_framework_from_project(tmp_path) is None
+
+
+def test_detect_framework_from_project_prunes_ignored_dirs_during_walk(
+    tmp_path: Path,
+) -> None:
+    """Ignored directories are pruned before the walk descends into them, so a real
+    first-party marker is still found even alongside a large node_modules tree."""
+    (tmp_path / "vite.config.ts").write_text("")
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "App.tsx").write_text("export default function App() {}")
+    vendor_dir = tmp_path / "node_modules" / "some-vue-lib"
+    vendor_dir.mkdir(parents=True)
+    (vendor_dir / "Widget.vue").write_text("<template></template>")
+    assert detect_framework_from_project(tmp_path) == "react"
 
 
 def test_resolve_frontend_framework_normalizes_value() -> None:
