@@ -34,17 +34,17 @@ def _autouse_patched_job_store(patched_job_store):
 
 @pytest.fixture(autouse=True)
 def _stub_background_workflow(monkeypatch):
-    """Replace the fire-and-forget workflow worker with a no-op.
+    """Stub the Temporal dispatch call POST /frontend-code-v2/run makes.
 
-    The ``POST /frontend-code-v2/run`` endpoint spawns a daemon thread that runs
-    the real (integration-only) 6-phase frontend workflow. These unit tests only
-    assert the endpoint contract, so without this stub the thread keeps executing
-    after the test returns and logs to closed pytest capture streams
-    ("ValueError: I/O operation on closed file"). Mirrors the
-    ``patch.object(_api_main, "_run_orchestrator_background")`` pattern used for
-    the /run-team endpoint tests.
+    The route calls start_standalone_workflow unconditionally — no thread
+    fallback. Without a real Temporal client that raises, which the route's
+    try/except turns into a 503. Stubbing it to a no-op keeps these unit
+    tests' endpoint-contract assertions meaningful without a live Temporal
+    deployment.
     """
-    monkeypatch.setattr(_api_main, "_run_frontend_code_v2_background", lambda *a, **k: None)
+    import software_engineering_team.temporal.start_workflow as _start_workflow
+
+    monkeypatch.setattr(_start_workflow, "start_standalone_workflow", lambda *a, **k: None)
 
 
 @pytest.fixture
@@ -124,6 +124,36 @@ class TestFrontendCodeV2RunEndpoint:
     def test_run_requires_task_and_repo(self, client: TestClient):
         response = client.post("/frontend-code-v2/run", json={})
         assert response.status_code == 422
+
+    def test_run_dispatches_to_temporal_even_when_disabled(
+        self, client: TestClient, temp_repo: Path, monkeypatch
+    ):
+        """No thread fallback: start_standalone_workflow is called regardless of is_temporal_enabled()."""
+        import software_engineering_team.temporal.start_workflow as start_workflow
+        from software_engineering_team.temporal.constants import STANDALONE_TYPE_FRONTEND
+
+        monkeypatch.setattr("software_engineering_team.temporal.client.is_temporal_enabled", lambda: False)
+        dispatched: dict = {}
+        monkeypatch.setattr(
+            start_workflow,
+            "start_standalone_workflow",
+            lambda standalone_type, job_id, repo_path, **kw: dispatched.update(
+                standalone_type=standalone_type, job_id=job_id
+            ),
+        )
+
+        response = client.post(
+            "/frontend-code-v2/run",
+            json={
+                "task": {"title": "Test task", "description": "test"},
+                "repo_path": str(temp_repo),
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "running"
+        assert dispatched["standalone_type"] == STANDALONE_TYPE_FRONTEND
+        assert dispatched["job_id"] == response.json()["job_id"]
 
 
 class TestFrontendCodeV2StatusEndpoint:
