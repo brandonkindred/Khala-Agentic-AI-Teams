@@ -37,6 +37,7 @@ cluster and code that stays in ``orchestrator.py`` live in
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.env_config import env_int
@@ -46,7 +47,6 @@ from ..models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
 from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     _AlignmentLoopOutcome,
-    _AlignmentRoundOutcome,
     _attach_execution_diagnostics,
     _DriftCollector,
     _format_execution_diagnostics,
@@ -67,6 +67,35 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
 MAX_ALIGNMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS", 10, floor=1)
+
+
+@dataclass
+class _AlignmentRoundOutcome:
+    """One iteration of ``_run_trade_alignment_loop``.
+
+    Semantics:
+    - ``terminate=True`` ⇒ caller breaks the loop. The spec/code/trades/
+      metrics fields carry the pre-iteration state (either because the
+      audit reported aligned, the proposal was rejected, or the round
+      budget is spent).
+    - ``terminate=False`` ⇒ caller continues. The spec/code/trades/
+      metrics fields carry the just-committed proposal as the new
+      known-good state.
+
+    The helper mutates ``alignment_reports``, ``alignment_attempts``,
+    and ``all_gate_results`` in place; callers observe those lists
+    directly.
+    """
+
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+    terminate: bool
+    # Set on a committing round (``terminate=False``) to the conformance
+    # verdict of the just-committed code; ignored on terminate rounds (which
+    # carry the unchanged pre-iteration state).
+    ran_on_non_conforming_code: bool = False
 
 
 class AlignmentMixin:

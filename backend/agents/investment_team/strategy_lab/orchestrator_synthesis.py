@@ -45,6 +45,7 @@ live in ``_orchestrator_helpers.py`` instead.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..market_data_service import OHLCVBar
@@ -52,7 +53,6 @@ from ..models import BacktestConfig, BacktestResult, StrategyLabRecord, Strategy
 from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     RefinementStallTracker,
-    _AnomalyRecoveryOutcome,
     _attach_execution_diagnostics,
     _DesignPersistContext,
     _DriftCollector,
@@ -60,7 +60,6 @@ from ._orchestrator_helpers import (
     _MarketDataFetch,
     _maybe_attach_coverage_report,
     _round_demoted_conformance,
-    _SynthesisEvaluateResult,
     _SynthesisLoopOutcome,
 )
 from .agents._llm_budget import DesignBudgetExhausted
@@ -71,6 +70,76 @@ from .quality_gates.models import QualityGateResult, join_gate_details
 from .quality_gates.universe_injection import inject_universe_and_guard
 
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
+
+
+@dataclass
+class _AnomalyRecoveryOutcome:
+    """Bundle of state returned by ``_handle_critical_anomalies``.
+
+    The synthesis loop's evaluation phase delegates to that helper when
+    the backtest produces critical anomaly gates. The helper either
+    commits a zero-trade-repair proposal, applies a generic refinement,
+    or exhausts the round budget — and the loop body needs to know which
+    outcome happened so it can continue or break.
+
+    Invariants on return:
+    - ``exhausted=True`` ⇒ caller breaks the synthesis loop with
+      ``max_rounds_exhausted=True``; the spec/code/trades/metrics fields
+      carry the last failed-round values (callers should not commit them).
+    - ``exhausted=False`` ⇒ caller continues to the next round; the
+      spec/code/trades/metrics/exec_result fields carry the new known-good
+      state (either ZTR-committed proposal or generic-refined source).
+    """
+
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+    exec_result: StrategyRunResult
+    exhausted: bool
+    # Set only when a zero-trade repair commits new code (which replaces the
+    # persisted trades but is not otherwise conformance-gated): the conformance
+    # verdict of the committed repair code. ``None`` on the generic-refinement
+    # path, which leaves ``trades`` unchanged so the round's existing verdict
+    # still applies and must not be overwritten.
+    ran_on_non_conforming_code: Optional[bool] = None
+    # True iff ``exhausted`` was caused by the refinement-loop stall guard
+    # (``RefinementStallTracker``) rather than genuine round-cap exhaustion.
+    # Only the generic-refinement path (``_refine_or_exhaust``) can set this;
+    # a committed zero-trade repair always returns ``exhausted=False`` and
+    # this field's default (``False``) applies.
+    stalled: bool = False
+
+
+@dataclass
+class _SynthesisEvaluateResult:
+    """Return envelope for the synthesis loop's backtest-evaluation step.
+
+    ``action`` is one of:
+    - ``"success"`` — gates clean, the caller marks ``execution_succeeded`` and
+      breaks the loop;
+    - ``"continue"`` — a critical anomaly was recovered (refined/repaired) and
+      the caller continues to the next round;
+    - ``"exhausted"`` — recovery ran the round budget out, the caller marks
+      ``max_rounds_exhausted`` and breaks.
+
+    The remaining fields carry the (possibly recovery-mutated) round state back
+    to the loop so it can thread them into the final outcome.
+    """
+
+    action: str
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+    exec_result: StrategyRunResult
+    ran_on_non_conforming_code: Optional[bool]
+    runtime_lookahead_violation: bool
+    # True iff ``action="exhausted"`` was caused by the refinement-loop
+    # stall guard rather than genuine round-cap exhaustion. Carried from
+    # ``_AnomalyRecoveryOutcome.stalled`` on the anomaly-recovery path;
+    # ``False`` on the direct "success" return (no recovery ran).
+    stalled: bool = False
 
 
 class SynthesisMixin:

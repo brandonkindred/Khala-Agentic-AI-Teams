@@ -19,14 +19,12 @@ final composed instance.
 
 ``_orchestrate_refinement_and_alignment``, ``_orchestrate_verification_and_analysis``,
 ``_extract_findings_and_assemble_record``, and the module-level
-``_resolve_alignment_report_for_analysis`` moved here (from ``orchestrator.py``)
+``_resolve_alignment_report_for_analysis`` moved here from ``orchestrator.py``
 because ``_run_design_attempt``, their sole caller, already lives in this
-file — keeping them on the base class no longer earned its complexity once
-that was confirmed. They still call across into ``SynthesisMixin`` /
-``AlignmentMixin`` / ``VerificationMixin`` / ``RecordAssemblyMixin`` methods
-via ``self``, which resolves fine through the MRO at runtime regardless of
-which file physically defines the caller. See ``MIXIN_BOUNDARIES.md`` for
-the full rationale.
+file. They still call across into ``SynthesisMixin`` / ``AlignmentMixin`` /
+``VerificationMixin`` / ``RecordAssemblyMixin`` methods via ``self``, which
+resolves fine through the MRO regardless of which file defines the caller.
+See ``MIXIN_BOUNDARIES.md`` for the full rationale.
 
 This module must not import anything from ``orchestrator.py`` (that would be
 circular: ``orchestrator.py`` imports ``DesignMixin`` from here before its
@@ -40,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from pydantic import ValidationError
@@ -58,9 +57,7 @@ from ..models import (
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ._orchestrator_helpers import (
-    _DesignLoopOutcome,
     _DesignPersistContext,
-    _DesignPhaseResult,
     _DriftCollector,
     _emit_phase_transition,
     _env_flag,
@@ -497,6 +494,70 @@ def _resolve_alignment_report_for_analysis(
             ],
         )
     return latest
+
+
+@dataclass
+class _DesignLoopOutcome:
+    """Bundle returned by ``_run_design_loop``.
+
+    The design loop iterates (DesignAgent → SpecReadinessGate →
+    DesignReviewAgent → DesignAgent.revise) until either the reviewer
+    marks the spec ready or the configured round budget is exhausted.
+
+    Invariants on return:
+    - ``ready=True`` ⇒ ``spec`` passed both the deterministic readiness
+      gate and the LLM reviewer on the most recent round; downstream
+      code synthesis may proceed.
+    - ``ready=False`` ⇒ the round budget exhausted; ``critique_history``
+      carries one entry per round (synthetic critiques produced from
+      readiness findings count); the orchestrator must short-circuit
+      the cycle rather than running code against a not-ready spec.
+    - ``rounds`` equals ``len(critique_history)`` in both branches.
+    - ``spec`` is the final candidate the loop produced (whether ready
+      or not), so the audit trail always carries the spec the cycle
+      stopped on.
+    - ``budget_exhausted=True`` ⇒ ``ready=False`` and the per-cycle
+      LLM-call budget was hit mid-loop; ``spec`` / ``critique_history``
+      carry whatever state existed at the trip. It disambiguates the two
+      reasons a ``ready=False`` outcome can arise: round-budget exhaustion
+      (``False``) versus LLM-call-budget exhaustion (``True``), which the
+      orchestrator maps to ``failed: design_not_ready`` and
+      ``failed: budget_exhausted`` respectively.
+    """
+
+    spec: StrategySpec
+    rationale: str
+    ready: bool
+    rounds: int
+    # NB: typed as ``Any`` to avoid a cycle with ``agents/design_review``.
+    # The orchestrator passes a ``List[SpecCritique]`` through.
+    critique_history: List[Any]
+    budget_exhausted: bool = False
+    # Why the loop stopped: "ready" | "round_cap" | "stalled" |
+    # "budget_exhausted". Disambiguates the not-ready short-circuit status
+    # (stall vs honest round-cap exhaustion).
+    stop_reason: str = ""
+    # Design-loop slice of the persisted telemetry summary (round count,
+    # stop reason, critique-ledger totals). Gate counts + the
+    # compiled-vs-custom flag are merged in at record-build time.
+    loop_telemetry: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _DesignPhaseResult:
+    """Return envelope for ``_run_design_attempt``'s design + review phase.
+
+    ``record`` is a short-circuit ``StrategyLabRecord`` (typed ``Any`` to avoid
+    an import cycle) when the design loop did not reach readiness — the caller
+    returns it immediately. Otherwise ``record`` is ``None`` and the
+    ``spec`` / ``rationale`` / ``design_context`` carry the converged design
+    forward into code synthesis.
+    """
+
+    record: Optional[Any]
+    spec: Optional[StrategySpec] = None
+    rationale: str = ""
+    design_context: Optional[_DesignPersistContext] = None
 
 
 class DesignMixin:

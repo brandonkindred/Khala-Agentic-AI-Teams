@@ -35,15 +35,11 @@ callers historically imported via ``investment_team.strategy_lab.orchestrator``
 — check those blocks (and the mixin's module docstring) before assuming a
 symbol lives here.
 
-Per-design-attempt cross-cluster orchestration (running the refinement loop
-then the alignment loop; running verification then the analysis narrative;
-extracting alignment findings then assembling the record) lives in
+Per-design-attempt cross-cluster orchestration lives in
 ``orchestrator_design.py``'s ``_orchestrate_refinement_and_alignment`` /
 ``_orchestrate_verification_and_analysis`` / ``_extract_findings_and_assemble_record``
-— they moved there from this file because their sole caller,
-``_run_design_attempt``, already lives in that cluster. See
-``MIXIN_BOUNDARIES.md`` for the full audit and rationale behind the current
-module boundaries.
+— moved there because their sole caller, ``_run_design_attempt``, already
+lives in that cluster. See ``MIXIN_BOUNDARIES.md`` for the full audit.
 """
 
 from __future__ import annotations
@@ -1623,17 +1619,13 @@ class StrategyLabOrchestrator(
 from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     RefinementStallTracker,
     _AlignmentLoopOutcome,
-    _AlignmentRoundOutcome,
-    _AnomalyRecoveryOutcome,
     _apply_veto_to_acceptance_reason,
     _attach_execution_diagnostics,
     _build_rule_implementation_map,
     _closes_to_equity,
     _CodeSynthesisPhaseResult,
     _daily_returns_from_trades,
-    _DesignLoopOutcome,
     _DesignPersistContext,
-    _DesignPhaseResult,
     _DriftCollector,
     _emit_phase_transition,
     _env_flag,
@@ -1646,7 +1638,6 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     _RefinementAlignmentResult,
     _resolve_vix_provider,
     _round_demoted_conformance,
-    _SynthesisEvaluateResult,
     _SynthesisLoopOutcome,
     _VerificationOutcome,
     publishability_skip_reason,
@@ -1658,7 +1649,10 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
 # from ``investment_team.strategy_lab.orchestrator`` keep working without
 # the alignment-loop cluster cluttering this file.
 # ──────────────────────────────────────────────────────────────────────────
-from .orchestrator_alignment import MAX_ALIGNMENT_ROUNDS  # noqa: E402,F401  — keep at file end
+from .orchestrator_alignment import (  # noqa: E402,F401  — keep at file end
+    MAX_ALIGNMENT_ROUNDS,
+    _AlignmentRoundOutcome,
+)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Re-exports — these symbols live in :mod:`orchestrator_design`. The
@@ -1674,6 +1668,8 @@ from .orchestrator_design import (  # noqa: E402,F401  — keep at file end
     _design_loop_telemetry_summary,
     _design_review_rounds,
     _design_review_stall_rounds,
+    _DesignLoopOutcome,
+    _DesignPhaseResult,
     _emit_design_review_telemetry,
     _format_regression_notice,
     _mechanical_repair_enabled,
@@ -1690,4 +1686,15 @@ from .orchestrator_design import (  # noqa: E402,F401  — keep at file end
 # ──────────────────────────────────────────────────────────────────────────
 from .orchestrator_record_assembly import (  # noqa: E402,F401  — keep at file end
     _finalize_loop_telemetry,
+)
+
+# ──────────────────────────────────────────────────────────────────────────
+# Re-exports — these symbols live in :mod:`orchestrator_synthesis`. The
+# orchestrator module re-exports them so existing call sites that import
+# from ``investment_team.strategy_lab.orchestrator`` keep working without
+# the synthesis-loop cluster cluttering this file.
+# ──────────────────────────────────────────────────────────────────────────
+from .orchestrator_synthesis import (  # noqa: E402,F401  — keep at file end
+    _AnomalyRecoveryOutcome,
+    _SynthesisEvaluateResult,
 )
