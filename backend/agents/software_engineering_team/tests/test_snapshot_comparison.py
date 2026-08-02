@@ -13,10 +13,12 @@ how to run a real comparison.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
+import pytest
 from code_review_agent.models import CodeReviewIssue
 from code_review_agent.snapshot_comparison import (
     CORPUS,
@@ -24,6 +26,7 @@ from code_review_agent.snapshot_comparison import (
     SubmissionSpec,
     _dedupe_pooled,
     _finding_similarity,
+    _warn_if_repeats_imbalanced,
     compare_submission,
     diff_findings,
 )
@@ -114,8 +117,11 @@ def test_dedupe_pooled_collapses_the_same_finding_repeated_across_repeats() -> N
     repeat_0 = [_issue(description="bypasses the repository layer")]
     repeat_1 = [_issue(description="bypasses the repository layer entirely")]
     repeat_2 = [_issue(description="bypasses the repository layer here too")]
-    deduped = _dedupe_pooled([repeat_0, repeat_1, repeat_2])
-    assert deduped == [repeat_0[0]]
+    groups = _dedupe_pooled([repeat_0, repeat_1, repeat_2])
+    assert len(groups) == 1
+    assert groups[0].representative == repeat_0[0]
+    # Every collapsed original is kept for audit, not silently discarded.
+    assert groups[0].collapsed == [repeat_1[0], repeat_2[0]]
 
 
 def test_dedupe_pooled_keeps_genuinely_different_findings_separate() -> None:
@@ -123,7 +129,9 @@ def test_dedupe_pooled_keeps_genuinely_different_findings_separate() -> None:
         _issue(description="bypasses the repository layer"),
         _issue(description="stale docstring drift on an unrelated function"),
     ]
-    assert _dedupe_pooled([repeat_0]) == repeat_0
+    groups = _dedupe_pooled([repeat_0])
+    assert [g.representative for g in groups] == repeat_0
+    assert all(g.collapsed == [] for g in groups)
 
 
 def test_dedupe_pooled_never_collapses_two_findings_from_the_same_repeat() -> None:
@@ -137,11 +145,20 @@ def test_dedupe_pooled_never_collapses_two_findings_from_the_same_repeat() -> No
     assert _finding_similarity(finding_a, finding_b) >= 0.45  # sanity: they WOULD collide
 
     same_repeat = [finding_a, finding_b]
-    assert _dedupe_pooled([same_repeat]) == [finding_a, finding_b]
+    groups = _dedupe_pooled([same_repeat])
+    assert [g.representative for g in groups] == [finding_a, finding_b]
+    assert all(g.collapsed == [] for g in groups)
 
-    # But a near-duplicate of finding_a from a later, separate repeat still collapses.
+    # A near-duplicate of finding_a from a later, separate repeat still
+    # collapses -- but the original is recorded on the matching group for
+    # audit, never silently dropped (this is exactly the case a pure
+    # similarity heuristic cannot distinguish from a genuinely distinct
+    # finding that happens to land in a different repeat).
     later_repeat = [_issue(description="bypasses the repository layer for reads, too")]
-    assert _dedupe_pooled([same_repeat, later_repeat]) == [finding_a, finding_b]
+    groups2 = _dedupe_pooled([same_repeat, later_repeat])
+    assert [g.representative for g in groups2] == [finding_a, finding_b]
+    assert groups2[0].collapsed == later_repeat
+    assert groups2[1].collapsed == []
 
 
 def test_finding_similarity_zero_for_different_category() -> None:
@@ -403,3 +420,34 @@ def test_compare_submission_dedupes_findings_pooled_unevenly_across_repeats(
     assert len(result.architecture_diff.matched) == 1
     assert result.architecture_diff.lost == []
     assert result.architecture_diff.added == []
+
+    # The old path's 2 collapsed cross-repeat copies are recorded for audit,
+    # not silently discarded (the new path found it consistently in only 1
+    # repeat, so it has nothing to collapse).
+    assert len(result.architecture_cross_repeat_collapses) == 1
+    assert len(result.architecture_cross_repeat_collapses[0]["collapsed"]) == 2
+    import json
+
+    json.dumps(result.to_dict())  # must stay JSON-serializable
+
+
+# ---------------------------------------------------------------------------
+# _warn_if_repeats_imbalanced
+# ---------------------------------------------------------------------------
+
+
+def test_warn_if_repeats_imbalanced_logs_for_odd_repeats_greater_than_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="code_review_agent.snapshot_comparison"):
+        _warn_if_repeats_imbalanced(3)
+    assert any("repeats=3 is odd" in r.message for r in caplog.records)
+
+
+def test_warn_if_repeats_imbalanced_silent_for_single_or_even_repeats(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="code_review_agent.snapshot_comparison"):
+        _warn_if_repeats_imbalanced(1)
+        _warn_if_repeats_imbalanced(4)
+    assert caplog.records == []

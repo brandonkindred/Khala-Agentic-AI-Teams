@@ -323,7 +323,27 @@ def _finding_similarity(a: CodeReviewIssue, b: CodeReviewIssue) -> float:
     return score
 
 
-def _dedupe_pooled(runs: Sequence[Sequence[CodeReviewIssue]]) -> List[CodeReviewIssue]:
+@dataclass
+class _DedupeGroup:
+    """One cross-repeat cluster :func:`_dedupe_pooled` folded into one representative.
+
+    ``collapsed`` is kept for audit, not discarded: a text-similarity
+    heuristic run over pooled findings with no other signal CANNOT reliably
+    tell "the same real finding recurring across repeats" apart from "two
+    different findings that happen to be worded similarly and land in
+    different repeats" (e.g. a read-path violation in one repeat, a
+    similarly-worded write-path violation in another) — that ambiguity is
+    irreducible from pooled text alone, so the collapsed originals are
+    surfaced in the report for a human to re-judge, rather than the harness
+    silently guessing one way or the other. See
+    ``docs/snapshot-comparison-report.md``.
+    """
+
+    representative: CodeReviewIssue
+    collapsed: List[CodeReviewIssue] = field(default_factory=list)
+
+
+def _dedupe_pooled(runs: Sequence[Sequence[CodeReviewIssue]]) -> List[_DedupeGroup]:
     """Collapse cross-repeat duplicate findings for one path, one repeat at a time.
 
     Preconditions:
@@ -334,33 +354,58 @@ def _dedupe_pooled(runs: Sequence[Sequence[CodeReviewIssue]]) -> List[CodeReview
           function needs).
 
     Postconditions:
-        - Returns one representative per group of cross-repeat duplicates, in
-          first-seen order. A finding is dropped only when it is similar
-          (``_finding_similarity(...) >= _MATCH_TEXT_THRESHOLD``) to a finding
-          already kept from a STRICTLY EARLIER repeat — two findings emitted
-          by the SAME repeat are never compared against each other, so two
-          genuinely distinct findings a single run co-emits (e.g. two
-          different architecture violations in the same file, worded
-          similarly enough to score above the threshold) are both kept, never
-          silently collapsed into one. Without cross-repeat dedup at all, a
-          finding one path's repeats emit inconsistently (e.g. 1 of 3 runs)
-          would pool to fewer copies than the other path's consistent
-          emission (e.g. 3 of 3 runs), and the 1:1 cross-path matcher in
-          :func:`diff_findings` would then report the surplus copies as
-          spurious ``lost``/``added`` noise instead of one real match. Pure;
-          never raises.
+        - Returns one :class:`_DedupeGroup` per group of cross-repeat
+          duplicates, in first-seen order. A finding is folded into an
+          existing group's ``collapsed`` only when it is similar
+          (``_finding_similarity(...) >= _MATCH_TEXT_THRESHOLD``) to that
+          group's ``representative``, which must come from a STRICTLY
+          EARLIER repeat — two findings emitted by the SAME repeat are never
+          compared against each other, so two genuinely distinct findings a
+          single run co-emits (e.g. two different architecture violations in
+          the same file, worded similarly enough to score above the
+          threshold) always start their own groups, never collapsing into
+          one. Without cross-repeat dedup at all, a finding one path's
+          repeats emit inconsistently (e.g. 1 of 3 runs) would pool to fewer
+          representatives than the other path's consistent emission (e.g. 3
+          of 3 runs), and the 1:1 cross-path matcher in :func:`diff_findings`
+          would then report the surplus as spurious ``lost``/``added`` noise
+          instead of one real match. Pure; never raises.
     """
-    kept: List[CodeReviewIssue] = []
+    groups: List[_DedupeGroup] = []
     for run in runs:
-        kept_before_this_run = list(kept)
+        representatives_before_this_run = [g.representative for g in groups]
         for finding in run:
-            already_seen = any(
-                _finding_similarity(finding, prior) >= _MATCH_TEXT_THRESHOLD
-                for prior in kept_before_this_run
+            match = next(
+                (
+                    group
+                    for group, prior in zip(groups, representatives_before_this_run)
+                    if _finding_similarity(finding, prior) >= _MATCH_TEXT_THRESHOLD
+                ),
+                None,
             )
-            if not already_seen:
-                kept.append(finding)
-    return kept
+            if match is None:
+                groups.append(_DedupeGroup(representative=finding))
+            else:
+                match.collapsed.append(finding)
+    return groups
+
+
+def _collapse_report(groups: Sequence[_DedupeGroup]) -> List[dict]:
+    """JSON-friendly audit trail of every group that actually collapsed >1 finding.
+
+    Postconditions: returns one ``{"representative": ..., "collapsed": [...]}``
+        dict per group with a non-empty ``collapsed`` list; groups that never
+        matched a later repeat's finding are omitted (nothing to audit).
+        Pure; never raises.
+    """
+    return [
+        {
+            "representative": g.representative.model_dump(),
+            "collapsed": [f.model_dump() for f in g.collapsed],
+        }
+        for g in groups
+        if g.collapsed
+    ]
 
 
 def diff_findings(old: Sequence[CodeReviewIssue], new: Sequence[CodeReviewIssue]) -> FindingDiff:
@@ -404,6 +449,8 @@ class SubmissionComparisonResult:
     side_effect_diff: FindingDiff
     old_llm_calls: int
     new_llm_calls: int
+    architecture_cross_repeat_collapses: List[dict] = field(default_factory=list)
+    side_effect_cross_repeat_collapses: List[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -412,6 +459,8 @@ class SubmissionComparisonResult:
             "new_llm_calls": self.new_llm_calls,
             "architecture": self.architecture_diff.to_dict(),
             "side_effect": self.side_effect_diff.to_dict(),
+            "architecture_cross_repeat_collapses": self.architecture_cross_repeat_collapses,
+            "side_effect_cross_repeat_collapses": self.side_effect_cross_repeat_collapses,
         }
 
 
@@ -438,16 +487,26 @@ def compare_submission(
           into each other) before the cross-path diff — so a finding one path
           emits in every repeat and the other emits in only one still counts
           as a single match, not surplus ``lost``/``added`` noise from the
-          unequal repeat counts.
+          unequal repeat counts. Every cross-repeat collapse the dedup step
+          actually made (on either path) is recorded in
+          ``architecture_cross_repeat_collapses``/``side_effect_cross_repeat_collapses``
+          for audit — the similarity heuristic cannot distinguish a true
+          repeated finding from two distinct findings that happen to land in
+          different repeats with similar wording, so that judgment call is
+          never silent.
         - Which path runs first alternates by repeat index (old-then-new on
           even repeats, new-then-old on odd repeats), so a rate-limited or
           time-degrading provider does not systematically disadvantage
           whichever path always ran second within a repeat — an ordering
           bias that repeating with a fixed order would amplify, not average
-          out.
+          out. This alternation cannot exactly balance an ODD ``repeats``
+          count (one path is unavoidably first one more time than the
+          other — see :func:`_warn_if_repeats_imbalanced`); pass an even
+          ``repeats`` for a fully counterbalanced real run.
         - The worktree is always removed, even when a pass call raises.
     """
     assert repeats >= 1, "repeats must be >= 1"
+    _warn_if_repeats_imbalanced(repeats)
     input_data, repo_reader, worktree_path = materialize_submission(spec, repo_path, worktree_root)
     try:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -466,19 +525,53 @@ def compare_submission(
                     a2, s2 = run_merged_call(llm_factory(), input_data, repo_reader, index)
                     new_arch_runs.append(a2)
                     new_side_runs.append(s2)
+        old_arch_groups = _dedupe_pooled(old_arch_runs)
+        new_arch_groups = _dedupe_pooled(new_arch_runs)
+        old_side_groups = _dedupe_pooled(old_side_runs)
+        new_side_groups = _dedupe_pooled(new_side_runs)
         return SubmissionComparisonResult(
             label=spec.label,
             architecture_diff=diff_findings(
-                _dedupe_pooled(old_arch_runs), _dedupe_pooled(new_arch_runs)
+                [g.representative for g in old_arch_groups],
+                [g.representative for g in new_arch_groups],
             ),
             side_effect_diff=diff_findings(
-                _dedupe_pooled(old_side_runs), _dedupe_pooled(new_side_runs)
+                [g.representative for g in old_side_groups],
+                [g.representative for g in new_side_groups],
             ),
             old_llm_calls=repeats * 2,
             new_llm_calls=repeats * 1,
+            architecture_cross_repeat_collapses=(
+                _collapse_report(old_arch_groups) + _collapse_report(new_arch_groups)
+            ),
+            side_effect_cross_repeat_collapses=(
+                _collapse_report(old_side_groups) + _collapse_report(new_side_groups)
+            ),
         )
     finally:
         cleanup_worktree(repo_path, worktree_path)
+
+
+def _warn_if_repeats_imbalanced(repeats: int) -> None:
+    """Log when ``repeats`` cannot be evenly counterbalanced between paths.
+
+    Postconditions: logs a warning naming the exact old-first/new-first split
+        when ``repeats > 1`` and odd (the per-repeat alternation in
+        :func:`compare_submission` unavoidably gives one path one extra
+        "runs first" slot — see the repeats-imbalance review comment this was
+        added in response to); no-op otherwise. Never raises.
+    """
+    if repeats > 1 and repeats % 2 == 1:
+        old_first = repeats // 2 + 1
+        new_first = repeats // 2
+        logger.warning(
+            "compare_submission: repeats=%s is odd; the old path runs first %s time(s) vs "
+            "%s for the merged path (cannot be exactly balanced) -- pass an even --repeats "
+            "for a fully counterbalanced real run.",
+            repeats,
+            old_first,
+            new_first,
+        )
 
 
 @dataclass
@@ -492,11 +585,16 @@ class ComparisonReport:
         total_added = sum(
             len(r.architecture_diff.added) + len(r.side_effect_diff.added) for r in self.results
         )
+        total_collapses = sum(
+            len(r.architecture_cross_repeat_collapses) + len(r.side_effect_cross_repeat_collapses)
+            for r in self.results
+        )
         return {
             "summary": {
                 "submissions_compared": len(self.results),
                 "total_lost_findings": total_lost,
                 "total_added_findings": total_added,
+                "total_cross_repeat_collapses": total_collapses,
                 "total_old_llm_calls": sum(r.old_llm_calls for r in self.results),
                 "total_new_llm_calls": sum(r.new_llm_calls for r in self.results),
             },
@@ -542,6 +640,7 @@ def _render_summary(report: ComparisonReport) -> str:
     lines.append(
         f"Totals: {summary['submissions_compared']} submission(s), "
         f"{summary['total_lost_findings']} lost, {summary['total_added_findings']} added, "
+        f"{summary['total_cross_repeat_collapses']} cross-repeat collapse(s) to audit, "
         f"{summary['total_old_llm_calls']} old-path calls vs "
         f"{summary['total_new_llm_calls']} new-path calls."
     )

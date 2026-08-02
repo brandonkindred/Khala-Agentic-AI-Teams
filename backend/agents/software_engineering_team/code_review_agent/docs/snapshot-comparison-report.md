@@ -73,23 +73,34 @@ search) instead of isolated snippets.
   no temperature control to this harness — a single before/after pair per
   submission cannot distinguish a genuine prompt-structure regression from
   ordinary sampling variance. `N=1` (the default) is a plumbing smoke test,
-  not a statistically meaningful comparison; a real run should use `N ≥ 3`.
-  Which path runs first alternates every repeat (old-then-new on even
-  repeats, new-then-old on odd repeats), so a rate-limited or
+  not a statistically meaningful comparison; a real run should use an **even**
+  `N ≥ 4`. Which path runs first alternates every repeat (old-then-new on
+  even repeat indices, new-then-old on odd), so a rate-limited or
   time-degrading real provider does not systematically disadvantage
   whichever path always ran second — repeating with a fixed order would
-  otherwise amplify that bias instead of averaging it out. Each path's
-  findings are deduplicated across repeats independently (`_dedupe_pooled`)
-  before the cross-path diff, so a finding one path emits in every repeat and
-  the other emits in only one repeat still counts as a single match — without
-  this, the unequal counts would surface as spurious `lost`/`added` noise
-  rather than the one real (in)consistency signal. Deduplication is
-  repeat-aware: it only collapses a finding against one already kept from a
-  STRICTLY EARLIER repeat, never against another finding from the SAME
-  repeat, so two genuinely distinct findings one run co-emits (e.g. two
-  different architecture violations in the same file, worded similarly
-  enough to score above the match threshold) are both preserved rather than
-  being silently merged into one.
+  otherwise amplify that bias instead of averaging it out. This alternation
+  cannot exactly balance an **odd** `N`: one path unavoidably runs first one
+  more time than the other (e.g. `N=3` → old first twice, new first once).
+  The harness logs a warning when `N` is odd and `> 1`; prefer an even `N`
+  for a fully counterbalanced real run.
+- **Cross-repeat deduplication** (`_dedupe_pooled`): each path's findings are
+  deduplicated across repeats independently before the cross-path diff, so a
+  finding one path emits in every repeat and the other emits in only one
+  repeat still counts as a single match — without this, the unequal counts
+  would surface as spurious `lost`/`added` noise rather than the one real
+  (in)consistency signal. Deduplication is repeat-aware: it only collapses a
+  finding against one already kept from a STRICTLY EARLIER repeat, never
+  against another finding from the SAME repeat, so two genuinely distinct
+  findings one run co-emits (e.g. two different architecture violations in
+  the same file, worded similarly enough to score above the match threshold)
+  are both preserved rather than being silently merged into one. This still
+  leaves one irreducible ambiguity a pure text-similarity heuristic cannot
+  resolve on its own: a finding in repeat 0 and a *different* finding in
+  repeat 1 that merely happen to be worded similarly (e.g. a read-path
+  violation, then a write-path violation) look identical to the same finding
+  recurring — so every actual collapse (not just "would-be" ones) is recorded
+  in `architecture_cross_repeat_collapses`/`side_effect_cross_repeat_collapses`
+  in the report for a human to re-judge, rather than silently trusted.
 - **What counts as a candidate regression:** a `lost` entry (old path found
   it, new path didn't) on any submission is the signal this whole exercise
   exists to catch, and an `added` entry (new path found it, old path didn't)
@@ -124,7 +135,7 @@ cd backend
 PYTHONPATH="$(pwd):$(pwd)/agents/software_engineering_team:$(pwd)/agents" \
   .venv/bin/python -m code_review_agent.snapshot_comparison \
   --repo-root /path/to/a/full/clone/of/this/repo \
-  --repeats 3 \
+  --repeats 4 \
   --output snapshot_comparison_report.json
 ```
 
@@ -166,8 +177,8 @@ two-call-vs-merged comparison described above has **not been executed**. What
 
 What remains before this validation can be marked complete:
 
-1. Run the command above (with `--repeats 3` or higher) in an environment
-   with a configured LLM provider.
+1. Run the command above (with an even `--repeats 4` or higher) in an
+   environment with a configured LLM provider.
 2. Review the `lost` entries in the output report for both categories across
    all six submissions — any non-empty `lost` list is a candidate regression
    and must be individually assessed (is the old-path finding still valid?
@@ -180,4 +191,9 @@ What remains before this validation can be marked complete:
    similarity heuristic paired genuinely equivalent findings, not two
    different findings that merely share a category/file and overlapping
    wording.
-5. Record the outcome and a go/no-go recommendation in this section.
+5. Review every entry in `architecture_cross_repeat_collapses`/
+   `side_effect_cross_repeat_collapses` — each is a case where the harness
+   folded a later repeat's finding into an earlier one as a likely duplicate;
+   confirm it actually was one, not two distinct findings that happened to
+   land in different repeats.
+6. Record the outcome and a go/no-go recommendation in this section.
