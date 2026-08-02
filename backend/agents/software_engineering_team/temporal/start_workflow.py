@@ -43,6 +43,19 @@ def _run_async(coro: Any) -> Any:
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
 
+def is_workflow_v2_enabled() -> bool:
+    """Whether ``SE_WORKFLOW_V2`` selects ``RunTeamWorkflowV2`` for ``start_run_team_workflow``.
+
+    Exposed so callers (e.g. the jobs API) can reject sprint-scoped requests
+    before dispatch when V2 is selected — ``RunTeamWorkflowV2`` doesn't accept
+    ``sprint_id`` yet, so silently proceeding would either fail asynchronously
+    in the orchestrator or, if a stale on-disk spec exists, run the wrong scope.
+    """
+    import os
+
+    return os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
+
+
 def start_run_team_workflow(
     job_id: str,
     repo_path: str,
@@ -57,14 +70,12 @@ def start_run_team_workflow(
     accepts it as a trailing positional arg; ``RunTeamWorkflowV2`` does not yet
     support sprint-scoped runs, so it is omitted from the V2 args entirely.
     """
-    import os
-
     workflow_id = f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"
     client = get_temporal_client()
     if client is None:
         raise RuntimeError("Temporal client not available")
 
-    use_v2 = os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
+    use_v2 = is_workflow_v2_enabled()
     workflow_cls = RunTeamWorkflowV2 if use_v2 else RunTeamWorkflow
 
     args: List[Any] = [

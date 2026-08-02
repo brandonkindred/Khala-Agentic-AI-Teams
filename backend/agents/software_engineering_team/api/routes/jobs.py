@@ -81,6 +81,32 @@ def _resolve_repo_path(repo_path: str | Path, sprint_id: Any) -> Path:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+def _reject_sprint_under_workflow_v2(sprint_id: Any, *, detail: str) -> None:
+    """Reject a sprint-mode job when the V2 workflow pipeline is selected, before any state mutation.
+
+    ``RunTeamWorkflowV2`` doesn't accept ``sprint_id`` (V2 pipeline support is
+    separate, out-of-scope work) — dispatching it anyway would either fail
+    asynchronously once the orchestrator hits a missing/wrong spec, or, if a
+    stale on-disk spec exists, silently run the wrong scope. This is a
+    client-input error, not infrastructure, so callers invoke it *before*
+    create_job / the launch try-except (whose broad ``except`` would otherwise
+    re-wrap the 400 as a 503).
+
+    Preconditions:
+        - ``detail`` is the caller-specific 400 message.
+    Postconditions:
+        - Raises ``HTTPException(400, detail)`` when ``sprint_id`` is not
+          ``None`` and ``SE_WORKFLOW_V2`` selects the V2 pipeline; returns
+          ``None`` otherwise.
+    """
+    if sprint_id is None:
+        return
+    from software_engineering_team.temporal.start_workflow import is_workflow_v2_enabled
+
+    if is_workflow_v2_enabled():
+        raise HTTPException(status_code=400, detail=detail)
+
+
 @router.post(
     "/run-team",
     response_model=RunTeamResponse,
@@ -91,6 +117,15 @@ def _resolve_repo_path(repo_path: str | Path, sprint_id: Any) -> Path:
 def run_team(request: RunTeamRequest) -> RunTeamResponse:
     """Start the software engineering team on a work folder."""
     repo_path = _resolve_repo_path(request.repo_path, request.sprint_id)
+
+    # Reject sprint_id under the V2 pipeline *before* create_job and *outside*
+    # the launch try/except — otherwise the broad `except Exception` below
+    # catches the 400 and re-wraps it as a 503. RunTeamWorkflowV2 doesn't
+    # accept sprint_id yet; V1 (the default) does.
+    _reject_sprint_under_workflow_v2(
+        request.sprint_id,
+        detail="sprint_id is not supported under SE_WORKFLOW_V2; omit sprint_id.",
+    )
 
     # Validate `sprint_id` exists *and has planned scope* before
     # enqueuing the job — otherwise a typo, a deleted sprint, or a
@@ -428,6 +463,14 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
     # to the orchestrator/workflow from the value persisted at creation.
     _resolve_repo_path(repo_path, sprint_id)
 
+    # Same V2 guard as POST /run-team: validate BEFORE flipping the job to
+    # running, so the guard firing can't leave the job stuck in `running`
+    # with no workflow running (recoverable only via the stale-job monitor).
+    _reject_sprint_under_workflow_v2(
+        sprint_id,
+        detail="sprint_id is not supported under SE_WORKFLOW_V2; this job was created with sprint_id and cannot be resumed.",
+    )
+
     # Re-validate the sprint scope on resume — the sprint may have been
     # deleted or unplanned since the job was created. Surfaces synchronously
     # before flipping the job to `running` (Codex review on PR #396).
@@ -517,6 +560,12 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     # Re-persist sprint_id after reset_job clears the payload so a
     # sprint-scoped restart goes back through the synthesized-spec
     # path instead of silently falling back to repo spec parsing.
+
+    # Same V2 guard as POST /run-team.
+    _reject_sprint_under_workflow_v2(
+        sprint_id,
+        detail="sprint_id is not supported under SE_WORKFLOW_V2; this job was created with sprint_id and cannot be restarted.",
+    )
 
     # Re-validate the sprint scope BEFORE `reset_job` — otherwise a
     # restart with a deleted/unplanned sprint would discard the prior

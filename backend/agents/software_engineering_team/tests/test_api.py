@@ -715,3 +715,30 @@ def test_resolve_repo_path_invalid_path_is_400() -> None:
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path("/nonexistent/xyz", None)
     assert exc.value.status_code == 400
+
+
+def test_reject_sprint_under_workflow_v2_raises_when_both_set(monkeypatch) -> None:
+    """sprint_id + SE_WORKFLOW_V2 is a 400 client-input error — RunTeamWorkflowV2 can't carry sprint_id."""
+    from fastapi import HTTPException
+
+    from software_engineering_team.api.routes.jobs import _reject_sprint_under_workflow_v2
+
+    monkeypatch.setenv("SE_WORKFLOW_V2", "true")
+    with pytest.raises(HTTPException) as exc:
+        _reject_sprint_under_workflow_v2("sprint-1", detail="nope")
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "nope"
+
+
+def test_reject_sprint_under_workflow_v2_noop_when_not_both(monkeypatch) -> None:
+    """No rejection when V2 is off, or when sprint_id is absent."""
+    from software_engineering_team.api.routes.jobs import _reject_sprint_under_workflow_v2
+
+    monkeypatch.delenv("SE_WORKFLOW_V2", raising=False)
+    assert _reject_sprint_under_workflow_v2("sprint-1", detail="nope") is None
+
+    monkeypatch.setenv("SE_WORKFLOW_V2", "true")
+    assert _reject_sprint_under_workflow_v2(None, detail="nope") is None
+
+    monkeypatch.delenv("SE_WORKFLOW_V2", raising=False)
+    assert _reject_sprint_under_workflow_v2(None, detail="nope") is None
