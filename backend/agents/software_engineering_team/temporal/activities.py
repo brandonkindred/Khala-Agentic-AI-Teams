@@ -406,6 +406,15 @@ def _parse_spec_activity_body(
         # spec is already structured (per-story user_story + ACs) and validated by
         # the upstream Sprint Planner. Mirrors discovery.py::resolve_spec_source.
         if sprint_id is not None:
+            if spec_content_override is not None:
+                err = (
+                    "parse_spec_activity received both sprint_id and "
+                    "spec_content_override; they are mutually exclusive."
+                )
+                logger.error(err, extra={"trace_id": current_trace_id()})
+                update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
+                return SpecParseResult().model_dump()
+
             from software_engineering_team.shared.sprint_scope import (
                 load_requirements_from_sprint,
             )
@@ -513,7 +522,11 @@ def _plan_project_activity_body(
     Preconditions: a trace id is already bound (callers must go through
         :func:`plan_project_activity`); ``spec_parse_result`` validates as a ``SpecParseResult``.
     Postconditions: returns a ``PlanResult`` dict; on failure the job is marked FAILED and
-        the exception propagates to the activity wrapper.
+        the exception propagates to the activity wrapper. Uses ``spec_data.requirements_title``
+        (set by Phase 1) as the adapter's spec title rather than re-parsing
+        ``spec_data.spec_content`` via the LLM — avoids a second, nondeterministic parse and
+        an unnecessary spec-intake LLM dependency; required for the sprint path, where
+        ``spec_data.spec_content`` is synthesized Markdown, not LLM-parseable prose.
     """
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
 
@@ -530,10 +543,6 @@ def _plan_project_activity_body(
         from planning_team.orchestrator import run_workflow as run_planning_workflow
         from software_engineering_team.planning_adapter import adapt_planning_result
         from software_engineering_team.shared import planning_audit
-        from software_engineering_team.spec_parser import parse_spec_with_llm
-
-        # Re-parse requirements for the adapter (lightweight)
-        requirements = parse_spec_with_llm(spec_data.spec_content, get_client("spec_intake"))
 
         agents = _get_agents()
 
@@ -568,7 +577,7 @@ def _plan_project_activity_body(
         planning_audit.record_se_planning_run(job_id, planning_result)
 
         adapter_result = adapt_planning_result(
-            planning_result, spec_title=requirements.title, repo_path=str(path)
+            planning_result, spec_title=spec_data.requirements_title, repo_path=str(path)
         )
         adapter_result.shared_planning_doc_path = str(
             path / "plan" / "planning_team" / "planning_document.md"
