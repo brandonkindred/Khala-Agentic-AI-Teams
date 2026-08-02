@@ -779,6 +779,28 @@ def test_stream_strategy_lab_run_terminal_short_circuit(
     assert "done" in body
 
 
+def test_stream_strategy_lab_run_terminal_short_circuit_completed_with_errors(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``completed_with_errors`` must also be treated as terminal so a
+    reconnecting client gets snapshot + done instead of hanging in 'running'."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["done-with-errors"] = {
+        "run_id": "done-with-errors",
+        "status": "completed_with_errors",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 1,
+        "completed_cycles": 1,
+        "errored_cycles": 1,
+    }
+    resp = api_client.get("/strategy-lab/runs/done-with-errors/stream")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "snapshot" in body
+    assert "done" in body
+
+
 # ---------------------------------------------------------------------------
 # stream_strategy_lab_run — active (non-terminal) event_generator path
 # ---------------------------------------------------------------------------
