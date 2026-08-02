@@ -23,12 +23,14 @@ from code_review_agent.models import CodeReviewIssue
 from code_review_agent.snapshot_comparison import (
     CORPUS,
     FindingDiff,
+    SnapshotComparisonError,
     SubmissionSpec,
     _call_pass_detecting_failure,
     _collapse_report,
     _dedupe_pooled,
     _DedupeGroup,
     _finding_similarity,
+    _require_passes_enabled,
     _warn_if_repeats_imbalanced,
     compare_submission,
     diff_findings,
@@ -101,6 +103,15 @@ def test_diff_findings_never_matches_different_nonblank_files() -> None:
     new = [_issue(file_path="b.py", description="identical wording")]
     result = diff_findings(old, new)
     assert result.matched == []
+
+
+def test_diff_findings_never_matches_identical_text_at_distant_lines() -> None:
+    old = [_issue(line=10, description="stale docstring drift")]
+    new = [_issue(line=200, description="stale docstring drift")]
+    result = diff_findings(old, new)
+    assert result.matched == []
+    assert result.lost == old
+    assert result.added == new
 
 
 def test_diff_findings_greedily_pairs_best_scoring_candidate() -> None:
@@ -225,11 +236,15 @@ def test_finding_similarity_blank_file_path_never_blocks_a_match() -> None:
     assert _finding_similarity(a, b) > 0.0
 
 
-def test_finding_similarity_is_reduced_by_distant_line() -> None:
+def test_finding_similarity_rejects_distant_lines_even_with_identical_text() -> None:
+    """A score reduction alone is not enough to keep two findings with
+    identical text at genuinely different locations from clearing
+    _MATCH_TEXT_THRESHOLD -- this must be a hard 0.0, not a penalty."""
     text = "caller assumes old behavior at this exact call site"
     near = _finding_similarity(_issue(line=10, description=text), _issue(line=12, description=text))
     far = _finding_similarity(_issue(line=10, description=text), _issue(line=200, description=text))
-    assert far < near
+    assert near > 0.0
+    assert far == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -566,3 +581,58 @@ def test_compare_submission_detects_and_counts_call_failures(tmp_path: Path) -> 
     import json
 
     json.dumps(result.to_dict())  # must stay JSON-serializable
+
+
+# ---------------------------------------------------------------------------
+# _require_passes_enabled
+# ---------------------------------------------------------------------------
+
+
+def test_require_passes_enabled_silent_by_default() -> None:
+    _require_passes_enabled()  # must not raise
+
+
+def test_require_passes_enabled_raises_when_architecture_pass_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
+    with pytest.raises(SnapshotComparisonError, match="CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS"):
+        _require_passes_enabled()
+
+
+def test_require_passes_enabled_raises_when_side_effect_pass_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "false")
+    with pytest.raises(SnapshotComparisonError, match="CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"):
+        _require_passes_enabled()
+
+
+def test_require_passes_enabled_names_both_when_both_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "false")
+    with pytest.raises(SnapshotComparisonError) as exc_info:
+        _require_passes_enabled()
+    assert "CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS" in str(exc_info.value)
+    assert "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS" in str(exc_info.value)
+
+
+def test_compare_submission_raises_when_a_pass_is_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A disabled pass would otherwise return [] on both call paths for every
+    submission -- a silently 'clean' comparison for a category that was never
+    actually exercised. compare_submission must refuse to run rather than
+    produce that misleading report."""
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "false")
+    repo, sha = _init_one_commit_repo(tmp_path)
+    spec = SubmissionSpec(
+        label="synthetic-disabled-pass",
+        commit_sha=sha,
+        changed_files=("app.py",),
+        task_description="test change",
+    )
+    with pytest.raises(SnapshotComparisonError):
+        compare_submission(spec, lambda: DummyLLMClient(), repo, tmp_path / "worktrees", repeats=1)

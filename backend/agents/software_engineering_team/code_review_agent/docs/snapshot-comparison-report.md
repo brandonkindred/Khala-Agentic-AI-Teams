@@ -62,12 +62,14 @@ search) instead of isolated snippets.
 - **Matching heuristic** (`diff_findings` / `_finding_similarity`): a finding
   from the old path is paired with its best-scoring unused finding from the
   new path when both share the same `category`, do not cite different
-  non-blank `file_path`s, and score ≥ 0.45 on a `difflib.SequenceMatcher`
-  ratio over `description` (halved when both cite a `line` more than 5 apart).
-  This is a **heuristic for shrinking the human-review surface**, not an
-  automated regression verdict — two independent LLM calls never reproduce a
-  finding's exact wording, so an exact-string diff would misreport nearly
-  every real match as one lost + one added finding.
+  non-blank `file_path`s, do not cite a `line` more than 5 apart when both
+  have one (a hard reject, not a penalty — identical wording at genuinely
+  different locations in the same file is a different finding), and score
+  ≥ 0.45 on a `difflib.SequenceMatcher` ratio over `description`. This is a
+  **heuristic for shrinking the human-review surface**, not an automated
+  regression verdict — two independent LLM calls never reproduce a finding's
+  exact wording, so an exact-string diff would misreport nearly every real
+  match as one lost + one added finding.
 - **Repeats** (`--repeats N`): each path is run N times per submission and
   findings pooled before diffing, because `resolve_code_review_model` exposes
   no temperature control to this harness — a single before/after pair per
@@ -123,6 +125,15 @@ search) instead of isolated snippets.
   runtime warning when either is non-zero — treat a submission with any call
   failures as computed from fewer real samples than `--repeats` implies, not
   as a confident result.
+- **Pass-toggle pre-flight check:** both standalone passes and the merged
+  pass early-return `[]` with NO LLM call at all when their own
+  `CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS`/`CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS`
+  env flag is disabled — a call-failure count of zero in that case would be
+  misleading (there was no call to fail; the category was never exercised on
+  either path at all). `compare_submission` checks both flags before doing
+  any work and refuses to run (`SnapshotComparisonError`) if either is off,
+  so a misconfigured environment fails loudly instead of producing a
+  silently "clean" report for a category that was never compared.
 - **What counts as a candidate regression:** a `lost` entry (old path found
   it, new path didn't) on any submission is the signal this whole exercise
   exists to catch, and an `added` entry (new path found it, old path didn't)

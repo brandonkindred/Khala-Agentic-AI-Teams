@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from shared.env import env_flag_enabled
 from shared.git.git_utils import add_worktree, remove_worktree
 from software_engineering_team.shared.models import SystemArchitecture
 
@@ -56,6 +57,13 @@ _MATCH_TEXT_THRESHOLD = 0.45
 # a different location even when the text is similar (e.g. two distinct
 # docstring-drift findings on the same file).
 _MATCH_LINE_TOLERANCE = 5
+
+# Same env vars the standalone/merged passes gate on (architecture_consistency_pass.py,
+# side_effect_impact_pass.py). When either is explicitly disabled, the affected pass
+# returns [] on BOTH the old and new call paths without making any LLM call -- see
+# _require_passes_enabled.
+_ARCH_PASS_ENV = "CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS"
+_SIDE_PASS_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
 
 
 @dataclass(frozen=True)
@@ -160,6 +168,33 @@ _ARCHITECTURE_DOC_PATH = "docs/ARCHITECTURE.md"
 
 class SnapshotComparisonError(RuntimeError):
     """Raised when a corpus submission cannot be materialized or reviewed."""
+
+
+def _require_passes_enabled() -> None:
+    """Fail fast when either pass is disabled, rather than silently comparing nothing.
+
+    Both the standalone passes and the merged pass early-return ``[]`` with NO
+    LLM call at all when their own env flag is off (see
+    ``architecture_consistency_pass.find_architecture_and_redundancy_issues`` /
+    ``side_effect_impact_pass.find_side_effect_impact_issues``). If that flag
+    happens to be off in whatever environment a real comparison run uses, the
+    affected category would show "0 lost, 0 added" on every submission — a
+    clean-looking report for a category that was never actually exercised on
+    either path, silently invalidating the comparison.
+
+    Postconditions: raises :class:`SnapshotComparisonError` naming every
+        disabled flag when :data:`_ARCH_PASS_ENV` or :data:`_SIDE_PASS_ENV`
+        (checked via the same ``env_flag_enabled`` the passes themselves use)
+        is disabled; returns normally when both are enabled (the default).
+    """
+    disabled = [name for name in (_ARCH_PASS_ENV, _SIDE_PASS_ENV) if not env_flag_enabled(name)]
+    if disabled:
+        raise SnapshotComparisonError(
+            f"{', '.join(disabled)} is disabled in this environment -- the affected "
+            "pass(es) would never actually run (no LLM call, [] on both paths for every "
+            "submission), producing a misleadingly clean comparison instead of a real one. "
+            "Enable both env flags before running a snapshot comparison."
+        )
 
 
 def materialize_submission(
@@ -373,20 +408,24 @@ class FindingDiff:
 def _finding_similarity(a: CodeReviewIssue, b: CodeReviewIssue) -> float:
     """Score how likely ``a``/``b`` describe the same underlying finding.
 
-    Postconditions: returns 0.0 when categories differ or both cite a
-        non-blank, different ``file_path``; otherwise a
-        ``difflib.SequenceMatcher`` ratio over ``description``, halved when
-        both cite a ``line`` more than ``_MATCH_LINE_TOLERANCE`` apart. Pure;
-        never raises.
+    Postconditions: returns 0.0 when categories differ, both cite a
+        non-blank, different ``file_path``, or both cite a ``line`` more than
+        ``_MATCH_LINE_TOLERANCE`` apart (a hard reject, not a penalty: two
+        findings with identical or near-identical wording at genuinely
+        different locations in the same file — e.g. the same lint-style
+        issue on two different functions — are different findings, and a
+        mere score reduction is not enough to keep them from clearing
+        ``_MATCH_TEXT_THRESHOLD`` when their text similarity is high).
+        Otherwise returns the ``difflib.SequenceMatcher`` ratio over
+        ``description``. Pure; never raises.
     """
     if a.category != b.category:
         return 0.0
     if a.file_path and b.file_path and a.file_path != b.file_path:
         return 0.0
-    score = difflib.SequenceMatcher(None, a.description.lower(), b.description.lower()).ratio()
     if a.line is not None and b.line is not None and abs(a.line - b.line) > _MATCH_LINE_TOLERANCE:
-        score *= 0.5
-    return score
+        return 0.0
+    return difflib.SequenceMatcher(None, a.description.lower(), b.description.lower()).ratio()
 
 
 @dataclass
@@ -599,8 +638,15 @@ def compare_submission(
           other — see :func:`_warn_if_repeats_imbalanced`); pass an even
           ``repeats`` for a fully counterbalanced real run.
         - The worktree is always removed, even when a pass call raises.
+
+    Raises:
+        - :class:`SnapshotComparisonError` when either pass is disabled via
+          its env flag (see :func:`_require_passes_enabled`) — comparing
+          with a disabled pass would silently report a clean "0 lost, 0
+          added" result for a category neither path actually exercised.
     """
     assert repeats >= 1, "repeats must be >= 1"
+    _require_passes_enabled()
     _warn_if_repeats_imbalanced(repeats)
     input_data, repo_reader, worktree_path = materialize_submission(spec, repo_path, worktree_root)
     try:
