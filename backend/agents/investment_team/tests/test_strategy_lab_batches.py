@@ -843,24 +843,18 @@ def test_restart_accepts_completed_with_errors(
     _seed_run_state(run_id, request)
     lab_main._active_runs[run_id]["status"] = "completed_with_errors"
 
-    # Stub the worker thread so restart doesn't actually run the pipeline.
+    # Stub the Temporal dispatch so restart doesn't actually run the pipeline.
     started: List[str] = []
-
-    class _FakeThread:
-        def __init__(self, *_a: Any, **kw: Any) -> None:
-            started.append(kw.get("name", ""))
-
-        def start(self) -> None:
-            pass
-
-    monkeypatch.setattr(lab_main.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(
+        lab_main, "_dispatch_strategy_lab_run", lambda rid, req: started.append(rid)
+    )
     monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
 
     client = TestClient(lab_main.app)
     resp = client.post(f"/strategy-lab/runs/{run_id}/restart")
     # Before the fix this returned 400 ("job not restartable").
     assert resp.status_code == 200, resp.text
-    assert started, "restart should have dispatched the worker thread"
+    assert started, "restart should have dispatched the run"
 
 
 def test_sse_stream_short_circuits_completed_with_errors(

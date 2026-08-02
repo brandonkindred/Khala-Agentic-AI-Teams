@@ -4,7 +4,7 @@ Targets the routes that interact with the in-memory ``_active_runs``
 dict and the ``_get_lab_run_job_client`` shim:
 
 * ``run_strategy_lab`` — 409 when a run is already active.
-* ``run_strategy_lab`` — happy path (worker thread is stubbed so the
+* ``run_strategy_lab`` — happy path (Temporal dispatch is stubbed so the
   route can return immediately).
 * ``resume_strategy_lab_run`` — 404 + 400 + 409 + happy paths.
 * ``restart_strategy_lab_run`` — 404 + 400 + 409 + happy paths.
@@ -15,7 +15,7 @@ dict and the ``_get_lab_run_job_client`` shim:
   load-from-job-service fallback.
 * ``stream_strategy_lab_run`` — terminal-state short-circuit + 404.
 
-Every test patches the JobService shim and the worker so no real
+Every test patches the JobService shim and the Temporal dispatch so no real
 strategy-lab cycles execute.
 """
 
@@ -82,8 +82,8 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api_main, "_active_runs", shared_runs)
     monkeypatch.setattr(_run_state, "active_runs", shared_runs)
 
-    # Stop real threads from spawning.
-    monkeypatch.setattr(api_main, "_strategy_lab_worker", lambda *a, **k: None)
+    # Stub the Temporal dispatch so no real workflow start is attempted.
+    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", lambda *a, **k: None)
 
     # Stub the persistence calls so they don't try to reach the job service.
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)

@@ -1885,27 +1885,62 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
         return False
 
 
-def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> bool:
-    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal.
+def _fail_strategy_lab_run(run_id: str, error: str) -> None:
+    """Mark a strategy-lab run "failed" (best-effort, idempotent).
+
+    Preconditions:
+        - ``run_id`` may or may not exist in ``_active_runs``.
+    Postconditions:
+        - If the run exists and isn't already in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
+          with ``error`` recorded and the new state persisted. A missing run
+          and an already-terminal run are both no-ops. Never raises.
+    """
+    try:
+        with _lock:
+            state = _active_runs.get(run_id)
+            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            state["status"] = "failed"
+            state["error"] = error
+            state["current_cycle"] = None
+            _persist_run_state(run_id, state)
+    except Exception:
+        logger.warning(
+            "Failed to mark strategy-lab run %s failed: %s", run_id, error, exc_info=True
+        )
+
+
+def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> None:
+    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
 
     Preconditions:
         - ``run_id``'s state is already registered in ``_active_runs`` and
           persisted (the activity reads its resume offset from that state).
 
     Postconditions:
-        - Returns ``True`` iff the durable workflow was started; ``False`` (with
-          the failure logged) when Temporal is disabled/unavailable, so the
-          caller falls back to its daemon-thread path. Never raises.
+        - The durable workflow is started. On any failure (Temporal
+          disabled/unavailable, or the start RPC raising), ``run_id`` is
+          marked ``"failed"`` via ``_fail_strategy_lab_run`` and
+          ``HTTPException(503)`` is raised — never spawns a thread.
     """
-
-    def _start() -> None:
+    try:
+        _require_temporal()
         from investment_team.strategy_lab.temporal.start_workflow import (
             start_strategy_lab_batch_workflow,
         )
 
         start_strategy_lab_batch_workflow(run_id, request)
-
-    return _dispatch_via_temporal(_start)
+    except Exception as exc:
+        _fail_strategy_lab_run(
+            run_id, "Failed to start the strategy-lab workflow (Temporal unavailable)."
+        )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to start the strategy-lab workflow; Temporal worker unavailable.",
+        ) from exc
 
 
 def _ensure_no_active_run() -> None:
@@ -1982,41 +2017,6 @@ def _build_run_state(
     if contiguous_cycles is not None:
         state["contiguous_cycles"] = contiguous_cycles
     return state
-
-
-def _dispatch_or_thread(
-    run_id: str,
-    request: RunStrategyLabRequest,
-    *,
-    thread_name: str,
-    start_cycle_offset: Optional[int] = None,
-) -> None:
-    """Dispatch a run via Temporal, else fall back to an in-process daemon thread.
-
-    Shared dispatch path for the run/resume/restart endpoints.
-
-    Preconditions:
-        - ``run_id``'s state is already registered in ``_active_runs`` and persisted.
-
-    Postconditions:
-        - When ``_dispatch_strategy_lab_run`` starts the durable workflow, returns
-          without spawning a thread. Otherwise a daemon ``threading.Thread`` running
-          ``_strategy_lab_worker`` is started; ``start_cycle_offset`` is passed to the
-          worker only when not ``None`` (so initial/restart start from cycle 0).
-    """
-    if _dispatch_strategy_lab_run(run_id, request):
-        return
-    kwargs = {}
-    if start_cycle_offset is not None:
-        kwargs["start_cycle_offset"] = start_cycle_offset
-    thread = threading.Thread(
-        target=_strategy_lab_worker,
-        args=(run_id, request),
-        kwargs=kwargs,
-        name=thread_name,
-        daemon=True,
-    )
-    thread.start()
 
 
 def _dispatch_backtest_run(
@@ -2796,10 +2796,9 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
         _active_runs[run_id] = initial_state
     _persist_run_state(run_id, initial_state, create=True)
 
-    # When Temporal is enabled, dispatch the run as a durable workflow so it
-    # survives a worker/process restart and is visible in the Temporal UI; on
-    # any dispatch failure fall back to the in-process daemon thread.
-    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-{run_id}")
+    # Dispatch the run as a durable Temporal workflow so it survives a
+    # worker/process restart and is visible in the Temporal UI.
+    _dispatch_strategy_lab_run(run_id, request)
 
     return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
 
@@ -2973,7 +2972,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           progress — ``completed_record_ids``/``errored_cycles``/
           ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
           — and persists the new state.
-        - Dispatches the worker (Temporal or a daemon thread) from the first
+        - Dispatches the durable Temporal workflow from the first
           not-yet-contiguously-completed cycle, so no already-persisted cycle
           is re-run (and thus never duplicated).
         - Returns the run's start response with the resume offset and total
@@ -3030,13 +3029,8 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     # The Temporal activity derives its resume offset from the persisted
     # contiguous-cycle count (set above), so a durable resume picks up where the
-    # run left off. Fall back to the daemon thread with an explicit offset.
-    _dispatch_or_thread(
-        run_id,
-        request,
-        thread_name=f"strategy-lab-resume-{run_id}",
-        start_cycle_offset=contiguous_cycles,
-    )
+    # run left off.
+    _dispatch_strategy_lab_run(run_id, request)
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
@@ -3066,8 +3060,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
           carried forward — and persists the new state.
-        - Dispatches the worker (Temporal or a daemon thread) starting at
-          cycle 0.
+        - Dispatches the durable Temporal workflow starting at cycle 0.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
@@ -3112,9 +3105,9 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         _active_runs[run_id] = restarted_state
     _persist_run_state(run_id, restarted_state)
 
-    # Restart from scratch through Temporal when enabled (offset 0, per the
-    # reset persisted state above); else fall back to the daemon thread.
-    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-restart-{run_id}")
+    # Restart from scratch through Temporal (offset 0, per the reset
+    # persisted state above).
+    _dispatch_strategy_lab_run(run_id, request)
 
     return StrategyLabRunStartResponse(
         run_id=run_id,

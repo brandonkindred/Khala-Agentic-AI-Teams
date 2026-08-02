@@ -19,11 +19,13 @@ Covers three things the runtime depends on:
    the fine-grained ``StrategyLabBatchWorkflow`` in
    ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.)
 
-3. **Dispatch branch.** ``POST /strategy-lab/run`` and ``POST /backtests`` route
-   through a Temporal workflow when ``is_temporal_enabled()`` and fall back to a
-   daemon thread otherwise. Strategy Lab dispatch targets
-   ``strategy_lab.temporal.start_workflow.start_strategy_lab_batch_workflow``;
-   backtests target ``temporal.start_workflow.start_backtest_workflow``.
+3. **Dispatch branch.** ``POST /backtests`` routes through a Temporal workflow
+   when ``is_temporal_enabled()`` and falls back to a daemon thread otherwise
+   (target: ``temporal.start_workflow.start_backtest_workflow``).
+   ``POST /strategy-lab/run`` is Temporal-only: it targets
+   ``strategy_lab.temporal.start_workflow.start_strategy_lab_batch_workflow``
+   and returns 503 (rolling the run to "failed") instead of falling back to a
+   thread when Temporal is disabled or the dispatch fails.
 """
 
 from __future__ import annotations
@@ -326,21 +328,22 @@ def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_clien
     thread_ctor.assert_not_called()
 
 
-def test_strategy_lab_dispatch_uses_thread_when_disabled(monkeypatch, api_client) -> None:
+def test_strategy_lab_dispatch_returns_503_when_temporal_disabled(monkeypatch, api_client) -> None:
+    """Strategy Lab dispatch is Temporal-only: a disabled Temporal 503s and
+    rolls the freshly-registered run to "failed" instead of spawning a thread."""
     import shared.temporal
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
-    thread_ctor = mock.Mock()
-    monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
 
     resp = api_client.post(
         "/strategy-lab/run",
         json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
     )
 
-    assert resp.status_code == 200
-    thread_ctor.assert_called_once()
+    assert resp.status_code == 503
+    (run_state,) = api_main._active_runs.values()
+    assert run_state["status"] == "failed"
 
 
 def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -> None:
@@ -408,11 +411,10 @@ def test_dispatch_via_temporal_false_when_disabled(monkeypatch) -> None:
     assert called == []  # starter not invoked when Temporal is disabled
 
 
-def test_strategy_lab_dispatch_falls_back_to_thread_on_dispatch_failure(
-    monkeypatch, api_client
-) -> None:
-    """Finding 1 regression: a RuntimeError from the starter must NOT 500 or
-    leave a stuck 'running' entry — it falls back to the daemon thread."""
+def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_client) -> None:
+    """A RuntimeError from the starter must not 500 or leave a stuck 'running'
+    entry — Temporal-only dispatch rolls the run to 'failed' and 503s (no
+    thread fallback)."""
     import shared.temporal
     from investment_team.api import main as api_main
     from investment_team.strategy_lab.temporal import start_workflow as sl_sw
@@ -423,16 +425,15 @@ def test_strategy_lab_dispatch_falls_back_to_thread_on_dispatch_failure(
         raise RuntimeError("Temporal client not available")
 
     monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _boom)
-    thread_ctor = mock.Mock()
-    monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
 
     resp = api_client.post(
         "/strategy-lab/run",
         json={"batch_size": 1, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
     )
 
-    assert resp.status_code == 200  # not a 500
-    thread_ctor.assert_called_once()  # fell back to the thread path
+    assert resp.status_code == 503
+    (run_state,) = api_main._active_runs.values()
+    assert run_state["status"] == "failed"
 
 
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
