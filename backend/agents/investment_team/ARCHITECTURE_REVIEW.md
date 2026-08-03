@@ -375,8 +375,15 @@ The blogging team has a `FeedbackTracker` with Jaccard similarity to detect stal
 
 - [ ] Create `session.py` (FileSessionManager local, S3SessionManager prod)
 - [ ] Encrypt session data at rest (financial PII)
-- [ ] Evaluate Temporal activities for cycle phases
-- [ ] If viable, migrate `_strategy_lab_worker` to Temporal workflow
+- [x] Evaluate Temporal activities for cycle phases — see
+      `strategy_lab/temporal/activities.py`
+- [x] Migrate `_strategy_lab_worker` to Temporal workflow — done and gone
+      further than "evaluate": the thread-based worker has been fully
+      removed (no fallback). `run_strategy_lab` / `resume_strategy_lab_run` /
+      `restart_strategy_lab_run` dispatch exclusively through
+      `_dispatch_strategy_lab_run` to the durable `StrategyLabBatchWorkflow`
+      (+ per-cycle `StrategyLabCycleWorkflow` children); see
+      [`system_design/architecture.md`](system_design/architecture.md) §7.
 
 **Rollback gate**: Temporal crash recovery within 30 seconds on process kill.
 
