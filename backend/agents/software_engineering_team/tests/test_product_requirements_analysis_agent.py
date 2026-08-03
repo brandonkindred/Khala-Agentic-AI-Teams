@@ -3,6 +3,7 @@
 import json
 import logging
 from contextlib import ExitStack
+from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
@@ -1279,6 +1280,27 @@ def test_consolidate_open_questions_sends_full_orchestration_metadata_to_llm() -
         assert field in sent_prompt, f"expected {field!r} in consolidation prompt"
 
 
+def test_consolidate_open_questions_does_not_raise_on_non_serializable_due_date() -> None:
+    """The prompt-building json.dumps must not raise TypeError even if due_date somehow
+    ends up holding a non-JSON-native value (e.g. via model_copy bypassing validation) —
+    the docstring promises this function never raises."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Which region?").model_copy(
+        update={"due_date": date(2026, 4, 1)}
+    )
+    q2 = OpenQuestion(id="q2", question_text="Which zone?")
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.call_llm_json"
+    ) as mock_call:
+        mock_call.return_value = {"consolidated_questions": []}
+        agent._consolidate_open_questions([q1, q2])
+
+    sent_prompt = mock_call.call_args[0][1]
+    assert "2026-04-01" in sent_prompt
+
+
 def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() -> None:
     """_review_question_answer_alignment should return List[OpenQuestion] with same ids when LLM returns valid aligned_questions."""
     llm = _StubClient(
@@ -1327,6 +1349,22 @@ def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() 
     assert len(result) == 1
     assert result[0].id == "infra_q"
     assert result[0].question_text == "What platform category for deployment?"
+
+
+def test_review_question_answer_alignment_does_not_raise_on_non_serializable_due_date() -> None:
+    """The prompt-building json.dumps must not raise TypeError even if due_date somehow
+    ends up holding a non-JSON-native value (e.g. via model_copy bypassing validation) —
+    the docstring promises this function never raises."""
+    llm = _StubClient({"aligned_questions": []})
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q = OpenQuestion(id="q1", question_text="Which region?").model_copy(
+        update={"due_date": date(2026, 4, 1)}
+    )
+
+    result = agent._review_question_answer_alignment([q])
+
+    assert len(result) == 1
+    assert result[0].id == "q1"
 
 
 def test_consolidate_open_questions_skips_malformed_item_keeps_valid_ones() -> None:
