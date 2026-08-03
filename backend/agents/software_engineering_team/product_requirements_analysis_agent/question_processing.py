@@ -386,9 +386,12 @@ def filter_duplicate_questions(
     Postconditions: the two returned lists partition ``new_questions`` (order
         preserved within each). Never raises for well-typed inputs
         (``List[OpenQuestion]``, ``str``); ``_stem_info`` / ``_clean_token`` are
-        total over cleaned lowercase tokens.
+        total over cleaned lowercase tokens. Precondition violations raise
+        ``AssertionError``.
     """
-    qa_history_lower = (qa_history or "").lower()
+    assert isinstance(new_questions, list), "new_questions must be a list"
+    assert isinstance(qa_history, str), "qa_history must be a string"
+    qa_history_lower = qa_history.lower()
     filtered = []
     duplicates = []
 
@@ -497,7 +500,9 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         parsed but not capped here (the agent workflow applies
         ``MAX_OPEN_QUESTIONS`` after semantic consolidation and
         answer-similarity deduplication so near-duplicates do not crowd out
-        distinct topics); never raises.
+        distinct topics). Malformed open-question items are skipped and logged
+        (``ValueError``/``TypeError``/``KeyError``); this function never raises
+        to callers.
     """
     if not isinstance(raw, dict):
         return SpecReviewResult(summary="Spec review completed (no structured output)")
@@ -530,8 +535,14 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         for i, q in enumerate(raw_questions):
             try:
                 open_questions.append(parse_open_question(q, i))
-            except Exception as exc:
-                logger.warning("Skipping malformed open question at index %d: %s", i, exc)
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.warning(
+                    "Skipping malformed open question at index %d (%s): %s; raw=%r",
+                    i,
+                    type(exc).__name__,
+                    exc,
+                    q,
+                )
 
     return SpecReviewResult(
         issues=issues,
@@ -546,17 +557,18 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
 
 
 def _str_or_default(value: Any, default: str = "") -> str:
-    """Safely accept an LLM-provided string field.
+    """Return an LLM-provided string field, or ``default`` when absent/wrong-typed.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns ``default`` when ``value`` is ``None`` or not a ``str``;
-        returns ``value`` when it is already a ``str``.
+    Postconditions: returns ``value`` when it is already a ``str``; otherwise
+        returns ``default``. Does not coerce via ``str()`` — non-string values
+        (including numbers and bools) yield ``default``.
     """
     return default if value is None or not isinstance(value, str) else value
 
 
 def _require_string_field(data: dict, key: str, default: str) -> str:
-    """Accept a string field; treat a missing key as ``default``; reject nulls/types.
+    """Accept a string field; raise on present null/non-string; default if missing.
 
     Preconditions: ``data`` is a mapping; ``default`` is the fallback for an absent key.
     Postconditions: returns ``default`` when ``key`` is absent; returns the value when
@@ -576,8 +588,9 @@ def _safe_constraint_layer(value: Any) -> int:
     """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns an int; non-numeric or missing input yields 0,
-        matching the "not a constraint question" default in :class:`OpenQuestion`.
+    Postconditions: returns a non-negative int. ``None``, non-numeric input, and
+        bools (treated as malformed, not as 0/1) yield 0, matching the
+        "not a constraint question" default in :class:`OpenQuestion`.
     """
     try:
         if value is None:
@@ -603,12 +616,12 @@ def _safe_constraint_layer(value: Any) -> int:
 
 
 def _safe_bool(value: Any, default: bool) -> bool:
-    """Safely coerce LLM-provided boolean-ish values.
+    """Coerce LLM-provided boolean-ish or numeric values to bool.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
     Postconditions: returns ``default`` when ``value`` is ``None`` or unrecognized;
-        returns parsed boolean when ``value`` is already a bool, numeric 0/1,
-        or common boolean strings.
+        returns a bool when ``value`` is already a bool, numeric 0/1, or a common
+        boolean string (``true``/``false``/``yes``/``no``/…).
     """
     if value is None:
         return default
@@ -641,9 +654,9 @@ def _coerce_list(value: Any, *, allow_str: bool = False, allow_dict: bool = Fals
 
     Preconditions: none; ``value`` may be any decoded JSON type.
     Postconditions: returns a new list; does not mutate ``value`` itself.
-        Nested objects are shallow-referenced (not deep-copied): mutating a
-        nested element of the returned list mutates the same object in ``value``
-        when ``value`` was already a list/tuple/dict.
+        Nested objects are shallow-referenced (not deep-copied). WARNING: mutating
+        nested elements of the returned list mutates the original when ``value``
+        was already a list/tuple/dict.
         - None -> []
         - list/tuple -> list(value) (new outer list, shared nested objects)
         - string -> [value] when ``allow_str`` is True
@@ -664,7 +677,7 @@ def _coerce_list(value: Any, *, allow_str: bool = False, allow_dict: bool = Fals
 def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     """Parse a single open question from LLM output.
 
-    Preconditions: ``index`` is a non-negative int; ``q_data`` is the decoded item.
+    Preconditions: ``index`` is a non-negative int; ``q_data`` is a ``dict``.
     Postconditions: returns a valid :class:`OpenQuestion` when parsing succeeds.
         - ``options``, ``section_impact``, and ``asked_via`` are coerced to lists
           (``None`` becomes ``[]``; only well-typed scalars are kept).
@@ -672,92 +685,76 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
           are already ``str``.
         - Option ``confidence`` values are normalized to ``[0.0, 1.0]``,
           defaulting to ``0.5`` when missing or malformed.
-        - When ``q_data`` is a dict with options but no default, the
-          highest-confidence option is marked default.
+        - When ``q_data`` has options but no default, the highest-confidence
+          option is marked default.
         - Malformed option entries are skipped individually (logged); they do
           not discard the surrounding question.
         - Missing ``id`` / ``question_text`` fall back to ``q{index}`` / ``""``.
     Raises:
-        ValueError: when ``id`` or ``question_text`` is present but not a ``str``,
-            or on other unanticipated malformed shapes this helper does not coerce.
+        ValueError: when ``q_data`` is not a ``dict``; when ``id`` or
+            ``question_text`` is present but not a ``str``; or on other
+            unanticipated malformed shapes this helper does not coerce.
             This function has no top-level try/except. Callers handle failures
             differently: ``parse_spec_review_response``, ``consolidate_open_questions``,
             and ``review_question_answer_alignment`` catch per item;
             ``run_context_constraints_discovery`` catches per item and falls back
             to the fixed list when none parse.
     """
-    if isinstance(q_data, dict):
-        raw_options = _coerce_list(q_data.get("options", []), allow_str=True, allow_dict=True)
-        options = []
-        for i, opt in enumerate(raw_options):
-            try:
-                options.append(parse_question_option(opt, i))
-            except ValueError as exc:
-                logger.warning("Skipping malformed question option at index %d: %s", i, exc)
+    if not isinstance(q_data, dict):
+        raise ValueError(f"parse_open_question expects dict input, got {type(q_data).__name__}")
 
-        if options and not any(opt.is_default for opt in options):
-            best = max(options, key=lambda opt: opt.confidence)
-            default_idx = options.index(best)
-            options[default_idx] = QuestionOption(
-                id=best.id,
-                label=best.label,
-                is_default=True,
-                rationale=best.rationale,
-                confidence=best.confidence,
-            )
+    raw_options = _coerce_list(q_data.get("options", []), allow_str=True, allow_dict=True)
+    options = []
+    for i, opt in enumerate(raw_options):
+        try:
+            options.append(parse_question_option(opt, i))
+        except ValueError as exc:
+            logger.warning("Skipping malformed question option at index %d: %s", i, exc)
 
-        raw_depends = q_data.get("depends_on")
-        if isinstance(raw_depends, (list, tuple)):
-            depends_on = raw_depends[0] if raw_depends and isinstance(raw_depends[0], str) else None
-        elif isinstance(raw_depends, str):
-            depends_on = raw_depends
-        else:
-            depends_on = None
-
-        raw_section_impact = _coerce_list(q_data.get("section_impact", []), allow_str=True)
-        section_impact = [v for v in raw_section_impact if isinstance(v, str)]
-
-        raw_asked_via = _coerce_list(q_data.get("asked_via", []), allow_str=True)
-        asked_via = [v for v in raw_asked_via if isinstance(v, str)]
-
-        return OpenQuestion(
-            id=_require_string_field(q_data, "id", f"q{index}"),
-            question_text=_require_string_field(q_data, "question_text", ""),
-            context=_str_or_default(q_data.get("context")),
-            recommendation=_str_or_default(q_data.get("recommendation")),
-            options=options,
-            allow_multiple=_safe_bool(q_data.get("allow_multiple", False), default=False),
-            source=_str_or_default(q_data.get("source"), "spec_review"),
-            category=_str_or_default(q_data.get("category"), "general"),
-            priority=_str_or_default(q_data.get("priority"), "medium"),
-            constraint_domain=_str_or_default(q_data.get("constraint_domain")),
-            constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
-            depends_on=depends_on,
-            blocking=_safe_bool(q_data.get("blocking", True), default=True),
-            owner=_str_or_default(q_data.get("owner"), "user"),
-            section_impact=section_impact,
-            due_date=_str_or_default(q_data.get("due_date")),
-            status=_str_or_default(q_data.get("status"), "open"),
-            asked_via=asked_via,
+    if options and not any(opt.is_default for opt in options):
+        best = max(options, key=lambda opt: opt.confidence)
+        default_idx = options.index(best)
+        options[default_idx] = QuestionOption(
+            id=best.id,
+            label=best.label,
+            is_default=True,
+            rationale=best.rationale,
+            confidence=best.confidence,
         )
 
+    raw_depends = q_data.get("depends_on")
+    if isinstance(raw_depends, (list, tuple)):
+        depends_on = raw_depends[0] if raw_depends and isinstance(raw_depends[0], str) else None
+    elif isinstance(raw_depends, str):
+        depends_on = raw_depends
+    else:
+        depends_on = None
+
+    raw_section_impact = _coerce_list(q_data.get("section_impact", []), allow_str=True)
+    section_impact = [v for v in raw_section_impact if isinstance(v, str)]
+
+    raw_asked_via = _coerce_list(q_data.get("asked_via", []), allow_str=True)
+    asked_via = [v for v in raw_asked_via if isinstance(v, str)]
+
     return OpenQuestion(
-        id=f"q{index}",
-        question_text=str(q_data),
-        context="This question was identified during spec review.",
-        recommendation="",
-        options=[
-            QuestionOption(id="opt1", label="Yes", is_default=True, rationale="", confidence=0.5),
-            QuestionOption(id="opt2", label="No", is_default=False, rationale="", confidence=0.5),
-        ],
-        allow_multiple=False,
-        source="spec_review",
-        blocking=True,
-        owner="user",
-        section_impact=[],
-        due_date="",
-        status="open",
-        asked_via=[],
+        id=_require_string_field(q_data, "id", f"q{index}"),
+        question_text=_require_string_field(q_data, "question_text", ""),
+        context=_str_or_default(q_data.get("context")),
+        recommendation=_str_or_default(q_data.get("recommendation")),
+        options=options,
+        allow_multiple=_safe_bool(q_data.get("allow_multiple", False), default=False),
+        source=_str_or_default(q_data.get("source"), "spec_review"),
+        category=_str_or_default(q_data.get("category"), "general"),
+        priority=_str_or_default(q_data.get("priority"), "medium"),
+        constraint_domain=_str_or_default(q_data.get("constraint_domain")),
+        constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
+        depends_on=depends_on,
+        blocking=_safe_bool(q_data.get("blocking", True), default=True),
+        owner=_str_or_default(q_data.get("owner"), "user"),
+        section_impact=section_impact,
+        due_date=_str_or_default(q_data.get("due_date")),
+        status=_str_or_default(q_data.get("status"), "open"),
+        asked_via=asked_via,
     )
 
 

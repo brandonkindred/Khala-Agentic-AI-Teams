@@ -1153,6 +1153,41 @@ def test_parse_question_option_rejects_present_non_string_label() -> None:
         parse_question_option({"id": "opt1", "label": 5}, index=0)
 
 
+def test_parse_open_question_rejects_non_dict_input() -> None:
+    """Non-dict LLM items must raise ValueError instead of becoming Yes/No defaults."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    with pytest.raises(ValueError, match="expects dict input"):
+        agent._parse_open_question("Which cloud provider?", index=0)
+    with pytest.raises(ValueError, match="expects dict input"):
+        agent._parse_open_question(None, index=1)
+    with pytest.raises(ValueError, match="expects dict input"):
+        agent._parse_open_question(5, index=2)
+
+
+def test_parse_spec_review_response_skips_non_dict_open_questions() -> None:
+    """Non-dict open_questions entries are skipped; valid dicts are kept; never raises."""
+    result = parse_spec_review_response(
+        {
+            "summary": "ok",
+            "issues": [],
+            "gaps": [],
+            "open_questions": [
+                "plain string question",
+                {
+                    "id": "q1",
+                    "question_text": "Which region?",
+                    "options": [{"id": "opt1", "label": "us-east"}],
+                },
+                None,
+            ],
+        }
+    )
+    assert len(result.open_questions) == 1
+    assert result.open_questions[0].id == "q1"
+    assert result.summary == "ok"
+
+
 def test_parse_question_option_rejects_non_string_non_dict() -> None:
     """Unsupported option scalars must raise instead of becoming blank defaults."""
     with pytest.raises(ValueError, match="unsupported option type"):
