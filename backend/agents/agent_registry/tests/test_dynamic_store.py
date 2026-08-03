@@ -204,11 +204,13 @@ class TestLivePostgres:
         assert {m.id for m in got} == {"agentic.team-x.gen-1"}
 
     def test_manifests_with_prefix_escapes_like_metachars(self) -> None:
-        # An id containing a LIKE metachar ('_') must match literally, not wildcard.
+        # An id containing LIKE metachars ('_' / '%') must match literally, not as wildcards.
         ds.upsert(_manifest("agent_studio.a_b"))
         ds.upsert(_manifest("agent_studio.axb"))
-        got = ds.manifests_with_prefix("agent_studio.a_")
-        assert {m.id for m in got} == {"agent_studio.a_b"}
+        ds.upsert(_manifest("agent_studio.a%b"))
+        ds.upsert(_manifest("agent_studio.aXb"))
+        assert {m.id for m in ds.manifests_with_prefix("agent_studio.a_")} == {"agent_studio.a_b"}
+        assert {m.id for m in ds.manifests_with_prefix("agent_studio.a%")} == {"agent_studio.a%b"}
 
     def test_replace_manifests_is_atomic(self) -> None:
         keep = _manifest("agent_studio.keep")
