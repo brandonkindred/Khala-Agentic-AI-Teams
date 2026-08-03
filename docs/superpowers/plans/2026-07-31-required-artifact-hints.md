@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-31-required-artifact-hints-design.md`
 
-**Worktree:** `.worktrees/issue-3718-required-artifact-hints` on branch `fix/3718-required-artifact-hints`
+**Worktree:** `.worktrees/required-artifact-hints` on branch `fix/required-artifact-hints`
 
 ## Global Constraints
 
@@ -21,8 +21,9 @@
 - Preserve FakeLLM keyword phrases (`spec intake specialist`, `AI systems planner`) in the rebuilt system prompts so existing workflow tests keep routing.
 - Design by Contract: document `Preconditions` / `Postconditions` on new public builders; update problem-solving docstring for the known-hint guard.
 - Do not mention GitHub issue numbers in code, comments, commit messages, or tracked docs.
-- Run tests from the worktree `backend/` using the main repo venv:
-  `PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest ...`
+- Run tests from the checkout's `backend/` directory (worktree or main), using the project venv via `PATH` or an explicit relative path:
+  `cd backend && PYTHONPATH=. python -m pytest ...`
+  (Activate `.venv` first, or invoke `.venv/bin/python` relative to the main `backend/` checkout.)
 
 ## File map
 
@@ -76,8 +77,7 @@ def test_required_artifact_hints_tuple() -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_required_artifact_hints_tuple -v
 ```
 
@@ -104,8 +104,7 @@ REQUIRED_ARTIFACT_HINTS: tuple[str, ...] = (
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_required_artifact_hints_tuple -v
 ```
 
@@ -153,8 +152,7 @@ def test_review_uses_shared_required_artifact_hints() -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_review_uses_shared_required_artifact_hints -v
 ```
 
@@ -181,8 +179,7 @@ Leave the body of `run_review` unchanged (it already iterates `REQUIRED_ARTIFACT
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_review_uses_shared_required_artifact_hints \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_ai_agent_development_workflow_success \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_ai_agent_development_workflow_problem_solving -v
@@ -248,8 +245,7 @@ def test_intake_and_planning_prompts_include_required_artifact_hints() -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_intake_and_planning_prompts_include_required_artifact_hints -v
 ```
 
@@ -349,8 +345,7 @@ from ..prompts import planning_system_prompt
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_intake_and_planning_prompts_include_required_artifact_hints \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_run_intake_recovers_fenced_json_response \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_run_planning_recovers_fenced_json_response \
@@ -425,8 +420,7 @@ def test_problem_solving_ignores_unknown_artifact_gate_token() -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_problem_solving_ignores_unknown_artifact_gate_token -v
 ```
 
@@ -493,8 +487,7 @@ def run_problem_solving(
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_problem_solving_ignores_unknown_artifact_gate_token \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py::test_ai_agent_development_workflow_problem_solving -v
 ```
@@ -528,7 +521,6 @@ EOF
 - [ ] **Step 1: Confirm no local duplicate literals in consumer modules**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints && \
 rg -n 'REQUIRED_ARTIFACT_HINTS\s*=\s*\(' \
   backend/agents/software_engineering_team/ai_agent_development_team && \
 rg -n '"blueprint", "evaluation", "safety", "runbook", "mcp"' \
@@ -540,8 +532,7 @@ Expected: the assignment appears only in `constants.py`; the five-string literal
 - [ ] **Step 2: Run the full AI agent development team test file**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-3718-required-artifact-hints/backend && \
-PYTHONPATH=. /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
+cd backend && PYTHONPATH=. python -m pytest \
   agents/software_engineering_team/tests/test_ai_agent_development_team.py -v
 ```
 
