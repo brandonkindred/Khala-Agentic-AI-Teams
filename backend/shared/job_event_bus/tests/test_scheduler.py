@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -78,7 +79,9 @@ async def test_stop_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failing_pass_is_swallowed_and_loop_keeps_going(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_failing_pass_is_logged_and_swallowed_and_loop_keeps_going(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     state = BusState()
     calls: list[int] = []
 
@@ -89,14 +92,17 @@ async def test_failing_pass_is_swallowed_and_loop_keeps_going(monkeypatch: pytes
         return (0, 0)
 
     monkeypatch.setattr(scheduler_module, "reap_once", flaky_reap_once)
-    task = schedule_periodic_reap(state, ttl_seconds=1.0, max_jobs=1, interval_seconds=0.01)
-    try:
-        await asyncio.sleep(0.06)
-        assert len(calls) >= 2, "one raising pass must not kill the loop"
-    finally:
-        await stop_periodic_reap(task)
+    with caplog.at_level(logging.ERROR):
+        task = schedule_periodic_reap(state, ttl_seconds=1.0, max_jobs=1, interval_seconds=0.01)
+        try:
+            await asyncio.sleep(0.06)
+            assert len(calls) >= 2, "one raising pass must not kill the loop"
+        finally:
+            await stop_periodic_reap(task)
+    assert "periodic reap iteration failed" in caplog.text
 
 
-def test_rejects_nonpositive_interval() -> None:
-    with pytest.raises(AssertionError):
-        schedule_periodic_reap(BusState(), ttl_seconds=1.0, max_jobs=1, interval_seconds=0)
+@pytest.mark.parametrize("bad_interval", [0, -1.0])
+def test_rejects_nonpositive_interval(bad_interval: float) -> None:
+    with pytest.raises(ValueError):
+        schedule_periodic_reap(BusState(), ttl_seconds=1.0, max_jobs=1, interval_seconds=bad_interval)

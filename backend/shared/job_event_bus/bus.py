@@ -64,10 +64,33 @@ IntSource = Union[int, Callable[[], int]]
 
 
 def resolve_float(src: FloatSource) -> float:
+    """Resolve a float source to a float value.
+
+    If *src* is callable, it is invoked with no arguments and its result is
+    converted to float. Otherwise *src* itself is converted to float. This
+    allows TTL/max-job limits to be retuned live between reaper passes.
+
+    Preconditions:
+        - ``src`` is either a float or a zero-argument callable returning a
+          value convertible to float.
+    Postconditions:
+        - Returns the resolved float value.
+    """
     return float(src() if callable(src) else src)
 
 
 def resolve_int(src: IntSource) -> int:
+    """Resolve an int source to an int value.
+
+    If *src* is callable, it is invoked with no arguments and its result is
+    converted to int. Otherwise *src* itself is converted to int.
+
+    Preconditions:
+        - ``src`` is either an int or a zero-argument callable returning a
+          value convertible to int.
+    Postconditions:
+        - Returns the resolved int value.
+    """
     return int(src() if callable(src) else src)
 
 

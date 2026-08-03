@@ -55,7 +55,8 @@ def schedule_periodic_reap(
         - A failing reap pass is logged and swallowed; the loop keeps running
           on the same cadence.
     """
-    assert interval_seconds > 0, "interval_seconds must be positive"
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
     log = logger if logger is not None else _DEFAULT_LOGGER
 
     async def _loop() -> None:

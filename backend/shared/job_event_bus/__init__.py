@@ -1,9 +1,11 @@
 """Shared per-job in-memory event bus for SSE streaming.
 
-Re-exports the bus algorithm from :mod:`shared.job_event_bus.bus`. Teams hold
-their own :class:`BusState` and bind thin module-level ``subscribe``/``publish``
-wrappers over it; see the module docstring in ``bus.py`` for the contract and
-the multi-worker caveat.
+Re-exports the public API of the shared per-job in-memory event bus: the bus
+algorithm from :mod:`shared.job_event_bus.bus`, the threaded reaper from
+:mod:`shared.job_event_bus.reaper`, and the asyncio periodic scheduler from
+:mod:`shared.job_event_bus.scheduler`. Teams hold their own :class:`BusState`
+and bind thin module-level ``subscribe``/``publish`` wrappers over it; see the
+module docstring in ``bus.py`` for the contract and the multi-worker caveat.
 """
 
 from __future__ import annotations
