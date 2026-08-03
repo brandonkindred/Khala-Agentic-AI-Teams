@@ -142,10 +142,30 @@ the workflow to the `resume_token` it is resolving (see §2). On (re-)entry:
 - If a persisted, unresolved pause exists **and**
   `request.get("acknowledged_resume_token") == persisted_resume_token`: this
   invocation is the one meant to consume it. Apply the resolved
-  `resolved_questions` / `task_decision_overrides`, **persist the accepted
-  answer batch to the job record's `submitted_answers`**, clear the pause
-  envelope, and continue execution normally — do **not** re-emit. The
-  persist step matters beyond in-memory application:
+  `resolved_questions` / `task_decision_overrides`, **append the accepted
+  answer batch to the job record's `submitted_answers` and clear the pause
+  envelope in one atomic update**, and continue execution normally — do
+  **not** re-emit. Two details matter here, not just the fact of
+  persisting:
+  - **Append, not overwrite.** `submitted_answers` is an accumulated
+    history across every pause round in the job's lifetime, not a
+    single-round scratch value: `job_service_client.submit_answers()`
+    (`job_service_client.py:767-778`) already writes it via
+    `append_to={"submitted_answers": answers}`, and `hitl.answers_to_resolved()`
+    /`unanswered_questions()` both expect to see every prior round's answers
+    when checking coverage. A plain assignment here would silently discard
+    every earlier pause round's answers the moment a job with more than one
+    pause round resolves its second one.
+  - **Atomic with the envelope clear, not two writes.** If the append
+    succeeded but the pause-envelope clear then failed (or the activity
+    crashed between them), a retry would still find a persisted, unresolved
+    pause **and** the same matching `acknowledged_resume_token` — the exact
+    condition this bullet is gated on — and would append the identical
+    batch a second time. The append and the clear must be one atomic job
+    record write, equivalent to the store-and-clear helper's own atomicity,
+    not a persist step followed by a separate clear step.
+
+  The persist step matters beyond in-memory application:
   `system_design/architecture.md`'s "Persistence And Resume" section already
   documents "submitted HITL answers" as one of the fields the orchestrator
   persists, and status/audit consumers that read the job record depend on
@@ -361,7 +381,6 @@ while True:
     self._active_resume_token = result["resume_token"]
     self._pending_questions = result["pending_questions"]
     self._check_buffered_signal_for(self._active_resume_token)  # apply a signal that beat us here
-    await workflow.wait_condition(lambda: self._submitted_answers is not None)
     # A gate on submitted answers alone silently strands the workflow if the
     # job is cancelled while paused: SE's cancel route marks the job record
     # cancelled unconditionally, then makes a BEST-EFFORT attempt at native
@@ -369,14 +388,44 @@ while True:
     # /run-team/{job_id}/cancel) whose failure is explicitly swallowed
     # (`except Exception: logger.debug(...)`) -- so a transient RPC error
     # leaves the job record terminal while this workflow, having received no
-    # cancellation, sits in wait_condition forever with no submitted_answers
-    # ever coming. Today's hitl.wait_for_answers poll loop can't strand this
-    # way: it independently re-checks the job record's terminal status on
-    # every 5s tick regardless of what happened at the Temporal RPC layer.
-    # The native design needs an equivalent reconciliation path -- e.g. a
-    # bounded wait_condition timeout after which an activity re-reads the job
-    # record and the loop exits on a terminal status it finds there, closing
-    # the gap left by a best-effort cancel that never reached the workflow.
+    # cancellation, would sit in an unconditional wait_condition forever.
+    # Today's hitl.wait_for_answers poll loop can't strand this way: it
+    # independently re-checks the job record's terminal status on every 5s
+    # tick regardless of what happened at the Temporal RPC layer. The
+    # native design needs the same reconciliation, actually wired into the
+    # loop rather than merely documented as a risk:
+    while self._submitted_answers is None:
+        try:
+            await workflow.wait_condition(
+                lambda: self._submitted_answers is not None,
+                timeout=RECONCILE_INTERVAL,  # e.g. 60s -- bounds how stale a
+                # missed-cancellation can get; independent of the §4 open
+                # question on a fail-closed answer-wait timeout, which governs
+                # how long a pause waits for a *human*, not how often this
+                # loop reconciles against the job record
+            )
+        except asyncio.TimeoutError:
+            # New activity: reads the job record's status only, no mutation --
+            # the workflow has no direct job-store access, only activities do.
+            status = await workflow.execute_activity(
+                check_job_terminal_activity, request["job_id"],
+                start_to_close_timeout=<short>,
+            )
+            if status["is_terminal"]:
+                # The job record, not this workflow, is authoritative for
+                # cancellation (§4 decision) -- a terminal record wins even
+                # though this workflow itself was never signaled or cancelled.
+                return {
+                    "outcome": "failed" if status["status"] != "completed" else "completed",
+                    "job_id": request["job_id"],
+                    "error": status.get("error"),
+                }
+            # Job record still active -- the timeout fired with nothing wrong;
+            # loop back into wait_condition rather than treating it as an
+            # error. If native Temporal cancellation eventually succeeds
+            # instead (the common case), it interrupts wait_condition on its
+            # own via Temporal's own cancellation propagation, independent of
+            # this reconciliation path.
 
     # hitl.answers_to_resolved(submitted_answers, pending_questions) needs BOTH
     # args -- it recovers question_text/answer labels from pending_questions;
