@@ -27,21 +27,29 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     Postconditions:
         - Runs the orchestrator wired to the job store against the request's
           ``job_id`` when supplied (the API created the row; do not create it
-          again), or mints one and creates the row when absent. Returns the
-          final job snapshot as a dict, or a minimal synthetic
-          ``{"job_id": ..., "status": "unknown"}`` dict when the job row is
-          missing or unreadable after the orchestrator run. Raises with an
-          actionable message when the worker is mis-wired (no provider) or
+          again), or mints one and creates the row when absent, forwarding
+          ``req.acknowledged_resume_token`` and always requesting
+          ``pause_strategy="return"`` (contract doc §1) — this activity never
+          blocks through a HITL pause.
+        - When the orchestrator returns a non-``None`` result (a HITL gate
+          paused, or a pre-work activity retry re-emitting an already-persisted
+          pause — see ``run_coding_team_orchestrator``'s contract), that
+          ``{"outcome": "paused", ...}`` dict is returned unchanged and
+          promptly — no further job-store read, no blocking call past the
+          point of pause.
+        - Otherwise (the orchestrator returned ``None``, i.e. the pipeline
+          reached a terminal state) returns the final job snapshot as a dict,
+          or a minimal synthetic ``{"job_id": ..., "status": "unknown"}`` dict
+          when the job row is missing or unreadable after the orchestrator
+          run — unchanged from before ``pause_strategy`` existed. Raises with
+          an actionable message when the worker is mis-wired (no provider) or
           the request carries no plan — instead of failing later, mid-run,
           with a generic error.
-        - ``req.acknowledged_resume_token`` is NOT yet forwarded into
-          ``run_orchestrator_wired`` or consulted by any re-entry check — the
-          orchestrator does not yet mint or persist a ``resume_token`` per
-          pause for it to match against, so there is nothing to check it
-          against today. Declaring the field on ``RunRequest`` only stops it
-          from being silently dropped by Pydantic before that consumer
-          exists; wiring it through is separate, not-yet-implemented
-          activity-side work (contract §1, sibling issues #3987/#3988).
+        - Safe for POST ``/run/{job_id}/answers`` (see that route) to signal a
+          resume without this activity ever having blocked: the route reads
+          the job's persisted ``resume_token`` and signals
+          ``CodingTeamWorkflow`` directly rather than relying on a live,
+          blocked thread — this activity has nothing to unblock.
     """
     import uuid
 
@@ -77,7 +85,15 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     if not supplied_job_id:
         create_job(job_id=job_id, repo_path=req.repo_path, plan_input=req.plan_input)
     plan = plan_from_input(req.plan_input, req.repo_path)
-    run_orchestrator_wired(job_id, req.repo_path, plan)
+    paused = run_orchestrator_wired(
+        job_id,
+        req.repo_path,
+        plan,
+        pause_strategy="return",
+        acknowledged_resume_token=req.acknowledged_resume_token,
+    )
+    if paused is not None:
+        return paused
     return get_job(job_id) or {"job_id": job_id, "status": "unknown"}
 
 

@@ -54,7 +54,14 @@ def plan_from_input(plan_input: Dict[str, Any], repo_path: str) -> CodingTeamPla
     return CodingTeamPlanInput.model_validate({**plan_input, "repo_path": repo_path})
 
 
-def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
+def run_orchestrator_wired(
+    job_id: str,
+    repo_path: str,
+    plan: CodingTeamPlanInput,
+    *,
+    pause_strategy: str = "block",
+    acknowledged_resume_token: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """Run the coding-team orchestrator for *job_id* with the standard job-store wiring.
 
     Single source of the ``(update_job_fn, get_job_fn, cache_dir)`` wiring shared
@@ -62,21 +69,35 @@ def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInpu
     activity, so it cannot drift between them. The github-source path wires a
     custom ``update_job_fn`` (+ ``on_pause``) and deliberately does not use this.
 
+    ``pause_strategy``/``acknowledged_resume_token`` are forwarded unchanged into
+    ``run_coding_team_orchestrator`` — see that function's docstring for the full
+    contract. Every existing caller of this function (``_start_orchestrator_thread``,
+    thread-mode resume) passes neither, so it keeps requesting ``"block"`` (today's
+    behavior, unchanged) by default; only the Temporal activity path
+    (``run_pipeline_activity``) passes ``pause_strategy="return"``.
+
     Preconditions:
         - ``job_id`` names an existing job in the process job store; ``plan`` is a
           validated ``CodingTeamPlanInput`` whose ``repo_path`` equals *repo_path*.
     Postconditions:
-        - The orchestrator has run to completion (or raised); job state is
-          persisted through ``update_job``. Propagates the orchestrator's
-          exceptions unchanged — callers own their own failure handling.
+        - ``pause_strategy="block"``: returns ``None``, unchanged from every caller's
+          behavior before this parameter existed. The orchestrator has run to
+          completion (or raised); job state is persisted through ``update_job``.
+          Propagates the orchestrator's exceptions unchanged — callers own their own
+          failure handling.
+        - ``pause_strategy="return"``: returns the orchestrator's
+          ``{"outcome": "paused", ...}`` dict when a HITL gate paused, or ``None`` when
+          the pipeline instead reached a terminal state.
     """
-    _main.run_coding_team_orchestrator(
+    return _main.run_coding_team_orchestrator(
         job_id,
         repo_path,
         plan,
         update_job_fn=lambda **kw: _main.update_job(job_id, **kw),
         get_job_fn=_main.get_job,
         cache_dir=DEFAULT_CACHE_DIR,
+        pause_strategy=pause_strategy,
+        acknowledged_resume_token=acknowledged_resume_token,
     )
 
 

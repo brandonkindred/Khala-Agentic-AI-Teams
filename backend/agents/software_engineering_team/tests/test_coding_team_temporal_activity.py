@@ -42,8 +42,10 @@ def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
     # The activity mints a job, builds the plan, and delegates to the shared
     # ``run_orchestrator_wired``. Patch that seam on the (stable-identity) api.main
     # module — no ``coding_team.orchestrator`` sys.modules gymnastics needed.
-    def _fake_wired(job_id, repo_path, plan):
+    def _fake_wired(job_id, repo_path, plan, **kwargs):
         captured["args"] = (job_id, repo_path, plan)
+        captured["kwargs"] = kwargs
+        return None  # not paused -- falls through to get_job below
 
     monkeypatch.setattr(main, "run_orchestrator_wired", _fake_wired)
 
@@ -72,11 +74,12 @@ def test_activity_reuses_supplied_job_id_and_skips_create_job(monkeypatch) -> No
     monkeypatch.setattr(main, "get_job", lambda jid: {"job_id": jid, "status": "completed"})
 
     captured: dict = {}
-    monkeypatch.setattr(
-        main,
-        "run_orchestrator_wired",
-        lambda job_id, repo_path, plan: captured.update(args=(job_id, repo_path, plan)),
-    )
+
+    def _fake_wired(job_id, repo_path, plan, **kwargs):
+        captured["args"] = (job_id, repo_path, plan)
+        return None
+
+    monkeypatch.setattr(main, "run_orchestrator_wired", _fake_wired)
 
     out = run_pipeline_activity(
         {"job_id": "api-job-1", "repo_path": "/repo", "plan_input": {"objective": "ship it"}}
@@ -118,3 +121,100 @@ def test_run_orchestrator_wired_passes_standard_job_store_wiring(monkeypatch) ->
     assert callable(kwargs["update_job_fn"])  # closes over job_id → update_job
     assert kwargs["get_job_fn"] is main.get_job
     assert kwargs["cache_dir"] == main.DEFAULT_CACHE_DIR
+
+
+def test_activity_returns_paused_promptly_without_blocking(monkeypatch) -> None:
+    """The literal acceptance criterion for issue #3987: when the orchestrator
+    reports a pause, the activity returns that discriminated result verbatim and
+    promptly -- it must never fall through to a blocking call."""
+    import software_engineering_team.api.coding_team_main as main
+    import software_engineering_team.engine_provider as ep
+    from software_engineering_team import hitl
+
+    monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
+    monkeypatch.setattr(main, "create_job", lambda **kw: None)
+
+    def _no_blocking_wait(*_a, **_kw):  # pragma: no cover - must not be called
+        raise AssertionError("run_pipeline_activity must not block through a pause")
+
+    monkeypatch.setattr(hitl, "wait_for_answers", _no_blocking_wait)
+
+    paused_result = {
+        "outcome": "paused",
+        "job_id": "job-paused",
+        "resume_token": "job-paused:abc123",
+        "pause_kind": "entry",
+        "pause_context": None,
+        "pending_questions": [{"id": "q1", "question_text": "Which framework?"}],
+    }
+
+    def _fake_wired(job_id, repo_path, plan, **kwargs):
+        assert kwargs["pause_strategy"] == "return"
+        return paused_result
+
+    monkeypatch.setattr(main, "run_orchestrator_wired", _fake_wired)
+
+    # get_job must never be reached in the paused path -- fail the test if it is.
+    def _no_get_job(*_a, **_kw):  # pragma: no cover
+        raise AssertionError("run_pipeline_activity must return the paused result directly")
+
+    monkeypatch.setattr(main, "get_job", _no_get_job)
+
+    out = run_pipeline_activity(
+        {"job_id": "job-paused", "repo_path": "/repo", "plan_input": {"objective": "ship it"}}
+    )
+
+    assert out == paused_result
+
+
+def test_activity_returns_terminal_snapshot_when_not_paused(monkeypatch) -> None:
+    """When the orchestrator returns None (terminal), the activity falls through
+    to its existing get_job read -- unchanged from before pause_strategy existed."""
+    import software_engineering_team.api.coding_team_main as main
+    import software_engineering_team.engine_provider as ep
+
+    monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
+    monkeypatch.setattr(main, "create_job", lambda **kw: None)
+    monkeypatch.setattr(main, "get_job", lambda jid: {"job_id": jid, "status": "completed"})
+
+    def _fake_wired(job_id, repo_path, plan, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "run_orchestrator_wired", _fake_wired)
+
+    out = run_pipeline_activity(
+        {"job_id": "job-done", "repo_path": "/repo", "plan_input": {"objective": "ship it"}}
+    )
+
+    assert out == {"job_id": "job-done", "status": "completed"}
+
+
+def test_activity_forwards_acknowledged_resume_token_and_return_strategy(monkeypatch) -> None:
+    """The activity always requests pause_strategy="return" and forwards
+    req.acknowledged_resume_token unchanged into run_orchestrator_wired."""
+    import software_engineering_team.api.coding_team_main as main
+    import software_engineering_team.engine_provider as ep
+
+    monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
+    monkeypatch.setattr(main, "create_job", lambda **kw: None)
+    monkeypatch.setattr(main, "get_job", lambda jid: {"job_id": jid, "status": "completed"})
+
+    captured: dict = {}
+
+    def _fake_wired(job_id, repo_path, plan, **kwargs):
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(main, "run_orchestrator_wired", _fake_wired)
+
+    run_pipeline_activity(
+        {
+            "job_id": "job-ack",
+            "repo_path": "/repo",
+            "plan_input": {"objective": "ship it"},
+            "acknowledged_resume_token": "job-ack:tok-1",
+        }
+    )
+
+    assert captured["kwargs"]["pause_strategy"] == "return"
+    assert captured["kwargs"]["acknowledged_resume_token"] == "job-ack:tok-1"

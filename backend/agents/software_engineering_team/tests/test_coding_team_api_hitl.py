@@ -1730,3 +1730,77 @@ def test_github_resume_thread_advances_status_before_io(monkeypatch):
     assert running_update_idx is not None, "thread must update status to 'running'"
     assert io_idx is not None, "thread must call get_issue"
     assert running_update_idx < io_idx, "status must advance to 'running' before GitHub I/O"
+
+
+# --------------------------------------------------------------------------- /answers: Temporal-native pause
+
+
+def test_answers_temporal_native_signals_workflow_and_appends_without_clearing(monkeypatch):
+    """A pause published under pause_strategy="return" carries a resume_token on the job
+    record. Submitting answers for it must append-only store them (never clear the pause
+    envelope -- that's the orchestrator's own re-entry check's job) and signal
+    CodingTeamWorkflow directly, instead of the thread-liveness/auto-resume dance that only
+    applies to a block-mode pause."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    job = _job(resume_token="j1:tok-1")
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    appended: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        api,
+        "store_append_submitted_answers",
+        lambda jid, answers: appended.update(job_id=jid, answers=answers),
+    )
+    signaled: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        hitl_route,
+        "signal_workflow_sync",
+        lambda workflow_id, signal, payload: signaled.update(
+            workflow_id=workflow_id, signal=signal, payload=payload
+        ),
+    )
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover - block-mode-only paths
+        raise AssertionError("block-mode path must not run for a Temporal-native pause")
+
+    monkeypatch.setattr(api, "store_submit_answers", _must_not_run)
+    monkeypatch.setattr(api, "_is_run_thread_alive", _must_not_run)
+
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+
+    assert r.status_code == 200
+    assert appended["job_id"] == "j1"
+    assert appended["answers"][0]["question_id"] == "q1"
+    assert signaled["workflow_id"] == "coding_team-j1"
+    assert signaled["signal"] == "submit_answers"
+    assert signaled["payload"]["resume_token"] == "j1:tok-1"
+    assert signaled["payload"]["answers"] == appended["answers"]
+
+
+def test_answers_thread_mode_unaffected_when_no_resume_token(monkeypatch):
+    """A job with no resume_token (block-mode / GitHub-hook pause) keeps today's exact
+    behavior -- the new Temporal-signal branch must never be reached."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    job = _job()  # no resume_token key at all
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    stored: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        api, "store_submit_answers", lambda jid, answers: stored.update(answers=answers)
+    )
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: True)
+
+    def _no_signal(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not signal the workflow for a block-mode pause")
+
+    monkeypatch.setattr(hitl_route, "signal_workflow_sync", _no_signal)
+    monkeypatch.setattr(api, "store_append_submitted_answers", _no_signal)
+
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+
+    assert r.status_code == 200
+    assert stored["answers"][0]["question_id"] == "q1"

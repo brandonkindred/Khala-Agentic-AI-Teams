@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pytest
+
 from software_engineering_team import coding_team_orchestrator as orch_mod
 from software_engineering_team.coding_team_orchestrator import (
     CodingTeamSwarm,
@@ -14,7 +16,7 @@ from software_engineering_team.coding_team_orchestrator import (
     run_coding_team_orchestrator,
 )
 from software_engineering_team.models import CodingTeamPlanInput, StackSpec, TaskStatus
-from software_engineering_team.pause_cycle import _format_decisions
+from software_engineering_team.pause_cycle import _ActivityPauseSignal, _format_decisions
 from software_engineering_team.task_graph import TaskGraphService
 
 GIT_UTILS = "shared.git.git_utils"
@@ -999,3 +1001,286 @@ def test_escalate_decision_bounded_by_escalation_cap(tmp_path, monkeypatch):
     )
 
     assert graph.get_task("t1").status == TaskStatus.FAILED  # 2 prior + 1 == cap(3)
+
+
+# --------------------------------------------------------------------------- pause_strategy="return" (#3987)
+
+
+def test_entry_gate_returns_paused_without_blocking(tmp_path, monkeypatch):
+    job: Dict[str, Any] = {}
+
+    def no_wait(*a, **k):  # pragma: no cover
+        raise AssertionError('must not block in pause_strategy="return" mode')
+
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", no_wait)
+
+    class TL(_DefaultGroomTaskMixin):
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan):  # pragma: no cover
+            raise AssertionError("must not plan before the entry gate resolves")
+
+    class Swarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            self.aborted = False
+
+        def run(self, **kw):  # pragma: no cover
+            raise AssertionError("swarm must not run before the entry gate resolves")
+
+    _stub_agents(monkeypatch, TL, Swarm)
+    plan = CodingTeamPlanInput(
+        repo_path=str(tmp_path), open_questions=["Allergen strictness default?"]
+    )
+    result = run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: job.update(kw),
+        get_job_fn=lambda jid: job,
+        cache_dir=tmp_path,
+        get_llm=lambda k: None,
+        pause_strategy="return",
+    )
+
+    assert result["outcome"] == "paused"
+    assert result["job_id"] == "j1"
+    assert result["pause_kind"] == "entry"
+    assert result["pause_context"] is None
+    assert len(result["pending_questions"]) == 1
+    assert result["resume_token"].startswith("j1:")
+    # The pause envelope is durably persisted before returning -- a notification, not the
+    # source of truth (contract doc §1's precondition).
+    assert job.get("resume_token") == result["resume_token"]
+    assert job.get("waiting_for_answers") is True
+
+
+def test_tech_lead_clarify_returns_paused_without_blocking(tmp_path, monkeypatch):
+    job: Dict[str, Any] = {}
+    plan_calls = {"count": 0}
+
+    def no_wait(*a, **k):  # pragma: no cover
+        raise AssertionError('must not block in pause_strategy="return" mode')
+
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", no_wait)
+
+    class TL(_DefaultGroomTaskMixin):
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan):
+            plan_calls["count"] += 1
+            return {"tasks": [], "stacks": [], "open_questions": [{"question_text": "Which DB?"}]}
+
+    class Swarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            self.aborted = False
+
+        def run(self, **kw):  # pragma: no cover
+            raise AssertionError("swarm must not run before planning converges")
+
+    _stub_agents(monkeypatch, TL, Swarm)
+    result = run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: job.update(kw),
+        get_job_fn=lambda jid: job,
+        cache_dir=tmp_path,
+        get_llm=lambda k: None,
+        pause_strategy="return",
+    )
+
+    assert result["outcome"] == "paused"
+    assert result["pause_kind"] == "tech_lead_clarify"
+    assert plan_calls["count"] == 1  # exactly one LLM call before the pause, no retry-loop re-entry
+
+
+def test_worker_escalation_returns_paused_without_blocking(tmp_path, monkeypatch):
+    _patch_git(monkeypatch)
+    job: Dict[str, Any] = {}
+    worker = _DecisionWorker()
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", status=TaskStatus.IN_PROGRESS)
+
+    def bound_cycle(questions, source):
+        return _run_pause_cycle(
+            "j1",
+            questions,
+            source,
+            get_job_fn=lambda jid: job,
+            update_fn=lambda **kw: job.update(kw),
+            pause_strategy="return",
+        )
+
+    with pytest.raises(_ActivityPauseSignal) as exc_info:
+        swarm.run(max_rounds=20, pause_for_questions=bound_cycle, pause_strategy="return")
+
+    sig = exc_info.value
+    assert sig.pause_kind == "worker_escalation"
+    assert sig.pause_context == {"task_ids": ["t1"]}
+    assert job.get("resume_token")
+    assert job.get("waiting_for_answers") is True
+    # The task stays IN_PROGRESS (unescalated answer not yet applied) -- it is re-evaluated
+    # fresh on the next (Temporal-resumed) orchestrator invocation.
+    assert graph.get_task("t1").status == TaskStatus.IN_PROGRESS
+
+
+def test_reentry_matching_token_consumes_and_continues(tmp_path, monkeypatch):
+    job: Dict[str, Any] = {
+        "waiting_for_answers": True,
+        "pending_questions": [{"id": "q1", "question_text": "Allergen strictness default?"}],
+        "resume_token": "j1:tok-1",
+        "pause_kind": "entry",
+        "pause_context": None,
+        "submitted_answers": [
+            {
+                "question_id": "q1",
+                "question_text": "Allergen strictness default?",
+                "selected_option_id": "strict",
+            }
+        ],
+    }
+    plan_calls = {"count": 0}
+
+    class TL(_DefaultGroomTaskMixin):
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan):
+            plan_calls["count"] += 1
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+                "open_questions": [],
+            }
+
+    class Swarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            self.aborted = False
+
+        def run(self, **kw):
+            self.graph.mark_branch_merged("t1")
+
+    _stub_agents(monkeypatch, TL, Swarm)
+    plan = CodingTeamPlanInput(
+        repo_path=str(tmp_path), open_questions=["Allergen strictness default?"]
+    )
+    result = run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: job.update(kw),
+        get_job_fn=lambda jid: job,
+        cache_dir=tmp_path,
+        get_llm=lambda k: None,
+        pause_strategy="return",
+        acknowledged_resume_token="j1:tok-1",
+    )
+
+    assert result is None  # reached a terminal state, not a new pause
+    assert job.get("resume_token") is None  # envelope cleared atomically on consume
+    assert job.get("waiting_for_answers") is False
+    assert plan_calls["count"] == 1  # planning proceeded exactly once
+    assert job.get("status") == "completed"
+
+
+def test_reentry_stale_token_reemits_without_rerunning_work(tmp_path, monkeypatch):
+    job: Dict[str, Any] = {
+        "waiting_for_answers": True,
+        "pending_questions": [{"id": "q1", "question_text": "Allergen strictness default?"}],
+        "resume_token": "j1:tok-1",
+        "pause_kind": "entry",
+        "pause_context": None,
+        "submitted_answers": [],
+    }
+
+    class TL(_DefaultGroomTaskMixin):
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan):  # pragma: no cover
+            raise AssertionError("a pre-work retry must not re-run any planning work")
+
+    class Swarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            self.aborted = False
+
+        def run(self, **kw):  # pragma: no cover
+            raise AssertionError("a pre-work retry must not run the swarm")
+
+    _stub_agents(monkeypatch, TL, Swarm)
+    plan = CodingTeamPlanInput(
+        repo_path=str(tmp_path), open_questions=["Allergen strictness default?"]
+    )
+    # acknowledged_resume_token omitted (None) -- missing/stale, not a genuine resume.
+    result = run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: job.update(kw),
+        get_job_fn=lambda jid: job,
+        cache_dir=tmp_path,
+        get_llm=lambda k: None,
+        pause_strategy="return",
+    )
+
+    assert result == {
+        "outcome": "paused",
+        "job_id": "j1",
+        "resume_token": "j1:tok-1",
+        "pause_kind": "entry",
+        "pause_context": None,
+        "pending_questions": job["pending_questions"],
+    }
+
+
+def test_escalate_decision_defers_when_pause_already_committed_this_round(tmp_path, monkeypatch):
+    """Under pause_strategy="return", a second worker escalating in the same round after
+    another has already published a pause must defer to next round instead of racing to
+    publish its own competing pause (see CodingTeamSwarm.run's parallel_map/wait_for_stragglers
+    comment and _escalate_decision's Concurrency note)."""
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [_DecisionWorker()])
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t2", "a1")
+    swarm._pause_strategy = "return"
+    swarm._escalation_pause_committed = True  # another worker already published this round's pause
+
+    def _must_not_be_called(*a, **k):  # pragma: no cover
+        raise AssertionError("must not call pause_for_questions when already committed")
+
+    swarm.pause_for_questions = _must_not_be_called
+
+    swarm._escalate_decision(
+        graph.get_task("t2"), {"open_questions": [{"question_text": "Q?"}]}, lambda **k: None
+    )
+
+    task = graph.get_task("t2")
+    assert task.status == TaskStatus.IN_PROGRESS  # deferred to next round, not lost or failed
+    assert not task.revision_feedback  # no user_decision entry was appended
+
+
+def test_escalate_decision_ignores_committed_flag_in_block_mode(tmp_path, monkeypatch):
+    """The commit-flag guard is scoped to pause_strategy="return" only -- block mode must keep
+    today's behavior of every escalating worker getting its own full pause-and-resolve cycle,
+    even if the flag happens to be set."""
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [_DecisionWorker()])
+    graph.add_task("t3", title="T3")
+    graph.assign_task_to_agent("t3", "a1")
+    assert swarm._pause_strategy == "block"  # default
+    swarm._escalation_pause_committed = True  # must be ignored outside return mode
+    swarm.pause_for_questions = lambda q, s: ([{"question_text": "Q?", "answer": "ok"}], True)
+
+    swarm._escalate_decision(
+        graph.get_task("t3"), {"open_questions": [{"question_text": "Q?"}]}, lambda **k: None
+    )
+
+    task = graph.get_task("t3")
+    assert task.status == TaskStatus.IN_PROGRESS
+    assert task.revision_feedback[-1]["source"] == "user_decision"  # answer WAS applied
