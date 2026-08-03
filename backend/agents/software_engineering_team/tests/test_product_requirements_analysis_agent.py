@@ -45,8 +45,8 @@ from product_requirements_analysis_agent.question_processing import (
 from llm_service.clients.dummy import DummyLLMClient
 
 
-class _StubClient(DummyLLMClient):
-    """Returns a canned response for every ``complete_json`` call.
+class _StubClientBase(DummyLLMClient):
+    """Shared base: returns a fixed canned response from ``complete_json``.
 
     Routes transparently through the Strands adapter path
     (``stream()`` → ``complete_json`` override below). For PRA tests,
@@ -54,7 +54,12 @@ class _StubClient(DummyLLMClient):
     pattern. When the response is a dict, ``stream()`` JSON-serializes it so the
     Strands Agent returns JSON text that calling code can parse. When the response
     is a string, ``stream()`` passes it through as-is (for prompts expecting
-    plain markdown/text)."""
+    plain markdown/text).
+
+    Preconditions: none.
+    Postconditions: ``complete_json`` always returns the ``response`` passed to
+        ``__init__``, regardless of ``prompt``/``system_prompt``/other arguments.
+    """
 
     def __init__(self, response) -> None:
         super().__init__()
@@ -73,15 +78,24 @@ class _StubClient(DummyLLMClient):
         return self._response
 
 
-class _TrackingStubClient(DummyLLMClient):
+class _StubClient(_StubClientBase):
+    """Returns a canned response for every ``complete_json`` call (untracked)."""
+
+
+class _TrackingStubClient(_StubClientBase):
     """Returns a canned response and tracks calls for assertions.
 
     Supports call_count, last_prompt, and all_prompts for tests that
-    previously inspected ``llm.complete_json.call_count`` or ``call_args``."""
+    previously inspected ``llm.complete_json.call_count`` or ``call_args``.
+
+    Postconditions (in addition to the base class's): each ``complete_json`` call
+    increments ``call_count`` by 1, sets ``last_prompt`` to that call's ``prompt``,
+    and appends ``prompt`` to ``all_prompts``, before returning the base class's
+    canned response.
+    """
 
     def __init__(self, response) -> None:
-        super().__init__()
-        self._response = response
+        super().__init__(response)
         self.call_count = 0
         self.last_prompt: Optional[str] = None
         self.all_prompts: list = []
@@ -99,7 +113,14 @@ class _TrackingStubClient(DummyLLMClient):
         self.call_count += 1
         self.last_prompt = prompt
         self.all_prompts.append(prompt)
-        return self._response
+        return super().complete_json(
+            prompt,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            tools=tools,
+            think=think,
+            **kwargs,
+        )
 
 
 def test_format_answered_questions_for_prompt_empty() -> None:
