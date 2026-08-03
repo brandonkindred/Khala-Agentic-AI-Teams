@@ -426,6 +426,21 @@ while True:
             # instead (the common case), it interrupts wait_condition on its
             # own via Temporal's own cancellation propagation, independent of
             # this reconciliation path.
+            #
+            # A short RECONCILE_INTERVAL is not free over a long pause: every
+            # iteration of this loop records a durable timer plus an activity
+            # execution in workflow history, and unlike worker-escalation
+            # (bounded to a short drain window), an entry or Tech-Lead pause
+            # can legitimately wait on a human for days -- at 60s that's
+            # thousands of iterations, each several history events, risking
+            # Temporal's workflow-history size/event-count limits before the
+            # human ever answers. This loop must therefore periodically
+            # `continue_as_new`, carrying `self._active_resume_token`,
+            # `self._pending_questions`, and any still-buffered
+            # `self._buffered_signals` entries forward as the new run's
+            # starting state, rather than looping in place indefinitely --
+            # resetting history growth without losing the pause it's mid-way
+            # through waiting on.
 
     # hitl.answers_to_resolved(submitted_answers, pending_questions) needs BOTH
     # args -- it recovers question_text/answer labels from pending_questions;
