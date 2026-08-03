@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 MAX_ISSUES = 10
 MAX_GAPS = 10
 MAX_OPEN_QUESTIONS = 10
+ANSWER_SIMILARITY_THRESHOLD = 0.85
 
 
 def cap_open_questions(
@@ -371,11 +372,13 @@ def filter_duplicate_questions(
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Filters out questions whose keyword stems (plus simple plural/past-tense
-    variants) appear as whole words in the Q&A history. A question is considered
-    a duplicate when at least 90% of its keyword stems are found in the history.
-    Below-90% coverage is kept for possible consolidation elsewhere. This is
-    keyword coverage, not a similarity ratio between the question and history.
+    Filters out questions whose keyword stems (plus inflectional variants such as
+    plurals, past tense, and silent-e forms) match stemmed history tokens via
+    :func:`_stem_info` / :func:`_stems_match` — not verbatim raw-token equality.
+    A question is considered a duplicate when at least 90% of its keyword stems
+    are found in the history. Below-90% coverage is kept for possible
+    consolidation elsewhere. This is keyword coverage, not a similarity ratio
+    between the question and history.
 
     Uses :func:`content_words` (stopword-based, not length-based) for the same
     keyword-admission rule as :func:`qa_history.extract_answer_from_qa_history`,
@@ -478,7 +481,9 @@ def filter_organizational_questions(questions: List[OpenQuestion]) -> List[OpenQ
 
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`.
     Postconditions: returns the sublist that is not organizational, order preserved.
+        Precondition violations raise ``AssertionError``.
     """
+    assert isinstance(questions, list), "questions must be a list"
     kept: List[OpenQuestion] = []
     for q in questions:
         text_norm = (q.question_text or "").lower().strip()
@@ -529,8 +534,16 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     original_issue_count = len(issues)
     original_gap_count = len(gaps)
 
-    issues = _dedupe_items(issues)[:MAX_ISSUES]
-    gaps = _dedupe_items(gaps)[:MAX_GAPS]
+    try:
+        issues = _dedupe_items(issues)[:MAX_ISSUES]
+    except Exception as exc:
+        logger.warning("Deduplication failed for issues, using raw capped list: %s", exc)
+        issues = issues[:MAX_ISSUES]
+    try:
+        gaps = _dedupe_items(gaps)[:MAX_GAPS]
+    except Exception as exc:
+        logger.warning("Deduplication failed for gaps, using raw capped list: %s", exc)
+        gaps = gaps[:MAX_GAPS]
 
     if len(issues) < original_issue_count or len(gaps) < original_gap_count:
         logger.info(
@@ -665,13 +678,14 @@ def _coerce_list(value: Any, *, allow_str: bool = False, allow_dict: bool = Fals
 
     Preconditions: none; ``value`` may be any decoded JSON type.
     Postconditions: returns a new list; does not mutate ``value`` itself.
-        Nested objects are shallow-referenced (not deep-copied). WARNING: mutating
-        nested elements of the returned list mutates the original when ``value``
-        was already a list/tuple/dict.
         - None -> []
-        - list/tuple -> list(value) (new outer list, shared nested objects)
+        - list/tuple -> list(value) (new outer list; nested objects are
+          shallow-referenced, so mutating ``result[i]`` mutates the original
+          nested object)
         - string -> [value] when ``allow_str`` is True
-        - dict -> [value] when ``allow_dict`` is True
+        - dict -> [value] when ``allow_dict`` is True (the dict is the single
+          top-level element ``result[0]``; mutating that dict mutates the
+          original)
         - any other scalar -> []
     """
     if value is None:
@@ -690,10 +704,10 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
 
     Preconditions: ``index`` is a non-negative int; ``q_data`` is a ``dict``.
     Postconditions: returns a valid :class:`OpenQuestion` when parsing succeeds.
-        - ``options``, ``section_impact``, and ``asked_via`` are coerced to lists
-          (``None`` becomes ``[]``; only well-typed scalars are kept).
-        - ``section_impact`` and ``asked_via`` elements are accepted only when they
-          are already ``str``.
+        - ``options`` is coerced to a list (``None`` becomes ``[]``); dict and
+          string entries are kept and parsed, while other types are dropped.
+        - ``section_impact`` and ``asked_via`` are coerced to lists
+          (``None`` becomes ``[]``); elements are kept only when already ``str``.
         - Option ``confidence`` values are normalized to ``[0.0, 1.0]``,
           defaulting to ``0.5`` when missing or malformed.
         - When ``q_data`` has options but no default, the highest-confidence
@@ -735,6 +749,12 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
 
     raw_depends = q_data.get("depends_on")
     if isinstance(raw_depends, (list, tuple)):
+        if len(raw_depends) > 1:
+            logger.warning(
+                "depends_on list truncated to first element for question %s (got %d entries)",
+                q_data.get("id", f"q{index}"),
+                len(raw_depends),
+            )
         depends_on = raw_depends[0] if raw_depends and isinstance(raw_depends[0], str) else None
     elif isinstance(raw_depends, str):
         depends_on = raw_depends
@@ -860,7 +880,7 @@ def dedupe_questions_by_answer_similarity(
         return list(open_questions)
 
     # Same threshold as shared deduplication for "same meaning"
-    SIMILARITY_THRESHOLD = 0.85
+    SIMILARITY_THRESHOLD = ANSWER_SIMILARITY_THRESHOLD
     kept: List[OpenQuestion] = []
 
     for q in open_questions:
@@ -962,6 +982,8 @@ def consolidate_open_questions(
                     "id": q.id,
                     "question_text": q.question_text,
                     "context": q.context,
+                    "recommendation": q.recommendation,
+                    "source": q.source,
                     "category": q.category,
                     "priority": q.priority,
                     "allow_multiple": q.allow_multiple,
@@ -995,15 +1017,32 @@ def consolidate_open_questions(
         )
         if consolidated is None:
             return list(open_questions)
+        original_by_id = {q.id: q for q in open_questions}
         result = []
         for i, q_data in enumerate(consolidated):
             try:
-                result.append(parse_open_question(q_data, i))
+                parsed = parse_open_question(q_data, i)
+                orig = original_by_id.get(parsed.id)
+                if orig is not None:
+                    # Preserve metadata the LLM may omit when echoing a known id.
+                    parsed = parsed.model_copy(
+                        update={
+                            "source": orig.source
+                            if parsed.source in ("", "spec_review") and orig.source
+                            else parsed.source,
+                            "recommendation": parsed.recommendation or orig.recommendation,
+                        }
+                    )
+                result.append(parsed)
             except Exception as e:
                 logger.warning("Failed to parse consolidated question %d: %s", i, e)
         return result if result else list(open_questions)
     except Exception as e:
-        logger.warning("Question consolidation failed, using original list: %s", str(e))
+        logger.warning(
+            "Question consolidation failed, using original list: %s",
+            str(e),
+            exc_info=True,
+        )
         return list(open_questions)
 
 
@@ -1123,7 +1162,7 @@ def add_recommendations(
     """Add a short recommendation (which option and why) to each question.
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list;
-        ``spec_content`` a string.
+        ``spec_content`` is a string or ``None``.
     Postconditions: returns the list with ``recommendation`` populated where the LLM
         supplied one, or the unmodified list on empty input or any failure
         (payload serialization, prompt formatting, LLM call, or apply-step
@@ -1132,6 +1171,7 @@ def add_recommendations(
     """
     assert isinstance(model, Model), "model must be a Strands Model"
     assert isinstance(open_questions, list), "open_questions must be a list"
+    assert isinstance(spec_content, (str, type(None))), "spec_content must be a string or None"
     if len(open_questions) == 0:
         return list(open_questions)
 
@@ -1182,7 +1222,7 @@ def add_recommendations(
         return result
     except Exception as e:
         logger.warning(
-            "Recommendation generation failed, leaving recommendations empty: %s",
+            "Recommendation generation failed, returning original questions unchanged: %s",
             str(e),
         )
         return list(open_questions)

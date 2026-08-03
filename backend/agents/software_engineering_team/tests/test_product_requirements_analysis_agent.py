@@ -331,15 +331,11 @@ def test_run_workflow_uses_next_version_after_existing_v6(tmp_path: Path) -> Non
     agent = ProductRequirementsAnalysisAgent(llm)
     update_spec_calls = []
 
-    def capture_update_spec(*args, **kwargs):
-        version = kwargs["version"] if "version" in kwargs else (args[3] if len(args) > 3 else None)
+    def capture_update_spec(current_spec, answered_questions, repo_path, version, **kwargs):
         update_spec_calls.append(version)
-        current_spec = (
-            kwargs["current_spec"] if "current_spec" in kwargs else (args[0] if args else "")
-        )
         return current_spec + "\n# Updated"
 
-    agent._update_spec = MagicMock(side_effect=capture_update_spec)
+    agent._update_spec = capture_update_spec
 
     call_count = [0]
 
@@ -485,15 +481,11 @@ def test_run_workflow_renames_validated_spec_when_needs_more_detail(tmp_path: Pa
     agent = ProductRequirementsAnalysisAgent(llm)
     update_spec_calls = []
 
-    def capture_update_spec(*args, **kwargs):
-        version = kwargs["version"] if "version" in kwargs else (args[3] if len(args) > 3 else None)
+    def capture_update_spec(current_spec, answered_questions, repo_path, version, **kwargs):
         update_spec_calls.append(version)
-        current_spec = (
-            kwargs["current_spec"] if "current_spec" in kwargs else (args[0] if args else "")
-        )
         return current_spec + "\n# Updated"
 
-    agent._update_spec = MagicMock(side_effect=capture_update_spec)
+    agent._update_spec = capture_update_spec
 
     call_count = [0]
 
@@ -1533,20 +1525,32 @@ def test_consolidate_open_questions_sends_full_orchestration_metadata_to_llm() -
         mock_call.return_value = {"consolidated_questions": []}
         agent._consolidate_open_questions([q1, q2])
 
-    sent_prompt = mock_call.call_args[0][1]
-    for field in [
-        '"id": "q1"',
-        '"constraint_domain": "infrastructure"',
-        '"constraint_layer": 2',
-        '"depends_on": "q0"',
-        '"blocking": false',
-        '"owner": "stakeholder"',
-        '"section_impact"',
-        '"due_date": "2026-04-01"',
-        '"status": "asked"',
-        '"asked_via"',
-    ]:
-        assert field in sent_prompt, f"expected {field!r} in consolidation prompt"
+    mock_call.assert_called_once()
+    sent_prompt = (
+        mock_call.call_args.args[1]
+        if mock_call.call_args.args
+        else mock_call.call_args.kwargs["prompt"]
+    )
+    # Prompt wraps questions_json between the input marker and the response instruction.
+    marker = "Input questions (JSON array):\n"
+    start = sent_prompt.find(marker)
+    assert start >= 0, "expected input-questions marker in consolidation prompt"
+    start += len(marker)
+    end = sent_prompt.find("\n\nRespond with a JSON object", start)
+    assert end > start, "expected end of questions JSON in consolidation prompt"
+    payload = json.loads(sent_prompt[start:end])
+    q = next(item for item in payload if item.get("id") == "q1")
+    assert q["constraint_domain"] == "infrastructure"
+    assert q["constraint_layer"] == 2
+    assert q["depends_on"] == "q0"
+    assert q["blocking"] is False
+    assert q["owner"] == "stakeholder"
+    assert q["section_impact"] == ["Technical Approach"]
+    assert q["due_date"] == "2026-04-01"
+    assert q["status"] == "asked"
+    assert q["asked_via"] == ["slack"]
+    assert "source" in q
+    assert "recommendation" in q
 
 
 def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() -> None:
@@ -1631,7 +1635,7 @@ def test_consolidate_open_questions_skips_malformed_item_keeps_valid_ones() -> N
 
 
 def test_consolidate_open_questions_falls_back_when_all_items_fail() -> None:
-    """If every item in the batch fails to parse, the original list is returned unchanged."""
+    """If every item fails to parse, return the original questions (same instances)."""
     llm = _StubClient(
         {
             "consolidated_questions": [
@@ -1651,6 +1655,7 @@ def test_consolidate_open_questions_falls_back_when_all_items_fail() -> None:
         result = agent._consolidate_open_questions([q1, q2])
 
     assert result == [q1, q2]
+    assert result[0] is q1 and result[1] is q2
 
 
 def test_review_question_answer_alignment_retains_original_when_item_fails_to_parse() -> None:
@@ -1688,8 +1693,8 @@ def test_review_question_answer_alignment_retains_original_when_item_fails_to_pa
 
 
 def test_review_question_answer_alignment_restores_original_for_unmatched_malformed_item() -> None:
-    """A malformed aligned item whose id does not match any original question is dropped;
-    the original question list is preserved unchanged."""
+    """A malformed aligned item with an unrecognized id is ignored, and any original
+    questions absent from the aligned output are appended so the batch is never shrunk."""
     llm = _StubClient(
         {
             "aligned_questions": [
@@ -1752,9 +1757,9 @@ def test_review_question_answer_alignment_restores_original_when_two_items_fail_
 
 
 def test_review_question_answer_alignment_rejects_hallucinated_id() -> None:
-    """An aligned item that parses successfully but carries an id absent from the original
-    questions (a hallucinated id) must not be added to the result; the original question it
-    displaced is restored instead, and the batch is never inflated beyond the originals."""
+    """An aligned item with an id not present in the original questions is rejected,
+    and any original questions missing from the aligned output are appended so the
+    batch size stays equal to the input."""
     llm = _StubClient(
         {
             "aligned_questions": [
@@ -1803,7 +1808,7 @@ def test_review_question_answer_alignment_rejects_duplicate_id() -> None:
 
 
 def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> None:
-    """If every item in the batch fails to parse, the original list is returned unchanged."""
+    """If every item fails to parse, return the original questions (same instances)."""
     llm = _StubClient(
         {
             "aligned_questions": [
@@ -1823,6 +1828,7 @@ def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> No
         result = agent._review_question_answer_alignment([q1, q2])
 
     assert result == [q1, q2]
+    assert result[0] is q1 and result[1] is q2
 
 
 def test_review_question_answer_alignment_preserves_input_order_when_all_items_fail_but_ids_match() -> (
@@ -1850,6 +1856,7 @@ def test_review_question_answer_alignment_preserves_input_order_when_all_items_f
         result = agent._review_question_answer_alignment([q1, q2])
 
     assert result == [q1, q2]
+    assert result[0] is q1 and result[1] is q2
 
 
 def test_dedupe_questions_by_answer_similarity_drops_question_when_we_already_have_that_answer() -> (
@@ -3713,7 +3720,7 @@ def test_filter_duplicate_questions_does_not_match_cases_to_cas_acronym() -> Non
 
 
 def test_filter_duplicate_questions_matches_shoes_via_silent_e() -> None:
-    """shoes→sho matches shoe via silent-e while echoes stay exact."""
+    """shoes matches shoe via silent-e restoration after -oes strip."""
     questions = [OpenQuestion(id="q1", question_text="Which shoe sizes should catalogs list?")]
     qa_history = (
         "Q: Which shoes sizes should catalogs list?\n"
@@ -3727,7 +3734,7 @@ def test_filter_duplicate_questions_matches_shoes_via_silent_e() -> None:
 
 
 def test_filter_duplicate_questions_normalizes_plural_ing_forms() -> None:
-    """settings/mappings recurse through -ing so they match setting/map stems."""
+    """settings matches setting after plural strip and -ing stem recursion."""
     questions = [OpenQuestion(id="q1", question_text="Which setting should the service expose?")]
     qa_history = (
         "Q: Which settings should the service expose after mappings land?\n"
@@ -3769,7 +3776,7 @@ def test_filter_duplicate_questions_keeps_lexical_kick_compounds() -> None:
 
 
 def test_filter_duplicate_questions_preserves_lexical_tt_doubles() -> None:
-    """boycotted/butted keep lexical tt while patted still undoubles to pat."""
+    """boycotted keeps lexical tt (boycott), and butt matches without undoubling."""
     questions = [OpenQuestion(id="q1", question_text="Which vendors boycott butt extensions?")]
     qa_history = (
         "Q: Which vendors boycotted butt extensions after review?\n"
@@ -3783,7 +3790,7 @@ def test_filter_duplicate_questions_preserves_lexical_tt_doubles() -> None:
 
 
 def test_filter_duplicate_questions_matches_ie_silent_e_past_tense() -> None:
-    """untied/belied keep ie bases (untie/belie), while carried still matches carry."""
+    """untied/belied keep ie bases so they match untie/belie."""
     questions = [OpenQuestion(id="q1", question_text="When should we untie and belie flags?")]
     qa_history = (
         "Q: When should flags be untied after claims were belied?\n"
@@ -3811,7 +3818,7 @@ def test_filter_duplicate_questions_does_not_equate_unrelated_silent_e_pairs() -
 
 
 def test_filter_duplicate_questions_matches_short_british_l_inflections() -> None:
-    """fuelled/dialled/duelled undouble to fuel/dial/duel while billed stays lexical."""
+    """fuelled/dialled/duelled undouble to fuel/dial/duel."""
     questions = [OpenQuestion(id="q1", question_text="Which fuel dial duel checks apply?")]
     qa_history = (
         "Q: Which fuelled dialled duelled checks apply after billed work?\n"
@@ -3857,7 +3864,7 @@ def test_filter_duplicate_questions_matches_complete_o_nouns() -> None:
 
 
 def test_filter_duplicate_questions_matches_long_silent_e_ches() -> None:
-    """headaches/avalanches/quiches restore silent-e; arches/speeches stay exact."""
+    """headaches/avalanches/quiches restore silent-e to match headache/avalanche/quiche."""
     questions = [
         OpenQuestion(id="q1", question_text="Which headache avalanche quiche limits apply after?")
     ]
@@ -3931,7 +3938,9 @@ def test_filter_duplicate_questions_stems_plural_and_past_tense() -> None:
     stemming let a duplicate match against the base word form recorded in
     qa_history."""
     questions = [
-        OpenQuestion(id="q1", question_text="Where are the config options documented for the service?")
+        OpenQuestion(
+            id="q1", question_text="Where are the config options documented for the service?"
+        )
     ]
     qa_history = "Q: Should we document the config option for the service?\nA: Yes, use Confluence."
 
@@ -3951,7 +3960,9 @@ def test_filter_duplicate_questions_matches_short_content_word_keywords() -> Non
     candidate at all, regardless of how permissive the extractor itself is.
     """
     questions = [OpenQuestion(id="q1", question_text="Do we use IAM or ACL on S3?")]
-    qa_history = "Q: Should we use IAM or ACL policies on S3 buckets?\nA: Use IAM policies exclusively."
+    qa_history = (
+        "Q: Should we use IAM or ACL policies on S3 buckets?\nA: Use IAM policies exclusively."
+    )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
 
