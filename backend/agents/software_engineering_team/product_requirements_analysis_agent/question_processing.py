@@ -460,7 +460,7 @@ def dedupe_questions_by_answer_similarity(
     if not open_questions:
         return list(open_questions)
 
-    def norm(t: str) -> str:
+    def norm(t: str | None) -> str:
         return " ".join((t or "").lower().split()).strip()
 
     # Build set of existing answers (normalized) we already have
