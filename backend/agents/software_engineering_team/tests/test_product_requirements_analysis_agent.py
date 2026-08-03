@@ -1216,6 +1216,123 @@ def test_parse_spec_review_response_drops_non_string_issues_and_gaps() -> None:
     assert result.summary == "ok"
 
 
+def test_parse_spec_review_response_logs_and_defaults_on_non_dict_raw(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-dict top-level LLM output yields the empty default result and a warning."""
+    with caplog.at_level(logging.WARNING):
+        result = parse_spec_review_response(["not", "an", "object"])
+
+    assert result.issues == []
+    assert result.gaps == []
+    assert result.open_questions == []
+    assert result.summary == "Spec review completed (no structured output)"
+    assert any("not a JSON object" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad_payload", ["plain string", 42, None])
+def test_parse_spec_review_response_handles_scalar_non_dict_raw(bad_payload: Any) -> None:
+    """Scalar non-dict payloads never raise and return the unstructured summary."""
+    result = parse_spec_review_response(bad_payload)
+    assert result.summary == "Spec review completed (no structured output)"
+    assert result.issues == []
+    assert result.gaps == []
+    assert result.open_questions == []
+
+
+def test_parse_spec_review_response_logs_non_list_issues_and_gaps(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-list issues/gaps fields are logged and treated as empty lists."""
+    with caplog.at_level(logging.WARNING):
+        result = parse_spec_review_response(
+            {
+                "summary": "ok",
+                "issues": "single issue string",
+                "gaps": {"gap": 1},
+                "open_questions": [],
+            }
+        )
+
+    assert result.issues == []
+    assert result.gaps == []
+    assert any("Expected list for 'issues'" in r.message for r in caplog.records)
+    assert any("Expected list for 'gaps'" in r.message for r in caplog.records)
+
+
+def test_parse_spec_review_response_skips_open_questions_missing_required_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dict open questions that fail parse_open_question are skipped and logged."""
+    with caplog.at_level(logging.WARNING):
+        result = parse_spec_review_response(
+            {
+                "summary": "ok",
+                "issues": [],
+                "gaps": [],
+                "open_questions": [
+                    {"id": None, "question_text": "Missing id type"},
+                    {
+                        "id": "q1",
+                        "question_text": "Which region?",
+                        "options": [],
+                    },
+                ],
+            }
+        )
+
+    assert len(result.open_questions) == 1
+    assert result.open_questions[0].id == "q1"
+    assert any("Skipping malformed open question" in r.message for r in caplog.records)
+
+
+def test_parse_spec_review_response_falls_back_when_dedupe_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Deduplication failures are logged and the raw capped list is retained."""
+    import product_requirements_analysis_agent.question_processing as qp
+
+    def _boom(items: list[str]) -> list[str]:
+        raise RuntimeError("dedupe failed")
+
+    monkeypatch.setattr(qp, "_dedupe_items", _boom)
+    with caplog.at_level(logging.WARNING):
+        result = parse_spec_review_response(
+            {
+                "summary": "ok",
+                "issues": ["a", "b"],
+                "gaps": ["g1"],
+                "open_questions": [],
+            }
+        )
+
+    assert result.issues == ["a", "b"]
+    assert result.gaps == ["g1"]
+    assert any("Deduplication failed for issues" in r.message for r in caplog.records)
+    assert any("Deduplication failed for gaps" in r.message for r in caplog.records)
+
+
+def test_safe_bool_logs_unexpected_numeric_values(caplog: pytest.LogCaptureFixture) -> None:
+    """Non-0/1 numerics fall back to default and emit a warning."""
+    from product_requirements_analysis_agent.question_processing import _safe_bool
+
+    with caplog.at_level(logging.WARNING):
+        assert _safe_bool(2, default=False) is False
+        assert _safe_bool(-1, default=True) is True
+        assert _safe_bool(0.5, default=False) is False
+
+    assert sum("Unexpected numeric boolean value" in r.message for r in caplog.records) == 3
+
+
+def test_require_string_field_includes_value_in_error() -> None:
+    """ValueError for non-string fields includes a truncated-friendly value repr."""
+    from product_requirements_analysis_agent.question_processing import _require_string_field
+
+    with pytest.raises(ValueError, match=r"expected string for 'id', got NoneType: None"):
+        _require_string_field({"id": None}, "id", "q0")
+
+
 def test_parse_question_option_rejects_non_string_non_dict() -> None:
     """Unsupported option scalars must raise instead of becoming blank defaults."""
     with pytest.raises(ValueError, match="unsupported option type"):

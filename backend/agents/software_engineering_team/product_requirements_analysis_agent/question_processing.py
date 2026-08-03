@@ -520,9 +520,18 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         ``MAX_OPEN_QUESTIONS`` after semantic consolidation and
         answer-similarity deduplication so near-duplicates do not crowd out
         distinct topics). Malformed open-question items are skipped and logged;
-        this function never raises to callers.
+        non-dict top-level ``raw`` and non-list ``issues``/``gaps`` are logged and
+        treated as empty; this function never raises to callers.
     """
     if not isinstance(raw, dict):
+        preview = repr(raw)
+        if len(preview) > 200:
+            preview = preview[:200] + "..."
+        logger.warning(
+            "Spec review response is not a JSON object (%s): %s",
+            type(raw).__name__,
+            preview,
+        )
         return SpecReviewResult(summary="Spec review completed (no structured output)")
 
     raw_issues = raw.get("issues", [])
@@ -530,8 +539,24 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     raw_questions = raw.get("open_questions", [])
 
     # Keep only string issues/gaps; non-string LLM elements are dropped.
-    issues = [i for i in (raw_issues if isinstance(raw_issues, list) else []) if isinstance(i, str)]
-    gaps = [g for g in (raw_gaps if isinstance(raw_gaps, list) else []) if isinstance(g, str)]
+    if isinstance(raw_issues, list):
+        issues = [i for i in raw_issues if isinstance(i, str)]
+    else:
+        logger.warning(
+            "Expected list for 'issues', got %s: %r",
+            type(raw_issues).__name__,
+            raw_issues,
+        )
+        issues = []
+    if isinstance(raw_gaps, list):
+        gaps = [g for g in raw_gaps if isinstance(g, str)]
+    else:
+        logger.warning(
+            "Expected list for 'gaps', got %s: %r",
+            type(raw_gaps).__name__,
+            raw_gaps,
+        )
+        gaps = []
 
     original_issue_count = len(issues)
     original_gap_count = len(gaps)
@@ -594,16 +619,17 @@ def _require_string_field(data: dict, key: str, default: str) -> str:
 
     Preconditions: ``data`` is a mapping; ``default`` is the fallback for an absent key.
     Postconditions: returns ``default`` when ``key`` is absent; returns the value when
-        it is a ``str``; raises ``ValueError`` when the key is present with ``null`` or
-        any non-string type so callers cannot silently remap explicit null IDs/text
-        onto generated defaults (e.g. ``q0``) or blank content.
+        it is a ``str``; raises ``ValueError`` (including key, type, and value repr)
+        when the key is present with ``null`` or any non-string type so callers
+        cannot silently remap explicit null IDs/text onto generated defaults
+        (e.g. ``q0``) or blank content.
     """
     if key not in data:
         return default
     value = data[key]
     if isinstance(value, str):
         return value
-    raise ValueError(f"expected string for {key!r}, got {type(value).__name__}")
+    raise ValueError(f"expected string for {key!r}, got {type(value).__name__}: {value!r}")
 
 
 def _safe_constraint_layer(value: Any) -> int:
@@ -658,6 +684,11 @@ def _safe_bool(value: Any, default: bool) -> bool:
             return True
         if value == 0:
             return False
+        logger.warning(
+            "Unexpected numeric boolean value %r, using default %r",
+            value,
+            default,
+        )
         return default
 
     if isinstance(value, str):

@@ -35,15 +35,19 @@ def run_context_constraints_discovery(
     """Formulate context/constraint questions (project context, deployment, tenets, mandates).
 
     Uses LLM with CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT; on empty or invalid response
-    returns a fixed fallback list.
+    returns a fixed fallback list. Questions whose parsed ``source`` is
+    ``'spec_review'`` are rewritten to ``'context_discovery'`` because this
+    helper shares :func:`parse_open_question` with the spec-review path (whose
+    default source is ``spec_review``).
 
     Preconditions: ``model`` is a Strands ``Model``.
     Postconditions: returns a non-empty question list — the LLM's parsed questions
-        when at least one item parses, otherwise the fixed fallback. Prompt
-        formatting, LLM, and parse failures are caught and also yield the
-        fallback, so this function never raises to callers. This helper does not
-        apply organizational filtering; an all-invalid parse batch falls back
-        rather than returning ``[]``.
+        when at least one item parses, otherwise the fixed fallback. Every returned
+        question has ``source != 'spec_review'`` (rewritten to ``context_discovery``
+        when needed). Prompt formatting, LLM, and parse failures are caught and
+        also yield the fallback, so this function never raises to callers. This
+        helper does not apply organizational filtering; an all-invalid parse batch
+        falls back rather than returning ``[]``.
     """
     try:
         spec_excerpt = spec_content or ""
@@ -82,10 +86,14 @@ def inject_context_answers_into_spec(
 ) -> str:
     """Build '## Project context and constraints' section from Q&A and prepend to current_spec.
 
+    ``repo_path`` is accepted for call-site symmetry with other discovery helpers
+    and is reserved for future filesystem-aware formatting; it is currently unused.
+
     Preconditions: ``answered_questions`` is a list of :class:`AnsweredQuestion`.
     Postconditions: when ``answered_questions`` is empty, returns ``current_spec``
         unchanged (no section is prepended); otherwise returns the spec with a
-        prepended context section built from the answers.
+        prepended context section built from the answers. ``repo_path`` does not
+        affect the return value.
     """
     if not answered_questions:
         return current_spec
