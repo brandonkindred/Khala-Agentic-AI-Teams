@@ -331,6 +331,66 @@ def test_replace_manifests_shared_conn_avoids_nested_pool(
     assert any("INSERT INTO" in s for s in executed)
 
 
+def test_replace_manifests_shared_conn_propagates_execute_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-conn write failures must raise without flipping ``_schema_ensured``."""
+    from agent_registry import dynamic_store as ds
+
+    monkeypatch.setattr(ds, "_schema_ensured", True)  # skip DDL; hit _execute only
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            raise RuntimeError("shared conn execute boom")
+
+    class _Conn:
+        def cursor(self, *args, **kwargs):
+            return _Cur()
+
+    with pytest.raises(RuntimeError, match="shared conn execute boom"):
+        ds.replace_manifests([_manifest("agent_studio.shared-fail")], [], conn=_Conn())
+    # A rolled-back outer txn must be able to retry schema on the same process.
+    assert ds._schema_ensured is True  # unchanged from our pre-set True
+
+
+def test_replace_manifests_shared_conn_propagates_schema_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-conn DDL failures propagate and must not set ``_schema_ensured``."""
+    from agent_registry import dynamic_store as ds
+
+    monkeypatch.setattr(ds, "_schema_ensured", False)
+
+    def _boom_apply(cur) -> None:
+        raise RuntimeError("shared conn ddl boom")
+
+    monkeypatch.setattr(ds, "_apply_schema_statements", _boom_apply)
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            raise AssertionError("execute should not run after DDL failure")
+
+    class _Conn:
+        def cursor(self, *args, **kwargs):
+            return _Cur()
+
+    with pytest.raises(RuntimeError, match="shared conn ddl boom"):
+        ds.replace_manifests([_manifest("agent_studio.shared-ddl")], [], conn=_Conn())
+    assert ds._schema_ensured is False
+
+
 def test_manifests_with_id_prefix_require_store_propagates(
     fake_store: _FakeStore,
 ) -> None:
