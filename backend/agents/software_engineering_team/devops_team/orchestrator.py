@@ -335,14 +335,28 @@ def _legacy_environment_from_text(combined_text: str) -> str:
         - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
     """
     assert isinstance(combined_text, str), "combined_text must be a str"
+    assert combined_text == combined_text.lower(), "combined_text must be lowercase"
     for clause in _LEGACY_CLAUSE_SPLIT.split(combined_text):
         if _clause_implies_production(clause.strip()):
             return "production"
     return "staging"
 
 
-_APPROVAL_WORD = re.compile(r"\bapproval\b")
-_APPROVAL_NEGATION_PREFIX = re.compile(r"(?:\b(?:no|not|non)\b|non-)\s*$")
+# Fillers allowed between a negation and ``approval`` (``no formal approval``).
+_APPROVAL_INTERVENING_TOKENS = frozenset(
+    {
+        "formal",
+        "any",
+        "prior",
+        "explicit",
+        "required",
+        "gate",
+        "gates",
+        "the",
+        "a",
+        "an",
+    }
+)
 
 
 def _scope_item_mentions_approval(item: str) -> bool:
@@ -351,14 +365,20 @@ def _scope_item_mentions_approval(item: str) -> bool:
     Preconditions: ``item`` is a str.
     Postconditions:
         - True when ``approval`` appears as a word and is not governed by a
-          preceding ``no`` / ``not`` / ``non`` / ``non-`` (e.g. ``prod approval``).
-        - False for negated forms (``no approval``, ``non-approval``) or when
-          the word is absent.
+          preceding ``no`` / ``not`` / ``non`` (allowing intervening fillers
+          such as ``formal`` / ``prior``; e.g. ``prod approval``).
+        - False for negated forms (``no approval``, ``no formal approval``,
+          ``non-approval``) or when the word is absent.
     """
     assert isinstance(item, str), "item must be a str"
-    text = item.lower()
-    for match in _APPROVAL_WORD.finditer(text):
-        if _APPROVAL_NEGATION_PREFIX.search(text[: match.start()]):
+    tokens = _LEGACY_WORD_TOKEN.findall(item.lower())
+    for i, token in enumerate(tokens):
+        if token != "approval":
+            continue
+        j = i - 1
+        while j >= 0 and tokens[j] in _APPROVAL_INTERVENING_TOKENS:
+            j -= 1
+        if j >= 0 and tokens[j] in _NEGATION_TOKENS:
             continue
         return True
     return False
@@ -745,8 +765,14 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         assert task_spec.platform_scope.environments is not None, (
             "task_spec.platform_scope.environments must be set"
         )
+        assert not isinstance(task_spec.platform_scope.environments, str), (
+            "task_spec.platform_scope.environments must be a collection, not a string"
+        )
         assert hasattr(task_spec.platform_scope.environments, "__iter__"), (
             "task_spec.platform_scope.environments must be iterable"
+        )
+        assert all(isinstance(env, str) for env in task_spec.platform_scope.environments), (
+            "task_spec.platform_scope.environments must be an iterable of strings"
         )
         assert task_spec.scope.included is not None, "task_spec.scope.included must be set"
         assert not isinstance(task_spec.scope.included, str), (

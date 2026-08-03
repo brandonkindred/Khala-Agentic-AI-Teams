@@ -386,7 +386,16 @@ class TestGateNames:
         assert "change_review" in DEVOPS_REQUIRED_GATE_NAMES
 
     def test_required_gate_names_count(self) -> None:
-        assert len(DEVOPS_REQUIRED_GATE_NAMES) >= 6
+        assert DEVOPS_REQUIRED_GATE_NAMES == (
+            "iac_validate",
+            "iac_validate_fmt",
+            "policy_checks",
+            "pipeline_lint",
+            "pipeline_gate_check",
+            "deployment_dry_run",
+            "security_review",
+            "change_review",
+        )
 
 
 # ===========================================================================
@@ -1460,7 +1469,7 @@ class TestDevOpsTeamLeadAgentIntegration:
             acceptance_criteria=[],
             rollback_requirements=[],
         )
-        with pytest.raises(ValueError, match="Clarification required|DevOps team run failed"):
+        with pytest.raises(ValueError, match="Clarification required"):
             agent.run(spec)
 
     def test_blocked_by_env_policy(self) -> None:
@@ -1470,7 +1479,7 @@ class TestDevOpsTeamLeadAgentIntegration:
             rollback_requirements=[],
             scope={"included": ["build"], "excluded": []},
         )
-        with pytest.raises(ValueError, match="policy violation|DevOps team run failed"):
+        with pytest.raises(ValueError, match="[Pp]olicy violation"):
             agent.run(spec)
 
     def test_blocked_by_security_review(self) -> None:
@@ -2134,6 +2143,37 @@ class TestBackwardCompatibility:
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "approval" in reason.lower()
+
+    def test_enforce_env_policy_rejects_intervening_negated_approval(self) -> None:
+        spec = _base_task_spec(
+            platform_scope={"environments": ["production"]},
+            scope={"included": ["no formal approval"], "excluded": []},
+            rollback_requirements=["Rollback"],
+        )
+        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
+        assert reason is not None
+        assert "approval" in reason.lower()
+
+    def test_enforce_env_policy_rejects_string_environments(self) -> None:
+        from types import SimpleNamespace
+
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments="production"),
+            scope=SimpleNamespace(included=["prod approval"]),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="not a string"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
+
+    def test_build_legacy_spec_title_exact_boundary(self) -> None:
+        exact = "y" * MAX_LEGACY_TITLE_LENGTH
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-title-exact",
+            task_description=exact,
+            requirements="staging",
+        )
+        assert spec.title == exact
+        assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
 
     def test_enforce_env_policy_rejects_non_string_included(self) -> None:
         from types import SimpleNamespace
