@@ -122,9 +122,11 @@ class _GitHubHttpMixin:
         Postconditions:
             - Returns the first non-429 response obtained from re-issuing the same
               request, or, if every retry is still 429, the final 429 response after
-              exactly ``SECONDARY_RATE_LIMIT_MAX_RETRIES`` retries. Never raises
-              directly -- the caller's ``_check`` turns a persisting 429 into
-              ``GitHubAPIError`` only once this budget is exhausted.
+              exactly ``SECONDARY_RATE_LIMIT_MAX_RETRIES`` retries. Does not raise
+              ``GitHubAPIError`` itself -- the caller's ``_check`` turns a persisting
+              429 into ``GitHubAPIError`` only once this budget is exhausted. The
+              underlying ``self._client.request(...)`` / ``self._sleep(...)`` calls
+              may still raise their own exceptions (e.g. ``httpx.TransportError``).
         """
         for attempt in range(SECONDARY_RATE_LIMIT_MAX_RETRIES):
             retry_after = _parse_retry_after(response.headers.get("Retry-After"))
