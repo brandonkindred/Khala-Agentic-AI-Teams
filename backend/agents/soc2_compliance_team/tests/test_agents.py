@@ -120,6 +120,11 @@ def test_run_tsc_agent_parses_response_into_audit_result() -> None:
     assert out.findings[0].severity is FindingSeverity.HIGH
     assert out.findings[1].severity is FindingSeverity.LOW
     assert out.compliant is False
+    # Exactly two LLM calls total (one reasoning + one formatting) — not more,
+    # not fewer. Pinning the list lengths (not just index [0]) is what catches
+    # a regression that silently adds a retry/extra call.
+    assert len(llm.reasoning_calls) == 1
+    assert len(llm.calls) == 1
     # Prompt should include criterion-specific text
     # The criterion-specific content and temperature belong to the reasoning
     # pass — that is the call that actually performs the audit. Assert against
@@ -354,7 +359,10 @@ def test_report_writer_returns_next_steps_when_no_findings() -> None:
     assert any(s.get("description") == "" for s in next_steps.steps)
     assert next_steps.recommended_timeline == "6 months"
     # The two-pass split: a think=True reasoning call followed by a
-    # think=False formatting call, not a single call to either method.
+    # think=False formatting call, not a single call to either method — and
+    # exactly one of each, not a retry-inflated count.
+    assert len(llm.reasoning_calls) == 1
+    assert len(llm.calls) == 1
     assert llm.reasoning_calls[0]["think"] is True
     assert llm.reasoning_calls[0]["temperature"] == 0.2
     assert llm.calls[0]["think"] is False
@@ -413,7 +421,10 @@ def test_report_writer_returns_compliance_report_when_findings_exist() -> None:
     assert TSCCategory.SECURITY.value in report.findings_by_tsc
     assert len(report.findings_by_tsc[TSCCategory.SECURITY.value]) == 1
     # The two-pass split: a think=True reasoning call followed by a
-    # think=False formatting call, not a single call to either method.
+    # think=False formatting call, not a single call to either method — and
+    # exactly one of each, not a retry-inflated count.
+    assert len(llm.reasoning_calls) == 1
+    assert len(llm.calls) == 1
     assert llm.reasoning_calls[0]["think"] is True
     assert llm.reasoning_calls[0]["temperature"] == 0.2
     assert llm.calls[0]["think"] is False
