@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from investment_team.api.main import _dispatch_strategy_lab_run as _real_dispatch_strategy_lab_run
+from investment_team.api.main import _persist_run_state as _real_persist_run_state
 
 
 class _InMemoryDict:
@@ -530,6 +531,52 @@ def test_resume_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fail
     assert api_main._active_runs["run-revalidate-fail"]["status"] == "failed"
 
 
+def test_resume_strategy_lab_run_revalidation_failure_does_not_regress_concurrently_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: if the pre-dispatch revalidation read itself hits a
+    transient job-service failure after a concurrent replica has already
+    minted (and dispatched under) a newer generation, the resulting
+    _fail_strategy_lab_run call must not durably regress that generation.
+    Marking a run "failed" is a status/error update, not a fencing
+    decision -- writing this request's stale in-memory generation back to
+    the durable record would re-enable an incarnation generation fencing
+    has already superseded and stop the legitimate newer one."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-revalidate-fail2"] = _resumable_state("run-revalidate-fail2", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-revalidate-fail2", "generation": 1}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_bumping_then_failing(jid: str):
+        read_calls.append(jid)
+        if len(read_calls) == 1:
+            result = real_get_job(jid)
+            # Concurrent replica mints (and dispatches under) generation 5
+            # immediately after this resume's first read.
+            stub.by_id[jid]["generation"] = 5
+            return result
+        raise ConnectionError("connection refused")  # the pre-dispatch revalidation read
+
+    monkeypatch.setattr(stub, "get_job", _get_job_bumping_then_failing)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # Override the api_client fixture's blanket _persist_run_state no-op
+    # stub: this test needs the real durable-write behavior (including
+    # _fail_strategy_lab_run's own persist call) to observe the regression.
+    monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+
+    resp = api_client.post("/strategy-lab/runs/run-revalidate-fail2/resume")
+
+    assert resp.status_code == 503
+    assert api_main._active_runs["run-revalidate-fail2"]["status"] == "failed"
+    # The legitimate, concurrently minted generation 5 must survive --
+    # marking this request's run "failed" must not regress it back to the
+    # stale value (1) this request read moments earlier.
+    assert stub.by_id["run-revalidate-fail2"]["generation"] == 5
+
+
 def test_restart_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
@@ -668,6 +715,51 @@ def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
     assert resp.status_code == 200
     assert api_main._active_runs["run-legacy"]["generation"] == 2
     assert stub.by_id["run-legacy"]["generation"] == 2
+
+
+def test_restart_strategy_lab_run_bootstraps_from_durable_record_not_stale_in_memory_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: resuming a legacy run (no durable "generation" field)
+    populates the in-memory active_runs entry with a default generation=1
+    (get_run_generation_strict's fallback), while resume deliberately
+    excludes "generation" from its own durable write -- so the durable
+    record stays legacy. A restart of the SAME run in the SAME process
+    afterward must still recognize the durable record as legacy and mint
+    generation 2, not defer to the in-memory entry (which now has a
+    "generation" key) and mint only +1 -- landing on durable generation 1,
+    exactly what a still-in-flight legacy activity (which omits generation
+    entirely, defaulting to 1) presents, which check_fencing_token accepts
+    as current rather than fencing out."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-legacy2"] = {
+        "run_id": "run-legacy2",
+        "status": "interrupted",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "completed_cycles": 0,
+        "contiguous_cycles": 0,
+        # No "generation" key -- simulates a run created before this change.
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-legacy2"}])  # durable: also no "generation" field
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resume_resp = api_client.post("/strategy-lab/runs/run-legacy2/resume")
+    assert resume_resp.status_code == 200
+    # Confirms the race is set up correctly: resume's in-memory default
+    # must not have reached the durable record.
+    assert "generation" not in stub.by_id["run-legacy2"]
+    assert api_main._active_runs["run-legacy2"]["generation"] == 1
+
+    # Simulate the resumed run later reaching a restartable terminal status,
+    # still carrying that stale in-memory generation=1.
+    api_main._active_runs["run-legacy2"]["status"] = "completed_with_errors"
+
+    restart_resp = api_client.post("/strategy-lab/runs/run-legacy2/restart")
+
+    assert restart_resp.status_code == 200
+    assert stub.by_id["run-legacy2"]["generation"] == 2
+    assert api_main._active_runs["run-legacy2"]["generation"] == 2
 
 
 def test_restart_strategy_lab_run_rollback_does_not_regress_concurrently_minted_generation(

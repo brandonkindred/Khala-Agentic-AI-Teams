@@ -1923,6 +1923,14 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
           before the delay elapses, so it never tears down a live resumed
           run. A missing run and an already-terminal run are both no-ops.
           Never raises.
+        - The durable write excludes ``"generation"``: this function's
+          in-memory ``state`` snapshot may be older than the durable value
+          — e.g. a resume/restart on another process/replica minted a newer
+          generation, whose freshly dispatched workflow is already relying
+          on it, in the gap before this call runs. Marking a run "failed" is
+          purely a status/error update; it must never regress the durable
+          fencing generation and re-enable an incarnation that generation
+          fencing has since superseded.
     """
     try:
         with _lock:
@@ -1932,7 +1940,7 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
             state["status"] = "failed"
             state["error"] = error
             state["current_cycle"] = None
-            _persist_run_state(run_id, state)
+            _persist_run_state(run_id, state, exclude_fields=frozenset({"generation"}))
 
         from investment_team.api.job_event_bus import cleanup_job
 
@@ -2950,8 +2958,28 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # exceeds the legacy default; a run that already has an explicit
         # generation field (every run created after this change, and any
         # legacy run past its first post-upgrade restart) increments normally.
-        generation_increment = 2 if "generation" not in state else 1
+        #
+        # This must be judged against the DURABLE record, not `state` above:
+        # `state` may be `_get_run_state`'s process-local `active_runs` entry,
+        # which a resume of this same legacy run can already have populated
+        # with an in-memory `generation=1` default (resume_strategy_lab_run
+        # deliberately excludes "generation" from ITS durable write, so the
+        # durable record stays legacy even after that). Checking `state` here
+        # would see "generation" present, mint only +1, land on durable
+        # generation 1 -- exactly what a still-in-flight legacy activity
+        # (which omits generation entirely, defaulting to 1) presents, and
+        # check_fencing_token accepts that as current rather than fencing it
+        # out. A durable read that fails defaults to the legacy/+2 branch:
+        # incrementing one extra is harmless (fencing only needs strict
+        # monotonic increase), while defaulting to +1 when the record really
+        # was legacy would reopen this exact bug.
         client = _get_lab_run_job_client()
+        try:
+            durable_job = client.get_job(run_id)
+        except Exception:
+            durable_job = None
+        durable_data = durable_job.get("data", durable_job) if durable_job else {}
+        generation_increment = 2 if not durable_data or "generation" not in durable_data else 1
         try:
             updated_generation_record = client.apply_and_get(
                 run_id, increment={"generation": generation_increment}
