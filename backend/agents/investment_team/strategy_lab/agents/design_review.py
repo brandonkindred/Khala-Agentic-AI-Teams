@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from strands import Agent
 
 from llm_service.interface import LLMSemanticExhaustionError
@@ -630,6 +630,9 @@ def _format_readiness(results: List[QualityGateResult]) -> tuple[str, List[str]]
     return "\n".join(lines), findings
 
 
+_CRITIQUE_PREVIEW_CHARS = 160
+
+
 def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
     """Render past critiques so the reviewer / designer does not re-raise or regress resolved issues.
 
@@ -650,12 +653,16 @@ def format_prior_critiques(prior: Optional[List[SpecCritique]]) -> str:
     lines: List[str] = []
     for c in prior:
         lines.append(
-            f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — {c.rationale[:160]}"
+            f"  Round {c.round}: ready={c.ready} ({len(c.issues)} issues) — "
+            f"{c.rationale[:_CRITIQUE_PREVIEW_CHARS]}"
         )
         for issue in c.issues:
-            detail = f"      - [{issue.severity}] {issue.field}: {issue.description[:160]}"
+            detail = (
+                f"      - [{issue.severity}] {issue.field}: "
+                f"{issue.description[:_CRITIQUE_PREVIEW_CHARS]}"
+            )
             if issue.suggested_fix:
-                detail += f" (fix: {issue.suggested_fix[:160]})"
+                detail += f" (fix: {issue.suggested_fix[:_CRITIQUE_PREVIEW_CHARS]})"
             lines.append(detail)
     return "\n".join(lines)
 
@@ -721,7 +728,9 @@ def _coerce_critique(
     """
     ready = _coerce_strict_bool(parsed.get("ready"))
     rationale = str(parsed.get("rationale", "")).strip()
-    raw_issues = parsed.get("issues") or []
+    raw_issues = parsed.get("issues")
+    if not isinstance(raw_issues, list):
+        raw_issues = []
 
     issues: List[CritiqueIssue] = []
     for raw in raw_issues:
@@ -743,7 +752,7 @@ def _coerce_critique(
                     suggested_fix=str(raw.get("suggested_fix", "")),
                 )
             )
-        except Exception:
+        except (TypeError, ValueError, ValidationError):
             # Best-effort: one bad item shouldn't bin the rest.
             continue
 
