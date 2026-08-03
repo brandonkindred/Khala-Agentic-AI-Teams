@@ -9,3 +9,7 @@ REQUIRED_ARTIFACT_HINTS: tuple[str, ...] = (
     "runbook",
     "mcp",
 )
+
+ARTIFACT_GATE_DESCRIPTION_PREFIX = "Missing expected artifact category: "
+
+PLACEHOLDER_ARTIFACT_DIR = "ai_system"

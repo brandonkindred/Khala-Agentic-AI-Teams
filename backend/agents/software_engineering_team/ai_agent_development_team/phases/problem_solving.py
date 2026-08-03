@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from ..constants import REQUIRED_ARTIFACT_HINTS
+from ..constants import (
+    ARTIFACT_GATE_DESCRIPTION_PREFIX,
+    PLACEHOLDER_ARTIFACT_DIR,
+    REQUIRED_ARTIFACT_HINTS,
+)
 from ..models import ExecutionResult, ProblemSolvingResult, ReviewResult
-from .review import ARTIFACT_GATE_DESCRIPTION_PREFIX
 
 
 def run_problem_solving(
@@ -37,7 +40,7 @@ def run_problem_solving(
         token = issue.description[len(ARTIFACT_GATE_DESCRIPTION_PREFIX) :].strip()
         if not token or token not in REQUIRED_ARTIFACT_HINTS:
             continue
-        path = f"ai_system/{token}_placeholder.md"
+        path = f"{PLACEHOLDER_ARTIFACT_DIR}/{token}_placeholder.md"
         patched_files[path] = (
             f"# Placeholder {token}\n\nAuto-generated during problem-solving to satisfy artifact gate."
         )

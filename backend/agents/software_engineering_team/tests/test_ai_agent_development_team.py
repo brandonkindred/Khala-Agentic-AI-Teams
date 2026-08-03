@@ -10,6 +10,8 @@ from llm_service import DummyLLMClient
 from software_engineering_team.ai_agent_development_team import constants as team_constants
 from software_engineering_team.ai_agent_development_team import orchestrator
 from software_engineering_team.ai_agent_development_team.constants import (
+    ARTIFACT_GATE_DESCRIPTION_PREFIX,
+    PLACEHOLDER_ARTIFACT_DIR,
     REQUIRED_ARTIFACT_HINTS,
 )
 from software_engineering_team.ai_agent_development_team.models import (
@@ -30,10 +32,7 @@ from software_engineering_team.ai_agent_development_team.phases.planning import 
 from software_engineering_team.ai_agent_development_team.phases.problem_solving import (
     run_problem_solving,
 )
-from software_engineering_team.ai_agent_development_team.phases.review import (
-    ARTIFACT_GATE_DESCRIPTION_PREFIX,
-    run_review,
-)
+from software_engineering_team.ai_agent_development_team.phases.review import run_review
 from software_engineering_team.ai_agent_development_team.prompts import (
     intake_system_prompt,
     planning_system_prompt,
@@ -190,7 +189,7 @@ def test_ai_agent_development_workflow_problem_solving(tmp_path: Path):
     assert any("_placeholder.md" in path for path in result.final_files)
     # final_files must alias the execution result's own (post-rebind) files
     # rather than a dict captured before problem-solving rebinds them.
-    assert result.final_files == result.execution_result.files
+    assert result.final_files is result.execution_result.files
 
 
 def test_ai_agent_development_workflow_aborts_when_fix_unavailable(
@@ -527,7 +526,7 @@ def test_run_problem_solving_synthesizes_placeholder_from_prefix() -> None:
         review_result=review,
     )
     assert result.resolved is True
-    assert f"ai_system/{hint}_placeholder.md" in result.files
+    assert f"{PLACEHOLDER_ARTIFACT_DIR}/{hint}_placeholder.md" in result.files
     assert "existing.md" in result.files
     assert any(hint in fix for fix in result.fixes_applied)
 
@@ -605,4 +604,4 @@ def test_run_problem_solving_skips_empty_artifact_gate_token() -> None:
     )
     assert result.resolved is False
     assert result.files == {}
-    assert "ai_system/_placeholder.md" not in result.files
+    assert f"{PLACEHOLDER_ARTIFACT_DIR}/_placeholder.md" not in result.files
