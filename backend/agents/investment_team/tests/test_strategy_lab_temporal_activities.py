@@ -908,6 +908,47 @@ def test_finalize_cycle_record_activity_recovers_run_id_from_activity_context(mo
     assert seen_run_ids == ["run-legacy2", "run-legacy2"]  # pre-check + post-check, both fenced
 
 
+def test_finalize_cycle_record_activity_recovered_run_id_still_rejects_stale_generation(
+    monkeypatch,
+) -> None:
+    """Companion to the success-path test above: recovering run_id from the
+    activity context must not merely be tolerated -- it must actually fence.
+    A pre-upgrade payload (no run_id) whose recovered run_id's durable
+    generation has since advanced must still be rejected, not silently
+    accepted just because the payload predates run_id."""
+    from types import SimpleNamespace
+
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(
+        act.activity, "info", lambda: SimpleNamespace(workflow_id="strategy-lab-run-stale2")
+    )
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 3)
+
+    finalize_calls = []
+    monkeypatch.setattr(
+        api_main,
+        "_finalize_strategy_lab_cycle_record",
+        lambda *a, **k: finalize_calls.append(1),
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    # No run_id in params -- must be recovered from the activity context above,
+    # and its (stale, generation=1) payload must be rejected before
+    # _finalize_strategy_lab_cycle_record ever runs.
+    with pytest.raises(ApplicationError) as exc_info:
+        act.finalize_cycle_record_activity(
+            {"generation": 1, "record": {"lab_record_id": "raw-stale2"}}
+        )
+    assert exc_info.value.type == "StaleFencingTokenError"
+    assert exc_info.value.non_retryable is True
+    assert finalize_calls == []  # rejected at the pre-check, never reached the write
+
+
 def test_finalize_cycle_record_activity_post_check_lookup_failure_is_not_retryable(monkeypatch):
     """Regression: unlike the pre-check, the post-check's OWN lookup failure must
     NOT be retryable -- _finalize_strategy_lab_cycle_record already durably

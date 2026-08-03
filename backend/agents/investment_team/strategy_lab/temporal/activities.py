@@ -275,7 +275,7 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
     """
     from investment_team.api.main import _persist_run_state
     from investment_team.strategy_lab.run_state import get_run_generation_strict
-    from shared.fencing import check_fencing_token
+    from shared.fencing import StaleFencingTokenError, check_fencing_token
 
     try:
         current_generation = get_run_generation_strict(run_id)
@@ -290,8 +290,18 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
             provided_token=generation,
             current_token=current_generation,
         )
+    except StaleFencingTokenError as exc:
+        # Handled directly rather than via _map_exception_to_application_error:
+        # that helper's documented precondition is an exception raised by a
+        # strategy-lab agent-class method, which check_fencing_token is not.
+        raise ApplicationError(str(exc), type="StaleFencingTokenError", non_retryable=True) from exc
     except Exception as exc:  # noqa: BLE001
-        raise _map_exception_to_application_error(exc) from exc
+        # check_fencing_token is a pure comparison with no I/O -- the only
+        # other failure mode is a caller precondition violation (e.g. a
+        # non-int generation), a bug that a retry cannot fix either.
+        raise ApplicationError(
+            f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=True
+        ) from exc
     _persist_run_state(run_id, state, create=create)
 
 
@@ -751,7 +761,7 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.run_state import get_run_generation_strict
-    from shared.fencing import check_fencing_token
+    from shared.fencing import StaleFencingTokenError, check_fencing_token
 
     def _check_generation(run_id: str, *, retry_on_lookup_failure: bool) -> None:
         try:
@@ -769,8 +779,19 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 provided_token=params.get("generation", 1),
                 current_token=current_generation,
             )
+        except StaleFencingTokenError as exc:
+            # Handled directly rather than via _map_exception_to_application_error:
+            # that helper's documented precondition is an exception raised by
+            # a strategy-lab agent-class method, which check_fencing_token is
+            # not.
+            raise ApplicationError(str(exc), type="StaleFencingTokenError", non_retryable=True) from exc
         except Exception as exc:  # noqa: BLE001
-            raise _map_exception_to_application_error(exc) from exc
+            # check_fencing_token is a pure comparison with no I/O -- the
+            # only other failure mode is a caller precondition violation
+            # (e.g. a non-int generation), a bug a retry cannot fix either.
+            raise ApplicationError(
+                f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=True
+            ) from exc
 
     record = StrategyLabRecord.parse_persisted(params["record"])
     run_id = params.get("run_id") or _infer_run_id_from_activity_context()

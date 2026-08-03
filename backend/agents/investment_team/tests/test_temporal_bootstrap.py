@@ -883,7 +883,9 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
 
     started = []
     monkeypatch.setattr(
-        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req, generation: started.append(rid)
+        sl_sw,
+        "start_strategy_lab_batch_workflow",
+        lambda rid, req, generation: started.append((rid, generation)),
     )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
@@ -891,7 +893,9 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     resp = api_client.post("/strategy-lab/runs/run-r/resume")
 
     assert resp.status_code == 200
-    assert started == ["run-r"]
+    # A resume carries the current (durable, generation=1 here) generation
+    # forward unchanged -- confirms the route doesn't drop or hardcode it.
+    assert started == [("run-r", 1)]
     thread_ctor.assert_not_called()
 
 
@@ -948,7 +952,9 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
 
     started = []
     monkeypatch.setattr(
-        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req, generation: started.append(rid)
+        sl_sw,
+        "start_strategy_lab_batch_workflow",
+        lambda rid, req, generation: started.append((rid, generation)),
     )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
@@ -956,6 +962,9 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     resp = api_client.post("/strategy-lab/runs/run-x/restart")
 
     assert resp.status_code == 200
-    assert started == ["run-x"]
+    # Restart mints a fresh generation (1 -> 2 via the stub's atomic
+    # increment) and must thread that exact minted value through to the
+    # dispatched workflow, not drop or hardcode it.
+    assert started == [("run-x", 2)]
     thread_ctor.assert_not_called()
     assert persisted["contiguous_cycles"] == 0  # reset so the activity restarts from 0

@@ -1931,8 +1931,38 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
           purely a status/error update; it must never regress the durable
           fencing generation and re-enable an incarnation that generation
           fencing has since superseded.
+        - Skips the write entirely (a no-op, not an error) when the durable
+          generation has already advanced past this ``state`` snapshot's
+          generation: excluding ``"generation"`` from the write protects the
+          fencing token itself, but ``status``/``error``/``current_cycle``
+          are still written unconditionally otherwise — a stale write from
+          this call could mark a legitimately newer, already-dispatched
+          incarnation "failed" out from under it, which a still-running
+          workflow would observe (via ``strategy_lab_external_terminal_status``)
+          and abort itself over. A durable-read failure here is treated as
+          "can't confirm a newer generation exists" and does not block the
+          write (this function is documented never to raise; the write it
+          guards is itself best-effort).
     """
     try:
+        with _lock:
+            state = _active_runs.get(run_id)
+            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            request_generation = state.get("generation", 1)
+        try:
+            durable_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception:
+            durable_generation = None
+        if durable_generation is not None and durable_generation > int(request_generation or 1):
+            logger.warning(
+                "Skipping fail write for strategy-lab run %s: durable generation %s "
+                "is newer than this request's generation %s.",
+                run_id,
+                durable_generation,
+                request_generation,
+            )
+            return
         with _lock:
             state = _active_runs.get(run_id)
             if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
@@ -2993,7 +3023,13 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         client = _get_lab_run_job_client()
         try:
             durable_job = client.get_job(run_id)
-        except Exception:
+        except Exception as exc:
+            # Best-effort: falling back to the legacy/+2 branch below is safe
+            # regardless of why this read failed (see above), but log it so a
+            # non-transient job-service problem isn't silently invisible.
+            logger.warning(
+                "get_job failed during restart's legacy-generation check for %s: %s", run_id, exc
+            )
             durable_job = None
         durable_data = durable_job.get("data", durable_job) if durable_job else {}
         generation_increment = 2 if not durable_data or "generation" not in durable_data else 1

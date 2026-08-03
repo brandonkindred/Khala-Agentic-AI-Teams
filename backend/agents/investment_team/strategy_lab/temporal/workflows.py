@@ -359,6 +359,13 @@ class StrategyLabBatchWorkflow:
         ``batch_input`` (the sole ``run()`` argument) is a JSON-shaped dict:
           - ``run_id``: str run identifier (used for child-workflow ids, run-state
             persistence, and the cancellation check).
+          - ``generation`` (int, default 1): the fencing generation this
+            workflow incarnation was dispatched with. Minted fresh by
+            ``restart_strategy_lab_run``, carried forward unchanged by
+            ``resume_strategy_lab_run``, and defaulting to ``1`` for a fresh
+            run. Threaded into every ``persist_run_state_activity`` and
+            ``finalize_cycle_record_activity`` call so a write from an
+            activity belonging to a superseded incarnation is rejected.
           - ``config``: ``BacktestConfig`` JSON dump, shared by every cycle.
           - ``batch_size`` / ``batch_count`` / ``max_parallel``: ints.
           - ``benchmark_symbol``: str, for the per-batch signal brief.

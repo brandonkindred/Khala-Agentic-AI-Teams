@@ -404,6 +404,10 @@ def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_re
     api_main._active_runs["run-race"] = _resumable_state("run-race", generation=1)
     stub = _StubLabClient(jobs=[{"job_id": "run-race", "generation": 1}])
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # Override the api_client fixture's blanket _persist_run_state no-op
+    # stub: this test needs the real durable-write behavior (including its
+    # exclude_fields handling) to observe the regression it claims to catch.
+    monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
 
     real_get_job = stub.get_job
     read_calls: List[str] = []
@@ -527,7 +531,10 @@ def test_resume_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fail
 
     assert resp.status_code == 503
     assert "generation" in resp.json()["detail"].lower()
-    assert read_calls == ["run-revalidate-fail", "run-revalidate-fail"]
+    # Three get_job reads: the initial carry-forward read, the pre-dispatch
+    # revalidation that's made to fail here, and _fail_strategy_lab_run's own
+    # durable-generation check before it writes the "failed" status.
+    assert read_calls == ["run-revalidate-fail"] * 3
     assert api_main._active_runs["run-revalidate-fail"]["status"] == "failed"
 
 
@@ -818,9 +825,11 @@ def test_restart_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fai
 
     assert resp.status_code == 503
     assert "generation" in resp.json()["detail"].lower()
-    # Two get_job reads: the mint-time legacy-bootstrap check, then the
-    # pre-dispatch revalidation that's made to fail here.
-    assert read_calls == ["run-restart-revalidate-fail", "run-restart-revalidate-fail"]
+    # Three get_job reads: the mint-time legacy-bootstrap check, the
+    # pre-dispatch revalidation that's made to fail here, and
+    # _fail_strategy_lab_run's own durable-generation check before it writes
+    # the "failed" status.
+    assert read_calls == ["run-restart-revalidate-fail"] * 3
     assert api_main._active_runs["run-restart-revalidate-fail"]["status"] == "failed"
 
 
