@@ -23,9 +23,12 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
         - Runs the orchestrator wired to the job store against the request's
           ``job_id`` when supplied (the API created the row; do not create it
           again), or mints one and creates the row when absent. Returns the
-          final job snapshot as a dict. Raises with an actionable message when
-          the worker is mis-wired (no provider) or the request carries no plan —
-          instead of failing later, mid-run, with a generic error.
+          final job snapshot as a dict, or a minimal synthetic
+          ``{"job_id": ..., "status": "unknown"}`` dict when the job row is
+          missing or unreadable after the orchestrator run. Raises with an
+          actionable message when the worker is mis-wired (no provider) or
+          the request carries no plan — instead of failing later, mid-run,
+          with a generic error.
     """
     import uuid
 
