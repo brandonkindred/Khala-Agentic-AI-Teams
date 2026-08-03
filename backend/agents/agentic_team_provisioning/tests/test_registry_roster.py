@@ -49,18 +49,30 @@ class _FakeRegistry:
     def get(self, agent_id: str) -> AgentManifest | None:
         return self._by_id.get(agent_id)
 
-    def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
+    def manifests_with_id_prefix(
+        self, prefix: str, *, require_store: bool = False
+    ) -> list[AgentManifest]:
+        del require_store  # fake has no dynamic store
         # Mirror AgentRegistry.manifests_with_id_prefix so register_team_manifests'
-        # stale-cleanup scan runs against the fake instead of AttributeError-ing
-        # into register_team_manifests' best-effort try/except (which would silently
-        # skip the register/unregister path in every test using this fake).
+        # stale-cleanup scan runs against the fake (without this method the call
+        # would raise AttributeError and fail the register/unregister path).
         return [m for m in self._by_id.values() if m.id.startswith(prefix)]
 
-    def register(self, manifest: AgentManifest, source_path=None) -> None:
+    def register(
+        self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False
+    ) -> None:
+        del source_path, require_persist  # fake has no dynamic store to persist
         self._by_id[manifest.id] = manifest
 
     def unregister(self, agent_id: str) -> bool:
         return self._by_id.pop(agent_id, None) is not None
+
+    def replace_dynamic_manifests(self, upserts, delete_ids, *, conn=None) -> None:
+        del conn  # fake has no dynamic store
+        for agent_id in delete_ids:
+            self._by_id.pop(agent_id, None)
+        for manifest in upserts:
+            self._by_id[manifest.id] = manifest
 
 
 @pytest.fixture
@@ -404,9 +416,9 @@ def test_register_team_manifests_skips_registry_agents(
 ) -> None:
     """register_team_manifests must not install a generated wrapper for a
     registry-source agent (which would duplicate it on every restart), while it DOES
-    register the generated wrapper and unregister this team's stale generated entries
-    — the register/unregister path that silently no-ops if the fake registry lacks
-    ``manifests_with_id_prefix`` (register_team_manifests swallows the AttributeError)."""
+    register the generated wrapper and unregister this team's stale generated entries.
+    The fake registry must implement ``manifests_with_id_prefix`` — without it
+    register_team_manifests raises AttributeError."""
     from agentic_team_provisioning.manifest_generation import (
         build_agent_manifest,
         register_team_manifests,
@@ -598,7 +610,9 @@ def test_update_generated_agent_reregisters_manifest_with_new_summary(
     from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(agent_name="Writer", role="Writes drafts", skills=["seo"], source="generated")
+    gen = AgenticTeamAgent(
+        agent_name="Writer", role="Writes drafts", skills=["seo"], source="generated"
+    )
     AgenticTeamStore().save_team_agents(team_id, [gen])
     manifest = build_agent_manifest(team_id, gen)
     registry.register(manifest)  # simulate the LLM save path's install
@@ -620,7 +634,9 @@ def test_update_registry_agent_does_not_register_a_generated_wrapper(
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
-    resp = client.put(f"/teams/{team_id}/agents/blogging.planner", json={"role": "Team-specific role"})
+    resp = client.put(
+        f"/teams/{team_id}/agents/blogging.planner", json={"role": "Team-specific role"}
+    )
     assert resp.status_code == 200
     assert resp.json()["source"] == "registry"
     # No generated wrapper was registered for the registry agent's team-namespaced id.
@@ -753,7 +769,7 @@ def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyP
     result = store.merge_generated_agents(
         "missing",
         [AgenticTeamAgent(agent_name="X", role="x", skills=["y"])],
-        on_merged=lambda ms: seen.append([m.agent_name for m in ms]),
+        on_merged=lambda ms, _conn: seen.append([m.agent_name for m in ms]),
     )
     assert result == []
     assert store.list_team_agents("missing") == []
@@ -814,7 +830,41 @@ def test_merge_generated_agents_invokes_on_merged(client: TestClient) -> None:
     merged = store.merge_generated_agents(
         team_id,
         [AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"])],
-        on_merged=lambda ms: seen.append([m.agent_name for m in ms]),
+        on_merged=lambda ms, _conn: seen.append([m.agent_name for m in ms]),
     )
     assert [m.agent_name for m in merged] == ["Writer"]
     assert seen == [["Writer"]]  # called exactly once with the merged list
+
+
+def test_merge_generated_agents_passes_conn_and_propagates_on_merged_failure(
+    client: TestClient,
+) -> None:
+    """Chat-save wiring: on_merged receives the roster conn and a raise escapes.
+
+    Production ``get_conn`` rolls the open transaction back on that escape so the
+    roster write is undone together with any registry statements that joined
+    ``conn``. The dict-backed fake mutates eagerly (no txn rollback), so this
+    test asserts the fail-closed *control path* rather than fake DB contents.
+    """
+    team_id = _new_team()
+    store = AgenticTeamStore()
+    store.save_team_agents(
+        team_id,
+        [AgenticTeamAgent(agent_name="Prior", role="p", skills=["x"], source="generated")],
+    )
+
+    seen_conn: list[object] = []
+
+    def _boom(merged, conn):
+        seen_conn.append(conn)
+        raise RuntimeError("registry replace failed")
+
+    with pytest.raises(RuntimeError, match="registry replace failed"):
+        store.merge_generated_agents(
+            team_id,
+            [AgenticTeamAgent(agent_name="New", role="n", skills=["y"])],
+            on_merged=_boom,
+        )
+
+    assert len(seen_conn) == 1
+    assert seen_conn[0] is not None

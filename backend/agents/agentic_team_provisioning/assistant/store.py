@@ -282,7 +282,7 @@ class AgenticTeamStore:
         self,
         team_id: str,
         generated: list[AgenticTeamAgent],
-        on_merged: Optional[Callable[[list[AgenticTeamAgent]], None]] = None,
+        on_merged: Optional[Callable[[list[AgenticTeamAgent], Any], None]] = None,
     ) -> list[AgenticTeamAgent]:
         """Atomically merge LLM-generated agents into the roster, preserving registry entries.
 
@@ -297,11 +297,14 @@ class AgenticTeamStore:
         takes a ``SELECT ... FOR UPDATE`` row lock on the team, so two concurrent
         merges for the *same* team serialize instead of racing — neither can rewrite
         from a stale snapshot and drop the other's writes. ``on_merged`` (if given) is
-        invoked with the merged roster **under that lock**, before commit, so a
-        caller's dependent registry registration is serialized with the roster write
-        (and with the single-agent helpers' registry cleanup) — closing the gap where
-        a chat-save register could race a concurrent add/delete cleanup. It must be
-        non-raising (best-effort); a raising callback would roll back the roster write.
+        invoked as ``on_merged(merged, conn)`` **under that lock**, before commit, so a
+        caller's dependent registry registration can join this same connection/
+        transaction (and stay serialized with the single-agent helpers' registry
+        cleanup) — closing the gap where a chat-save register could race a concurrent
+        add/delete cleanup, and so a later commit failure rolls roster + registry
+        writes back together. A raising callback (e.g. ``register_team_manifests`` on
+        registry failure) rolls back the roster write so the DB roster and live
+        registry stay consistent.
 
         Preconditions: ``team_id`` should name an existing team (callers validate).
         Postconditions: returns the merged roster actually written (``[]`` if the team
@@ -318,7 +321,7 @@ class AgenticTeamStore:
                 # Unknown team: nothing to write, but still let the caller reconcile
                 # external state for the (now-absent) team with the empty roster.
                 if on_merged is not None:
-                    on_merged([])
+                    on_merged([], conn)
                 return []
             existing = self._load_team_agents(cur, team_id)
             preserved = [a for a in existing if a.source == SOURCE_REGISTRY]
@@ -326,7 +329,7 @@ class AgenticTeamStore:
             merged = preserved + [g for g in generated if g.agent_name not in preserved_names]
             self._write_team_agents(cur, team_id, merged, now)
             if on_merged is not None:
-                on_merged(merged)
+                on_merged(merged, conn)
         return merged
 
     @timed_query(store=_STORE, op="add_or_replace_team_agent")

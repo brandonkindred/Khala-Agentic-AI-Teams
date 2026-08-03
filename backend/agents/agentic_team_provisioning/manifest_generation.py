@@ -1,28 +1,33 @@
 """Generate ``agent_registry`` manifests for agents this team produces.
 
 Every agent the agentic-team designer rosters should join the platform with the
-batteries-included Agent Cognition Core attached. This module turns a roster
-:class:`~agentic_team_provisioning.models.AgenticTeamAgent` into a validated
-:class:`~agent_registry.models.AgentManifest` whose ``cognition`` block carries
-the core defaults (day-one ``default_guardrails`` seed pack, 90-day episodic
-memory, a default-on knowledge graph).
+batteries-included Agent Cognition Core attached. The pure builder helpers in this
+module turn a roster :class:`~agentic_team_provisioning.models.AgenticTeamAgent`
+into a validated :class:`~agent_registry.models.AgentManifest` whose ``cognition``
+block carries the core defaults (day-one ``default_guardrails`` seed pack, 90-day
+episodic memory, a default-on knowledge graph). Those builders perform no
+Postgres, LLM, or filesystem I/O.
 
-Pure builder: no Postgres, no LLM, no filesystem writes. The API surfaces the
-result over a read endpoint; nothing is persisted to the registry's manifest
-discovery paths.
+:func:`register_team_manifests` is the stateful counterpart: it installs built
+manifests into the process-wide registry and, when a Postgres-backed dynamic store
+is active, persists them so other workers and sandboxes can resolve them.
 """
 
 from __future__ import annotations
 
 import hashlib
-import logging
 from typing import NamedTuple
 
-from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
+from agent_registry.models import (
+    AgentManifest,
+    CognitionKnowledgeGraphSpec,
+    CognitionMemorySpec,
+    CognitionSpec,
+    IOSchema,
+    SourceInfo,
+)
 from agentic_team_provisioning.agent_env_provisioning import _slug
 from agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
-
-logger = logging.getLogger(__name__)
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
@@ -54,7 +59,7 @@ _HASH_HEX_LEN = 16
 
 
 def _id_hash(s: str) -> str:
-    """Stable, collision-resistant hex digest used to keep derived ids injective."""
+    """Stable, practically collision-resistant hex digest for derived ids."""
     return hashlib.sha256(s.encode()).hexdigest()[:_HASH_HEX_LEN]
 
 
@@ -64,25 +69,28 @@ def team_id_prefix(team_id: str) -> str:
     Postconditions: returns ``"agentic_team_provisioning.<team-slug>-<hash>."`` —
     the common prefix of every id :func:`manifest_agent_id` produces for
     ``team_id``, used to find this team's generated entries in the registry. The
-    ``<hash>`` of the *full* ``team_id`` keeps the prefix injective, so two teams
-    whose ids share a normalized 12-char slug never collide (stale cleanup keyed
-    on this prefix can't touch another team's manifests).
+    ``<hash>`` of the *full* ``team_id`` makes accidental collisions between two
+    teams that share a normalized 12-char slug negligible at any realistic team
+    count (see ``_HASH_HEX_LEN``), so stale cleanup keyed on this prefix is
+    extremely unlikely to touch another team's manifests.
     """
     return f"{_TEAM_KEY}.{_slug(team_id, 12)}-{_id_hash(team_id)}."
 
 
 def manifest_agent_id(team_id: str, agent_name: str) -> str:
-    """Stable, collision-free manifest id for a generated agent.
+    """Stable, practically unique manifest id for a generated agent.
 
     Preconditions:
         * ``team_id`` and ``agent_name`` are non-empty.
     Postconditions:
-        * Deterministic for a given ``(team_id, agent_name)`` pair, and **never**
-          collides for distinct pairs: the team-injective :func:`team_id_prefix`
-          plus a short hash of the original strings disambiguates names that share
-          a normalized slug (e.g. ``"QA Agent"`` and ``"qa-agent"``, or names
-          agreeing on their first 40 slug chars). Always starts with
-          :func:`team_id_prefix`.
+        * Deterministic for a given ``(team_id, agent_name)`` pair. Distinct pairs
+          produce distinct ids at any realistic roster size: :func:`team_id_prefix`
+          plus a 64-bit (``_HASH_HEX_LEN`` hex) hash of the original strings
+          disambiguates names that share a normalized slug (e.g. ``"QA Agent"``
+          and ``"qa-agent"``, or names agreeing on their first 40 slug chars).
+          Accidental birthday collision on the truncated digest is mathematically
+          possible but negligible far past realistic team/agent counts (see
+          ``_HASH_HEX_LEN``). Always starts with :func:`team_id_prefix`.
     """
     pair_hash = _id_hash(f"{team_id}\x00{agent_name}")
     return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
@@ -104,7 +112,13 @@ def default_cognition_block() -> CognitionSpec:
     registries (``LlmToolsService`` + a caller-supplied integration registry + ``agent_git_tools``),
     so they are never stamped here — that would only break later tool resolution.
     """
-    return CognitionSpec(rule_packs=["default_guardrails"])
+    return CognitionSpec(
+        memory=CognitionMemorySpec(retention_days_events=90),
+        tools=[],
+        rule_packs=["default_guardrails"],
+        requires_idempotency_key=False,
+        knowledge_graph=CognitionKnowledgeGraphSpec(),
+    )
 
 
 def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest:
@@ -118,7 +132,7 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
           equals :func:`default_cognition_block` (``rule_packs ==
           ["default_guardrails"]``), ``team == "agentic_team_provisioning"``,
           ``source.entrypoint`` points at the roster-agent factory, and ``id`` is
-          the stable, collision-free :func:`manifest_agent_id`.
+          the stable, practically unique :func:`manifest_agent_id`.
     """
     # Explicit validation rather than ``assert`` (which ``python -O`` strips): these
     # are real boundary preconditions — silently skipping them under ``-O`` would
@@ -171,23 +185,15 @@ def is_generated_manifest(manifest: AgentManifest) -> bool:
 
 
 class ManifestRegistrationResult(NamedTuple):
-    """Outcome of :func:`register_team_manifests`.
+    """Outcome of a successful :func:`register_team_manifests` call.
 
     Supports both attribute access (``result.manifests``) and positional
-    unpacking (``manifests, registered = register_team_manifests(...)``), so a
-    caller can observe whether the registration call path itself completed
-    instead of only ever seeing the built manifests, as if registration always
-    worked.
+    unpacking (``manifests, registered = register_team_manifests(...)``).
 
-    ``registered`` reflects only this process's local install/removal calls
-    (import, stale-cleanup scan, ``register``/``unregister``) completing
-    without raising — it is **not** a guarantee that a Postgres-backed dynamic
-    store's write-through succeeded. ``AgentRegistry.register``/``unregister``
-    already swallow a write-through failure internally (logged, never raised;
-    see ``agent_registry/loader.py``), so ``registered=True`` can still mean a
-    manifest is visible only on this worker, or a removed one is still visible
-    on others. Surfacing that would require ``AgentRegistry`` itself to expose
-    write-through confirmation — a separate change to that shared module.
+    On success ``registered`` is always ``True`` (registry / store failures
+    propagate rather than returning ``registered=False``), so chat-save can roll
+    back the roster write when registration fails. ``registered`` remains part of
+    the result shape for callers that already destructure it.
     """
 
     manifests: list[AgentManifest]
@@ -195,7 +201,10 @@ class ManifestRegistrationResult(NamedTuple):
 
 
 def register_team_manifests(
-    team_id: str, agents: list[AgenticTeamAgent]
+    team_id: str,
+    agents: list[AgenticTeamAgent],
+    *,
+    conn: object | None = None,
 ) -> ManifestRegistrationResult:
     """Build and install the live registry entries for a team's roster.
 
@@ -206,32 +215,33 @@ def register_team_manifests(
 
     Scope: registration always updates *this process's* in-memory registry
     immediately. When a Postgres-backed dynamic store is active (see
-    ``AgentRegistry.register``), each manifest is also write-through persisted
-    there, so other workers and per-invoke sandboxes that share that store
-    resolve the same entries — not just this process. When no dynamic store
-    is active (Postgres off / sandboxed), registration is local-only and other
-    processes won't see these entries until they generate their own.
+    ``AgentRegistry.replace_dynamic_manifests``), the full replacement
+    (upserts + stale deletes) commits in **one** Postgres transaction before
+    local memory is updated, so other workers and per-invoke sandboxes that
+    share that store never observe a partial replace. When ``conn`` is provided
+    (chat-save ``on_merged``), those store statements join the caller's open
+    roster transaction so both commit or roll back together. When no dynamic
+    store is active (Postgres off / sandboxed), registration is local-only and
+    other processes won't see these entries until they generate their own.
 
     Preconditions:
         * ``team_id`` is non-empty.
     Postconditions:
         * Returns a :class:`ManifestRegistrationResult` whose ``manifests`` holds
           one validated manifest per **generated** roster agent (registry-source
-          agents are skipped — they're already in the registry). When
-          ``registered`` is ``True``, every one of those manifests is registered
-          (``get_registry().get(m.id)`` returns it) and this call acted as a full
-          replace for the team: previously-registered generated manifests for
-          ``team_id`` that are absent from this roster were unregistered, so
-          removed/renamed agents stop appearing in the catalog. Idempotent;
-          persisted to the dynamic store when one is active, in-memory-only
-          otherwise (see Scope above).
-          Best-effort — a registry failure (import, stale-cleanup scan, register,
-          or unregister) is logged and never raised, so manifest generation still
-          succeeds; ``registered`` is ``False`` in that case and ``manifests`` may
-          reflect a partial (or no) registry update. Callers that only need the
-          built manifests can keep destructuring ``result.manifests``; callers
-          that need to detect a registry failure (e.g. to retry or surface it)
-          should check ``result.registered``.
+          agents are skipped — they're already in the registry) and whose
+          ``registered`` is ``True``. Every returned manifest is registered
+          (``get_registry().get(m.id)`` returns it). Acts as a full replace for
+          the team: previously-registered generated manifests for ``team_id`` that
+          are absent from this roster are unregistered, so removed/renamed agents
+          stop appearing in the catalog. Idempotent; persisted to the dynamic
+          store when one is active, in-memory-only otherwise (see Scope above).
+          Registry / store failures propagate — callers that must keep the DB
+          roster and registry in sync (e.g. chat-save ``on_merged``) let the
+          raise roll back the roster write; import-time retroactive registration
+          wraps this call. The prefix scan that computes the stale set uses
+          ``require_store=True`` so a failed cross-worker scan cannot silently
+          omit another worker's stale ids.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -247,27 +257,23 @@ def register_team_manifests(
     agents = [a for a in agents if a.source == SOURCE_GENERATED]
     manifests = [build_agent_manifest(team_id, a) for a in agents]
     new_ids = {m.id for m in manifests}
-    try:
-        from agent_registry import get_registry
+    from agent_registry import get_registry
 
-        registry = get_registry()
-        # Drop stale entries from a prior roster (removed/renamed agents) before
-        # registering the replacement set. Scope strictly to this team's generated
-        # ids (prefix + the "generated" tag) so a hand-authored disk manifest is
-        # never touched. ``manifests_with_id_prefix`` materializes only this team's
-        # entries (not a copy of the whole registry) — this runs under the team lock
-        # on the chat-save path, so keeping the scan's allocation small matters.
-        prefix = team_id_prefix(team_id)
-        stale = [
-            m.id
-            for m in registry.manifests_with_id_prefix(prefix)
-            if is_generated_manifest(m) and m.id not in new_ids
-        ]
-        for agent_id in stale:
-            registry.unregister(agent_id)
-        for manifest in manifests:
-            registry.register(manifest)
-    except Exception:
-        logger.warning("Could not register generated manifests for team %s", team_id, exc_info=True)
-        return ManifestRegistrationResult(manifests=manifests, registered=False)
+    registry = get_registry()
+    # Snapshot prior team-generated manifests before mutating. Scope strictly to
+    # this team's generated ids (prefix + the "generated" tag) so a hand-authored
+    # disk manifest is never touched. ``require_store=True`` so a dynamic-store
+    # scan failure cannot silently omit another worker's stale ids. This runs
+    # under the team lock on the chat-save path, so keeping the scan's allocation
+    # small matters.
+    prefix = team_id_prefix(team_id)
+    prior_generated = {
+        m.id: m
+        for m in registry.manifests_with_id_prefix(prefix, require_store=True)
+        if is_generated_manifest(m)
+    }
+    stale = [agent_id for agent_id in prior_generated if agent_id not in new_ids]
+    # Single atomic replace: shared-store upserts + deletes commit together (or
+    # join ``conn`` when provided), then local memory is updated.
+    registry.replace_dynamic_manifests(manifests, stale, conn=conn)
     return ManifestRegistrationResult(manifests=manifests, registered=True)

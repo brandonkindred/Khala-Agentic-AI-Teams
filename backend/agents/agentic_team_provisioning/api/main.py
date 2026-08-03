@@ -221,12 +221,16 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     if not generated:
         return
 
-    def _register(merged: list[AgenticTeamAgent]) -> None:
+    def _register(merged: list[AgenticTeamAgent], conn) -> None:
         # Install the generated agents into the live registry so the Agent Console
-        # catalog and /api/agents/{id}/invoke resolve them (best-effort; skips
-        # registry-source entries internally). Runs under the team lock so it's
-        # serialized with the single-agent routes' registry cleanup.
-        register_team_manifests(team_id, merged)
+        # catalog and /api/agents/{id}/invoke resolve them (skips registry-source
+        # entries internally). Runs under the team lock on the roster connection so
+        # it's serialized with the single-agent routes' registry cleanup and the
+        # dynamic-store replace joins this transaction — a commit failure rolls
+        # roster + registry back together. Raises on registry failure so
+        # merge_generated_agents rolls back the roster write and keeps both
+        # stores consistent.
+        register_team_manifests(team_id, merged, conn=conn)
 
     # Merge under a team-row lock so the read (preserve registry agents), the write,
     # and the registry register all happen in one atomic, serialized transaction.
@@ -406,8 +410,10 @@ def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
         within the locked roster mutation that removes/replaces the row.
     Postconditions: the agent's generated manifest is unregistered if present. A
         registry failure is logged, **never raised** — so this best-effort cleanup
-        can neither 500 the request nor roll back the committed roster mutation
-        (mirrors ``register_team_manifests``, which logs registry errors not raises).
+        can neither 500 the request nor roll back the committed roster mutation.
+        (Chat-save registration via ``register_team_manifests`` is fail-closed
+        instead; cleanup hooks stay best-effort so a transient unregister blip
+        cannot undo a successful delete/replace.)
     """
     try:
         # ``get_registry`` stays inline so tests' ``monkeypatch`` of
@@ -441,7 +447,9 @@ def _reregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
     Postconditions: the agent's manifest is (re)registered if the registry is
         reachable. A registry failure is logged, **never raised** — so this
         best-effort refresh can neither 500 the request nor roll back the committed
-        roster edit (mirrors ``register_team_manifests``).
+        roster edit. (Unlike chat-save ``register_team_manifests``, which raises
+        so the roster write rolls back; an in-place role edit still commits even
+        if the catalog refresh fails — a later chat-save re-registers the roster.)
     """
     try:
         from agent_registry import get_registry

@@ -16,7 +16,7 @@ import time
 from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import yaml
 from pydantic import ValidationError
@@ -269,7 +269,9 @@ class AgentRegistry:
     def all(self) -> list[AgentManifest]:
         return self._merged_manifests()
 
-    def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
+    def manifests_with_id_prefix(
+        self, prefix: str, *, require_store: bool = False
+    ) -> list[AgentManifest]:
         """Return registered manifests whose ``id`` starts with ``prefix``.
 
         Materializes only the matching subset in one pass, unlike :meth:`all`, which
@@ -285,7 +287,10 @@ class AgentRegistry:
             Carries the same brief scan-then-lock eventual-consistency window as
             :meth:`_merged_manifests` (a dynamic id registered between the store
             prefix scan and the lock may be momentarily absent); see that method's
-            consistency note.
+            consistency note. Default store-scan failure degrades to this process's
+            local subset. When ``require_store`` is True and a dynamic store is
+            active, a scan failure propagates instead — fail-closed callers (roster
+            replace) must not omit another worker's stale ids.
         """
         with self._lock:
             local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
@@ -295,6 +300,8 @@ class AgentRegistry:
         try:
             dynamic = store.manifests_with_prefix(prefix)
         except Exception:
+            if require_store:
+                raise
             logger.warning(
                 "dynamic store prefix scan failed for %r; serving local", prefix, exc_info=True
             )
@@ -380,7 +387,13 @@ class AgentRegistry:
                 return None
             return self._by_id.get(agent_id) if agent_id in self._unconfirmed else None
 
-    def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
+    def register(
+        self,
+        manifest: AgentManifest,
+        source_path: Path | None = None,
+        *,
+        require_persist: bool = False,
+    ) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
 
         Disk discovery (:meth:`load`) is the norm; teams that *generate* agents at
@@ -390,16 +403,26 @@ class AgentRegistry:
         Preconditions:
             * ``manifest.id`` is non-empty.
         Postconditions:
-            * ``get(manifest.id)`` returns ``manifest`` (re-registering the same id
-              overwrites the prior entry). Always updates this process's in-memory
-              view; when a dynamic store is active and ``manifest.id`` is not a
-              static/disk id, it is also persisted to Postgres so other workers and
-              the per-invoke sandbox resolve it. The write-through is best-effort —
-              a Postgres error is logged, never raised (callers like the generated
-              roster path hold a lock and swallow registry errors).
+            * On success, ``get(manifest.id)`` returns ``manifest`` (re-registering
+              the same id overwrites the prior entry). Always updates this process's
+              in-memory view; when a dynamic store is active and ``manifest.id`` is
+              not a static/disk id, it is also persisted to Postgres so other
+              workers and the per-invoke sandbox resolve it.
+            * Default write-through is best-effort — a Postgres error is logged,
+              never raised, and the local entry remains (``_unconfirmed``) so this
+              worker still sees read-your-writes.
+            * When ``require_persist`` is True and a dynamic store is active, a
+              Postgres upsert failure restores the prior local state (if any) and
+              re-raises so fail-closed callers (e.g. generated roster chat-save)
+              can roll back their DB write. When no store is active, local-only
+              registration still succeeds — there is nothing to persist.
         """
         assert manifest.id, "register: manifest.id must be non-empty"
         with self._lock:
+            prior_manifest = self._by_id.get(manifest.id)
+            prior_source = self._source_paths.get(manifest.id)
+            prior_tombstone = self._tombstones.get(manifest.id)
+            was_unconfirmed = manifest.id in self._unconfirmed
             self._by_id[manifest.id] = manifest
             if source_path is not None:
                 self._source_paths[manifest.id] = source_path
@@ -414,13 +437,44 @@ class AgentRegistry:
             if store is None:
                 # No active store to confirm against (Postgres off / in sandbox):
                 # the local copy is authoritative, so a store miss must never drop
-                # it. Treat as unconfirmed.
+                # it. Treat as unconfirmed. ``require_persist`` is a no-op here —
+                # there is no store that other workers could miss.
                 with self._lock:
                     self._unconfirmed.add(manifest.id)
                 return
             try:
                 store.upsert(manifest)
             except Exception:
+                if require_persist:
+                    # Undo the in-memory install so fail-closed callers do not leave
+                    # a half-registered local entry when their transaction rolls back.
+                    # Only roll back state this call still owns: the lock was released
+                    # during the store upsert, so a concurrent register/unregister of
+                    # the same id must not be clobbered by restoring our snapshots.
+                    with self._lock:
+                        if self._by_id.get(manifest.id) is manifest:
+                            if prior_manifest is None:
+                                self._by_id.pop(manifest.id, None)
+                                self._source_paths.pop(manifest.id, None)
+                                self._unconfirmed.discard(manifest.id)
+                            else:
+                                self._by_id[manifest.id] = prior_manifest
+                                if prior_source is not None:
+                                    self._source_paths[manifest.id] = prior_source
+                                elif source_path is not None:
+                                    self._source_paths.pop(manifest.id, None)
+                                if was_unconfirmed:
+                                    self._unconfirmed.add(manifest.id)
+                                else:
+                                    self._unconfirmed.discard(manifest.id)
+                        if (
+                            prior_tombstone is not None
+                            and manifest.id not in self._tombstones
+                            and manifest.id not in self._by_id
+                        ):
+                            self._tombstones[manifest.id] = prior_tombstone
+                            self._tombstones.move_to_end(manifest.id)
+                    raise
                 logger.warning(
                     "dynamic store upsert failed for %s; registered locally only",
                     manifest.id,
@@ -479,6 +533,81 @@ class AgentRegistry:
                     exc_info=True,
                 )
         return removed
+
+    def replace_dynamic_manifests(
+        self,
+        upserts: Sequence[AgentManifest],
+        delete_ids: Sequence[str],
+        *,
+        conn: Any | None = None,
+    ) -> None:
+        """Atomically install ``upserts`` and drop ``delete_ids`` for dynamic agents.
+
+        Generated-roster replacement uses this so the shared store and this
+        process's in-memory view stay aligned with the roster DB transaction:
+        either the whole replacement lands, or nothing does.
+
+        Preconditions:
+            * Every upsert has a non-empty ``id`` that is not a static/disk id.
+            * No ``delete_ids`` entry names a static/disk id.
+            * ``upserts`` ids and ``delete_ids`` are disjoint.
+        Postconditions:
+            * When a dynamic store is active and ``conn`` is ``None``, all upserts
+              and deletes commit in **one** dedicated Postgres transaction before
+              local memory is updated. A store failure leaves both store and local
+              registry unchanged and propagates.
+            * When ``conn`` is provided (chat-save), store statements join that
+              open transaction so a later roster-commit failure rolls both back
+              together. Local memory is still updated after the statements succeed
+              on ``conn`` (process-local residual if the outer commit then fails —
+              other workers never see the uncommitted store rows).
+            * When no store is active, only this process's in-memory view is
+              updated (local-authoritative, same as :meth:`register` with no
+              store). After success, each upserted id resolves via :meth:`get`
+              and each deleted id does not (subject to tombstone / store semantics).
+        """
+        upsert_list = list(upserts)
+        delete_list = list(delete_ids)
+        for manifest in upsert_list:
+            if not manifest.id:
+                raise ValueError("replace_dynamic_manifests: manifest.id must be non-empty")
+            if manifest.id in self._static_ids:
+                raise ValueError(f"replace_dynamic_manifests: refusing static id {manifest.id!r}")
+        for agent_id in delete_list:
+            if agent_id in self._static_ids:
+                raise ValueError(
+                    f"replace_dynamic_manifests: refusing to delete static id {agent_id!r}"
+                )
+        upsert_ids = {m.id for m in upsert_list}
+        overlap = upsert_ids & set(delete_list)
+        if overlap:
+            raise ValueError(
+                "replace_dynamic_manifests: upserts and delete_ids must be disjoint; "
+                f"overlap={sorted(overlap)!r}"
+            )
+
+        store = self._dynamic_store()
+        if store is not None:
+            # Store first: on failure local state is untouched so fail-closed
+            # callers can roll back their roster write against an unchanged catalog.
+            store.replace_manifests(upsert_list, delete_list, conn=conn)
+
+        with self._lock:
+            for manifest in upsert_list:
+                self._by_id[manifest.id] = manifest
+                self._tombstones.pop(manifest.id, None)
+                if store is None:
+                    self._unconfirmed.add(manifest.id)
+                else:
+                    self._unconfirmed.discard(manifest.id)
+            for agent_id in delete_list:
+                self._source_paths.pop(agent_id, None)
+                self._by_id.pop(agent_id, None)
+                self._unconfirmed.discard(agent_id)
+                self._tombstones[agent_id] = time.monotonic()
+                self._tombstones.move_to_end(agent_id)
+                while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
+                    self._tombstones.popitem(last=False)
 
     def search(
         self,

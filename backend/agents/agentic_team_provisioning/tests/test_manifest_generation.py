@@ -95,8 +95,8 @@ def test_build_agent_manifest_id_stable_and_unique():
     assert id_a1.startswith("agentic_team_provisioning.")
 
 
-def test_manifest_id_is_collision_free_for_normalized_name_clashes():
-    # Distinct roster names that normalize to the same slug must not collide.
+def test_manifest_id_disambiguates_normalized_slug_clashes():
+    # Distinct roster names that normalize to the same slug must stay distinct.
     id_1 = build_agent_manifest("t", AgenticTeamAgent(agent_name="QA Agent", role="r")).id
     id_2 = build_agent_manifest("t", AgenticTeamAgent(agent_name="qa-agent", role="r")).id
     assert id_1 != id_2
@@ -225,7 +225,9 @@ def test_register_team_manifests_isolates_teams_with_shared_slug(monkeypatch: py
     assert reg.get(a_result.manifests[0].id) is not None
 
 
-def test_register_team_manifests_is_best_effort(monkeypatch: pytest.MonkeyPatch):
+def test_register_team_manifests_propagates_registry_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
     import agent_registry
 
     def _boom():
@@ -233,8 +235,41 @@ def test_register_team_manifests_is_best_effort(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(agent_registry, "get_registry", _boom)
 
-    # A registry failure must not break generation; manifests are still built, but
-    # the failure is observable via `registered` instead of looking like success.
-    result = register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
-    assert len(result.manifests) == 1
-    assert result.registered is False
+    # Registry failures propagate so chat-save can roll back the roster write.
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
+
+
+def test_register_team_manifests_propagates_atomic_replace_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed atomic replace leaves the prior roster manifests untouched."""
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    first = register_team_manifests(
+        "team-1",
+        [AgenticTeamAgent(agent_name="A", role="prior-A")],
+    )
+    prior_a_id = first.manifests[0].id
+
+    def _boom(upserts, delete_ids, *, conn=None):
+        raise RuntimeError("replace boom")
+
+    monkeypatch.setattr(reg, "replace_dynamic_manifests", _boom)
+
+    with pytest.raises(RuntimeError, match="replace boom"):
+        register_team_manifests(
+            "team-1",
+            [
+                AgenticTeamAgent(agent_name="B", role="renamed"),
+                AgenticTeamAgent(agent_name="C", role="new"),
+            ],
+        )
+
+    assert reg.get(prior_a_id) is not None
+    assert reg.get(prior_a_id).summary == "prior-A"
+    assert {m.name for m in reg.all()} == {"A"}
