@@ -2950,6 +2950,63 @@ def test_filter_duplicate_questions_stems_plural_and_past_tense() -> None:
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_stems_silent_e_past_tense() -> None:
+    """A past-tense word formed from a silent-e root (e.g. 'based' from
+    'base') must match the root word in qa_history.
+
+    Blindly stripping the 'ed' suffix (based -> 'bas') would never match
+    'base'; the stemmer must also try dropping just the trailing 'd'.
+    """
+    questions = [OpenQuestion(id="q1", question_text="Should pricing be based on usage tiers?")]
+    qa_history = "Q: What should pricing be based on?\nA: We will base it on usage tiers."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_es_plural_dropping_e() -> None:
+    """A plural formed by adding '-es' to a root with no silent 'e' (e.g.
+    'classes' from 'class') must match the root word in qa_history.
+
+    Stripping only the trailing 's' (classes -> 'classe') would never match
+    'class'; the stemmer must also try dropping the full 'es'.
+    """
+    questions = [OpenQuestion(id="q1", question_text="How should the CSS classes be organized?")]
+    qa_history = "Q: How should we organize the CSS class structure?\nA: By component."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_ies_plural() -> None:
+    """A plural formed by '-ies' (e.g. 'policies' from 'policy') must match
+    the root word in qa_history."""
+    questions = [OpenQuestion(id="q1", question_text="What retry policies should the client use?")]
+    qa_history = "Q: What retry policy should the client use?\nA: Exponential backoff."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_double_s_word_is_not_stemmed() -> None:
+    """A word ending in a doubled 's' (e.g. 'address') is never treated as a
+    plural/past-tense form, so it is only matched against its own literal
+    form (optionally suffixed with 's' or 'ed') in qa_history."""
+    questions = [OpenQuestion(id="q1", question_text="What should the email address format be?")]
+    qa_history = "Q: What email format and address rules apply?\nA: Follow RFC 5322 for addresses."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_matches_short_content_word_keywords() -> None:
     """A question made up entirely of short (<=3 char) content words is still
     recognized as a duplicate.

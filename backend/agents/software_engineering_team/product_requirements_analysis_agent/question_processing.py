@@ -79,9 +79,10 @@ def filter_duplicate_questions(
 
     Filters out questions whose keyword stems (plus simple plural/past-tense
     variants) appear as whole words in the Q&A history. A question is considered
-    a duplicate when at least 90% of its keyword stems are found in the history.
-    Below-90% coverage is kept for possible consolidation elsewhere. This is
-    keyword coverage, not a similarity ratio between the question and history.
+    a duplicate when at least 90% of its keywords have a matching stem found in
+    the history. Below-90% coverage is kept for possible consolidation elsewhere.
+    This is keyword coverage, not a similarity ratio between the question and
+    history.
 
     Uses :func:`content_words` (stopword-based, not length-based) for the same
     keyword-admission rule as :func:`qa_history.extract_answer_from_qa_history`,
@@ -104,31 +105,64 @@ def filter_duplicate_questions(
     filtered = []
     duplicates = []
 
-    def _stem(w: str) -> str:
-        """Normalize word for matching (e.g. tokens->token, stored->store)."""
+    def _stem_candidates(w: str) -> set[str]:
+        """Return plausible root forms of ``w`` for keyword-coverage matching.
+
+        A single-guess suffix strip is ambiguous for silent-e roots (e.g.
+        "based" is "base" + d, "stored" is "store" + d) versus regular roots
+        (e.g. "documented" is "document" + ed), and likewise for "-es"
+        plurals (e.g. "phases" is "phase" + s, "classes" is "class" + es) —
+        the surface form alone doesn't say which rule applies. Guessing a
+        single stem silently drops the correct one (e.g. stemming "based" to
+        "bas" alone would never match "base"). Instead this returns every
+        plausible root and lets the caller accept a match against any of
+        them. This is a small suffix map, not a linguistically complete
+        stemmer/lemmatizer: irregular forms (e.g. "geese" -> "goose") are not
+        handled, and it only strips one layer of suffix.
+
+        Preconditions: ``w`` is a lowercase string with no whitespace.
+        Postconditions: returns a non-empty set of candidate stems that
+            always includes ``w`` itself; a word ending in "ss" (e.g.
+            "address", "process") is returned unchanged, since a doubled-s
+            ending is never itself a plural/past-tense suffix here; never
+            raises.
+        """
+        candidates = {w}
+        if w.endswith("ss"):
+            return candidates
         if w.endswith("ed") and len(w) > 4:
-            return w[:-2]  # stored -> store
-        if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
-            return w[:-1]  # tokens -> token
-        return w
+            candidates.add(w[:-1])  # based -> base, stored -> store
+            candidates.add(w[:-2])  # documented -> document
+        elif w.endswith("ies") and len(w) > 4:
+            candidates.add(w[:-3] + "y")  # policies -> policy
+        elif w.endswith("es") and len(w) > 4:
+            candidates.add(w[:-1])  # phases -> phase
+            candidates.add(w[:-2])  # classes -> class
+        elif w.endswith("s") and len(w) > 4:
+            candidates.add(w[:-1])  # tokens -> token
+        return candidates
 
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
-        key_stems = {_stem(w) for w in content_words(q_text_lower)}
-        if not key_stems:
+        key_words = content_words(q_text_lower)
+        if not key_words:
             filtered.append(q)
             continue
-        # Count how many stems (or their plural/past-tense variant) appear as a
-        # whole word in qa_history. Word-boundary matching (not substring
-        # containment) so a short stem can't false-match inside an unrelated
-        # longer word (e.g. "api" inside "capitalizing") now that short content
-        # words are admitted as key stems.
+        # Count how many keywords have at least one candidate stem (or that
+        # candidate's own plural/past-tense variant) appear as a whole word in
+        # qa_history. Word-boundary matching (not substring containment) so a
+        # short stem can't false-match inside an unrelated longer word (e.g.
+        # "api" inside "capitalizing") now that short content words are
+        # admitted as keywords.
         matches = sum(
             1
-            for stem in key_stems
-            if re.search(rf"\b{re.escape(stem)}(?:s|ed)?\b", qa_history_lower)
+            for w in key_words
+            if any(
+                re.search(rf"\b{re.escape(stem)}(?:s|ed)?\b", qa_history_lower)
+                for stem in _stem_candidates(w)
+            )
         )
-        match_ratio = matches / len(key_stems)
+        match_ratio = matches / len(key_words)
         # Only treat as duplicate of an answered question when match >= 90%.
         # Below-90% coverage may be consolidated but should not be filtered out.
         if match_ratio >= 0.90:
