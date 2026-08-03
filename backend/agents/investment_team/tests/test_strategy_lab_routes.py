@@ -689,7 +689,7 @@ def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
     """Mid-run progress must reach the client even while the job service still
-    reports a non-terminal status (#4096) -- not just status/error at completion."""
+    reports a non-terminal status -- not just status/error at completion."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-prog2"] = {
@@ -701,6 +701,7 @@ def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
         "skipped_cycles": 0,
         "errored_cycles": 0,
         "current_batch": None,
+        "completed_record_ids": [],
     }
     stub = _StubLabClient(
         jobs=[
@@ -713,6 +714,7 @@ def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
                     "errored_cycles": 1,
                     "current_batch": 2,
                     "contiguous_cycles": 5,
+                    "completed_record_ids": ["rec-1", "rec-2"],
                 },
             }
         ]
@@ -729,6 +731,7 @@ def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
     assert run["skipped_cycles"] == 2
     assert run["errored_cycles"] == 1
     assert run["current_batch"] == 2
+    assert run["completed_record_ids"] == ["rec-1", "rec-2"]
     # contiguous_cycles is intentionally absent from the response schema
     # (internal resume-offset math only); assert it landed in _active_runs.
     assert api_main._active_runs["run-prog2"]["contiguous_cycles"] == 5
@@ -1045,7 +1048,7 @@ def test_get_strategy_lab_run_status_reconciles_progress_while_non_terminal(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
     """Mid-run progress must reach the client even while the job service still
-    reports a non-terminal status (#4096) -- not just status/error at completion."""
+    reports a non-terminal status -- not just status/error at completion."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-prog"] = {
@@ -1366,7 +1369,7 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
     """The initial SSE snapshot must reflect job-service-reconciled progress,
-    not the stale in-memory values that were current at connect time (#4096)."""
+    not the stale in-memory values that were current at connect time."""
     import json
     from collections import deque
 
@@ -1393,6 +1396,7 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
                     "skipped_cycles": 1,
                     "errored_cycles": 1,
                     "current_batch": 4,
+                    "contiguous_cycles": 5,
                 },
             }
         ]
@@ -1422,3 +1426,6 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
     assert snapshot["skipped_cycles"] == 1
     assert snapshot["errored_cycles"] == 1
     assert snapshot["current_batch"] == 4
+    # contiguous_cycles is intentionally absent from the response schema
+    # (internal resume-offset math only); assert it landed in _active_runs.
+    assert api_main._active_runs["stream-prog"]["contiguous_cycles"] == 5
