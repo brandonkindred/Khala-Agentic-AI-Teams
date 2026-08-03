@@ -201,6 +201,38 @@ Metrics are produced by `prometheus-fastapi-instrumentator` which is installed i
 
 Add a new team? Edit `docker/prometheus/prometheus.yml` and append a new target entry to the `team-services` job with the service's DNS name and port, then add a matching `extra_hosts` entry to the `prometheus` service in `docker-compose.yml`.
 
+## Tracing (Tempo)
+
+Grafana Tempo (`docker/tempo/tempo.yaml`) is the trace backend, capped at 1G
+memory (`mem_limit`/`deploy.resources.limits.memory` on the `tempo` service in
+`docker-compose.yml`). Only opted-in containers (`se-service`,
+`investment-service`, `branding-service`) export OTLP traces here
+(`OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318`); other team services keep
+spans in-process. Grafana queries Tempo via the pre-provisioned "Tempo"
+datasource (`docker/grafana/provisioning/datasources/tempo.yml`, uid
+`khala-tempo`).
+
+Query-path memory is bounded by three cooperating caps in `tempo.yaml`:
+
+- **`querier.max_concurrent_queries`** (5, Tempo default 20) — limits concurrently-executing
+  query jobs; each one holds decoded trace blocks in memory.
+- **`query_frontend.max_outstanding_per_tenant`** (100, Tempo default 2000) — limits
+  in-flight query requests queued at the frontend before it starts returning
+  HTTP 429 instead of buffering more work.
+- **`query_frontend.search.concurrent_jobs`** (200, Tempo default 1000) — limits
+  concurrently-running sharded search sub-jobs, each of which holds decoded
+  block data while it runs.
+
+**Tradeoff**: these caps are set well below Tempo's defaults to protect the
+1G cgroup. Under heavy parallel dashboard use (many Grafana panels refreshing
+at once), requests queue and search jobs serialize more than they would with
+Tempo's out-of-the-box defaults — trading some query latency (and occasional
+HTTP 429s) for a bounded, predictable memory footprint. Raise these values
+(and likely the 1G limit) if sustained query queuing/429s show up in real
+usage. See the concurrent-load validation script in the PR description for
+the querier + query_frontend sub-issue for how these values were checked
+under load.
+
 ## Verification
 
 After starting the stack:
@@ -212,6 +244,7 @@ After starting the stack:
 5. **Metrics endpoints** – `curl -sf http://localhost:8888/metrics | head` and the same on `:8585` (job service) and `:8090`–`:8110` (team services) should return Prometheus text-format output (`# HELP ...`).
 6. **Prometheus targets** – Open http://localhost:9090/targets; all rows should be green (`UP`). Or run `curl -s 'http://localhost:9090/api/v1/query?query=up' | jq '.data.result[] | {service:.metric.service, up:.value[1]}'`.
 7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Khala → **Khala FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`).
+8. **Tempo tracing** – `curl -sf http://localhost:3200/ready` should return `ready`. Generate a few traces by calling an opted-in service a few times through `khala:8888` (e.g. an `se-service` route), wait ~10s for `ingester.trace_idle_period` to flush, then `curl -s 'http://localhost:3200/api/search?tags=' | jq '.traces | length'` should return a non-zero count. Pick a `traceID` from that response and confirm `curl -s http://localhost:3200/api/traces/<traceID> | jq '.batches | length'` returns non-zero. Finally, in Grafana open **Explore** → **Tempo** datasource and confirm the same trace is browsable via search and via trace-by-ID lookup.
 
 ## Security
 

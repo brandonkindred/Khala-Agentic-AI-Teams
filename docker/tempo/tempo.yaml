@@ -42,6 +42,20 @@ storage:
 querier:
   max_concurrent_queries: 5
 
+# Cap query_frontend fan-out so a burst of concurrent Grafana panels/dashboards
+# can't queue unbounded work in memory. Paired with querier.max_concurrent_queries
+# above, this keeps total query-path memory small under the 1G cgroup even when
+# several dashboards refresh at once.
+query_frontend:
+  # Reject additional per-tenant query requests past this many in flight
+  # (default 2000) with HTTP 429 instead of queuing them in memory indefinitely.
+  max_outstanding_per_tenant: 100
+  search:
+    # Bound concurrently-running sharded search sub-jobs (default 1000); each
+    # holds decoded block data while it executes, so a lower cap keeps search
+    # memory bounded under concurrent dashboard load.
+    concurrent_jobs: 200
+
 # Bound on-disk growth explicitly: the compactor deletes trace blocks older than
 # block_retention so the local /var/tempo volume can't fill unbounded on a
 # long-running stack. (Retention in Tempo lives under compactor.compaction, not
