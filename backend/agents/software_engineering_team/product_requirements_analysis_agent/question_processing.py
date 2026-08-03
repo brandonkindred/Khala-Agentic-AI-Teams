@@ -28,6 +28,7 @@ from .prompts import (
     GENERATE_QUESTION_RECOMMENDATIONS_PROMPT,
     REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
 )
+from .qa_history import content_words
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +78,17 @@ def filter_duplicate_questions(
     """Filter out questions that appear to be duplicates of answered ones.
 
     Filters out questions whose keyword stems (plus simple plural/past-tense
-    variants) appear verbatim in the Q&A history. A question is considered a
-    duplicate when at least 90% of its keyword stems are found in the history.
+    variants) appear as whole words in the Q&A history. A question is considered
+    a duplicate when at least 90% of its keyword stems are found in the history.
     Below-90% coverage is kept for possible consolidation elsewhere. This is
     keyword coverage, not a similarity ratio between the question and history.
+
+    Uses :func:`content_words` (stopword-based, not length-based) for the same
+    keyword-admission rule as :func:`qa_history.extract_answer_from_qa_history`,
+    so a short-keyword question (e.g. one about an acronym) that the extractor
+    can now match isn't excluded from ``duplicates`` here first — otherwise it
+    would never reach the extractor at all and would be re-asked regardless of
+    the extractor's own behavior.
 
     Returns:
         Tuple of (filtered_questions, duplicate_questions).
@@ -96,13 +104,8 @@ def filter_duplicate_questions(
     filtered = []
     duplicates = []
 
-    def _clean_token(w: str) -> str:
-        """Strip punctuation so tokens like 'store?' match their bare form."""
-        return re.sub(r"[^a-z0-9]", "", w.strip())
-
     def _stem(w: str) -> str:
         """Normalize word for matching (e.g. tokens->token, stored->store)."""
-        w = w.strip()
         if w.endswith("ed") and len(w) > 4:
             return w[:-2]  # stored -> store
         if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
@@ -111,19 +114,19 @@ def filter_duplicate_questions(
 
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
-        # Key words: length > 3, normalized to stems for plural/tense
-        words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
-        key_stems = set(_stem(_clean_token(w)) for w in words)
+        key_stems = {_stem(w) for w in content_words(q_text_lower)}
         if not key_stems:
             filtered.append(q)
             continue
-        # Count how many stems (or their plural) appear in qa_history
+        # Count how many stems (or their plural/past-tense variant) appear as a
+        # whole word in qa_history. Word-boundary matching (not substring
+        # containment) so a short stem can't false-match inside an unrelated
+        # longer word (e.g. "api" inside "capitalizing") now that short content
+        # words are admitted as key stems.
         matches = sum(
             1
             for stem in key_stems
-            if stem in qa_history_lower
-            or (stem + "s") in qa_history_lower
-            or (stem + "ed") in qa_history_lower
+            if re.search(rf"\b{re.escape(stem)}(?:s|ed)?\b", qa_history_lower)
         )
         match_ratio = matches / len(key_stems)
         # Only treat as duplicate of an answered question when match >= 90%.
