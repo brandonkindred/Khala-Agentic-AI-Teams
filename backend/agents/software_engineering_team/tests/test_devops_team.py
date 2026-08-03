@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.devops_team import (
@@ -112,6 +113,7 @@ class _ScriptedClient(DummyLLMClient):
 
 
 def _base_task_spec(**overrides) -> DevOpsTaskSpec:
+    """Return a baseline ``DevOpsTaskSpec`` for tests, with optional field overrides."""
     defaults = dict(
         task_id="DO-2207",
         title="Add CI/CD pipeline and deployment flow",
@@ -209,7 +211,7 @@ def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _Script
 
 class TestDevOpsTaskSpec:
     def test_task_id_required(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             DevOpsTaskSpec(task_id="")
 
     def test_task_id_strips_whitespace(self) -> None:
@@ -1899,6 +1901,22 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "staging"
 
+    def test_build_legacy_spec_ignores_not_in_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-phrase-4",
+            task_description="Not in production",
+            requirements="Staging only",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_ignores_not_at_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-phrase-5",
+            task_description="Not at production",
+            requirements="Staging only",
+        )
+        assert spec.environment == "staging"
+
     def test_build_legacy_spec_ignores_no_production_access_allowed(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-neg-phrase-3",
@@ -1969,6 +1987,30 @@ class TestBackwardCompatibility:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-post-2",
             task_description="Production is prohibited",
+            requirements="Staging only",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_production_is_allowed_still_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-post-3",
+            task_description="Production is allowed",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_production_is_permitted_still_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-post-4",
+            task_description="Production is permitted",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
+    def test_build_legacy_spec_production_is_forbidden_is_staging(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-post-5",
+            task_description="Production is forbidden",
             requirements="Staging only",
         )
         assert spec.environment == "staging"
@@ -2053,6 +2095,25 @@ class TestBackwardCompatibility:
             requirements="staging",
         )
         assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
+
+    def test_build_legacy_spec_whitespace_title_falls_back_to_task_id(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-ws-title",
+            task_description="   ",
+            requirements="staging",
+        )
+        assert spec.title == "devops-ws-title"
+
+    def test_enforce_env_policy_rejects_plain_string_included(self) -> None:
+        from types import SimpleNamespace
+
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments=["production"]),
+            scope=SimpleNamespace(included="approval gate"),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="not a single string"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
 
     def test_enforce_env_policy_rejects_non_string_included(self) -> None:
         from types import SimpleNamespace

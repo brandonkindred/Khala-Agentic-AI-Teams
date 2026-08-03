@@ -58,34 +58,47 @@ from .tool_agents import (
 )
 
 # Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
-# Keep list values read-only — do not mutate them in the adapter.
+# Tuples enforce the read-only contract — callers get list(...) copies when needed.
 _DEFAULT_LEGACY_CLOUD = "on-premises"
 _DEFAULT_LEGACY_APP_REPO = "application"
 _DEFAULT_LEGACY_INFRA_REPO = "platform-infra"
 _DEFAULT_LEGACY_SECRETS_SOURCE = "managed_secret_store"
 
-_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = [
+_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = (
     "CI/CD workflow exists and validates",
     "Deployment strategy and rollback documented",
     "Security and policy review executed",
-]
-_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = [
-    "Rollback to previous known good release",
-]
-_DEFAULT_LEGACY_SECURITY_CONSTRAINTS = [
+)
+_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = ("Rollback to previous known good release",)
+_DEFAULT_LEGACY_SECURITY_CONSTRAINTS = (
     "No plaintext credentials",
     "Least privilege IAM",
-]
-_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
-    "Audit trail required",
-]
+)
+_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
 
 MAX_LEGACY_TITLE_LENGTH: int = 120
 
 _NEGATION_TOKENS = frozenset({"not", "no", "non"})
-# Skippable fillers between a negation and a prod token ("not deploy to production").
+# Skippable fillers between a negation and a prod token ("not deploy to production",
+# "not in production").
 _NEGATION_INTERVENING_TOKENS = frozenset(
-    {"to", "for", "into", "on", "deploy", "deploying", "deployment", "the", "a", "an"}
+    {
+        "to",
+        "for",
+        "into",
+        "on",
+        "in",
+        "at",
+        "with",
+        "by",
+        "from",
+        "deploy",
+        "deploying",
+        "deployment",
+        "the",
+        "a",
+        "an",
+    }
 )
 # After a ``no``/``not`` + prod token, these may indicate a production *control*
 # under discussion rather than excluding production as a target.
@@ -113,13 +126,9 @@ _PROD_SAFEGUARD_TOKENS = frozenset(
         "permissions",
     }
 )
-# With a safeguard noun, these mark an explicit prohibition → still staging.
-_PROD_PROHIBITION_TOKENS = frozenset(
+# Negative prohibition predicates (``production is forbidden``).
+_PROD_NEGATIVE_PROHIBITION_TOKENS = frozenset(
     {
-        "allowed",
-        "allow",
-        "permitted",
-        "permit",
         "forbidden",
         "denied",
         "prohibited",
@@ -127,6 +136,18 @@ _PROD_PROHIBITION_TOKENS = frozenset(
         "exclude",
     }
 )
+# Positive permission words — exclusion only when negated
+# (``production is not allowed`` vs ``production is allowed``).
+_PROD_POSITIVE_PERMISSION_TOKENS = frozenset(
+    {
+        "allowed",
+        "allow",
+        "permitted",
+        "permit",
+    }
+)
+# Union used by environment-negation safeguard logic.
+_PROD_PROHIBITION_TOKENS = _PROD_NEGATIVE_PROHIBITION_TOKENS | _PROD_POSITIVE_PERMISSION_TOKENS
 # With a safeguard noun, these mark a missing/absent control → production work.
 _PROD_MISSING_CONTROL_TOKENS = frozenset(
     {
@@ -251,19 +272,24 @@ def _is_post_token_exclusion(tokens: List[str], prod_index: int) -> bool:
         - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
           ``prod`` or ``production``.
     Postconditions:
-        - True for patterns like ``production is not allowed``,
-          ``production is prohibited``, ``prod is forbidden``.
+        - True for negative prohibitions (``production is prohibited``,
+          ``prod is forbidden``).
+        - True for positive permission words only when negated
+          (``production is not allowed``); ``production is allowed`` is False.
         - False when no such post-token prohibition is present.
     """
     assert 0 <= prod_index < len(tokens), "prod_index out of range"
     assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
     after = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
-    if not after or not any(t in _PROD_PROHIBITION_TOKENS for t in after):
+    if not after:
         return False
-    # Require a copula / negation bridge so we do not treat
-    # "production approval allowed" as an exclusion.
-    bridge = {"is", "are", "was", "were", "be", "being", "not", "no"}
-    return after[0] in bridge or after[0] in _PROD_PROHIBITION_TOKENS
+    if any(t in _PROD_NEGATIVE_PROHIBITION_TOKENS for t in after):
+        return True
+    if any(t in _PROD_POSITIVE_PERMISSION_TOKENS for t in after) and any(
+        t in _NEGATION_TOKENS for t in after
+    ):
+        return True
+    return False
 
 
 def _clause_implies_production(clause: str) -> bool:
@@ -502,16 +528,19 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Postconditions:
             - Returns a valid ``DevOpsTaskSpec`` using module-level defaults for
               all fields not derivable from the arguments.
-            - ``title`` is ``task_description[:MAX_LEGACY_TITLE_LENGTH]`` or
-              ``task_id`` when ``task_description`` is empty.
+            - ``title`` is the stripped ``task_description[:MAX_LEGACY_TITLE_LENGTH]``
+              or ``task_id`` when that slice is empty/whitespace-only.
             - ``environment`` is inferred from the combined text of
               ``task_description`` and ``requirements`` via
               ``_legacy_environment_from_text``; defaults to ``\"staging\"``.
-            - Module-level ``_DEFAULT_LEGACY_*`` constants supply acceptance
+            - Module-level ``_DEFAULT_LEGACY_*`` tuples supply acceptance
               criteria, rollback requirements, security and compliance
-              constraints, and secret-source defaults; callers must not mutate
-              those shared list objects.
+              constraints, and secret-source defaults; each call receives a
+              fresh ``list(...)`` copy of the mutable fields.
         """
+        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
+        assert isinstance(task_description, str), "task_description must be a string"
+        assert isinstance(requirements, str), "requirements must be a string"
         repo_name = (
             target_repo.value
             if hasattr(target_repo, "value")
@@ -521,7 +550,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         env = _legacy_environment_from_text(combined_text)
         return DevOpsTaskSpec(
             task_id=task_id,
-            title=task_description[:MAX_LEGACY_TITLE_LENGTH] or task_id,
+            title=(task_description[:MAX_LEGACY_TITLE_LENGTH]).strip() or task_id,
             platform_scope={"cloud": _DEFAULT_LEGACY_CLOUD, "environments": ["dev", env]},
             repo_context={
                 "app_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
@@ -531,10 +560,10 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             goal={"summary": task_description},
             scope={"included": [requirements], "excluded": []},
             constraints={"secrets": {"source": _DEFAULT_LEGACY_SECRETS_SOURCE}},
-            acceptance_criteria=_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA,
-            rollback_requirements=_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS,
-            security_constraints=_DEFAULT_LEGACY_SECURITY_CONSTRAINTS,
-            compliance_constraints=_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS,
+            acceptance_criteria=list(_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA),
+            rollback_requirements=list(_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS),
+            security_constraints=list(_DEFAULT_LEGACY_SECURITY_CONSTRAINTS),
+            compliance_constraints=list(_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS),
             environment=env,
         )
 
@@ -579,6 +608,11 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             - Artifacts are written to the repo on a feature branch and merged into
               ``development`` when the pipeline completes successfully.
         """
+        repo_path_obj = Path(repo_path).resolve()
+        assert repo_path_obj.is_dir(), f"repo_path must be an existing directory: {repo_path_obj}"
+        if build_verifier is not None:
+            assert callable(build_verifier), "build_verifier must be callable"
+        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
         task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id=task_id,
             task_description=task_description,
@@ -586,7 +620,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             target_repo=target_repo,
         )
         return self._run_pipeline(
-            repo_path=Path(repo_path).resolve(),
+            repo_path=repo_path_obj,
             task_spec=task_spec,
             build_verifier=build_verifier,
             write_changes=True,
@@ -598,12 +632,17 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         """Create the IaC, CI/CD, and deployment subtask contracts for a run.
 
         Preconditions:
+            - ``task_spec`` is not None.
             - ``task_spec.task_id`` is a non-empty string.
         Postconditions:
             - Returns exactly three ``SubtaskContract`` objects owned by
               ``InfrastructureAsCodeAgent``, ``CICDPipelineAgent``, and
               ``DeploymentStrategyAgent`` respectively.
         """
+        assert task_spec is not None, "task_spec is required"
+        assert isinstance(task_spec.task_id, str) and task_spec.task_id, (
+            "task_spec.task_id must be a non-empty string"
+        )
         return [
             SubtaskContract(
                 subtask_id=f"{task_spec.task_id}-T1",
@@ -651,6 +690,9 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Invariants:
             - The method does not mutate ``task_spec``.
         """
+        assert task_spec is not None, "task_spec is required"
+        assert task_spec.platform_scope is not None, "task_spec.platform_scope must be set"
+        assert task_spec.scope is not None, "task_spec.scope must be set"
         assert task_spec.platform_scope.environments is not None, (
             "task_spec.platform_scope.environments must be set"
         )
@@ -658,6 +700,9 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             "task_spec.platform_scope.environments must be iterable"
         )
         assert task_spec.scope.included is not None, "task_spec.scope.included must be set"
+        assert not isinstance(task_spec.scope.included, str), (
+            "task_spec.scope.included must be an iterable of strings, not a single string"
+        )
         assert all(isinstance(item, str) for item in task_spec.scope.included), (
             "task_spec.scope.included must be an iterable of strings"
         )
