@@ -34,7 +34,10 @@ from software_engineering_team.github_source.client import (
     MAX_ISSUES_TRAVERSED,
     _is_safe_ref,
 )
-from software_engineering_team.github_source.client_http import _parse_next_link
+from software_engineering_team.github_source.client_http import (
+    SECONDARY_RATE_LIMIT_MAX_RETRIES,
+    _parse_next_link,
+)
 from software_engineering_team.models import CodingTeamPlanInput
 
 # ---------------------------------------------------------------------------
@@ -438,10 +441,10 @@ class TestClientRetries:
         assert repo.default_branch == "main"
         assert len(slept) == 1
 
-    def test_rate_limit_not_retried_when_not_first_attempt(self) -> None:
-        # The rate-limit branch only fires when attempt == 0. Force a 502 retry
-        # first (bumping attempt to 1), then return a rate-limited 403: it must
-        # fall straight through to _check (which raises), not sleep again.
+    def test_rate_limit_retried_even_when_not_first_attempt(self) -> None:
+        # The primary rate-limit branch must retry regardless of which attempt
+        # index it's hit on, not just attempt 0. Force a 502 retry first
+        # (bumping the attempt index), then a rate-limited 403, then success.
         slept: list[float] = []
         calls = {"n": 0}
 
@@ -449,22 +452,24 @@ class TestClientRetries:
             calls["n"] += 1
             if calls["n"] == 1:
                 return httpx.Response(502, json={"message": "bad gateway"})
-            return httpx.Response(
-                403,
-                json={"message": "rate limited"},
-                headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0"},
-            )
+            if calls["n"] == 2:
+                return httpx.Response(
+                    403,
+                    json={"message": "rate limited"},
+                    headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0"},
+                )
+            return httpx.Response(200, json={"default_branch": "main"})
 
         transport = httpx.MockTransport(handler)
         client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
         client._client.close()  # type: ignore[attr-defined]
         client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
 
-        with pytest.raises(GitHubAPIError) as exc_info:
-            client.get_repo("o", "r")
-        assert exc_info.value.status == 403
-        # Only the one 502-retry sleep; the 403 on attempt 1 must not sleep again.
-        assert len(slept) == 1
+        repo = client.get_repo("o", "r")
+        assert repo.default_branch == "main"
+        assert calls["n"] == 3
+        # One sleep for the 502 retry, one for the 403 rate-limit retry.
+        assert len(slept) == 2
 
     def test_rate_limit_missing_reset_header_defaults_wait_to_one_second(self) -> None:
         slept: list[float] = []
@@ -523,6 +528,102 @@ class TestClientRetries:
             client.get_repo("o", "r")
         assert exc_info.value.status == 403
         assert calls["n"] == 1
+
+
+class TestClientSecondaryRateLimitRetry:
+    def test_429_retries_then_succeeds(self) -> None:
+        slept: list[float] = []
+        calls = {"n": 0}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                return httpx.Response(
+                    429,
+                    json={"message": "You have exceeded a secondary rate limit"},
+                    headers={"Retry-After": "2"},
+                )
+            return httpx.Response(200, json={"default_branch": "main"})
+
+        transport = httpx.MockTransport(handler)
+        client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
+        client._client.close()  # type: ignore[attr-defined]
+        client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
+
+        repo = client.get_repo("o", "r")
+        assert repo.default_branch == "main"
+        assert calls["n"] == 3
+        assert len(slept) == 2
+        assert all(s >= 2.0 for s in slept)
+
+    def test_429_honors_retry_after_header_value(self) -> None:
+        slept: list[float] = []
+        calls = {"n": 0}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    429,
+                    json={"message": "rate limited"},
+                    headers={"Retry-After": "30"},
+                )
+            return httpx.Response(200, json={"default_branch": "main"})
+
+        transport = httpx.MockTransport(handler)
+        client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
+        client._client.close()  # type: ignore[attr-defined]
+        client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
+
+        repo = client.get_repo("o", "r")
+        assert repo.default_branch == "main"
+        assert len(slept) == 1
+        assert slept[0] >= 30.0
+
+    def test_429_exhausts_retries_and_raises_hard_failure(self) -> None:
+        slept: list[float] = []
+        calls = {"n": 0}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                429,
+                json={"message": "You have exceeded a secondary rate limit"},
+                headers={"Retry-After": "1"},
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
+        client._client.close()  # type: ignore[attr-defined]
+        client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
+
+        with pytest.raises(GitHubAPIError) as exc_info:
+            client.get_repo("o", "r")
+        assert exc_info.value.status == 429
+        # 1 initial request + SECONDARY_RATE_LIMIT_MAX_RETRIES retries.
+        assert calls["n"] == 1 + SECONDARY_RATE_LIMIT_MAX_RETRIES
+        assert len(slept) == SECONDARY_RATE_LIMIT_MAX_RETRIES
+
+    def test_429_missing_retry_after_falls_back_to_backoff(self) -> None:
+        slept: list[float] = []
+        calls = {"n": 0}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(429, json={"message": "rate limited"})
+            return httpx.Response(200, json={"default_branch": "main"})
+
+        transport = httpx.MockTransport(handler)
+        client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
+        client._client.close()  # type: ignore[attr-defined]
+        client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
+
+        repo = client.get_repo("o", "r")
+        assert repo.default_branch == "main"
+        assert calls["n"] == 2
+        assert len(slept) == 1
+        assert slept[0] > 0.0
 
 
 class TestGitHubHttpHeaders:
