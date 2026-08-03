@@ -1,15 +1,16 @@
 """Generate ``agent_registry`` manifests for agents this team produces.
 
 Every agent the agentic-team designer rosters should join the platform with the
-batteries-included Agent Cognition Core attached. This module turns a roster
-:class:`~agentic_team_provisioning.models.AgenticTeamAgent` into a validated
-:class:`~agent_registry.models.AgentManifest` whose ``cognition`` block carries
-the core defaults (day-one ``default_guardrails`` seed pack, 90-day episodic
-memory, a default-on knowledge graph).
+batteries-included Agent Cognition Core attached. The pure builder helpers in this
+module turn a roster :class:`~agentic_team_provisioning.models.AgenticTeamAgent`
+into a validated :class:`~agent_registry.models.AgentManifest` whose ``cognition``
+block carries the core defaults (day-one ``default_guardrails`` seed pack, 90-day
+episodic memory, a default-on knowledge graph). Those builders perform no
+Postgres, LLM, or filesystem I/O.
 
-Pure builder: no Postgres, no LLM, no filesystem writes. The API surfaces the
-result over a read endpoint; nothing is persisted to the registry's manifest
-discovery paths.
+:func:`register_team_manifests` is the stateful counterpart: it installs built
+manifests into the process-wide registry and, when a Postgres-backed dynamic store
+is active, persists them so other workers and sandboxes can resolve them.
 """
 
 from __future__ import annotations
@@ -68,9 +69,10 @@ def team_id_prefix(team_id: str) -> str:
     Postconditions: returns ``"agentic_team_provisioning.<team-slug>-<hash>."`` —
     the common prefix of every id :func:`manifest_agent_id` produces for
     ``team_id``, used to find this team's generated entries in the registry. The
-    ``<hash>`` of the *full* ``team_id`` keeps the prefix injective, so two teams
-    whose ids share a normalized 12-char slug never collide (stale cleanup keyed
-    on this prefix can't touch another team's manifests).
+    ``<hash>`` of the *full* ``team_id`` makes accidental collisions between two
+    teams that share a normalized 12-char slug negligible at any realistic team
+    count (see ``_HASH_HEX_LEN``), so stale cleanup keyed on this prefix is
+    extremely unlikely to touch another team's manifests.
     """
     return f"{_TEAM_KEY}.{_slug(team_id, 12)}-{_id_hash(team_id)}."
 
@@ -82,13 +84,13 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
         * ``team_id`` and ``agent_name`` are non-empty.
     Postconditions:
         * Deterministic for a given ``(team_id, agent_name)`` pair. Distinct pairs
-          produce distinct ids at any realistic roster size: the team-injective
-          :func:`team_id_prefix` plus a 64-bit (``_HASH_HEX_LEN`` hex) hash of the
-          original strings disambiguates names that share a normalized slug
-          (e.g. ``"QA Agent"`` and ``"qa-agent"``, or names agreeing on their first
-          40 slug chars). Accidental birthday collision on the truncated digest is
-          mathematically possible but negligible far past realistic team/agent
-          counts (see ``_HASH_HEX_LEN``). Always starts with :func:`team_id_prefix`.
+          produce distinct ids at any realistic roster size: :func:`team_id_prefix`
+          plus a 64-bit (``_HASH_HEX_LEN`` hex) hash of the original strings
+          disambiguates names that share a normalized slug (e.g. ``"QA Agent"``
+          and ``"qa-agent"``, or names agreeing on their first 40 slug chars).
+          Accidental birthday collision on the truncated digest is mathematically
+          possible but negligible far past realistic team/agent counts (see
+          ``_HASH_HEX_LEN``). Always starts with :func:`team_id_prefix`.
     """
     pair_hash = _id_hash(f"{team_id}\x00{agent_name}")
     return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
