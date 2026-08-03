@@ -19,6 +19,7 @@ Note for maintainers:
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -526,12 +527,21 @@ class BrandingStore(PostgresHelperMixin):
 # Lazy singleton
 # ---------------------------------------------------------------------------
 
+_store_lock = threading.Lock()
 _default_store: Optional[BrandingStore] = None
 
 
 def get_default_store() -> BrandingStore:
-    """Return the process-wide store, instantiating on first call."""
+    """Return the process-wide store, instantiating on first call.
+
+    Postconditions:
+        Returns the singleton ``BrandingStore``. Concurrent first calls race
+        safely (double-checked locking under ``_store_lock``) — exactly one
+        instance is constructed and every caller observes the same object.
+    """
     global _default_store
     if _default_store is None:
-        _default_store = BrandingStore()
+        with _store_lock:
+            if _default_store is None:
+                _default_store = BrandingStore()
     return _default_store

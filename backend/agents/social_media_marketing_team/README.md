@@ -206,7 +206,7 @@ curl -X POST http://127.0.0.1:8010/social-marketing/run \
   -d '{
     "brand_guidelines_path": "/data/brand/guidelines.md",
     "brand_objectives_path": "/data/brand/objectives.md",
-    "llm_model_name": "qwen3.5:9b-mlx",
+    "llm_model_name": "glm-5.2:cloud",
     "brand_name": "Acme AI",
     "target_audience": "B2B marketing leaders",
     "human_approved_for_testing": true
@@ -252,7 +252,7 @@ Simple service health response:
 ```python
 from social_media_marketing_team import BrandGoals, HumanReview, SocialMediaMarketingOrchestrator
 
-orchestrator = SocialMediaMarketingOrchestrator(llm_model_name="qwen3.5:9b-mlx")
+orchestrator = SocialMediaMarketingOrchestrator(llm_model_name="glm-5.2:cloud")
 
 goals = BrandGoals(
     brand_name="Acme AI",

@@ -67,7 +67,7 @@ def test_run_team_job_success(tmp_path: Path, temp_job_manager) -> None:
     req = api_main.RunMarketingTeamRequest(
         client_id="c1",
         brand_id="b1",
-        llm_model_name="qwen3.5:9b-mlx",
+        llm_model_name="glm-5.2:cloud",
         human_approved_for_testing=True,
     )
     _seed_job("ok", req)
@@ -75,7 +75,7 @@ def test_run_team_job_success(tmp_path: Path, temp_job_manager) -> None:
     api_main._run_team_job("ok", req, _MOCK_BRAND_CTX)
     ok_job = temp_job_manager.get_job("ok")
     assert ok_job["status"] == "completed"
-    assert ok_job["result"]["llm_model_name"] == "qwen3.5:9b-mlx"
+    assert ok_job["result"]["llm_model_name"] == "glm-5.2:cloud"
 
 
 @patch(
@@ -162,7 +162,7 @@ def test_legacy_job_without_brand_ids_returns_410(temp_job_manager) -> None:
         status="completed",
         current_stage="completed",
         progress=100,
-        llm_model_name="qwen3.5:9b-mlx",
+        llm_model_name="glm-5.2:cloud",
         result=None,
         error=None,
         eta_hint="done",
@@ -170,7 +170,7 @@ def test_legacy_job_without_brand_ids_returns_410(temp_job_manager) -> None:
         request_payload={
             "brand_guidelines_path": "/tmp/old.md",
             "brand_objectives_path": "/tmp/old.md",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
         },
     )
     with pytest.raises(HTTPException) as exc_info:
@@ -186,7 +186,7 @@ def test_job_backfills_brand_ids_from_request_payload(temp_job_manager) -> None:
         status="completed",
         current_stage="completed",
         progress=100,
-        llm_model_name="qwen3.5:9b-mlx",
+        llm_model_name="glm-5.2:cloud",
         result=None,
         error=None,
         eta_hint="done",
@@ -194,7 +194,7 @@ def test_job_backfills_brand_ids_from_request_payload(temp_job_manager) -> None:
         request_payload={
             "client_id": "c_from_payload",
             "brand_id": "b_from_payload",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
             "goals": ["engagement"],
         },
     )

@@ -26,6 +26,7 @@ from product_requirements_analysis_agent.models import (
     ToolGapAnalysis,
     ToolRecommendation,
 )
+from product_requirements_analysis_agent.qa_history import extract_answer_from_qa_history
 from product_requirements_analysis_agent.question_data import (
     SOP_PHASE1_QUESTIONS,
     _context_discovery_fallback_questions,
@@ -2919,3 +2920,95 @@ def test_filter_duplicate_questions_keeps_non_duplicate() -> None:
 
     assert filtered == questions
     assert duplicates == []
+
+
+def test_filter_duplicate_questions_stopword_only_question_is_kept() -> None:
+    """A question with no content-bearing word (only stopwords) is kept as
+    filtered rather than treated as a duplicate, since there's no keyword
+    evidence either way."""
+    questions = [OpenQuestion(id="q1", question_text="Should we?")]
+    qa_history = "Q: Should we use OAuth2?\nA: Yes."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
+
+
+def test_filter_duplicate_questions_stems_plural_and_past_tense() -> None:
+    """Plural ('options'->'option') and past-tense ('documented'->'document')
+    stemming let a duplicate match against the base word form recorded in
+    qa_history."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Where are the config options documented for the service?")
+    ]
+    qa_history = "Q: Should we document the config option for the service?\nA: Yes, use Confluence."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_short_content_word_keywords() -> None:
+    """A question made up entirely of short (<=3 char) content words is still
+    recognized as a duplicate.
+
+    Previously key_stems filtered to len(_clean_token(w)) > 3, so a question
+    with no word over 3 characters (e.g. an all-short-acronym question) never
+    reached the extract_answer_from_qa_history extractor as a duplicate
+    candidate at all, regardless of how permissive the extractor itself is.
+    """
+    questions = [OpenQuestion(id="q1", question_text="Do we use IAM or ACL on S3?")]
+    qa_history = "Q: Should we use IAM or ACL policies on S3 buckets?\nA: Use IAM policies exclusively."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_short_keyword_does_not_match_as_a_substring() -> None:
+    """A short key stem must match a whole word in qa_history, not merely
+    appear as a substring inside an unrelated longer word.
+
+    Once short (<=3 char) words became eligible key stems, comparing them via
+    raw substring containment risked a false match: the stem "api" is a
+    substring of "capitalizing", which would incorrectly mark an unrelated
+    question as an already-answered duplicate and drop it from the questions
+    asked of the user.
+    """
+    questions = [OpenQuestion(id="q1", question_text="Do we use an API?")]
+    qa_history = "Q: Are we capitalizing gains this quarter?\nA: Unrelated topic."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
+
+
+def test_filter_duplicate_questions_and_extractor_agree_on_short_keyword_duplicate() -> None:
+    """filter_duplicate_questions and extract_answer_from_qa_history are consistent
+    for a short-keyword question, matching the actual spec-review call chain
+    (spec_review.filter_duplicate_questions -> spec_writing.update_spec_from_duplicates
+    -> qa_history.extract_answer_from_qa_history).
+
+    A short-keyword question that the extractor can answer must also be
+    recognized as a duplicate candidate upstream, or it never reaches the
+    extractor and is re-asked regardless of the extractor's own behavior.
+    """
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### Should we use IAM or ACL policies on S3 buckets?\n"
+        "**Answer:** Use IAM policies exclusively.\n\n"
+    )
+    question = OpenQuestion(id="q1", question_text="Do we use IAM or ACL on S3?")
+
+    filtered, duplicates = filter_duplicate_questions([question], qa_history)
+    assert filtered == []
+    assert duplicates == [question]
+
+    result = extract_answer_from_qa_history(question, qa_history)
+    assert result is not None
+    assert result.selected_answer == "Use IAM policies exclusively."

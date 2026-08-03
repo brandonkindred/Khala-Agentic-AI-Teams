@@ -293,7 +293,7 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     # established smaller/faster model tier (already used for soc2,
     # accessibility_audit) and has no registered thinking levels of its own, so no
     # AGENT_DEFAULT_THINK entry applies here.
-    "code_review_verify": "qwen3.5:9b-mlx",
+    "code_review_verify": "glm-5.2:cloud",
     "repair": "deepseek-v4-pro:cloud",
     "devops": "deepseek-v4-pro:cloud",
     "dbc_comments": "deepseek-v4-pro:cloud",
@@ -319,10 +319,10 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "security": "deepseek-v4-pro:cloud",
     "accessibility": "deepseek-v4-pro:cloud",
     # Other teams
-    "soc2": "qwen3.5:9b-mlx",
+    "soc2": "glm-5.2:cloud",
     "blog": "deepseek-v4-pro:cloud",
     "personal_assistant": "llama3.2",
-    "accessibility_audit": "qwen3.5:9b-mlx",
+    "accessibility_audit": "glm-5.2:cloud",
     "strategy_ideation": "deepseek-v4-pro:cloud",
     "signal_intelligence": "deepseek-v4-pro:cloud",
     "deepthought": "deepseek-v4-pro:cloud",
@@ -374,6 +374,7 @@ OLLAMA_MODEL_SUGGESTIONS: list[str] = [
     "deepseek-v4-pro:cloud",
     "qwen3-coder:480b-cloud",
     "qwen3.5:9b-mlx",
+    "glm-5.2:cloud",
     "llama3.2",
 ]
 

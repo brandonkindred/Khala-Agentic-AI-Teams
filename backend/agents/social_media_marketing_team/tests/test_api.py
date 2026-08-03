@@ -43,7 +43,7 @@ def test_run_endpoint_and_status_success(_mock_brand) -> None:
         json={
             "client_id": "client_1",
             "brand_id": "brand_1",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
             "human_approved_for_testing": True,
         },
     )
@@ -58,9 +58,9 @@ def test_run_endpoint_and_status_success(_mock_brand) -> None:
     status_payload = status_resp.json()
     assert status_payload["status"] == "completed"
     assert status_payload["progress"] == 100
-    assert status_payload["llm_model_name"] == "qwen3.5:9b-mlx"
+    assert status_payload["llm_model_name"] == "glm-5.2:cloud"
     assert status_payload["eta_hint"] == "done"
-    assert status_payload["result"]["llm_model_name"] == "qwen3.5:9b-mlx"
+    assert status_payload["result"]["llm_model_name"] == "glm-5.2:cloud"
 
 
 @patch(f"{_BRAND_ADAPTER}._fetch_and_validate_brand", return_value=_MOCK_BRAND_CTX)
@@ -118,7 +118,7 @@ def test_run_endpoint_rejects_missing_brand(_mock_fetch) -> None:
         json={
             "client_id": "client_x",
             "brand_id": "brand_x",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
         },
     )
     assert resp.status_code == 422
@@ -142,7 +142,7 @@ def test_run_endpoint_rejects_incomplete_brand(_mock_fetch) -> None:
         json={
             "client_id": "client_y",
             "brand_id": "brand_y",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
         },
     )
     assert resp.status_code == 422
