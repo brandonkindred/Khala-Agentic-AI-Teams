@@ -299,6 +299,32 @@ def _safe_constraint_layer(value: Any) -> int:
         return 0
 
 
+def _safe_bool(value: Any, default: bool) -> bool:
+    """Coerce LLM-provided boolean output to bool, defaulting to ``default``.
+
+    A real JSON boolean already decodes to a Python ``bool`` via ``json.loads``;
+    this exists for when the LLM stringifies it instead (e.g. ``"false"``),
+    since ``bool("false")`` is ``True`` and would silently invert the intended
+    value.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns ``value`` unchanged when it is already a ``bool``;
+        for a string, returns ``True``/``False`` for a case-insensitive
+        (surrounding-whitespace-stripped) ``"true"``/``"false"`` and
+        ``default`` for any other string; returns ``default`` for every other
+        type; never raises.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    return default
+
+
 def _coerce_list(value: Any) -> list:
     """Coerce LLM-provided list-valued output to a list.
 
@@ -365,14 +391,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             context=_str_or_default(q_data.get("context")),
             recommendation=_str_or_default(q_data.get("recommendation")),
             options=options,
-            allow_multiple=bool(q_data.get("allow_multiple", False)),
+            allow_multiple=_safe_bool(q_data.get("allow_multiple"), False),
             source=_str_or_default(q_data.get("source"), "spec_review"),
             category=_str_or_default(q_data.get("category"), "general"),
             priority=_str_or_default(q_data.get("priority"), "medium"),
             constraint_domain=_str_or_default(q_data.get("constraint_domain")),
             constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
-            blocking=bool(q_data.get("blocking", True)),
+            blocking=_safe_bool(q_data.get("blocking"), True),
             owner=_str_or_default(q_data.get("owner"), "user"),
             section_impact=section_impact,
             due_date=_str_or_default(q_data.get("due_date")),
@@ -429,7 +455,7 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
         return QuestionOption(
             id=_str_or_default(opt_data.get("id"), f"opt{index}"),
             label=_str_or_default(opt_data.get("label")),
-            is_default=bool(opt_data.get("is_default", False)),
+            is_default=_safe_bool(opt_data.get("is_default"), False),
             rationale=_str_or_default(opt_data.get("rationale")),
             confidence=_safe_confidence(opt_data.get("confidence", 0.5)),
         )
