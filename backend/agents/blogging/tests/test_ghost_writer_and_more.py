@@ -814,6 +814,7 @@ def test_ghost_conduct_interview_notifies_job_updater(monkeypatch) -> None:
     )
     assert result.skipped is True
     assert updates
+    assert any("Waiting for your response" in u.get("status_text", "") for u in updates)
 
 
 # ---------------------------------------------------------------------------
@@ -976,4 +977,3 @@ def test_ghost_writer_generate_friendly_seeds_empty_input() -> None:
 
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     assert agent._generate_friendly_seeds([]) == []
-    assert any("Waiting for your response" in u.get("status_text", "") for u in updates)
