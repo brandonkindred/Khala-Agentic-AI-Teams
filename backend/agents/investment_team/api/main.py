@@ -395,6 +395,17 @@ STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
 )
 
+# restart_strategy_lab_run's fencing-generation mint amount: a run created
+# before generation fencing shipped has no persisted "generation" field, and
+# the job service's atomic increment treats an absent field as 0 -- a plain
+# +1 would land on 1, which is also what a pre-upgrade caller that omits
+# generation entirely is treated as presenting (check_fencing_token accepts
+# equal tokens), so that first post-upgrade restart must jump straight to 2
+# instead. See restart_strategy_lab_run's own inline comment for the full
+# reasoning.
+GENERATION_INCREMENT_NORMAL = 1
+GENERATION_INCREMENT_LEGACY_BOOTSTRAP = 2
+
 
 class StrategyLabRunStartResponse(BaseModel):
     """Returned immediately when a strategy lab batch is started."""
@@ -2708,7 +2719,12 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # contiguous_cycles tracks the highest unbroken sequence from index 0
         # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
         contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
-        request = RunStrategyLabRequest(**payload)
+        try:
+            request = RunStrategyLabRequest(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid stored request payload: {exc}"
+            ) from exc
         total_cycles = request.batch_size * request.batch_count
         completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
 
@@ -2783,7 +2799,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 status_code=503,
                 detail="Failed to revalidate the current generation before resuming; job service unavailable.",
             ) from exc
-        if dispatch_generation != resumed_state["generation"]:
+        if dispatch_generation > resumed_state["generation"]:
             # `resumed_state` is the same dict object installed at
             # `_active_runs[run_id]` above, so mutating it in place keeps
             # both in sync -- guard the mutation with `_lock` since a
@@ -2791,6 +2807,25 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # may be iterating `_active_runs` at the same time.
             with _lock:
                 resumed_state["generation"] = dispatch_generation
+        elif dispatch_generation < resumed_state["generation"]:
+            # The generation field is meant to be strictly monotonic (only
+            # ever advanced via an atomic job-service increment), so a
+            # LOWER value here can't represent a legitimate concurrent
+            # mint -- it indicates a corrupted or otherwise malformed
+            # durable record. Fail closed rather than dispatch under a
+            # value that violates the invariant fencing depends on.
+            _fail_strategy_lab_run(
+                run_id,
+                f"Durable generation regressed from {resumed_state['generation']} "
+                f"to {dispatch_generation} during pre-dispatch revalidation",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Detected a durable generation regression while revalidating "
+                    "before dispatch; job service state is inconsistent."
+                ),
+            )
 
         # The Temporal activity derives its resume offset from the persisted
         # contiguous-cycle count (set above), so a durable resume picks up where the
@@ -2967,7 +3002,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
         _ensure_no_active_run()
 
-        request = RunStrategyLabRequest(**payload)
+        try:
+            request = RunStrategyLabRequest(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid stored request payload: {exc}"
+            ) from exc
         total_cycles = request.batch_size * request.batch_count
 
         # Resolve any prior execution BEFORE writing anything: a still-running
@@ -2990,6 +3030,9 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 detail="A prior execution for this run is still winding down; retry shortly.",
             ) from exc
         except Exception as exc:
+            logger.exception(
+                "Failed to terminate prior strategy-lab workflow for run %s before restart", run_id
+            )
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -3049,7 +3092,11 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # _row_to_dict), never returned as a separate nested key. `or {}`
         # normalizes only the "no job" case; no further shape-guessing needed.
         durable_data = durable_job or {}
-        generation_increment = 2 if "generation" not in durable_data else 1
+        generation_increment = (
+            GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+            if "generation" not in durable_data
+            else GENERATION_INCREMENT_NORMAL
+        )
         try:
             updated_generation_record = client.apply_and_get(
                 run_id, increment={"generation": generation_increment}
@@ -3068,7 +3115,22 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 status_code=503,
                 detail="Failed to mint a new generation for this restart; job service unavailable.",
             )
-        new_generation = int(updated_generation_record.get("generation", 1))
+        try:
+            # No default: a missing/non-int "generation" in the mint
+            # response is a malformed reply from the job service, not a
+            # legitimate absent-field case (apply_and_get's increment
+            # target always comes back populated on success) -- treat it
+            # the same as any other mint failure rather than silently
+            # assuming a value that could itself be stale.
+            new_generation = int(updated_generation_record["generation"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; job service "
+                    "returned an invalid generation value."
+                ),
+            ) from exc
 
         restarted_state = _build_run_state(
             run_id,
@@ -3118,7 +3180,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 status_code=503,
                 detail="Failed to revalidate the current generation before restarting; job service unavailable.",
             ) from exc
-        if dispatch_generation != restarted_state["generation"]:
+        if dispatch_generation > restarted_state["generation"]:
             # `restarted_state` is the same dict object installed at
             # `_active_runs[run_id]` above, so mutating it in place keeps
             # both in sync -- guard the mutation with `_lock` since a
@@ -3126,6 +3188,24 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # may be iterating `_active_runs` at the same time.
             with _lock:
                 restarted_state["generation"] = dispatch_generation
+        elif dispatch_generation < restarted_state["generation"]:
+            # Same invariant-violation guard as resume's identical check:
+            # generation only ever advances via an atomic increment, so a
+            # lower value here means the durable record is corrupted or
+            # otherwise inconsistent -- fail closed instead of dispatching
+            # under it.
+            _fail_strategy_lab_run(
+                run_id,
+                f"Durable generation regressed from {restarted_state['generation']} "
+                f"to {dispatch_generation} during pre-dispatch revalidation",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Detected a durable generation regression while revalidating "
+                    "before dispatch; job service state is inconsistent."
+                ),
+            )
 
         # Restart from scratch through Temporal (offset 0, per the reset
         # persisted state above). allow_already_started=False: unlike resume, a
@@ -3168,7 +3248,14 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                     current_generation = _get_run_generation_strict(
                         run_id, client=_get_lab_run_job_client()
                     )
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to re-read current generation during restart rollback "
+                        "for run %s; falling back to minted generation %s: %s",
+                        run_id,
+                        new_generation,
+                        exc,
+                    )
                     current_generation = new_generation
                 rolled_back_state = dict(state)
                 rolled_back_state["generation"] = current_generation

@@ -656,8 +656,13 @@ class StrategyLabBatchWorkflow:
         Raises when ``persist_run_state_activity`` rejects ``generation`` as stale
         (a non-retryable ``ApplicationError`` — a fenced write means this incarnation
         has been superseded by a restart and this workflow should stop, so letting the
-        error propagate and fail the workflow is correct, not a bug to swallow).
-        Otherwise never raises (the underlying helper swallows job-service failures).
+        error propagate and fail the workflow is correct, not a bug to swallow). Apart
+        from that stale-generation case, the activity itself does not raise for
+        job-service failures (the underlying helper swallows them) — but
+        ``workflow.execute_activity`` can still propagate infrastructure-level
+        failures (retry-policy exhaustion, worker unavailability, cancellation)
+        unrelated to the activity's own business logic; those are not swallowed
+        here and still propagate per Temporal's normal retry/timeout handling.
         """
         await workflow.execute_activity(
             act.persist_run_state_activity,

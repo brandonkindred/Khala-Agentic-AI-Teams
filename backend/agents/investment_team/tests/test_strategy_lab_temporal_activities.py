@@ -635,6 +635,10 @@ def test_is_run_cancelled_activity_delegates(monkeypatch):
 
 
 def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
+    """A non-stale call parses the persisted record, delegates to
+    _finalize_strategy_lab_cycle_record with the record and every
+    paper_trading_*/signal_brief_storage param forwarded verbatim, and
+    returns the finalized record's JSON dump."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
@@ -675,6 +679,10 @@ def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
 
 
 def test_finalize_cycle_record_activity_rejects_stale_generation(monkeypatch):
+    """When the payload's generation (1) is older than the persisted
+    generation (2), check_fencing_token raises StaleFencingTokenError, the
+    pre-check maps it to a non-retryable ApplicationError, and
+    _finalize_strategy_lab_cycle_record is never called."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
@@ -702,6 +710,10 @@ def test_finalize_cycle_record_activity_rejects_stale_generation(monkeypatch):
 
 
 def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):
+    """A payload generation equal to the persisted generation is accepted
+    (check_fencing_token's >= semantics) and the record is finalized
+    normally -- distinct from the strictly-newer case covered by
+    test_finalize_cycle_record_activity_accepts_generation_newer_than_persisted."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 

@@ -167,7 +167,9 @@ class _StubLabClient:
         job_service.db.update_job's "merge fields into the job's data" partial
         semantics, not a full replace) -- a field _persist_run_state's
         exclude_fields omitted from this call is left untouched, exactly as
-        the real job service behaves.
+        the real job service behaves. ``heartbeat`` is accepted for signature
+        compatibility with the real JobServiceClient.update_job but is
+        intentionally ignored in this stub.
         """
         record = self.by_id.setdefault(jid, {"job_id": jid})
         record.update(fields)
@@ -486,6 +488,44 @@ def test_resume_strategy_lab_run_dispatches_with_revalidated_generation_not_stal
     assert api_main._active_runs["run-revalidate"]["generation"] == 5
 
 
+def test_resume_strategy_lab_run_returns_503_when_revalidation_detects_generation_regression(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The generation field is meant to be strictly monotonic (only ever
+    advanced via an atomic job-service increment). If the pre-dispatch
+    revalidation read ever comes back LOWER than the earlier snapshot --
+    which cannot represent a legitimate concurrent mint -- that indicates a
+    corrupted or otherwise inconsistent durable record. Must fail closed
+    rather than silently dispatch under the lower, invariant-violating
+    value."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-regress"] = _resumable_state("run-regress", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-regress", "generation": 5}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_regressing_after_first_read(jid: str):
+        read_calls.append(jid)
+        result = real_get_job(jid)
+        if len(read_calls) == 1:
+            # Simulate the durable record becoming corrupted/inconsistent
+            # between the initial read (5) and the revalidation read (2) --
+            # a real decrease, not a legitimate concurrent mint.
+            stub.by_id[jid]["generation"] = 2
+        return result
+
+    monkeypatch.setattr(stub, "get_job", _get_job_regressing_after_first_read)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-regress/resume")
+
+    assert resp.status_code == 503
+    assert "regress" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-regress"]["status"] == "failed"
+
+
 def test_resume_strategy_lab_run_returns_503_when_generation_lookup_fails(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -636,7 +676,13 @@ def test_restart_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, ap
         "status": "completed_with_errors",  # extended restartable set
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+    # A single shared instance: restart calls _get_lab_run_job_client()
+    # multiple times per request (bootstrap check, mint, pre-dispatch
+    # revalidation), and each call must observe the same durable state --
+    # a fresh instance per call would make the revalidation read see an
+    # empty store and misreport a generation regression.
+    stub = _StubLabClient()
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
     resp = api_client.post("/strategy-lab/runs/run-g/restart")
     assert resp.status_code == 200
     body = resp.json()
@@ -794,6 +840,43 @@ def test_restart_strategy_lab_run_dispatches_with_revalidated_generation_not_sta
     assert resp.status_code == 200
     assert captured["generation"] == 9  # revalidated value, not this restart's own stale mint (2)
     assert api_main._active_runs["run-restart-revalidate"]["generation"] == 9
+
+
+def test_restart_strategy_lab_run_returns_503_when_revalidation_detects_generation_regression(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Mirrors the equivalent resume regression test: the durable generation
+    can only legitimately advance (atomic increments only), so if the
+    pre-dispatch revalidation read comes back LOWER than this restart's own
+    just-minted value, that's a corrupted/inconsistent durable record, not a
+    concurrent mint -- must fail closed rather than dispatch under it."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-restart-regress"] = {
+        "run_id": "run-restart-regress",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-regress", "generation": 1}])
+    real_apply_and_get = stub.apply_and_get
+
+    def _apply_and_get_then_corrupt_lower(jid, **kwargs):
+        result = real_apply_and_get(jid, **kwargs)
+        # This restart mints 2 (1 -> 2); simulate the durable record then
+        # becoming corrupted/inconsistent, reporting a lower value on the
+        # subsequent revalidation read.
+        stub.by_id[jid]["generation"] = 0
+        return result
+
+    monkeypatch.setattr(stub, "apply_and_get", _apply_and_get_then_corrupt_lower)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-regress/restart")
+
+    assert resp.status_code == 503
+    assert "regress" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-restart-regress"]["status"] == "failed"
 
 
 def test_restart_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fails(
@@ -1018,6 +1101,36 @@ def test_restart_strategy_lab_run_returns_503_when_generation_mint_raises(
     assert "generation" in resp.json()["detail"].lower()
     assert api_main._active_runs["run-mintraise"]["status"] == "completed_with_errors"
     assert api_main._active_runs["run-mintraise"]["generation"] == 1
+
+
+def test_restart_strategy_lab_run_returns_503_when_mint_response_is_malformed(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """apply_and_get returning a truthy record whose "generation" field is
+    missing or not an int is a malformed mint response, not a legitimate
+    absent-field case -- must map to the same documented 503 rather than
+    propagate a raw ValueError/TypeError/KeyError as an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintmalformed"] = {
+        "run_id": "run-mintmalformed",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _MalformedMintClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            return {"job_id": jid, "generation": "not-a-number"}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _MalformedMintClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintmalformed/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintmalformed"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintmalformed"]["generation"] == 1
 
 
 def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
@@ -1330,7 +1443,11 @@ def test_restart_strategy_lab_run_serializes_concurrent_restarts_for_same_run_id
         "status": "completed",
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+    # A single shared instance -- see test_restart_strategy_lab_run_happy_path
+    # for why a fresh instance per _get_lab_run_job_client() call breaks the
+    # pre-dispatch revalidation read.
+    stub = _StubLabClient()
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
 
     entered = threading.Event()
     release = threading.Event()
