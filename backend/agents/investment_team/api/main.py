@@ -3419,14 +3419,21 @@ def _run_paper_trading_background(
         - On the success path, ``_paper_trading_sessions[session_id]`` is always written
           (COMPLETED or FAILED with ``completed_at`` set), which can recreate a concurrently
           deleted session
+        - Import failures for ``MarketDataService``/``PaperTradingAgent`` (e.g. a missing
+          dependency or circular import) are caught by the same handler as any other
+          in-worker exception and also transition the session to FAILED
         - On the empty-data and exception paths, the terminal write runs only when the session
           entry still exists at write time; concurrent deletion (e.g. via
           ``DELETE /strategy-lab/records/{lab_record_id}``) then leaves no terminal record
-    """
-    from investment_team.market_data_service import MarketDataService
-    from investment_team.paper_trading_agent import PaperTradingAgent
 
+    Raises:
+        - None. All failures, including import errors for the two lazily-imported
+          dependencies, are caught and logged; the session is marked FAILED instead.
+    """
     try:
+        from investment_team.market_data_service import MarketDataService
+        from investment_team.paper_trading_agent import PaperTradingAgent
+
         market_service = MarketDataService()
         # Issue #523 — match the orchestrator backtest's universe choice.
         symbols = market_service.resolve_strategy_symbols(strategy)
@@ -3550,11 +3557,30 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     # 2a — Concurrency guard (spec §7.2): one live session per strategy_id.
     # Only enforced for the live path — the legacy recent-OHLCV path
     # completes in seconds and isn't subject to the "one at a time"
-    # invariant.
-    if use_live:
-        with _lock:
+    # invariant. The scan, session construction, and dict insertion below all
+    # happen under a single lock acquisition so two concurrent requests for
+    # the same strategy_id can't both pass the scan before either inserts. A
+    # record that fails to parse is logged and skipped rather than aborting
+    # the whole request — see _fail_paper_trading_session for the same
+    # pattern.
+    with _lock:
+        if use_live:
             for existing in _paper_trading_sessions.values():
-                existing_session = PaperTradingSession.parse_persisted(existing)
+                try:
+                    existing_session = PaperTradingSession.parse_persisted(existing)
+                except Exception:
+                    bad_id = (
+                        existing.get("session_id")
+                        if isinstance(existing, dict)
+                        else getattr(existing, "session_id", None)
+                    )
+                    logger.warning(
+                        "Skipping unparseable paper-trading session while checking "
+                        "the concurrency guard: %s",
+                        bad_id,
+                        exc_info=True,
+                    )
+                    continue
                 if (
                     existing_session.strategy.strategy_id == strategy.strategy_id
                     and existing_session.status in _ACTIVE_PT_STATES
@@ -3572,20 +3598,19 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                         ),
                     )
 
-    running_session = PaperTradingSession(
-        session_id=session_id,
-        lab_record_id=request.lab_record_id,
-        strategy=strategy,
-        status=PaperTradingStatus.OPENING if use_live else PaperTradingStatus.RUNNING,
-        initial_capital=request.initial_capital,
-        current_capital=request.initial_capital,
-        symbols_traded=[],
-        data_source="live" if use_live else "yahoo_finance",
-        data_period_start="",
-        data_period_end="",
-        started_at=now,
-    )
-    with _lock:
+        running_session = PaperTradingSession(
+            session_id=session_id,
+            lab_record_id=request.lab_record_id,
+            strategy=strategy,
+            status=PaperTradingStatus.OPENING if use_live else PaperTradingStatus.RUNNING,
+            initial_capital=request.initial_capital,
+            current_capital=request.initial_capital,
+            symbols_traded=[],
+            data_source="live" if use_live else "yahoo_finance",
+            data_period_start="",
+            data_period_end="",
+            started_at=now,
+        )
         _paper_trading_sessions[session_id] = running_session
 
     # 3 — Dispatch the durable paper-trading workflow (Temporal-only). The live
@@ -4137,7 +4162,7 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
         - ``HTTPException(500)`` if the advisory workflow returns a result
           missing ``advisor_message`` or ``session``.
     """
-    session_id = f"adv-{uuid.uuid4().hex[:8]}"
+    session_id = f"adv-{uuid.uuid4().hex}"
     result = _execute_advisory(
         "advisor_start",
         {"session_id": session_id, "user_id": request.user_id},
@@ -4214,8 +4239,8 @@ def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
 def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
     """Finalize the advisor session and create an IPS from collected data.
 
-    Can be called once the session status is 'completed', or called early
-    if all required fields have been collected.
+    Can be called at any point once all required fields have been collected
+    from the session — the endpoint does not itself check ``session.status``.
 
     Preconditions:
         - ``session_id`` identifies a previously started advisor session.

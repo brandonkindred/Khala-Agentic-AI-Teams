@@ -633,20 +633,15 @@ def _get_agents() -> Mapping[str, Any]:
           lazily builds and caches the corresponding agent.
     """
     from agent_repair_team import RepairExpertAgent
-    from software_engineering_team.acceptance_verifier_agent import AcceptanceVerifierAgent
     from software_engineering_team.accessibility_agent import AccessibilityExpertAgent
     from software_engineering_team.architect_agents.architecture_expert import (
         ArchitectureExpertAgent,
     )
     from software_engineering_team.build_fix_specialist import BuildFixSpecialistAgent
-    from software_engineering_team.code_review_agent import CodeReviewAgent
     from software_engineering_team.devops_team import DevOpsTeamLeadAgent
     from software_engineering_team.git_setup_agent import GitSetupAgent
     from software_engineering_team.integration_team import IntegrationAgent
     from software_engineering_team.linting_tool_agent import LintingToolAgent
-    from software_engineering_team.qa_agent import QAExpertAgent
-    from software_engineering_team.security_agent import CybersecurityExpertAgent
-    from software_engineering_team.technical_writers.dbc_comments_agent import DbcCommentsAgent
     from software_engineering_team.technical_writers.documentation_agent import (
         DocumentationAgent,
     )
@@ -655,17 +650,10 @@ def _get_agents() -> Mapping[str, Any]:
         {
             "architecture": lambda: ArchitectureExpertAgent(get_client("architecture")),
             "integration": lambda: IntegrationAgent(get_client("integration")),
-            "acceptance_verifier": lambda: AcceptanceVerifierAgent(
-                get_client("acceptance_verifier")
-            ),
             "devops": lambda: DevOpsTeamLeadAgent(get_client("devops")),
             "backend": _lazy_init_backend_code_v2_team,
             "frontend_code_v2": _lazy_init_frontend_code_v2_team,
-            "security": lambda: CybersecurityExpertAgent(get_client("security")),
-            "qa": lambda: QAExpertAgent(get_client("qa")),
             "accessibility": lambda: AccessibilityExpertAgent(get_client("accessibility")),
-            "code_review": lambda: CodeReviewAgent(get_client("code_review")),
-            "dbc_comments": lambda: DbcCommentsAgent(get_client("dbc_comments")),
             "documentation": lambda: DocumentationAgent(get_client("documentation")),
             "git_setup": GitSetupAgent,
             "repair": lambda: RepairExpertAgent(get_client("repair")),

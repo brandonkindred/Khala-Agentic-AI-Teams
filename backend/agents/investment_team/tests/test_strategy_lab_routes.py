@@ -928,11 +928,14 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
     for rid in run_ids:
         shared_runs[rid] = _make_state(rid)
 
-    # Force very frequent thread switches so the reader is reliably preempted
+    # Force frequent thread switches so the reader is reliably preempted
     # mid-iteration (the default 5ms interval almost never collides on a fast
-    # comprehension, masking the regression). Restored in ``finally``.
+    # comprehension, masking the regression). A moderate 1e-4s interval is
+    # enough to trigger the race across 2000 iterations without the
+    # excessive scheduling overhead (and consequent CI flakiness/slowness)
+    # of a 1e-6s interval. Restored in ``finally``.
     prev_interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
+    sys.setswitchinterval(1e-4)
 
     stop = threading.Event()
     churn_errors: List[BaseException] = []
@@ -1153,6 +1156,9 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
             return buf
         assert seen <= max_chunks, f"SSE stream exceeded {max_chunks} chunks without terminating"
         assert _time.monotonic() < deadline, "SSE stream did not terminate within timeout"
+    assert '"type": "done"' in buf or '"type":"done"' in buf, (
+        "SSE stream ended without terminal done marker"
+    )
     return buf
 
 
@@ -1170,13 +1176,17 @@ def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
     from investment_team.api import job_event_bus
     from investment_team.api import main as api_main
 
-    api_main._active_runs["active"] = {
-        "run_id": "active",
-        "status": "running",
-        "started_at": "2024-01-01T00:00:00Z",
-        "total_cycles": 2,
-        "completed_cycles": 0,
-    }
+    monkeypatch.setitem(
+        api_main._active_runs,
+        "active",
+        {
+            "run_id": "active",
+            "status": "running",
+            "started_at": "2024-01-01T00:00:00Z",
+            "total_cycles": 2,
+            "completed_cycles": 0,
+        },
+    )
 
     pre_events = deque(
         [
@@ -1229,13 +1239,17 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
     from investment_team.api import job_event_bus
     from investment_team.api import main as api_main
 
-    api_main._active_runs["boom"] = {
-        "run_id": "boom",
-        "status": "running",
-        "started_at": "2024-01-01T00:00:00Z",
-        "total_cycles": 1,
-        "completed_cycles": 0,
-    }
+    monkeypatch.setitem(
+        api_main._active_runs,
+        "boom",
+        {
+            "run_id": "boom",
+            "status": "running",
+            "started_at": "2024-01-01T00:00:00Z",
+            "total_cycles": 1,
+            "completed_cycles": 0,
+        },
+    )
 
     pre_events = deque([{"type": "error", "error": "kaboom"}])
 

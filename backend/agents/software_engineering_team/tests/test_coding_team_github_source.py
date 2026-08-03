@@ -9,8 +9,11 @@ the GitHubClient and helper functions on the api module.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -20,6 +23,7 @@ import pytest
 from software_engineering_team.github_source import (
     GitHubAPIError,
     GitHubClient,
+    GitHubRepoReader,
     Issue,
     NotAnIssueError,
     PullRequest,
@@ -1142,7 +1146,7 @@ def _stub_heavy_modules(monkeypatch: pytest.MonkeyPatch) -> None:
                     env[key] = "stub@example.com" if key.endswith("EMAIL") else "Stub"
             return env
 
-        gu_mod.git_identity_env = _stub_git_identity_env  # type: ignore[attr-defined]
+        monkeypatch.setattr(gu_mod, "git_identity_env", _stub_git_identity_env)
     if not hasattr(gu_mod, "commit_working_tree"):
         # Functional stand-in: api.main imports commit_working_tree for dirty-tree
         # recovery, and TestPrepareIssueBranch exercises that path against real
@@ -1172,7 +1176,7 @@ def _stub_heavy_modules(monkeypatch: pytest.MonkeyPatch) -> None:
             ok = r.returncode == 0 or "nothing to commit" in (r.stdout + r.stderr)
             return ok, (r.stdout + r.stderr).strip()
 
-        gu_mod.commit_working_tree = _stub_commit_working_tree  # type: ignore[attr-defined]
+        monkeypatch.setattr(gu_mod, "commit_working_tree", _stub_commit_working_tree)
 
 
 @pytest.fixture
@@ -1731,9 +1735,40 @@ class TestEndpointReuse:
         assert "t2" in gh.updated_pulls[0]["body"]
         assert "Refs #11" in gh.updated_pulls[0]["body"]
 
-    def test_reused_pr_body_refreshed_on_clean_retry(self, patched_app) -> None:
+    def test_reused_pr_body_refreshed_on_clean_retry(self, patched_app, monkeypatch) -> None:
         """A later retry that completes every task must refresh the reused PR body so a stale
         partial-failure warning from an earlier run is cleared (and the issue auto-closes again)."""
+        api = patched_app["api"]
+
+        def _partial_orchestrator(job_id, _repo_path, _plan, **kw):
+            kw["update_job_fn"](
+                status="completed_with_failures",
+                phase="completed",
+                task_graph_snapshot=[
+                    {
+                        "id": "t1",
+                        "status": "merged",
+                        "feature_branch": "feature/t1",
+                        "merged_at": "2026-05-10T00:00:00Z",
+                    },
+                    {"id": "t2", "title": "Broken task", "status": "failed"},
+                ],
+            )
+
+        def _clean_orchestrator(job_id, _repo_path, _plan, **kw):
+            kw["update_job_fn"](
+                status="completed",
+                phase="completed",
+                task_graph_snapshot=[
+                    {
+                        "id": "t1",
+                        "status": "merged",
+                        "feature_branch": "feature/t1",
+                        "merged_at": "2026-05-10T00:00:00Z",
+                    }
+                ],
+            )
+
         gh = _FakeClient(
             issues=[_issue(1)],
             sub_map={1: []},
@@ -1745,18 +1780,32 @@ class TestEndpointReuse:
             ),
         )
         patched_app["set_github"](gh)
+
+        # First (failing) run: seed a stale partial-failure warning on the PR body.
+        monkeypatch.setattr(api, "run_coding_team_orchestrator", _partial_orchestrator)
         resp = patched_app["client"].post(
             "/run-from-github",
             json=_body(1, repo_path=patched_app["repo_path"]),
         )
-        assert resp.status_code == 200
-        # The default orchestrator produces a clean (all-merged) result.
+        assert resp.status_code == 200, resp.text
         assert gh.created_pulls == []
         assert len(gh.updated_pulls) == 1
-        assert gh.updated_pulls[0]["number"] == 99
-        # Body reflects the clean run: closing reference, no failure warning.
-        assert "Closes #1" in gh.updated_pulls[0]["body"]
-        assert "did not complete" not in gh.updated_pulls[0]["body"]
+        assert "did not complete" in gh.updated_pulls[0]["body"]
+        assert "Broken task" in gh.updated_pulls[0]["body"]
+
+        # Retry with a clean (all-merged) orchestrator.
+        monkeypatch.setattr(api, "run_coding_team_orchestrator", _clean_orchestrator)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200, resp.text
+        assert gh.created_pulls == []
+        assert len(gh.updated_pulls) == 2
+        assert gh.updated_pulls[-1]["number"] == 99
+        # Body reflects the clean retry: closing reference, stale failure warning cleared.
+        assert "Closes #1" in gh.updated_pulls[-1]["body"]
+        assert "did not complete" not in gh.updated_pulls[-1]["body"]
 
 
 class TestEndpointDuplicateGuard:
@@ -1860,8 +1909,10 @@ class TestPrepareIssueBranch:
         self._git(repo, "config", "tag.gpgsign", "false")
         self._git(repo, "config", "user.email", "test@example.com")
         self._git(repo, "config", "user.name", "test")
-        # Older git defaults to "master"; rename to "main" explicitly.
-        self._git(repo, "checkout", "-q", "-b", "main")
+        # Force the branch to "main" regardless of the host's init.defaultBranch
+        # (older git defaults to "master"; newer installs may already be "main",
+        # in which case a plain "-b main" fails with "branch already exists").
+        self._git(repo, "checkout", "-q", "-B", "main")
         with open(f"{repo}/README.md", "w") as fh:
             fh.write("seed\n")
         self._git(repo, "add", "README.md")
@@ -1879,20 +1930,33 @@ class TestPrepareIssueBranch:
         return api_main
 
     def test_dirty_tree_recovered_to_rescue_branch(self, api, tmp_path) -> None:
-        """Uncommitted unattributed changes are preserved, then prep proceeds."""
+        """Uncommitted unattributed changes are preserved on a rescue branch, then prep proceeds."""
+        import re
+        import subprocess
+
         repo = self._init_repo(tmp_path)
         with open(f"{repo}/README.md", "a") as fh:
             fh.write("dirty\n")
 
         ok, msg, notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
-        assert any("khala/rescue/" in n for n in notes)
-        import subprocess
+        rescue_note = next((n for n in notes if "khala/rescue/" in n), None)
+        assert rescue_note is not None, notes
+        rescue_branch = re.search(r"`(khala/rescue/[^`]+)`", rescue_note).group(1)
 
         status = subprocess.run(
             ["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True
         ).stdout.strip()
         assert status == ""
+
+        # The dirty change was actually committed onto the rescue branch, not dropped.
+        rescued_contents = subprocess.run(
+            ["git", "-C", repo, "show", f"{rescue_branch}:README.md"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "dirty" in rescued_contents
 
     def test_clean_tree_succeeds(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
@@ -2646,9 +2710,10 @@ class TestEphemeralCheckoutCleanup:
 
 
 class TestFileContentsAndTree:
-    def test_get_file_contents_decodes_base64(self) -> None:
-        import base64
+    """Verify GitHubClient content/tree helpers handle files, directories, and errors."""
 
+    def test_get_file_contents_decodes_base64(self) -> None:
+        """A base64-encoded file response is decoded and returned as text."""
         body = "class Model:\n    pass\n"
         encoded = base64.b64encode(body.encode()).decode()
 
@@ -2662,12 +2727,16 @@ class TestFileContentsAndTree:
         assert _client_with(handler).get_file_contents("o", "r", "pkg/models.py", "sha1") == body
 
     def test_get_file_contents_404_returns_none(self) -> None:
+        """A missing file (404) is reported as None rather than raising."""
+
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(404, json={"message": "Not Found"})
 
         assert _client_with(handler).get_file_contents("o", "r", "missing.py", "sha1") is None
 
     def test_get_file_contents_directory_returns_none(self) -> None:
+        """A directory path (JSON array response) is reported as None, not a file body."""
+
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=[{"type": "file", "name": "a.py"}])
 
@@ -2675,6 +2744,8 @@ class TestFileContentsAndTree:
         assert _client_with(handler).get_file_contents("o", "r", "pkg", "sha1") is None
 
     def test_get_file_contents_non_404_error_raises(self) -> None:
+        """A non-404 error response (e.g. 403) propagates as GitHubAPIError."""
+
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(403, json={"message": "Forbidden"})
 
@@ -2682,6 +2753,8 @@ class TestFileContentsAndTree:
             _client_with(handler).get_file_contents("o", "r", "a.py", "sha1")
 
     def test_get_repository_tree_returns_blob_paths(self) -> None:
+        """Only blob (file) entries are returned; tree (directory) entries are excluded."""
+
         def handler(req: httpx.Request) -> httpx.Response:
             assert "/git/trees/sha1" in req.url.path
             return httpx.Response(
@@ -2700,6 +2773,8 @@ class TestFileContentsAndTree:
         assert paths == ["pkg/a.py", "pkg/b.py"]  # trees (directories) excluded
 
     def test_get_repository_tree_truncated_returns_partial(self) -> None:
+        """A truncated tree response still returns the partial blob listing it received."""
+
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200, json={"truncated": True, "tree": [{"type": "blob", "path": "a.py"}]}
@@ -2709,11 +2784,10 @@ class TestFileContentsAndTree:
 
 
 class TestGitHubRepoReader:
+    """Verify GitHubRepoReader's caching, failure handling, and concurrency safety."""
+
     def test_reads_and_caches_and_lists(self) -> None:
-        import base64
-
-        from software_engineering_team.github_source import GitHubRepoReader
-
+        """list_files and read_file each hit the API once, then serve from cache."""
         calls = {"contents": 0, "tree": 0}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -2735,7 +2809,7 @@ class TestGitHubRepoReader:
         assert calls["contents"] == 1
 
     def test_read_failure_and_cap_return_none(self) -> None:
-        from software_engineering_team.github_source import GitHubRepoReader
+        """A blank path never fetches; a failed fetch and the fetch cap both yield None."""
 
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(404, json={"message": "Not Found"})
@@ -2746,7 +2820,7 @@ class TestGitHubRepoReader:
         assert reader.read_file("b.py") is None  # cap reached -> None
 
     def test_tree_error_is_failsafe(self) -> None:
-        from software_engineering_team.github_source import GitHubRepoReader
+        """A tree-fetch error is swallowed, yielding an empty file listing instead of raising."""
 
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(500, text="boom")
@@ -2755,7 +2829,7 @@ class TestGitHubRepoReader:
         assert reader.list_files() == []
 
     def test_list_files_is_capped(self) -> None:
-        from software_engineering_team.github_source import GitHubRepoReader
+        """list_files truncates to max_listed instead of returning the full unbounded tree."""
 
         def handler(_req: httpx.Request) -> httpx.Response:
             blobs = [{"type": "blob", "path": f"f{i}.py"} for i in range(10)]
@@ -2774,12 +2848,6 @@ class TestGitHubRepoReader:
         which the other 7 threads arrive and queue up on the in-flight guard
         instead of each opening their own connection.
         """
-        import base64
-        import threading
-        import time
-
-        from software_engineering_team.github_source import GitHubRepoReader
-
         calls = {"contents": 0}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -2813,11 +2881,6 @@ class TestGitHubRepoReader:
         (the rest wait on the reader's condvar), so — as in the read_file test
         above — this does not barrier-synchronize multiple handler invocations.
         """
-        import threading
-        import time
-
-        from software_engineering_team.github_source import GitHubRepoReader
-
         calls = {"tree": 0}
 
         def handler(_req: httpx.Request) -> httpx.Response:

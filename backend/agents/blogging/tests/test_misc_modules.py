@@ -916,7 +916,7 @@ def test_arxiv_search_http_error(monkeypatch) -> None:
         arxiv_search.search_arxiv("foo", max_results=1)
 
 
-def test_arxiv_search_http_400(monkeypatch) -> None:
+def test_arxiv_search_http_503(monkeypatch) -> None:
     from agents.blogging.blog_research_agent.tools import arxiv_search
 
     class _Response:

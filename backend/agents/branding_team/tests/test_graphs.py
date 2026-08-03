@@ -118,6 +118,43 @@ def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
 
 
+def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
+    """Documented channel/description preconditions are enforced before construction."""
+    from branding_team.agents import _make_channel_guide
+    from branding_team.models import ChannelGuidelineOutput
+
+    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+        _make_channel_guide("", "some description", ChannelGuidelineOutput)
+    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+        _make_channel_guide("   ", "some description", ChannelGuidelineOutput)
+    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+        _make_channel_guide("website", "", ChannelGuidelineOutput)
+    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+        _make_channel_guide("website", "   ", ChannelGuidelineOutput)
+
+
+def test_make_channel_guide_rejects_non_basemodel_structured_output() -> None:
+    """Documented structured_output precondition is enforced before construction."""
+    from branding_team.agents import _make_channel_guide
+
+    with pytest.raises(
+        AssertionError, match="structured_output must be a Pydantic BaseModel subclass"
+    ):
+        _make_channel_guide("website", "a marketing site", dict)
+
+
+def test_channel_guide_and_brand_experience_prompts_drop_redundant_json_reminder() -> None:
+    """The prompt's field list is the contract; ``output_mode="json"`` already forces the wire format."""
+    from branding_team.agents import _make_channel_guide, make_brand_experience_principler
+    from branding_team.models import ChannelGuidelineOutput
+
+    channel_agent = _make_channel_guide("website", "a marketing site", ChannelGuidelineOutput)
+    assert "Output valid JSON" not in channel_agent.system_prompt
+
+    principler_agent = make_brand_experience_principler()
+    assert "Output valid JSON" not in principler_agent.system_prompt
+
+
 def test_build_phase5_graph_is_a_graph() -> None:
     assert isinstance(build_phase5_graph(), Graph)
 
@@ -234,9 +271,10 @@ def test_phase_order_text_driven_by_phase_order(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_serialize_mission_roundtrips_company_name() -> None:
-    text = serialize_mission(
-        make_mission(
-            company_description="A strategic studio for enterprise product teams",
-        )
+    mission = make_mission(
+        company_name="Acme Rebrand Co",
+        company_description="A strategic studio for enterprise product teams",
     )
-    assert "Northstar Labs" in text
+    text = serialize_mission(mission)
+    assert mission.company_name in text
+    assert mission.company_description in text

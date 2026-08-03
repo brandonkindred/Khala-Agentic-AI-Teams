@@ -373,6 +373,98 @@ def test_run_paper_trading_background_crashes_into_failed(
     assert "Paper trading crashed" in (updated.error or "")
 
 
+def test_run_paper_trading_background_import_failure_marks_failed(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ImportError raised by the function-scoped imports (e.g. a missing
+    dependency or circular import in ``market_data_service``) is caught by the
+    same handler as any other in-worker exception, so the session still ends
+    in FAILED instead of leaving the background thread to crash silently.
+    """
+    import sys
+
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        PaperTradingSession,
+        PaperTradingStatus,
+        StrategySpec,
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=BacktestResult(
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        ),
+        trades=[],
+    )
+    running = PaperTradingSession(
+        session_id="pt-import-fail",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-import-fail"] = running
+
+    # Force `from investment_team.market_data_service import MarketDataService`
+    # to raise ModuleNotFoundError, simulating a missing dependency / circular
+    # import at import time (not a runtime failure inside the try body).
+    monkeypatch.setitem(sys.modules, "investment_team.market_data_service", None)
+
+    api_main._run_paper_trading_background(
+        "pt-import-fail",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    updated = api_main._paper_trading_sessions.get("pt-import-fail")
+    assert updated.status == PaperTradingStatus.FAILED
+    assert updated.completed_at
+    assert "Paper trading crashed" in (updated.divergence_analysis or "")
+    assert "Paper trading crashed" in (updated.error or "")
+
+
 # ---------------------------------------------------------------------------
 # stop_live_paper_trading
 # ---------------------------------------------------------------------------
@@ -783,6 +875,44 @@ def test_run_paper_trading_409_when_live_session_already_active(
     assert "already has an" in resp.json()["detail"]
 
 
+def test_run_paper_trading_skips_unparseable_session_in_guard(
+    monkeypatch: pytest.MonkeyPatch, api_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A corrupt/unparseable record in ``_paper_trading_sessions`` must not
+    turn the concurrency guard into a 500 for unrelated strategies — it
+    should be logged and skipped, same as
+    ``_recover_orphaned_paper_trading_sessions``."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    record = _winning_record()
+    api_main._strategy_lab_records["lab-w"] = record
+    monkeypatch.setattr(api_main, "_run_live_paper_trading_background", lambda *a, **k: None)
+
+    # Corrupt record: fails PaperTradingSession.parse_persisted, unrelated to
+    # this request's strategy_id either way.
+    api_main._paper_trading_sessions["pt-bad"] = {"not": "a-paper-trading-session"}
+
+    with caplog.at_level(logging.WARNING, logger="investment_team.api.main"):
+        resp = api_client.post(
+            "/strategy-lab/paper-trade",
+            json={"lab_record_id": "lab-w"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["session"]["status"] == "opening"
+
+    warnings = [
+        r for r in caplog.records if "Skipping unparseable paper-trading session" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
+    # The corrupt row is left untouched, not overwritten/removed.
+    assert api_main._paper_trading_sessions["pt-bad"] == {"not": "a-paper-trading-session"}
+
+
 def test_run_paper_trading_live_mode_kicks_off_thread(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -813,6 +943,71 @@ def test_run_paper_trading_live_mode_kicks_off_thread(
             break
         time.sleep(0.05)
     assert started == [True]
+
+
+def test_run_paper_trading_concurrent_starts_same_strategy_only_one_wins(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression test for a race in the live-mode concurrency guard: the
+    scan, session construction, and dict insertion must be atomic under
+    ``_lock`` so two concurrent starts for the same strategy can't both
+    pass the guard.
+
+    The vulnerable gap in the pre-fix code sat between the scan's ``with
+    _lock:`` block and the later ``with _lock:`` that inserted the built
+    session — ``PaperTradingSession(...)`` construction ran unlocked in
+    between. This test widens exactly that gap by delaying the *first*
+    ``PaperTradingSession(...)`` construction: on the buggy code the delayed
+    thread has already released the scan lock by the time it starts
+    constructing, so the second racer's scan runs concurrently and also
+    finds no conflict (both succeed, two active sessions). On the fixed
+    code the lock is held continuously across scan + construction + insert,
+    so the second racer blocks until the first has already inserted and
+    correctly gets 409.
+    """
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    record = _winning_record()
+    api_main._strategy_lab_records["lab-w"] = record
+    monkeypatch.setattr(api_main, "_run_live_paper_trading_background", lambda *a, **k: None)
+
+    real_session_cls = api_main.PaperTradingSession
+    call_count = {"n": 0}
+    count_lock = threading.Lock()
+
+    class _SlowPaperTradingSession(real_session_cls):
+        def __init__(self, *args, **kwargs):
+            with count_lock:
+                call_count["n"] += 1
+                is_first = call_count["n"] == 1
+            if is_first:
+                time.sleep(0.2)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(api_main, "PaperTradingSession", _SlowPaperTradingSession)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                api_client.post, "/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"}
+            )
+            for _ in range(2)
+        ]
+        results = [f.result(timeout=5) for f in futures]
+
+    assert sorted(r.status_code for r in results) == [200, 409]
+    active = [
+        s
+        for s in api_main._paper_trading_sessions.values()
+        if PaperTradingSession.parse_persisted(s).status in api_main._ACTIVE_PT_STATES
+    ]
+    assert len(active) == 1
 
 
 # ---------------------------------------------------------------------------

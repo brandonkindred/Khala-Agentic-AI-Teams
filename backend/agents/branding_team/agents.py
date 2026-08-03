@@ -600,7 +600,7 @@ def make_brand_experience_principler() -> Agent:
             "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
             "2. signature_moments — 3-5 key moments in the customer journey that should feel "
             "distinctly on-brand\n"
-            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable\n"
+            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
         ),
         structured_output=BrandExperiencePrinciplesOutput,
     )
@@ -643,7 +643,7 @@ def _make_channel_guide(
             f"- donts: 3-4 things to avoid\n"
             f"- content_types: 3-5 recommended content formats\n"
             f"- frequency_guidance: recommended cadence\n"
-            f"Context: {description}\n"
+            f"Context: {description}"
         ),
         structured_output=structured_output,
     )

@@ -20,6 +20,10 @@ from software_engineering_team.devops_team import (
     DevOpsTeamResult,
     tool_dispatch,
 )
+from software_engineering_team.devops_team.iac_agent import (
+    IaCAgentInput,
+    InfrastructureAsCodeAgent,
+)
 from software_engineering_team.devops_team.models import (
     CriterionTrace,
     DevOpsCompletionPackage,
@@ -42,15 +46,24 @@ from software_engineering_team.devops_team.task_clarifier import (
 from software_engineering_team.devops_team.tool_agents import (
     CDKExecutionOutput,
     CDKExecutionToolAgent,
+    CICDLintInput,
     CICDLintOutput,
+    CICDLintPipelineValidationToolAgent,
+    DeploymentDryRunInput,
     DeploymentDryRunOutput,
+    DeploymentDryRunPlanToolAgent,
     DockerComposeExecutionOutput,
     DockerComposeExecutionToolAgent,
     HelmExecutionOutput,
     HelmExecutionToolAgent,
+    IaCValidationInput,
     IaCValidationOutput,
+    IaCValidationToolAgent,
     PolicyAsCodeInput,
     PolicyAsCodeOutput,
+    PolicyAsCodeToolAgent,
+    RepoNavigatorInput,
+    RepoNavigatorToolAgent,
     TerraformExecutionOutput,
     TerraformExecutionToolAgent,
 )
@@ -386,12 +399,16 @@ class TestEnforceEnvPolicy:
 
 
 class TestGateNames:
+    """Verify the required DevOps quality-gate name list is complete and stable."""
+
     def test_required_gate_names_present(self) -> None:
+        """The iac_validate, security_review, and change_review gates are required."""
         assert "iac_validate" in DEVOPS_REQUIRED_GATE_NAMES
         assert "security_review" in DEVOPS_REQUIRED_GATE_NAMES
         assert "change_review" in DEVOPS_REQUIRED_GATE_NAMES
 
     def test_required_gate_names_count(self) -> None:
+        """The full required-gate tuple matches its expected order and membership."""
         assert DEVOPS_REQUIRED_GATE_NAMES == (
             "iac_validate",
             "iac_validate_fmt",
@@ -410,12 +427,17 @@ class TestGateNames:
 
 
 class TestSubtaskContractGeneration:
+    """Verify DevOpsTeamLeadAgent._build_subtask_contracts fans a task spec out
+    into per-owner subtask contracts with stable, task-scoped IDs."""
+
     def test_generates_three_contracts(self) -> None:
+        """A task spec always yields exactly three subtask contracts."""
         spec = _base_task_spec()
         contracts = DevOpsTeamLeadAgent._build_subtask_contracts(spec)
         assert len(contracts) == 3
 
     def test_contract_owners(self) -> None:
+        """The three contracts are owned by IaC, CI/CD, and deployment agents."""
         spec = _base_task_spec()
         contracts = DevOpsTeamLeadAgent._build_subtask_contracts(spec)
         owners = {c.owner for c in contracts}
@@ -424,6 +446,7 @@ class TestSubtaskContractGeneration:
         assert "DeploymentStrategyAgent" in owners
 
     def test_contract_ids_use_task_id(self) -> None:
+        """Every contract's subtask_id is prefixed with the originating task_id."""
         spec = _base_task_spec()
         contracts = DevOpsTeamLeadAgent._build_subtask_contracts(spec)
         for c in contracts:
@@ -436,28 +459,37 @@ class TestSubtaskContractGeneration:
 
 
 class TestTaskClarifier:
+    """Verify DevOpsTaskClarifierAgent rejects incomplete or unsafe task specs
+    and only approves a spec once all required fields are satisfied."""
+
     def _agent(self) -> DevOpsTaskClarifierAgent:
+        """Build a clarifier agent backed by a mock LLM client (unused by the
+        rule-based blocking checks under test)."""
         return DevOpsTaskClarifierAgent(MagicMock())
 
     def test_blocks_missing_rollback_for_prod(self) -> None:
+        """A spec with no rollback requirements is rejected with a rollback request."""
         spec = _base_task_spec(rollback_requirements=[])
         out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
         assert not out.approved_for_execution
         assert any("Rollback" in r for r in out.clarification_requests)
 
     def test_blocks_missing_environments(self) -> None:
+        """A spec with no target environments is rejected with an environment request."""
         spec = _base_task_spec(platform_scope={"environments": []})
         out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
         assert not out.approved_for_execution
         assert any("environment" in r.lower() for r in out.clarification_requests)
 
     def test_blocks_missing_acceptance_criteria(self) -> None:
+        """A spec with no acceptance criteria is rejected with an acceptance request."""
         spec = _base_task_spec(acceptance_criteria=[])
         out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
         assert not out.approved_for_execution
         assert any("acceptance" in r.lower() for r in out.clarification_requests)
 
     def test_blocks_missing_secret_source(self) -> None:
+        """A spec with an empty secrets source is rejected with a secret request."""
         spec = _base_task_spec(
             constraints={
                 "iac": {"preferred": "terraform"},
@@ -471,18 +503,21 @@ class TestTaskClarifier:
         assert any("secret" in r.lower() for r in out.clarification_requests)
 
     def test_blocks_prod_without_approval_gate(self) -> None:
+        """Production-scope work without an approval gate is rejected."""
         spec = _base_task_spec(scope={"included": ["build image"], "excluded": []})
         out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
         assert not out.approved_for_execution
         assert any("approval" in r.lower() for r in out.clarification_requests)
 
     def test_blocks_missing_goal(self) -> None:
+        """A spec with an empty goal summary is rejected with an outcome request."""
         spec = _base_task_spec(goal={"summary": ""})
         out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
         assert not out.approved_for_execution
         assert any("outcome" in r.lower() for r in out.clarification_requests)
 
     def test_approves_complete_spec(self) -> None:
+        """A fully-specified spec, once the LLM confirms it, is approved for execution."""
         client = _StubClient(
             {
                 "approved_for_execution": True,
@@ -496,6 +531,7 @@ class TestTaskClarifier:
         assert out.approved_for_execution
 
     def test_checklist_populated(self) -> None:
+        """A blocked spec still returns a non-trivial pre-execution checklist."""
         spec = _base_task_spec(rollback_requirements=[])
         out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
         assert len(out.checklist) >= 3
@@ -507,12 +543,11 @@ class TestTaskClarifier:
 
 
 class TestRepoNavigatorToolAgent:
-    def test_detects_terraform_files(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            RepoNavigatorInput,
-            RepoNavigatorToolAgent,
-        )
+    """Verify RepoNavigatorToolAgent detects IaC, pipeline, and deploy paths
+    by scanning a repo's file layout for well-known markers."""
 
+    def test_detects_terraform_files(self) -> None:
+        """A ``.tf`` file under ``infra/`` is reported as a detected IaC path."""
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "infra").mkdir()
             (Path(tmp) / "infra" / "main.tf").write_text("resource {}")
@@ -520,11 +555,7 @@ class TestRepoNavigatorToolAgent:
             assert any("main.tf" in p for p in out.detected_iac_paths)
 
     def test_detects_github_workflows(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            RepoNavigatorInput,
-            RepoNavigatorToolAgent,
-        )
-
+        """A workflow file under ``.github/workflows/`` is a detected pipeline path."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -533,11 +564,7 @@ class TestRepoNavigatorToolAgent:
             assert any("ci.yml" in p for p in out.detected_pipeline_paths)
 
     def test_detects_helm_charts(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            RepoNavigatorInput,
-            RepoNavigatorToolAgent,
-        )
-
+        """A Helm ``Chart.yaml`` under ``deploy/helm/`` is a detected deploy path."""
         with tempfile.TemporaryDirectory() as tmp:
             helm_dir = Path(tmp) / "deploy" / "helm" / "myapp"
             helm_dir.mkdir(parents=True)
@@ -546,11 +573,7 @@ class TestRepoNavigatorToolAgent:
             assert any("helm" in p.lower() for p in out.detected_deploy_paths)
 
     def test_empty_repo(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            RepoNavigatorInput,
-            RepoNavigatorToolAgent,
-        )
-
+        """A repo with none of the known markers reports no detected paths."""
         with tempfile.TemporaryDirectory() as tmp:
             out = RepoNavigatorToolAgent().run(RepoNavigatorInput(repo_path=tmp))
             assert out.detected_iac_paths == []
@@ -560,11 +583,6 @@ class TestRepoNavigatorToolAgent:
 
 class TestIaCValidationToolAgent:
     def test_skipped_when_no_tf_files(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            IaCValidationInput,
-            IaCValidationToolAgent,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             out = IaCValidationToolAgent().run(IaCValidationInput(repo_path=tmp))
             assert out.checks["iac_validate"] == "skipped"
@@ -574,11 +592,6 @@ class TestIaCValidationToolAgent:
 
 class TestPolicyAsCodeToolAgent:
     def test_skipped_when_checkov_missing(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            PolicyAsCodeInput,
-            PolicyAsCodeToolAgent,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             out = PolicyAsCodeToolAgent().run(PolicyAsCodeInput(repo_path=tmp))
             assert out.checks["policy_checks"] == "skipped"
@@ -587,11 +600,6 @@ class TestPolicyAsCodeToolAgent:
 
 class TestCICDLintToolAgent:
     def test_pass_valid_workflow(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            CICDLintInput,
-            CICDLintPipelineValidationToolAgent,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -603,11 +611,6 @@ class TestCICDLintToolAgent:
             assert out.success is True
 
     def test_fail_missing_jobs(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            CICDLintInput,
-            CICDLintPipelineValidationToolAgent,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -617,11 +620,6 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_fail_prod_deploy_without_approval(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            CICDLintInput,
-            CICDLintPipelineValidationToolAgent,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -633,11 +631,6 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_skipped_no_workflows(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            CICDLintInput,
-            CICDLintPipelineValidationToolAgent,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_lint"] == "skipped"
@@ -646,11 +639,6 @@ class TestCICDLintToolAgent:
 
 class TestDeploymentDryRunToolAgent:
     def test_skipped_no_chart(self) -> None:
-        from software_engineering_team.devops_team.tool_agents import (
-            DeploymentDryRunInput,
-            DeploymentDryRunPlanToolAgent,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             out = DeploymentDryRunPlanToolAgent().run(DeploymentDryRunInput(repo_path=tmp))
             assert out.checks["deployment_dry_run"] == "skipped"
@@ -663,12 +651,11 @@ class TestDeploymentDryRunToolAgent:
 
 
 class TestInfrastructureAsCodeAgent:
-    def test_run_returns_artifacts(self) -> None:
-        from software_engineering_team.devops_team.iac_agent import (
-            IaCAgentInput,
-            InfrastructureAsCodeAgent,
-        )
+    """Verify InfrastructureAsCodeAgent surfaces generated IaC artifacts and
+    flags destructive-change warnings from the LLM response."""
 
+    def test_run_returns_artifacts(self) -> None:
+        """A non-destructive response yields the generated artifact and no warnings."""
         client = _StubClient(
             {
                 "artifacts": {"infra/main.tf": "resource {}"},
@@ -683,11 +670,7 @@ class TestInfrastructureAsCodeAgent:
         assert not out.destructive_changes_detected
 
     def test_handles_destructive_flag(self) -> None:
-        from software_engineering_team.devops_team.iac_agent import (
-            IaCAgentInput,
-            InfrastructureAsCodeAgent,
-        )
-
+        """A destructive response is passed through with its blast-radius notes intact."""
         client = _StubClient(
             {
                 "artifacts": {},
@@ -1246,6 +1229,22 @@ class TestChangeReviewAgent:
         with caplog.at_level(logging.WARNING):
             assert _normalize_severity("catastrophic") == "low"
         assert "unrecognized severity" in caplog.text.lower()
+
+    def test_severity_map_derives_from_engine_type(self) -> None:
+        """_SEVERITY_MAP's keys are exactly code_review_agent's severity values,
+        and every one maps to a valid ReviewFinding severity -- proving the map
+        is derived from the shared type, not hand-copied."""
+        from typing import get_args
+
+        from software_engineering_team.code_review_agent.models import CodeReviewIssueSeverity
+        from software_engineering_team.devops_team.change_review_agent.agent import (
+            _REVIEW_FINDING_SEVERITIES,
+            _SEVERITY_MAP,
+        )
+
+        engine_severities = set(get_args(CodeReviewIssueSeverity))
+        assert set(_SEVERITY_MAP) == engine_severities
+        assert all(v in _REVIEW_FINDING_SEVERITIES for v in _SEVERITY_MAP.values())
 
     def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
         """An engine 'info' severity maps to ReviewFinding 'low' and does not block."""
@@ -1918,9 +1917,7 @@ class TestBackwardCompatibility:
             "NO PRODUCTION traffic",
         ],
     )
-    def test_build_legacy_spec_ignores_case_variants_of_negation(
-        self, description: str
-    ) -> None:
+    def test_build_legacy_spec_ignores_case_variants_of_negation(self, description: str) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-neg-case",
             task_description=description,

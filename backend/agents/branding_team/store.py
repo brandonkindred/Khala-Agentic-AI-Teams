@@ -134,6 +134,8 @@ class BrandingStore(PostgresHelperMixin):
         Postconditions:
             Returns the validated ``Client`` when a row exists, else ``None``.
         """
+        if not client_id:
+            raise ValueError("client_id must be a non-empty string")
         row = self._fetch_one("SELECT data FROM branding_clients WHERE id = %s", (client_id,))
         if row is None:
             return None
@@ -178,6 +180,8 @@ class BrandingStore(PostgresHelperMixin):
             (``client_<hex>``) and whose timestamps are set. A matching row
             exists in ``branding_clients``.
         """
+        if not name:
+            raise ValueError("name must be a non-empty string")
         client_id = f"client_{uuid4().hex[:12]}"
         now = _now_iso()
         client = Client(
@@ -209,6 +213,10 @@ class BrandingStore(PostgresHelperMixin):
             ``(id, client_id)`` pair, else ``None`` (including when the brand
             exists under a different client).
         """
+        if not client_id:
+            raise ValueError("client_id must be a non-empty string")
+        if not brand_id:
+            raise ValueError("brand_id must be a non-empty string")
         row = self._fetch_one(
             "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
             (brand_id, client_id),
@@ -324,6 +332,10 @@ class BrandingStore(PostgresHelperMixin):
             ``branding_brands`` row. Best-effort profile association is
             attempted after commit and never raises.
         """
+        if not client_id:
+            raise ValueError("client_id must be a non-empty string")
+        if not isinstance(mission, BrandingMission):
+            raise ValueError("mission must be a BrandingMission")
         with self._transaction() as cur:
             cur.execute("SELECT 1 FROM branding_clients WHERE id = %s", (client_id,))
             if cur.fetchone() is None:
@@ -387,6 +399,11 @@ class BrandingStore(PostgresHelperMixin):
         + every phase output + history) is never read back and re-serialised
         just to flip ``status`` or attach a ``conversation_id``.
 
+        Preconditions:
+            ``client_id`` and ``brand_id`` are non-empty strings; when
+            provided, ``mission`` is a ``BrandingMission`` and ``status`` is a
+            ``BrandStatus``. ``name`` and ``conversation_id`` are optional
+            free-form strings.
         Postconditions:
             Returns the updated Brand, or None when no such brand exists for
             the given client.
@@ -398,6 +415,14 @@ class BrandingStore(PostgresHelperMixin):
             recompute against the new mission instead of serving stale
             positioning.
         """
+        if not client_id:
+            raise ValueError("client_id must be a non-empty string")
+        if not brand_id:
+            raise ValueError("brand_id must be a non-empty string")
+        if mission is not None and not isinstance(mission, BrandingMission):
+            raise ValueError("mission must be a BrandingMission")
+        if status is not None and not isinstance(status, BrandStatus):
+            raise ValueError("status must be a BrandStatus")
         patch: dict = {"updated_at": _now_iso()}
         if mission is not None:
             patch["mission"] = mission.model_dump(mode="json")
@@ -444,6 +469,14 @@ class BrandingStore(PostgresHelperMixin):
             rows unchanged (the transaction rolls back) and the paired value is
             ``None``.
         """
+        if not client_id:
+            raise ValueError("client_id must be a non-empty string")
+        if not brand_id:
+            raise ValueError("brand_id must be a non-empty string")
+        if not conversation_id:
+            raise ValueError("conversation_id must be a non-empty string")
+        if not isinstance(mission, BrandingMission):
+            raise ValueError("mission must be a BrandingMission")
         try:
             with self._transaction() as cur:
                 cur.execute(

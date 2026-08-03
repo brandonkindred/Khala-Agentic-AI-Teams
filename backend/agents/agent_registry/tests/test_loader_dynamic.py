@@ -60,11 +60,27 @@ class _FakeStore:
         self._maybe_raise("manifests_with_prefix")
         return [m for m in self.rows.values() if m.id.startswith(prefix)]
 
+    def replace_manifests(self, upserts, delete_ids, *, conn=None) -> None:
+        del conn
+        self._maybe_raise("replace_manifests")
+        for agent_id in delete_ids:
+            self.rows.pop(agent_id, None)
+        for manifest in upserts:
+            self.rows[manifest.id] = manifest
+
 
 @pytest.fixture
 def fake_store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     store = _FakeStore()
-    for name in ("_store_active", "get", "all", "upsert", "delete", "manifests_with_prefix"):
+    for name in (
+        "_store_active",
+        "get",
+        "all",
+        "upsert",
+        "delete",
+        "manifests_with_prefix",
+        "replace_manifests",
+    ):
         monkeypatch.setattr(ds_mod, name, getattr(store, name))
     return store
 
@@ -147,9 +163,243 @@ def test_register_never_persists_static_ids(fake_store: _FakeStore) -> None:
 def test_register_swallows_store_error(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
     fake_store.raise_on = {"upsert"}
-    # Must not raise — the generated path holds a lock and swallows registry errors.
+    # Default path is best-effort: local install survives a store upsert failure.
     reg.register(_manifest("agent_studio.err-1"))
     assert reg._by_id["agent_studio.err-1"].id == "agent_studio.err-1"
+
+
+def test_register_require_persist_raises_and_rolls_back_local(fake_store: _FakeStore) -> None:
+    reg = AgentRegistry([], {})
+    fake_store.raise_on = {"upsert"}
+    m = _manifest("agent_studio.strict-1")
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        reg.register(m, require_persist=True)
+    assert "agent_studio.strict-1" not in reg._by_id
+    assert "agent_studio.strict-1" not in reg._unconfirmed
+    assert "agent_studio.strict-1" not in fake_store.rows
+
+
+def test_register_require_persist_restores_prior_on_upsert_failure(
+    fake_store: _FakeStore,
+) -> None:
+    reg = AgentRegistry([], {})
+    prior = _manifest("agent_studio.strict-overwrite", name="Prior")
+    reg.register(prior)
+    assert "agent_studio.strict-overwrite" in fake_store.rows
+
+    fake_store.raise_on = {"upsert"}
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        reg.register(
+            _manifest("agent_studio.strict-overwrite", name="New"),
+            require_persist=True,
+        )
+    # Prior local entry restored; store still has the last successful upsert.
+    assert reg._by_id["agent_studio.strict-overwrite"].name == "Prior"
+    assert fake_store.rows["agent_studio.strict-overwrite"].name == "Prior"
+
+
+def test_register_require_persist_succeeds_when_store_inactive(
+    fake_store: _FakeStore,
+) -> None:
+    # No dynamic store → local-only is authoritative; require_persist is a no-op.
+    fake_store.active = False
+    reg = AgentRegistry([], {})
+    m = _manifest("agent_studio.strict-local")
+    reg.register(m, require_persist=True)
+    assert reg.get("agent_studio.strict-local") is m
+    assert "agent_studio.strict-local" in reg._unconfirmed
+
+
+def test_register_require_persist_rollback_preserves_concurrent_install(
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed require_persist must not clobber a concurrent re-register of the same id."""
+    reg = AgentRegistry([], {})
+    failing = _manifest("agent_studio.race-1", name="Failing")
+    concurrent = _manifest("agent_studio.race-1", name="Concurrent")
+
+    def _upsert_then_race(manifest):
+        # Simulate another thread installing a newer entry while our store call runs
+        # (lock is released around the upsert).
+        with reg._lock:
+            reg._by_id[manifest.id] = concurrent
+            reg._tombstones.pop(manifest.id, None)
+            reg._unconfirmed.discard(manifest.id)
+        raise RuntimeError("boom:upsert")
+
+    monkeypatch.setattr(ds_mod, "upsert", _upsert_then_race)
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        reg.register(failing, require_persist=True)
+
+    assert reg._by_id["agent_studio.race-1"] is concurrent
+    assert reg._by_id["agent_studio.race-1"].name == "Concurrent"
+
+
+def test_replace_dynamic_manifests_rejects_overlap(fake_store: _FakeStore) -> None:
+    reg = AgentRegistry([], {})
+    m = _manifest("agentic.team-1.both", team="agentic_team_provisioning")
+    with pytest.raises(ValueError, match="disjoint"):
+        reg.replace_dynamic_manifests([m], [m.id])
+    assert m.id not in reg._by_id
+    assert m.id not in fake_store.rows
+
+
+def test_replace_dynamic_manifests_writes_atomically(fake_store: _FakeStore) -> None:
+    reg = AgentRegistry([], {})
+    prior = _manifest("agentic.team-1.old", team="agentic_team_provisioning")
+    reg.register(prior)
+    replacement = _manifest("agentic.team-1.new", team="agentic_team_provisioning")
+
+    reg.replace_dynamic_manifests([replacement], [prior.id])
+
+    assert prior.id not in fake_store.rows
+    assert replacement.id in fake_store.rows
+    assert reg.get(prior.id) is None
+    assert reg.get(replacement.id) is replacement
+
+
+def test_replace_dynamic_manifests_leaves_local_unchanged_on_store_failure(
+    fake_store: _FakeStore,
+) -> None:
+    reg = AgentRegistry([], {})
+    prior = _manifest("agentic.team-1.old", team="agentic_team_provisioning")
+    reg.register(prior)
+    fake_store.raise_on = {"replace_manifests"}
+
+    with pytest.raises(RuntimeError, match="boom:replace_manifests"):
+        reg.replace_dynamic_manifests(
+            [_manifest("agentic.team-1.new", team="agentic_team_provisioning")],
+            [prior.id],
+        )
+
+    assert prior.id in fake_store.rows
+    assert "agentic.team-1.new" not in fake_store.rows
+    assert reg.get(prior.id) is not None
+    assert reg._by_id[prior.id].id == prior.id
+
+
+def test_replace_manifests_rejects_empty_id_and_overlap() -> None:
+    # Hit the real validators before any Postgres work (no fake_store patch).
+    from agent_registry.dynamic_store import replace_manifests
+
+    with pytest.raises(ValueError, match="non-empty id"):
+        replace_manifests([_manifest("")], [])
+    with pytest.raises(ValueError, match="disjoint"):
+        replace_manifests([_manifest("agent_studio.x")], ["agent_studio.x"])
+
+
+def test_upsert_rejects_empty_id() -> None:
+    from agent_registry.dynamic_store import upsert
+
+    with pytest.raises(ValueError, match="non-empty"):
+        upsert(_manifest(""))
+
+
+def test_replace_manifests_shared_conn_avoids_nested_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-conn path must not call _ensure_schema (nested get_conn deadlock)."""
+    from agent_registry import dynamic_store as ds
+
+    monkeypatch.setattr(ds, "_schema_ensured", False)
+
+    def _boom_ensure() -> None:
+        raise AssertionError("nested _ensure_schema / pool checkout")
+
+    monkeypatch.setattr(ds, "_ensure_schema", _boom_ensure)
+
+    executed: list[str] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            executed.append(sql if isinstance(sql, str) else str(sql))
+
+    class _Conn:
+        def cursor(self, *args, **kwargs):
+            return _Cur()
+
+    ds.replace_manifests([_manifest("agent_studio.shared-1")], [], conn=_Conn())
+    # DDL + upsert ran on the shared conn; _ensure_schema was never entered.
+    assert any("CREATE TABLE" in s or "agent_registry_dynamic" in s for s in executed)
+    assert any("INSERT INTO" in s for s in executed)
+
+
+def test_replace_manifests_shared_conn_propagates_execute_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-conn write failures must raise without flipping ``_schema_ensured``."""
+    from agent_registry import dynamic_store as ds
+
+    monkeypatch.setattr(ds, "_schema_ensured", True)  # skip DDL; hit _execute only
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            raise RuntimeError("shared conn execute boom")
+
+    class _Conn:
+        def cursor(self, *args, **kwargs):
+            return _Cur()
+
+    with pytest.raises(RuntimeError, match="shared conn execute boom"):
+        ds.replace_manifests([_manifest("agent_studio.shared-fail")], [], conn=_Conn())
+    # A rolled-back outer txn must be able to retry schema on the same process.
+    assert ds._schema_ensured is True  # unchanged from our pre-set True
+
+
+def test_replace_manifests_shared_conn_propagates_schema_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-conn DDL failures propagate and must not set ``_schema_ensured``."""
+    from agent_registry import dynamic_store as ds
+
+    monkeypatch.setattr(ds, "_schema_ensured", False)
+
+    def _boom_apply(cur) -> None:
+        raise RuntimeError("shared conn ddl boom")
+
+    monkeypatch.setattr(ds, "_apply_schema_statements", _boom_apply)
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            raise AssertionError("execute should not run after DDL failure")
+
+    class _Conn:
+        def cursor(self, *args, **kwargs):
+            return _Cur()
+
+    with pytest.raises(RuntimeError, match="shared conn ddl boom"):
+        ds.replace_manifests([_manifest("agent_studio.shared-ddl")], [], conn=_Conn())
+    assert ds._schema_ensured is False
+
+
+def test_manifests_with_id_prefix_require_store_propagates(
+    fake_store: _FakeStore,
+) -> None:
+    reg = AgentRegistry([], {})
+    fake_store.raise_on = {"manifests_with_prefix"}
+    with pytest.raises(RuntimeError, match="boom:manifests_with_prefix"):
+        reg.manifests_with_id_prefix("agentic.", require_store=True)
+    # Default still degrades to local.
+    assert reg.manifests_with_id_prefix("agentic.") == []
 
 
 def test_unregister_deletes_from_store(fake_store: _FakeStore) -> None:

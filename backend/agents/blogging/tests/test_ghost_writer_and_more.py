@@ -466,8 +466,8 @@ def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
 
 def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch) -> None:
     """Null seed_question triggers a generated fallback question that incorporates the
-    stringified section_context; other non-string fields (section_title, section_context)
-    are coerced to strings."""
+    stringified section_context; null section_title is normalized to an empty string,
+    and non-null non-string fields (section_context) are coerced to strings."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient

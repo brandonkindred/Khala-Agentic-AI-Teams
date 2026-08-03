@@ -803,11 +803,36 @@ def _drive_workflow(
 ) -> SimpleNamespace:
     """Run BrandingWorkflow.run with workflow.execute_activity monkeypatched.
 
-    Returns a namespace of ``calls`` (one dict per execute_activity), ``prior``
-    (per-phase snapshot of prior_outputs at dispatch time), ``finalize`` (the
-    finalize args), ``instance`` (the workflow for a post-run progress query), and
-    ``error`` (the exception that escaped run()). The ``*_error`` flags make the
-    corresponding fake activity raise, exercising the failure/degradation paths.
+    Args:
+        payload: The workflow input payload passed to ``instance.run``.
+        begin: Value returned by the fake ``begin_branding_job_activity``.
+        begin_error: If True, ``begin_branding_job_activity`` raises RuntimeError
+            instead of returning ``begin``.
+        cancel_after: If set, the fake ``check_branding_cancelled_activity``
+            returns True (cancelled) once its call count exceeds this value.
+        cancel_flag: If True, calls ``instance.cancel()`` before ``run()``,
+            simulating an externally-delivered cancel signal.
+        phase_error: Name of the phase for which the fake
+            ``run_branding_phase_activity`` raises RuntimeError instead of
+            returning its canned result.
+        mr_result: Value returned by the fake ``run_market_research_activity``.
+        da_result: Value returned by the fake ``run_design_assets_activity``.
+        mr_error: If True, ``run_market_research_activity`` raises RuntimeError
+            instead of returning ``mr_result``.
+        da_error: If True, ``run_design_assets_activity`` raises RuntimeError
+            instead of returning ``da_result``.
+        mark_failed_error: If True, ``mark_branding_failed_activity`` raises
+            RuntimeError instead of returning ``mark_failed_result``.
+        mark_failed_result: Value returned by the fake
+            ``mark_branding_failed_activity``.
+        check_cancel_error: If True, ``check_branding_cancelled_activity``
+            raises RuntimeError instead of its normal cancel-check logic.
+
+    Returns:
+        A namespace of ``calls`` (one dict per execute_activity), ``prior``
+        (per-phase snapshot of prior_outputs at dispatch time), ``finalize``
+        (the finalize args), ``instance`` (the workflow for a post-run progress
+        query), and ``error`` (the exception that escaped run()).
     """
     from branding_team.temporal import workflows as wf
 

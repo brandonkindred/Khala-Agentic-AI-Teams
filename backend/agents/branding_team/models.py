@@ -691,11 +691,15 @@ class PhaseGate(BaseModel):
 
 
 class BrandCheckRequest(BaseModel):
+    """Request to evaluate a marketing asset against a brand's guidelines."""
+
     asset_name: str
     asset_description: str
 
 
 class BrandCheckResult(BaseModel):
+    """Verdict from :class:`BrandComplianceAgent` on-brand evaluation of a single asset."""
+
     asset_name: str
     is_on_brand: bool
     confidence: float = Field(ge=0, le=1)
@@ -733,6 +737,8 @@ class BrandBook(BaseModel):
 
 
 class MoodBoardConcept(BaseModel):
+    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``."""
+
     title: str
     visual_direction: str
     color_story: List[str] = Field(default_factory=list)
@@ -752,6 +758,8 @@ class CreativeRefinementDecision(BaseModel):
 
 
 class WritingGuidelines(BaseModel):
+    """Voice/tone and editorial rules; merge target for ``WritingGuidelinesOutput``."""
+
     voice_principles: List[str] = Field(default_factory=list)
     style_dos: List[str] = Field(default_factory=list)
     style_donts: List[str] = Field(default_factory=list)
@@ -759,6 +767,8 @@ class WritingGuidelines(BaseModel):
 
 
 class DesignSystemDefinition(BaseModel):
+    """Codified design system; merge target for ``DesignSystemDefinitionOutput``."""
+
     design_principles: List[str] = Field(default_factory=list)
     foundation_tokens: List[str] = Field(default_factory=list)
     component_standards: List[str] = Field(default_factory=list)
@@ -909,6 +919,8 @@ class DesignSystemDefinitionOutput(BaseModel):
 
 
 class WikiEntry(BaseModel):
+    """A single entry in the brand's living wiki/knowledge base."""
+
     title: str
     summary: str
     owners: List[str] = Field(default_factory=list)
