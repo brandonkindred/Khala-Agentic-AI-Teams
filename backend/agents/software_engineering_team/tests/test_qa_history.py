@@ -691,6 +691,33 @@ def test_extract_answer_returns_none_for_stopword_only_question() -> None:
     assert extract_answer_from_qa_history(question, qa_history) is None
 
 
+def test_extract_answer_short_keyword_does_not_match_as_a_substring() -> None:
+    """A short key word must match a whole word in the recorded question, not
+    merely appear as a substring inside an unrelated longer word.
+
+    Once short (<=4 char) words became eligible key words, comparing them via
+    ``w in recorded_question_lower`` risked a false match: the key word "api"
+    is a substring of "capitalizing", so an unrelated later block could tie
+    (or beat) the genuine earlier match and win the later-block tie-break,
+    silently returning the wrong answer.
+    """
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### Do we use an API for external calls?\n"
+        "**Answer:** REST API answer.\n\n"
+        "## Iteration 2\n\n"
+        "### Are we capitalizing gains this quarter?\n"
+        "**Answer:** Unrelated wrong answer.\n\n"
+    )
+    question = _open_question("Do we use an API?")
+
+    result = extract_answer_from_qa_history(question, qa_history)
+
+    assert result is not None
+    assert result.selected_answer == "REST API answer."
+
+
 # ---------------------------------------------------------------------------
 # is_same_decision content-word matching (pruning safety)
 # ---------------------------------------------------------------------------

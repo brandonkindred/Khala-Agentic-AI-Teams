@@ -410,10 +410,14 @@ def extract_answer_from_qa_history(
     for _iteration, recorded_question, _answer, full_block_text in parse_qa_history_blocks(
         qa_history
     ):
-        recorded_question_lower = recorded_question.lower()
+        recorded_words = _content_words(recorded_question)
 
-        # Calculate match score
-        matches = sum(1 for w in key_words if w in recorded_question_lower)
+        # Calculate match score by whole-token overlap, not substring containment:
+        # a short key word (e.g. "api") must match a whole word in the recorded
+        # question, not merely appear inside an unrelated longer word (e.g.
+        # "capitalizing") — a false-positive risk once short words are eligible
+        # key words (see _content_words).
+        matches = sum(1 for w in key_words if w in recorded_words)
         match_ratio = matches / len(key_words)
 
         if (
