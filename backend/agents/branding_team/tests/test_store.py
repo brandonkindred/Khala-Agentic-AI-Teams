@@ -505,3 +505,68 @@ def test_attach_conversation_unknown_brand() -> None:
     assert result is AttachConversationResult.BRAND_NOT_FOUND
     assert updated_brand is None
     assert conv_store.get_conversation_brand_id(cid) is None
+
+
+# ---------------------------------------------------------------------------
+# Documented preconditions are enforced, not just documented
+# ---------------------------------------------------------------------------
+
+
+def test_get_client_rejects_empty_client_id() -> None:
+    store = BrandingStore()
+    with pytest.raises(ValueError, match="client_id"):
+        store.get_client("")
+
+
+def test_create_client_rejects_empty_name() -> None:
+    store = BrandingStore()
+    with pytest.raises(ValueError, match="name"):
+        store.create_client("")
+
+
+def test_get_brand_rejects_empty_ids() -> None:
+    store = BrandingStore()
+    with pytest.raises(ValueError, match="client_id"):
+        store.get_brand("", "brand_x")
+    with pytest.raises(ValueError, match="brand_id"):
+        store.get_brand("client_x", "")
+
+
+def test_create_brand_rejects_empty_client_id_and_bad_mission_type() -> None:
+    store = BrandingStore()
+    mission = make_mission(company_name="Acme Inc")
+    with pytest.raises(ValueError, match="client_id"):
+        store.create_brand("", mission)
+    with pytest.raises(ValueError, match="mission"):
+        store.create_brand("client_x", {"company_name": "Acme"})
+
+
+def test_update_brand_rejects_empty_ids_and_bad_types() -> None:
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, make_mission(company_name="Acme Inc"))
+    assert brand is not None
+    with pytest.raises(ValueError, match="client_id"):
+        store.update_brand("", brand.id)
+    with pytest.raises(ValueError, match="brand_id"):
+        store.update_brand(client.id, "")
+    with pytest.raises(ValueError, match="mission"):
+        store.update_brand(client.id, brand.id, mission={"company_name": "Acme"})
+    with pytest.raises(ValueError, match="status"):
+        store.update_brand(client.id, brand.id, status="draft")
+
+
+def test_attach_conversation_rejects_empty_ids_and_bad_mission_type() -> None:
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, make_mission(company_name="Acme Inc"))
+    assert brand is not None
+    mission = make_mission(company_name="Acme Inc")
+    with pytest.raises(ValueError, match="client_id"):
+        store.attach_conversation("", brand.id, "conv_x", mission)
+    with pytest.raises(ValueError, match="brand_id"):
+        store.attach_conversation(client.id, "", "conv_x", mission)
+    with pytest.raises(ValueError, match="conversation_id"):
+        store.attach_conversation(client.id, brand.id, "", mission)
+    with pytest.raises(ValueError, match="mission"):
+        store.attach_conversation(client.id, brand.id, "conv_x", {"company_name": "Acme"})

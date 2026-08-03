@@ -320,6 +320,13 @@ def test_default_mission_and_detection_use_shared_placeholders() -> None:
     assert _is_real_value("Acme Corp") is True
 
 
+def test_is_real_value_none_and_whitespace_are_not_real() -> None:
+    from branding_team.api.state import _is_real_value
+
+    assert _is_real_value(None) is False
+    assert _is_real_value("   ") is False
+
+
 def test_update_brand_request_includes_shared_and_extra_fields() -> None:
     names = tuple(UpdateBrandRequest.model_fields)
     for name in SHARED_FIELD_NAMES:
