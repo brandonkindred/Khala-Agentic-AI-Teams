@@ -420,7 +420,7 @@ def test_writer_llm_self_review_unexpected_error_propagates(monkeypatch) -> None
 
 
 def test_writer_self_review_combines_both(monkeypatch) -> None:
-    """_self_review runs deterministic + LLM passes."""
+    """_self_review runs both the deterministic pass and the LLM pass."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -429,9 +429,18 @@ def test_writer_self_review_combines_both(monkeypatch) -> None:
         "_call_text",
         lambda self, prompt, system_prompt="": '{"draft": 0}\n---DRAFT---\n# Result\nGood text.',
     )
+    calls = []
+    original_fix = BlogWriterAgent._fix_deterministic_violations
+
+    def spy_fix(self, draft, violations):
+        calls.append(draft)
+        return original_fix(self, draft, violations)
+
+    monkeypatch.setattr(BlogWriterAgent, "_fix_deterministic_violations", spy_fix)
     # Force at least one violation
     draft = "In today's fast-paced world—Studies show."
     out = a._self_review(draft)
+    assert calls == [draft]
     assert "—" not in out
     assert "Good text" in out
 
