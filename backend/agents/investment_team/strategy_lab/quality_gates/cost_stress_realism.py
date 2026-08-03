@@ -135,7 +135,7 @@ class CostStressRealismGate(GateResultsMixin):
             want surfaced rather than swallowed.
           - ``info`` (passing) when ``config.cost_stress=False``. The
             production Strategy Lab entrypoint
-            (:func:`investment_team.api.main._strategy_lab_worker`)
+            (:func:`investment_team.strategy_lab.temporal.start_workflow.build_strategy_lab_batch_input`)
             force-enables cost-stress on winning-candidate runs, so this
             branch only fires on legacy single-window runs or
             hand-constructed configs that explicitly opted out. The

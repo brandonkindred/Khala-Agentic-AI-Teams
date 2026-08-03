@@ -1,0 +1,61 @@
+# Slim dependency set for the unified-api container.
+#
+# This is the audited subset of backend/agents/requirements.txt (the file
+# backend/Dockerfile currently installs) needed to run the unified-api process
+# itself -- i.e. only packages reachable from module load or FastAPI lifespan
+# startup in unified_api/main.py, across the modules that run in-process
+# rather than being proxied to their own per-team container. See
+# docs/UNIFIED_API_DEPENDENCY_AUDIT.md for the full trace and the allow/deny
+# rationale for every package below and every package omitted.
+#
+# Omitted on purpose (proxied-team-only or otherwise unused by unified-api):
+#   pytest / pytest-xdist / pytest-cov / pytest-asyncio  -- test-only, not a runtime dep
+#   beautifulsoup4  -- blogging / job_matching team code only
+#   ollama          -- PyPI package appears unused repo-wide (OllamaLLMClient uses httpx directly)
+#   pandas / numpy / pyarrow  -- investment_team only, zero reach from unified-api
+#
+# playwright is included below even though it wasn't in agents/requirements.txt
+# before: unified_api/medium_browser_login.py needs it for the Medium
+# auto-login feature, and its absence there was a pre-existing gap rather than
+# an intentional exclusion.
+#
+# backend/Dockerfile installs this file (not backend/agents/requirements.txt,
+# which every per-team container installs instead).
+
+pydantic>=2.12,<3.0
+# Direct dep: agent_registry.models imports jsonschema at module load to validate
+# IOSchema.inline_schema. Currently satisfied transitively via strands-agents/mcp,
+# but declared directly here since the import is direct (matches backend/requirements.txt).
+jsonschema>=4.23,<5.0
+httpx>=0.28,<1.0
+json-repair>=0.28,<1.0
+PyYAML>=6.0,<7.0
+# <0.137: FastAPI 0.137 added _IncludedRouter route nodes that prometheus-fastapi-instrumentator (<8) can't resolve (route.path)
+fastapi>=0.135,<0.137
+python-multipart>=0.0.26,<1.0
+uvicorn[standard]>=0.44,<1.0
+slack-sdk>=3.41,<4
+cryptography>=46.0,<47.0
+# Unified API: encrypted_integration_credentials / Google browser login when POSTGRES_HOST is set
+psycopg[binary]>=3.3,<4.0
+psycopg_pool>=3.3,<4.0
+# Knowledge-graph layer over Agent Cognition (shared.neo4j + agent_cognition.graph)
+neo4j>=5.26,<6.0
+graphiti-core>=0.29,<0.30
+temporalio>=1.25,<2.0
+APScheduler>=3.11,<4.0
+pytz>=2026.1
+strands-agents>=1.35,<2.0
+strands-agents-tools>=0.4,<1.0
+anthropic>=0.69,<1.0
+# Medium auto-login (unified_api/medium_browser_login.py); requires
+# `playwright install chromium` at image build time to be usable.
+playwright>=1.58,<2.0
+prometheus-fastapi-instrumentator>=7.1,<8.0
+opentelemetry-api>=1.41,<2.0
+opentelemetry-sdk>=1.41,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.41,<2.0
+opentelemetry-exporter-otlp-proto-grpc>=1.41,<2.0
+opentelemetry-instrumentation-fastapi>=0.62b0,<1.0
+opentelemetry-instrumentation-httpx>=0.62b0,<1.0
+opentelemetry-instrumentation-logging>=0.62b0,<1.0

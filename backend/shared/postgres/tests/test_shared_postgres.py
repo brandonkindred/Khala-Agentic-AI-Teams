@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock
 
 import pytest
@@ -54,7 +55,7 @@ def test_team_schema_defaults():
 
 def test_team_schema_frozen():
     schema = TeamSchema(team="foo")
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         schema.team = "bar"  # type: ignore[misc]
 
 
@@ -70,9 +71,18 @@ def test_team_schema_database_override():
 
 
 @contextmanager
-def _fake_conn_factory(executed: list[str], fail_on: set[int] | None = None):
-    """Yield a fake connection whose cursor.execute records statements."""
-    call_index = {"n": 0}
+def _fake_conn_factory(
+    executed: list[str],
+    fail_on: set[int] | None = None,
+    call_index: dict[str, int] | None = None,
+):
+    """Yield a fake connection whose cursor.execute records statements.
+
+    Pass a shared ``call_index`` when ``get_conn`` is opened once per statement
+    so ``fail_on`` indexes span the whole schema apply, not a single connection.
+    """
+    if call_index is None:
+        call_index = {"n": 0}
     fail_on = fail_on or set()
 
     cursor = MagicMock()
@@ -125,24 +135,13 @@ def test_ensure_team_schema_runs_all_ddl(monkeypatch):
 def test_ensure_team_schema_continues_past_failure(monkeypatch, caplog):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
 
-    state = {"call": 0}
+    executed: list[str] = []
+    call_index = {"n": 0}
 
     @contextmanager
     def fake_get_conn(database=None):
-        cursor = MagicMock()
-
-        def _execute(sql):
-            idx = state["call"]
-            state["call"] += 1
-            if idx == 1:  # fail on second statement
-                raise RuntimeError("boom")
-
-        cursor.execute.side_effect = _execute
-        cursor.__enter__ = lambda self: cursor
-        cursor.__exit__ = lambda self, *a: None
-        conn = MagicMock()
-        conn.cursor.return_value = cursor
-        yield conn
+        with _fake_conn_factory(executed, fail_on={1}, call_index=call_index) as c:
+            yield c
 
     monkeypatch.setattr(runner_mod, "get_conn", fake_get_conn)
 
@@ -159,6 +158,9 @@ def test_ensure_team_schema_continues_past_failure(monkeypatch, caplog):
         applied = ensure_team_schema(schema)
 
     assert applied == 2
+    assert len(executed) == 2
+    assert "demo_a" in executed[0]
+    assert "demo_c" in executed[1]
     assert any("stmt_index=1" in rec.message for rec in caplog.records)
 
 
@@ -196,7 +198,7 @@ def test_register_team_schemas_noop_for_every_schema_in_a_multi_schema_set(monke
     def _fail_if_called(*_a, **_k):
         raise AssertionError("get_conn must not be called when POSTGRES_HOST is unset")
 
-    monkeypatch.setattr("shared.postgres.client.get_conn", _fail_if_called)
+    monkeypatch.setattr(runner_mod, "get_conn", _fail_if_called)
 
     schemas = [
         TeamSchema(team="demo-primary", statements=["SELECT 1"]),
@@ -405,10 +407,11 @@ def test_connect_timeout_env_override(monkeypatch):
     assert "connect_timeout=7" in client_mod.dsn()
 
 
-def test_connect_timeout_floored_to_one(monkeypatch):
+@pytest.mark.parametrize("raw", ["0", "-3"])
+def test_connect_timeout_floored_to_one(monkeypatch, raw):
     # A zero/negative override is clamped up so the pool can never be opened with an
     # unbounded (0 = wait forever) connect timeout against a down host.
-    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "0")
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", raw)
     assert client_mod._connect_timeout() == 1
 
 
@@ -418,10 +421,9 @@ def test_connect_timeout_floored_to_one(monkeypatch):
 
 
 class _ProbePool:
-    """Fake pool whose ``connection(timeout=...)`` yields a cursor returning ``row``.
+    """Fake pool whose ``connection(timeout=...)`` returns a context manager yielding a connection. The connection's cursor returns ``row``.
 
-    ``raise_on_connection`` simulates a down host / exhausted pool (the acquisition
-    itself fails), which the probe must swallow and report as unreachable.
+    ``raise_on_connection`` simulates a down host / exhausted pool (the acquisition itself fails), which the probe must swallow and report as unreachable.
     """
 
     def __init__(self, row=(1,), raise_on_connection=False):

@@ -43,9 +43,9 @@ from temporalio.exceptions import ActivityError
 # always breaks a phase) now costs up to 3 attempts instead of the monolith's
 # single try-and-record. The 1s initial interval (vs. the 30s used by sibling
 # Temporal teams that did the same monolith-to-phases split) is a deliberate
-# choice to bound that cost — 3 attempts at 1s/2s/4s total ~7s of extra delay
-# and LLM/network calls before ``fail_scan`` runs, instead of the tens-of-
-# seconds a 30s-initial policy would add on every deterministic failure. A
+# choice to bound that cost — 3 attempts at 1s/2s total ~3s of retry delay
+# before ``fail_scan`` runs, instead of the tens-of-seconds a 30s-initial
+# policy would add on every deterministic failure. A
 # ``maximum_interval`` is set for defensive completeness even though 3
 # attempts at this backoff never approach it.
 DEFAULT_RETRY_POLICY = RetryPolicy(
@@ -283,7 +283,8 @@ def rank_activity(
 
     Preconditions:
         * ``postings`` is the list from :func:`scan_activity`; ``profile`` is a
-          serialised :class:`JobSeekerProfile`; ``top_n >= 1``.
+          serialised :class:`JobSeekerProfile`; ``top_n >= 1`` (enforced below —
+          violation raises ``ValueError``).
     Postconditions:
         * ``{"top": [...], "total_found": len(postings),
           "scanned_fingerprints": [...]}`` — ``top`` is the ranked best-first
@@ -291,6 +292,9 @@ def rank_activity(
           scanned posting; ``scanned_fingerprints`` lists all their fingerprints
           (so ``exclude_seen`` can suppress them on later runs).
     """
+    if top_n < 1:
+        raise ValueError(f"top_n must be >= 1, got {top_n}")
+
     from job_matching_team.agents.ranker import JobRankerAgent
     from job_matching_team.models import JobPosting
     from job_matching_team.profile.model import JobSeekerProfile

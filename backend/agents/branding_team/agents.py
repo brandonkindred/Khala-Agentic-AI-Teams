@@ -651,12 +651,17 @@ class BrandComplianceAgent:
             mission.company_name,
             mission.target_audience,
         ]
+        # Deduplicate (preserving order) so a keyword listed under more than one
+        # mission field — e.g. also present as a differentiator — contributes at
+        # most one match; otherwise a single distinct keyword could satisfy the
+        # "at least two distinct keywords" on-brand threshold below.
+        unique_keywords = list(dict.fromkeys(k for k in keywords if k))
         # Word-boundary patterns, compiled once per call. Substring matching
         # ("k in text") falsely fires on incidental overlaps — e.g. the value
         # "tech" matching "fintech" or "logistics" — inflating the on-brand
         # score. ``\b`` anchors each keyword (and multi-word phrase) to whole
         # words.
-        patterns = [(k, re.compile(rf"\b{re.escape(k.lower())}\b")) for k in keywords if k]
+        patterns = [(k, re.compile(rf"\b{re.escape(k.lower())}\b")) for k in unique_keywords]
         results: List[BrandCheckResult] = []
 
         for check in checks:

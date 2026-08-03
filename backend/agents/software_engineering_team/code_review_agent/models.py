@@ -125,8 +125,9 @@ def derive_issue_title(description: str, max_len: int = _TITLE_MAX_LEN) -> str:
     Postconditions:
         - Returns the description's first line, trimmed to at most
           ``max_len`` characters TOTAL (including a trailing "…" when
-          truncated) at a word boundary. Returns "" only when ``description``
-          is blank.
+          truncated); prefers breaking at a word boundary, but falls back to a
+          hard character boundary when the first word is longer than the limit.
+          Returns "" only when ``description`` is blank.
     """
     assert max_len > 0, "max_len must be positive"
     stripped = (description or "").strip()
@@ -186,7 +187,14 @@ class FileSegment(BaseModel):
 
     @property
     def line_count(self) -> int:
-        """Number of lines in this segment's content."""
+        """Number of lines in this segment's content.
+
+        A trailing ``"\\n"`` ends the last line rather than starting a phantom
+        empty one (``splitlines()`` semantics), matching how ``total_lines`` is
+        computed for the same content in ``chunking.split_block_into_segments``
+        — the two always agree, so a whole-file segment is never misclassified
+        as partial by a trailing-newline off-by-one.
+        """
         return len(self.content.splitlines()) or 1
 
     @property
@@ -219,6 +227,23 @@ class FileSegment(BaseModel):
             f"{self.start_line + i}: {line}" for i, line in enumerate(self.content.splitlines())
         )
 
+    @model_validator(mode="after")
+    def _validate_segment(self) -> "FileSegment":
+        """Enforce the geometric invariants documented on this class.
+
+        Postconditions:
+            - ``start_line`` is ≥ 1.
+            - ``total_lines`` is at least ``line_count``.
+            - ``end_line`` does not extend past ``total_lines``.
+        """
+        if self.start_line < 1:
+            raise ValueError("start_line must be 1-based")
+        if self.total_lines < self.line_count:
+            raise ValueError("total_lines must be at least line_count")
+        if self.end_line > self.total_lines:
+            raise ValueError("segment extends past end of file")
+        return self
+
 
 class ReviewChunk(BaseModel):
     """One map-call unit: a group of file segments reviewed in a single LLM call.
@@ -229,6 +254,18 @@ class ReviewChunk(BaseModel):
     """
 
     segments: List[FileSegment] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_unique_paths(self) -> "ReviewChunk":
+        """Reject chunks where two segments share a path (including empty).
+
+        Postconditions:
+            - Every ``path`` in ``segments`` appears at most once.
+        """
+        paths = [seg.path for seg in self.segments]
+        if len(paths) != len(set(paths)):
+            raise ValueError("ReviewChunk segments must have unique paths")
+        return self
 
     @property
     def content(self) -> str:
@@ -319,8 +356,12 @@ class ChunkReviewOutput(BaseModel):
     approved: bool = Field(default=False, description="True if chunk has no critical/high issues")
     issues: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Issues found (each with severity, category, file_path, title, description, "
-        "suggestion)",
+        description="Issues found (each with severity, category, file_path, line, start_line, "
+        "title, description, suggestion, pre_existing). Items are already validated against "
+        "ChunkReviewIssueLLM's typed schema at the LLM response boundary in "
+        "chunk_reviewer._run_chunk_review before being flattened to plain dicts here; "
+        "normalization into CodeReviewIssue happens once, downstream, in "
+        "chunking._issues_from_chunk_output.",
     )
     summary: str = Field(default="", description="Review summary for this chunk")
     spec_compliance_notes: str = Field(
@@ -584,10 +625,11 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
     omits ``start_line`` and ``pre_existing``: that pass's own
     ``_coerce_finding`` never populates either (its prompt's output format
     has no multi-line-anchor field, and only the side-effect pass emits
-    ``pre_existing``). Design-only: not yet consumed by
-    ``generate_structured``, ``coordinator.py``, or ``temporal/workflows.py`` —
-    wiring the merged pass into those call sites is tracked separately from
-    this schema design.
+    ``pre_existing``). This is the intended shape for the merged prompt's
+    Part 1 output contract. The in-process merged pass currently reuses the
+    standalone architecture pass's parsing/validation helpers to coerce and
+    validate per-half findings, rather than model-validating this class
+    directly.
     """
 
     severity: _ChunkReviewIssueSeverity = Field(
@@ -634,8 +676,10 @@ class SideEffectImpactFindingLLM(BaseModel):
     being silently coerced to ``False`` (or a truthy string to ``True``) as
     ``_coerce_bool`` does today. Intentionally omits ``start_line``: that
     pass's own ``_coerce_finding`` never populates it either (its prompt's
-    output format has no multi-line-anchor field). Design-only: not yet
-    consumed anywhere — see :class:`ArchitectureConsistencyFindingLLM`.
+    output format has no multi-line-anchor field). This is the intended shape for the
+    merged prompt's Part 2 output contract. The in-process merged pass currently
+    reuses the standalone side-effect pass's parsing/validation helpers to coerce
+    and validate per-half findings, rather than model-validating this class directly.
     """
 
     severity: _ChunkReviewIssueSeverity = Field(
@@ -689,10 +733,11 @@ class MergedArchitectureSideEffectResponse(BaseModel):
     same way each pass's own ``_coerce_finding`` does today) without having
     to re-derive which pass a given category value came from.
 
-    Design-only: this schema is not yet consumed by ``generate_structured``,
-    the coordinator's ``_run_tail_passes``, or the Temporal workflow/activity
-    — those wire-up changes belong to implementing the parent consolidation
-    (tracked separately), not to this schema design.
+    This is the target reply schema for the merged prompt contract. The
+    current in-process merged pass implementation parses the raw JSON and then
+    validates/coerces each half independently via the standalone passes'
+    parsing/validation helpers; it does not model-validate this response object
+    as a whole.
 
     Both fields are required, not defaulted — mirroring
     :class:`ChunkReviewLLMResponse`'s identical rationale. The merged

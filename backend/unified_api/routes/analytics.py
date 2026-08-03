@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 _agents_dir = Path(__file__).resolve().parent.parent.parent / "agents"
-if str(_agents_dir) not in sys.path:
+if str(_agents_dir) not in sys.path:  # pragma: no cover - path already populated by earlier test-collection imports
     sys.path.insert(0, str(_agents_dir))
 
 from analytics.signals import get_signals, get_team_scorecard  # noqa: E402

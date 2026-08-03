@@ -54,7 +54,7 @@ commit and rejection — analogous to the drift commit log, not part of the work
 
 ## Alignment round state
 
-`_AlignmentRoundOutcome` (`_orchestrator_helpers.py`) carries the spec/code/trades/metrics for
+`_AlignmentRoundOutcome` (`orchestrator_alignment.py`) carries the spec/code/trades/metrics for
 one alignment round. On a rejected proposal (`terminate=True`) the outcome carries the **same
 pre-iteration spec/code objects** — the known-good state survives a failed attempt untouched;
 a committed proposal (`terminate=False`) carries the new known-good state. Issue lists are

@@ -1,9 +1,12 @@
 """Tests for the SE Temporal worker module.
 
 Exercises the public surface: ``WORKFLOWS``/``ACTIVITIES`` registration and
-``start_se_temporal_worker_thread``'s delegation to the shared
-``start_team_worker`` bootstrap. No live Temporal cluster is started —
-``is_temporal_enabled`` and ``start_team_worker`` are patched.
+``start_se_temporal_worker_thread``'s unconditional delegation to the shared
+``start_team_worker`` bootstrap (no SE-level ``is_temporal_enabled()``
+pre-check — ``start_team_worker`` already performs that check itself). No
+live Temporal cluster is started — ``start_team_worker`` is patched, except
+for the disabled-path test which leaves ``TEMPORAL_ADDRESS`` unset to
+exercise the real check inside shared ``start_team_worker``.
 """
 
 from __future__ import annotations
@@ -35,14 +38,12 @@ def test_workflows_and_activities_are_registered() -> None:
 
 
 def test_start_returns_false_when_disabled(monkeypatch) -> None:
+    """Standalone dev path: with TEMPORAL_ADDRESS unset, start_se_temporal_worker_thread
+    delegates straight to start_team_worker, whose own is_temporal_enabled()
+    check returns False -- no SE-level pre-check duplicates it."""
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     from software_engineering_team.temporal import worker
 
-    monkeypatch.setattr(worker, "is_temporal_enabled", lambda: False)
-
-    def _raise(*args, **kwargs):
-        raise AssertionError("start_team_worker must not be called when Temporal is disabled")
-
-    monkeypatch.setattr(worker, "start_team_worker", _raise)
     assert worker.start_se_temporal_worker_thread() is False
 
 
@@ -52,7 +53,6 @@ def test_start_delegates_to_start_team_worker(monkeypatch) -> None:
     ThreadPoolExecutor/Worker/daemon-thread bootstrap."""
     from software_engineering_team.temporal import worker
 
-    monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
     captured: dict = {}
 
     def _fake_start(team, workflows, activities, *, task_queue):
@@ -77,6 +77,5 @@ def test_start_returns_start_team_worker_result(monkeypatch) -> None:
     when the shared client fails to connect), not hardcoded to True."""
     from software_engineering_team.temporal import worker
 
-    monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(worker, "start_team_worker", lambda *a, **kw: False)
     assert worker.start_se_temporal_worker_thread() is False

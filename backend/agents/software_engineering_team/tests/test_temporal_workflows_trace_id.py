@@ -60,8 +60,12 @@ def test_run_team_workflow_v2_generates_one_trace_id_shared_by_all_three_activit
     names = [c[0] for c in calls]
     assert names == ["parse_spec_activity", "plan_project_activity", "execute_coding_team_activity"]
 
-    # Each activity's trailing positional arg is the trace_id (last element passed).
-    trace_ids = {c[1][-1] for c in calls}
+    # parse_spec_activity(job_id, repo_path, spec_content_override, trace_id, sprint_id)
+    # — trace_id is second-to-last now that sprint_id trails it; the other two phases
+    # are unchanged and still end with trace_id.
+    parse_spec_args, plan_args, execute_args = (c[1] for c in calls)
+    assert parse_spec_args[-1] is None  # sprint_id defaults to None when the caller omits it
+    trace_ids = {parse_spec_args[-2], plan_args[-1], execute_args[-1]}
     assert len(trace_ids) == 1, f"expected one shared trace id across all phases, got {calls}"
     trace_id = next(iter(trace_ids))
     assert trace_id == _FIRST_TRACE_ID  # workflow.uuid4(), not stdlib uuid4/new_trace_id
@@ -79,8 +83,18 @@ def test_run_team_workflow_v2_planning_only_still_shares_the_trace_id():
 
     names = [c[0] for c in calls]
     assert names == ["parse_spec_activity", "plan_project_activity"]
-    trace_ids = {c[1][-1] for c in calls}
+    parse_spec_args, plan_args = (c[1] for c in calls)
+    trace_ids = {parse_spec_args[-2], plan_args[-1]}
     assert trace_ids == {_FIRST_TRACE_ID}
+
+
+def test_run_team_workflow_v2_forwards_sprint_id_to_parse_spec_activity():
+    calls: list = []
+    with _driver({}, calls):
+        asyncio.run(wfmod.RunTeamWorkflowV2().run("job-6", "/repo", sprint_id="sprint-456"))
+
+    assert calls[0][0] == "parse_spec_activity"
+    assert calls[0][1][-1] == "sprint-456"
 
 
 def test_run_team_workflow_generates_and_forwards_a_trace_id():
@@ -90,8 +104,18 @@ def test_run_team_workflow_generates_and_forwards_a_trace_id():
 
     assert calls[0][0] == "run_orchestrator_activity"
     # run_orchestrator_activity(job_id, repo_path, spec_content_override,
-    #                            resolved_questions_override, planning_only, trace_id)
-    assert calls[0][1][-1] == _FIRST_TRACE_ID
+    #                            resolved_questions_override, planning_only, trace_id, sprint_id)
+    assert calls[0][1][-2] == _FIRST_TRACE_ID
+    assert calls[0][1][-1] is None  # sprint_id defaults to None when the caller omits it
+
+
+def test_run_team_workflow_forwards_sprint_id():
+    calls: list = []
+    with _driver({}, calls):
+        asyncio.run(wfmod.RunTeamWorkflow().run("job-5", "/repo", sprint_id="sprint-123"))
+
+    assert calls[0][0] == "run_orchestrator_activity"
+    assert calls[0][1][-1] == "sprint-123"
 
 
 def test_retry_failed_workflow_generates_and_forwards_a_trace_id():

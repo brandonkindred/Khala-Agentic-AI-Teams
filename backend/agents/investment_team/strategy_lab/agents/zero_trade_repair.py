@@ -19,16 +19,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
 
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
-from ._llm_budget import DesignBudgetExhausted
-from ._llm_envelope import run_structured_agent
-from ._parse_helpers import StrategySpecParseError, extract_json_object, validate_structured_rules
+from ._agent_runner import run_single_shot_agent
+from ._parse_helpers import StrategySpecParseError, validate_structured_rules
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
-from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -200,25 +197,7 @@ class ZeroTradeRepairAgent:
             response_schema_json=_ZERO_TRADE_REPAIR_SCHEMA_JSON,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_zero_trade_repair"),
-            system_prompt=system_prompt,
-            tools=[],
-        )
-
-        try:
-            parsed = run_structured_agent(
-                agent,
-                user_prompt,
-                agent_key="strategy_zero_trade_repair",
-                phase="zero_trade_repair",
-                parse=extract_json_object,
-                charge=True,
-                logger=logger,
-            )
-        except DesignBudgetExhausted:
-            raise
-        except Exception as exc:
+        def _on_failure(exc: Exception) -> ZeroTradeRepairReport:
             logger.exception("Zero-trade repair agent failed to produce parseable JSON")
             return ZeroTradeRepairReport(
                 root_cause_category=diagnostics.zero_trade_category,
@@ -227,6 +206,18 @@ class ZeroTradeRepairAgent:
                     "Falling through to generic refinement."
                 ),
             )
+
+        ok, parsed = run_single_shot_agent(
+            agent_key="strategy_zero_trade_repair",
+            phase="zero_trade_repair",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            charge=True,
+            logger=logger,
+            on_failure=_on_failure,
+        )
+        if not ok:
+            return parsed
 
         return _coerce_report(parsed, fallback_category=diagnostics.zero_trade_category)
 

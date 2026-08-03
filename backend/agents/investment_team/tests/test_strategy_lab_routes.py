@@ -4,10 +4,11 @@ Targets the routes that interact with the in-memory ``_active_runs``
 dict and the ``_get_lab_run_job_client`` shim:
 
 * ``run_strategy_lab`` — 409 when a run is already active.
-* ``run_strategy_lab`` — happy path (worker thread is stubbed so the
+* ``run_strategy_lab`` — happy path (Temporal dispatch is stubbed so the
   route can return immediately).
 * ``resume_strategy_lab_run`` — 404 + 400 + 409 + happy paths.
 * ``restart_strategy_lab_run`` — 404 + 400 + 409 + happy paths.
+* run/resume/restart — same-run_id transition-lock serialization (#4028).
 * ``list_strategy_lab_runs`` — terminal-status reconciliation + persisted
   job merge.
 * ``list_strategy_lab_jobs`` — persisted-job merge.
@@ -15,7 +16,7 @@ dict and the ``_get_lab_run_job_client`` shim:
   load-from-job-service fallback.
 * ``stream_strategy_lab_run`` — terminal-state short-circuit + 404.
 
-Every test patches the JobService shim and the worker so no real
+Every test patches the JobService shim and the Temporal dispatch so no real
 strategy-lab cycles execute.
 """
 
@@ -82,8 +83,23 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api_main, "_active_runs", shared_runs)
     monkeypatch.setattr(_run_state, "active_runs", shared_runs)
 
-    # Stop real threads from spawning.
-    monkeypatch.setattr(api_main, "_strategy_lab_worker", lambda *a, **k: None)
+    # Reset the per-run_id transition-lock registry too, so a test that
+    # deliberately pre-holds a lock to simulate contention can't leak it into
+    # a later test that happens to reuse the same run_id string.
+    monkeypatch.setattr(_run_state, "_run_transition_locks", {})
+
+    # Stub the Temporal dispatch so no real workflow start is attempted.
+    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", lambda *a, **k: None)
+
+    # restart_strategy_lab_run calls _require_temporal() and
+    # terminate_and_await_workflow_sync() directly (to resolve any prior
+    # execution before resetting state), independent of the dispatch stub
+    # above — stub those too so restart's happy path doesn't need a real
+    # Temporal worker either.
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
     # Stub the persistence calls so they don't try to reach the job service.
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
@@ -328,6 +344,312 @@ def test_restart_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, ap
     body = resp.json()
     assert body["run_id"] == "run-g"
     assert "restarted" in body["message"]
+
+
+# ---------------------------------------------------------------------------
+# run/resume/restart — same-run_id transition-lock serialization (#4028)
+# ---------------------------------------------------------------------------
+
+
+def test_run_strategy_lab_returns_409_when_transition_lock_held_for_minted_run_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    import uuid as uuid_module
+
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    fixed_uuid = uuid_module.UUID("12345678-1234-5678-1234-567812345678")
+    monkeypatch.setattr(api_main.uuid, "uuid4", lambda: fixed_uuid)
+    run_id = f"run-{fixed_uuid.hex[:8]}"
+
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.post("/strategy-lab/run", json={})
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+        assert run_id not in api_main._active_runs
+    finally:
+        held_lock.release()
+
+
+def test_resume_strategy_lab_run_returns_409_when_transition_lock_held(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-lock-held-resume"
+    api_main._active_runs[run_id] = _resumable_state(run_id)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+    dispatch_calls: List[Any] = []
+    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", lambda *a, **k: dispatch_calls.append(a))
+
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+        assert dispatch_calls == []
+    finally:
+        held_lock.release()
+
+
+def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_before(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: resume must derive its dispatched counters/payload from
+    state read AFTER acquiring the transition lock, not from a snapshot
+    taken beforehand — a concurrent transition for the same run_id could
+    otherwise complete (write its own state, dispatch, even reach a
+    terminal status) between an earlier read and this request's lock
+    acquisition, at which point _ensure_no_active_run() no longer blocks
+    it, and a resume built from the stale snapshot would rebuild the run
+    from outdated counters and dispatch duplicate work.
+
+    Simulated via a stateful _get_run_state stub keyed on call count (not
+    real threads): the fixed code calls it twice (a cheap existence check,
+    then the real read inside the lock) — only the second call's result
+    should drive the dispatch. The old code called it exactly once, before
+    the lock, so this test would have used the stale snapshot against it."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-resume-uses-post-lock-state"
+    stale_state = _resumable_state(run_id, contiguous_cycles=2, completed_cycles=2)
+    fresh_state = _resumable_state(run_id, contiguous_cycles=5, completed_cycles=5)
+    api_main._active_runs[run_id] = stale_state
+
+    call_count = {"n": 0}
+
+    def _stateful_get_run_state(rid: str):
+        call_count["n"] += 1
+        if call_count["n"] > 1:
+            # Simulate a concurrent transition completing and overwriting
+            # state between the first (existence) read and the real one.
+            api_main._active_runs[rid] = fresh_state
+        return _run_state.get_run_state(rid)
+
+    monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
+    assert resp.status_code == 200
+    assert call_count["n"] >= 2
+    body = resp.json()
+    # 5 + 1 (fresh), not 2 + 1 (stale).
+    assert "resumed from cycle 6" in body["message"]
+    assert api_main._active_runs[run_id]["contiguous_cycles"] == 5
+
+
+def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-lock-held-restart"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    terminate_calls: List[Any] = []
+    import shared.temporal
+
+    monkeypatch.setattr(
+        shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: terminate_calls.append(a)
+    )
+
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+        # Rejected purely by the lock — never reached Temporal at all.
+        assert terminate_calls == []
+    finally:
+        held_lock.release()
+
+
+def test_restart_strategy_lab_run_returns_409_not_400_when_racing_transition_wrote_running(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: status must be read INSIDE the transition lock, not
+    before it. "running" is deliberately excluded from RESTARTABLE_STATUSES
+    (a genuinely still-running run can't be restarted without stopping it
+    first) — but a concurrent in-flight restart for this same run_id
+    transiently writes "running" too, while still holding the lock. Reading
+    state before attempting the lock would misread that transient write as
+    a permanently invalid status and 400 instead of the promised retryable
+    409, breaking the "retry shortly" contract this whole guard exists to
+    provide."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-racing-restart-wrote-running"
+    # Simulates the state a concurrent in-flight restart already wrote —
+    # non-restartable on its face, but only because a transition, not a
+    # genuine long-running execution, currently owns this run_id.
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+    finally:
+        held_lock.release()
+
+
+def test_restart_strategy_lab_run_404_does_not_allocate_transition_lock_entry(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a 404 for a nonexistent run_id must be rejected by the
+    cheap existence check before the transition lock is ever touched — a
+    barrage of restart requests for run_ids that don't exist must not grow
+    the (never-evicted) transition-lock registry."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-never-existed"
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+    assert resp.status_code == 404
+    assert run_id not in _run_state._run_transition_locks
+
+
+def test_run_strategy_lab_409_when_already_running_does_not_allocate_transition_lock_entry(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: run_strategy_lab mints a fresh uuid4 run_id every call, so
+    if the global 409 guard ran after minting + acquiring the transition
+    lock, every rejected /run request during a long run would leak one
+    throwaway Lock into the (never-evicted) registry forever. The global
+    check must run first."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    api_main._active_runs["existing"] = {"run_id": "existing", "status": "running"}
+    before = len(_run_state._run_transition_locks)
+
+    resp = api_client.post("/strategy-lab/run", json={})
+
+    assert resp.status_code == 409
+    assert len(_run_state._run_transition_locks) == before
+
+
+def test_resume_strategy_lab_run_returns_409_when_restart_transition_lock_held_for_same_run_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Cross-endpoint case named explicitly in #4028: a resume racing a
+    restart for the same run_id must not proceed just because it's a
+    different route — the lock is keyed on run_id, not on endpoint."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-cross-endpoint"
+    api_main._active_runs[run_id] = _resumable_state(run_id)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    # Simulate a restart already in flight for this run_id.
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+    finally:
+        held_lock.release()
+
+
+def test_restart_strategy_lab_run_serializes_concurrent_restarts_for_same_run_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The literal #4028 acceptance criterion: two concurrent restart calls
+    for the same run_id must not both proceed to terminate/dispatch. Only
+    one wins the transition lock; the other is rejected with 409 before it
+    ever touches Temporal — a deterministic block-and-signal setup, not a
+    ``sys.setswitchinterval`` race (the fix makes the contended path
+    non-blocking, so no actual race window needs to be forced)."""
+    import threading
+
+    from fastapi import HTTPException
+
+    from investment_team.api import main as api_main
+
+    run_id = "run-concurrent-restart"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    entered = threading.Event()
+    release = threading.Event()
+    terminate_calls: List[Any] = []
+    dispatch_calls: List[Any] = []
+
+    def _slow_terminate(*args: Any, **kwargs: Any) -> None:
+        terminate_calls.append((args, kwargs))
+        entered.set()
+        assert release.wait(timeout=5.0), "release event was never set"
+
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _slow_terminate)
+    monkeypatch.setattr(
+        api_main, "_dispatch_strategy_lab_run", lambda *a, **k: dispatch_calls.append(a)
+    )
+
+    result_a: List[Any] = []
+
+    def _call_a() -> None:
+        try:
+            result_a.append(api_main.restart_strategy_lab_run(run_id))
+        except BaseException as exc:  # pragma: no cover - surfaced via assertion below
+            result_a.append(exc)
+
+    thread_a = threading.Thread(target=_call_a)
+    thread_a.start()
+    try:
+        assert entered.wait(timeout=5.0), "request A never entered terminate_and_await_workflow_sync"
+
+        # Request B races in while A still holds the transition lock inside
+        # the (stubbed) blocking termination call.
+        with pytest.raises(HTTPException) as exc_info:
+            api_main.restart_strategy_lab_run(run_id)
+        assert exc_info.value.status_code == 409
+        assert "Another transition" in exc_info.value.detail
+        # B was rejected purely by the lock — it never reached Temporal.
+        assert len(terminate_calls) == 1
+    finally:
+        release.set()
+        thread_a.join(timeout=5.0)
+    assert not thread_a.is_alive()
+
+    assert len(result_a) == 1
+    assert not isinstance(result_a[0], BaseException), result_a[0]
+    assert result_a[0].run_id == run_id
+
+    # Exactly one dispatch/termination sequence executed overall.
+    assert len(terminate_calls) == 1
+    assert len(dispatch_calls) == 1
+    assert api_main._active_runs[run_id]["status"] == "running"
+    assert api_main._active_runs[run_id]["contiguous_cycles"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +1085,28 @@ def test_stream_strategy_lab_run_terminal_short_circuit(
     }
     resp = api_client.get("/strategy-lab/runs/done/stream")
     # Terminal runs return a complete SSE response synchronously.
+    assert resp.status_code == 200
+    body = resp.text
+    assert "snapshot" in body
+    assert "done" in body
+
+
+def test_stream_strategy_lab_run_terminal_short_circuit_completed_with_errors(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``completed_with_errors`` must also be treated as terminal so a
+    reconnecting client gets snapshot + done instead of hanging in 'running'."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["done-with-errors"] = {
+        "run_id": "done-with-errors",
+        "status": "completed_with_errors",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 1,
+        "completed_cycles": 1,
+        "errored_cycles": 1,
+    }
+    resp = api_client.get("/strategy-lab/runs/done-with-errors/stream")
     assert resp.status_code == 200
     body = resp.text
     assert "snapshot" in body

@@ -78,6 +78,54 @@ def test_excluded_company_forced_skip():
     assert any("Excluded company" in c for c in ranked[0].concerns)
 
 
+def test_excluded_company_whole_word_false_positive():
+    """Excluding 'Apple' must not skip unrelated companies like 'Appleton'."""
+    posting = JobPosting(company="Appleton", title="Eng").ensure_fingerprint()
+    llm = _llm_with_scores(
+        {
+            "Appleton": {
+                f: 1.0
+                for f in (
+                    "title_fit",
+                    "seniority_fit",
+                    "location_fit",
+                    "comp_fit",
+                    "company_fit",
+                    "skills_fit",
+                )
+            }
+        }
+    )
+    profile = JobSeekerProfile(excluded_companies=["Apple"])
+    ranked = JobRankerAgent(llm_client=llm).rank([posting], profile)
+    assert not any("Excluded company" in c for c in ranked[0].concerns)
+    assert ranked[0].recommendation != "skip"
+
+
+def test_excluded_company_whole_word_true_positive():
+    """Excluding 'Apple' must still skip postings whose company is 'Apple Inc.'."""
+    posting = JobPosting(company="Apple Inc.", title="Eng").ensure_fingerprint()
+    llm = _llm_with_scores(
+        {
+            "Apple Inc.": {
+                f: 1.0
+                for f in (
+                    "title_fit",
+                    "seniority_fit",
+                    "location_fit",
+                    "comp_fit",
+                    "company_fit",
+                    "skills_fit",
+                )
+            }
+        }
+    )
+    profile = JobSeekerProfile(excluded_companies=["Apple"])
+    ranked = JobRankerAgent(llm_client=llm).rank([posting], profile)
+    assert ranked[0].recommendation == "skip"
+    assert any("Excluded company" in c for c in ranked[0].concerns)
+
+
 def test_salary_floor_forces_skip():
     posting = JobPosting(company="Acme", title="Eng", salary_max=90000).ensure_fingerprint()
     llm = _llm_with_scores(

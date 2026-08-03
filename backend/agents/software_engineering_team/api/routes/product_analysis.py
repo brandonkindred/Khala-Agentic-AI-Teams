@@ -1,14 +1,12 @@
 """SE team API — product-analysis (PRA) run, start-from-spec, status, answers, auto-answer and jobs routes."""
 
 import logging
-import threading
 import uuid
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from software_engineering_team.api import main as _main
 from software_engineering_team.api.models import (
     AutoAnswerRequest,
     AutoAnswerResponse,
@@ -83,26 +81,17 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
     create_job(job_id, request.repo_path, job_type="product_analysis")
 
     initial_spec_path_str = str(initial_spec_path) if initial_spec_path else None
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or PRA worker thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
         from software_engineering_team.temporal.start_workflow import start_standalone_workflow
 
-        if is_temporal_enabled():
-            start_standalone_workflow(
-                STANDALONE_TYPE_PRODUCT_ANALYSIS,
-                job_id,
-                request.repo_path,
-                spec_content=spec_content,
-                initial_spec_path=initial_spec_path_str,
-            )
-        else:
-            thread = threading.Thread(
-                target=_main._run_product_analysis_background,
-                args=(job_id, request.repo_path, spec_content, initial_spec_path),
-            )
-            thread.daemon = True
-            thread.start()
+        start_standalone_workflow(
+            STANDALONE_TYPE_PRODUCT_ANALYSIS,
+            job_id,
+            request.repo_path,
+            spec_content=spec_content,
+            initial_spec_path=initial_spec_path_str,
+        )
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -153,29 +142,29 @@ def start_product_analysis_from_spec(request: StartFromSpecRequest) -> ProductAn
     job_id = str(uuid.uuid4())
     create_job(job_id, repo_path_str, job_type="product_analysis")
 
-    try:  # pragma: no cover  # integration-only: spawns Temporal workflow or PRA worker thread
-        from software_engineering_team.temporal.client import is_temporal_enabled
+    try:  # pragma: no cover  # integration-only: spawns Temporal workflow
         from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
         from software_engineering_team.temporal.start_workflow import start_standalone_workflow
 
-        if is_temporal_enabled():
-            start_standalone_workflow(
-                STANDALONE_TYPE_PRODUCT_ANALYSIS,
-                job_id,
-                repo_path_str,
-                spec_content=spec_content,
-                initial_spec_path=initial_spec_path_str,
-            )
-        else:
-            thread = threading.Thread(
-                target=_main._run_product_analysis_background,
-                args=(job_id, repo_path_str, spec_content, initial_spec_path_str),
-            )
-            thread.daemon = True
-            thread.start()
+        start_standalone_workflow(
+            STANDALONE_TYPE_PRODUCT_ANALYSIS,
+            job_id,
+            repo_path_str,
+            spec_content=spec_content,
+            initial_spec_path=initial_spec_path_str,
+        )
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+        # Deliberately does not roll back project_dir: a dispatch exception
+        # here (timeout, RPC error, or anything past the "no client
+        # configured" precondition check) doesn't prove the workflow was
+        # never scheduled — Temporal may have accepted the start and simply
+        # lost the acknowledgment. Deleting the directory in that case would
+        # race a workflow that's still running against a path a retry just
+        # recreated. Leaving it in place (same tradeoff every sibling
+        # dispatch route already accepts) only costs a locked project_name
+        # until it's manually cleaned up.
         logger.exception("Failed to start product-analysis workflow from spec")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e

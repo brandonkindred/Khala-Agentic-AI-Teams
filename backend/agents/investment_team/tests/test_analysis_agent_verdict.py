@@ -28,6 +28,7 @@ from typing import Any, List
 import pytest
 
 from investment_team.models import BacktestResult, StrategySpec
+from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
 from investment_team.strategy_lab.agents import analysis as analysis_module
 from investment_team.strategy_lab.agents.alignment import (
     AlignmentIssue,
@@ -124,8 +125,8 @@ def _install_recorder(monkeypatch) -> _Recorder:
             rec.read_files.append(key)
             return super().__getitem__(key)
 
-    monkeypatch.setattr(analysis_module, "Agent", _StubAgent)
-    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda _name: None)
     monkeypatch.setattr(
         analysis_module,
         "_DRAFT_TEMPLATES",
@@ -150,9 +151,9 @@ def test_agent_key_is_strategy_analysis_not_ideation(monkeypatch):
             )
 
     model_keys: List[str] = []
-    monkeypatch.setattr(analysis_module, "Agent", _StubAgent)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubAgent)
     monkeypatch.setattr(
-        analysis_module, "get_strands_model", lambda name: model_keys.append(name) or None
+        agent_runner_module, "get_strands_model", lambda name: model_keys.append(name) or None
     )
 
     AnalysisAgent().run(
@@ -472,8 +473,8 @@ def _install_failing_draft_recorder(monkeypatch, *, mode: str) -> _Recorder:
                 raise AssertionError(f"unknown mode {mode!r}")
             return rec.render_response()
 
-    monkeypatch.setattr(analysis_module, "Agent", _FailingDraftAgent)
-    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _FailingDraftAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda _name: None)
     return rec
 
 
@@ -606,8 +607,8 @@ def _install_compliant_review_recorder(monkeypatch, *, draft_body: str) -> _Reco
             # "LLM ignored the disclaimer instruction" failure mode.
             return json.dumps({"revised_narrative": draft_body, "verification_notes": "echoed"})
 
-    monkeypatch.setattr(analysis_module, "Agent", _StubAgent)
-    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda _name: None)
     return rec
 
 
@@ -828,8 +829,8 @@ def test_misaligned_disclaimer_enforced_when_review_fails(monkeypatch):
                 )
             raise RuntimeError("simulated review transport failure")
 
-    monkeypatch.setattr(analysis_module, "Agent", _FailingReviewAgent)
-    monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _FailingReviewAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda _name: None)
 
     narrative = AnalysisAgent().run(
         _spec(),
