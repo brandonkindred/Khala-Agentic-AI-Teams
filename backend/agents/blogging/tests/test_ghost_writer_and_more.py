@@ -6,6 +6,8 @@ Covers:
 * ``_find_gaps_via_llm`` happy + error paths.
 * ``_plan_to_text``.
 * ``conduct_interview`` quick exits (skipped, cancelled, no-experience).
+* ``_is_no_experience`` (exhaustive true/false cases), agent construction,
+  ``_extract_gaps_from_plan``, and ``_generate_friendly_seeds``.
 """
 
 from __future__ import annotations
@@ -812,4 +814,166 @@ def test_ghost_conduct_interview_notifies_job_updater(monkeypatch) -> None:
     )
     assert result.skipped is True
     assert updates
+
+
+# ---------------------------------------------------------------------------
+# _is_no_experience (exhaustive), construction, _extract_gaps_from_plan,
+# _generate_friendly_seeds — moved here from test_writer_and_v2_helpers.py to
+# keep ghost_writer_agent coverage in one file.
+# ---------------------------------------------------------------------------
+
+
+def test_ghost_writer_no_experience_phrase() -> None:
+    from agents.blogging.ghost_writer_agent.agent import _is_no_experience
+
+    # Exact short tokens
+    assert _is_no_experience("skip") is True
+    assert _is_no_experience("SKIP.") is True
+    assert _is_no_experience("none") is True
+    assert _is_no_experience("pass") is True
+    assert _is_no_experience("n/a") is True
+
+    # Formerly ambiguous stems — exact message only (not substring)
+    assert _is_no_experience("Nothing comes to mind") is True
+    assert _is_no_experience("nothing comes to mind.") is True
+    assert _is_no_experience("I haven't done that") is True
+    assert _is_no_experience("i haven't") is True
+    assert _is_no_experience("i have no") is True
+    assert _is_no_experience("i can't think of") is True
+
+    # Explicit command-prefixed skips (leading token + trailing text)
+    assert _is_no_experience("skip this one") is True
+    assert _is_no_experience("skip, please") is True
+    assert _is_no_experience("pass on this question") is True
+    assert _is_no_experience("n/a for this section") is True
+
+    # Specific refusal phrases (word-boundary containment)
+    assert _is_no_experience("I don't have any story") is True
+    assert _is_no_experience("I don't have direct experience with that") is True
+    assert _is_no_experience("I don't have any relevant experiences") is True
+    assert _is_no_experience("no relevant experience for this") is True
+    assert _is_no_experience("I have no experience with that") is True
+    assert _is_no_experience("I have no story for this topic") is True
+    assert _is_no_experience("I can't think of a story") is True
+    assert _is_no_experience("Yes I have a great one") is False
+
+    # Qualified experience refusals (optional adjective between "no" and "experience")
+    assert _is_no_experience("I have no direct experience with that") is True
+    assert _is_no_experience("I have no personal experience here") is True
+    assert _is_no_experience("I have no relevant experiences in this area") is True
+    assert _is_no_experience("I have no prior experience") is True
+
+    # Ambiguous substrings / incidental short-word uses must NOT skip
+    assert _is_no_experience("I have no idea what you mean") is False
+    assert _is_no_experience("I haven't thought about it that way") is False
+    assert _is_no_experience("I can't think of anything else right now") is False
+    assert _is_no_experience("Nothing comes to mind immediately") is False
+    assert _is_no_experience("I haven't tried that") is False
+    assert _is_no_experience("nothing comes to mind here") is False
+    assert _is_no_experience("please skip ahead in the draft") is False
+    assert _is_no_experience("I will pass along the details") is False
+    assert _is_no_experience("none of my colleagues knew the answer, but I did") is False
+    assert (
+        _is_no_experience("I don't have the exact dates, but the migration started after launch")
+        is False
+    )
+
+
+def test_ghost_writer_agent_construction() -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    assert agent is not None
+
+
+def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
+    """_extract_gaps_from_plan returns an empty list when no section has a
+    story_opportunity; no LLM call is made."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import DummyLLMClient
+
+    from ._content_plan_test_utils import make_content_plan
+
+    plan = make_content_plan(
+        overarching_topic="X",
+        narrative_flow="flow",
+        sections=[
+            ContentPlanSection(title="A", coverage_description="cov", order=0),
+        ],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    # When no story_opportunity on sections, _extract_gaps_from_plan returns []
+    out = agent._extract_gaps_from_plan(plan)
+    assert out == []
+
+
+def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import DummyLLMClient
+
+    from ._content_plan_test_utils import make_content_plan
+
+    sec_a = ContentPlanSection(
+        title="A", coverage_description="cov", order=0, story_opportunity="A debug story"
+    )
+    sec_b = ContentPlanSection(
+        title="B",
+        coverage_description="cov2",
+        order=1,
+        story_opportunity="A migration story",
+    )
+    plan = make_content_plan(
+        overarching_topic="X",
+        narrative_flow="flow",
+        sections=[sec_a, sec_b],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    # Patch the seed generator to avoid LLM call
+    monkeypatch.setattr(agent, "_generate_friendly_seeds", lambda opps: [f"seed-{o}" for o in opps])
+    out = agent._extract_gaps_from_plan(plan)
+    assert len(out) == 2
+    assert out[0].section_title == "A"
+    assert "seed-A debug story" == out[0].seed_question
+
+
+def test_ghost_writer_generate_friendly_seeds_fallback(monkeypatch) -> None:
+    """When the LLM call raises, _generate_friendly_seeds falls back to generic seeds."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+
+    # Patch the Agent class globally inside ghost_writer_agent.agent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
+
+    class _BoomAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise RuntimeError("nope")
+
+    monkeypatch.setattr(gw_agent, "Agent", _BoomAgent)
+    out = agent._generate_friendly_seeds(["topic A.", "topic B."])
+    assert len(out) == 2
+    assert all("topic" in s.lower() for s in out)
+
+
+def test_ghost_writer_generate_friendly_seeds_empty_input() -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    assert agent._generate_friendly_seeds([]) == []
     assert any("Waiting for your response" in u.get("status_text", "") for u in updates)
