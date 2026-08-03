@@ -183,11 +183,11 @@ def test_clear_slack_oauth_preserves_credentials(tmp_path: Path, monkeypatch: py
 
 
 def test_get_integrations_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """get_integrations_list returns Slack, Medium, and GitHub entries without sensitive credentials."""
+    """get_integrations_list returns Slack, Medium, GitHub, and TradingView entries without sensitive credentials."""
     store, _ = _reload_modules(tmp_path, monkeypatch)
     store.set_slack_config(True, "https://hooks.slack.com/services/T/B/X", channel_display_name="#eng")
     items = store.get_integrations_list()
-    assert len(items) == 3
+    assert len(items) == 4
     slack = next(i for i in items if i["id"] == "slack")
     assert slack["type"] == "slack"
     assert slack["enabled"] is True
@@ -201,6 +201,9 @@ def test_get_integrations_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     github = next(i for i in items if i["id"] == "github")
     assert github["type"] == "github"
     assert github["enabled"] is False
+    tradingview = next(i for i in items if i["id"] == "tradingview")
+    assert tradingview["type"] == "tradingview"
+    assert tradingview["enabled"] is False
 
 
 def _install_inmemory_github_credentials(store_mod, monkeypatch: pytest.MonkeyPatch) -> dict:

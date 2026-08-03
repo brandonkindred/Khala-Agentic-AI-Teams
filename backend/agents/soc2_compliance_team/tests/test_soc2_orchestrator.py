@@ -168,6 +168,29 @@ def test_run_report_failure_preserves_tsc_results(
     assert len(out.tsc_results) == 5
 
 
+def test_run_assembly_failure_preserves_tsc_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure in result assembly (after criteria + report synthesis already
+    succeeded) must preserve those completed tsc_results in the failed result,
+    not propagate the exception (violating the documented 'never raises'
+    invariant) or discard the results."""
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _clean_results())
+    monkeypatch.setattr(
+        pipeline, "write_report", lambda rp, tsc: (None, NextStepsDocument(title="Next Steps"))
+    )
+
+    def _boom(rp, tsc, report, next_steps):
+        raise RuntimeError("assemble boom")
+
+    monkeypatch.setattr(pipeline, "assemble_result", _boom)
+    out = SOC2AuditOrchestrator().run(tmp_path)
+    assert out.status == "failed"
+    assert "assemble boom" in (out.error or "")
+    assert len(out.tsc_results) == 5
+
+
 def test_run_with_timeout_returns_result_within_deadline() -> None:
     from soc2_compliance_team.orchestrator import _run_with_timeout
 

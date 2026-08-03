@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from llm_service import LLMClient
-from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.team_lead_base import BaseTeamLead
 
@@ -42,6 +41,9 @@ logger = logging.getLogger(__name__)
 # subclasses may override via the class attribute ``max_review_iterations``
 # (which defaults to this module constant).
 MAX_REVIEW_ITERATIONS = 15
+REPO_EXTENSIONS = frozenset({".py", ".md", ".yaml", ".yml", ".json", ".toml"})
+REPO_EXCLUDE_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv"})
+REPO_MAX_CHARS = 20_000
 
 
 class AIAgentDevelopmentTeamLead(BaseTeamLead):
@@ -58,9 +60,8 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
     solving retry loop with no LLM-based gates and no git/branch concerns)
     does not fit the code-v2 teams' ``BaseV2DevelopmentAgent`` per-microtask
     gated state machine, mirroring why ``devops_team`` also does not use it.
-    Does not use ``BaseTeamLead``'s per-repo briefing cache
-    (:meth:`BaseTeamLead._repo_context_cache_for`), so ``__init__`` passes empty
-    extension/exclude-dir sets and a zero char budget for that unused feature.
+    Reuses :meth:`BaseTeamLead._repo_context_cache_for` with the briefing
+    contract above so multi-task jobs re-read only changed files.
     """
 
     max_review_iterations = MAX_REVIEW_ITERATIONS
@@ -69,9 +70,9 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
         BaseTeamLead.__init__(
             self,
             llm_client,
-            extensions=frozenset(),
-            exclude_dirs=frozenset(),
-            max_chars=0,
+            extensions=REPO_EXTENSIONS,
+            exclude_dirs=REPO_EXCLUDE_DIRS,
+            max_chars=REPO_MAX_CHARS,
         )
 
     def _build_tool_runners(
@@ -94,16 +95,15 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
             ToolAgentKind.MCP_SERVER_CONNECTIVITY: mcp.run,
         }
 
-    @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = 20_000) -> str:
-        """Read source files into a single string via the shared budgeted scanner."""
-        return read_repo_code_budgeted(
-            repo_path,
-            extensions={".py", ".md", ".yaml", ".yml", ".json", ".toml"},
-            exclude_dirs={".git", "node_modules", "__pycache__", ".venv", "venv"},
-            max_chars=max_chars,
-            empty="",
-        )
+    def _read_repo_code(self, repo_path: Path) -> str:
+        """Return the budgeted repo briefing via the per-repo incremental cache.
+
+        Preconditions: ``repo_path`` is an existing directory.
+        Postconditions: returns the same briefing ``RepoContextCache.read`` would for
+          this team's extensions / exclude dirs / char budget; the cache instance for
+          ``repo_path`` is reused across calls on this lead.
+        """
+        return self._repo_context_cache_for(repo_path).read(repo_path)
 
     def run_workflow(
         self,

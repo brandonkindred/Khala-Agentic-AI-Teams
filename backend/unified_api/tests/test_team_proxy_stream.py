@@ -188,6 +188,100 @@ def test_non_stream_path_does_not_override_timeout():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# get_team_client: lazy creation + caching
+# ---------------------------------------------------------------------------
+
+
+def test_get_team_client_creates_and_caches_per_team():
+    client_a = team_proxy.get_team_client("team-a", timeout=5.0)
+    client_b = team_proxy.get_team_client("team-a")
+    assert client_a is client_b
+    other = team_proxy.get_team_client("team-b")
+    assert other is not client_a
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker open -> 503 without reaching upstream
+# ---------------------------------------------------------------------------
+
+
+def test_circuit_breaker_open_short_circuits_to_503():
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not be called
+        raise AssertionError("upstream should not be reached when breaker is open")
+
+    _install_mock_client("flaky", httpx.MockTransport(handler))
+    app = _build_app("http://upstream", "flaky")
+
+    # Trip the breaker directly (5 consecutive failures by default).
+    for _ in range(5):
+        team_proxy.circuit_breaker.record_failure("flaky")
+    assert team_proxy.circuit_breaker.is_open("flaky") is True
+
+    with TestClient(app) as client:
+        resp = client.get("/api/t/anything")
+
+    assert resp.status_code == 503
+    assert b"circuit breaker is open" in resp.content
+
+
+# ---------------------------------------------------------------------------
+# Query string forwarding
+# ---------------------------------------------------------------------------
+
+
+def test_query_string_is_forwarded():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"ok": True})
+
+    _install_mock_client("qs-team", httpx.MockTransport(handler))
+    app = _build_app("http://upstream", "qs-team")
+
+    with TestClient(app) as client:
+        resp = client.get("/api/t/things", params={"foo": "bar"})
+
+    assert resp.status_code == 200
+    assert "foo=bar" in captured["url"]
+
+
+# ---------------------------------------------------------------------------
+# Upstream connection failure -> 502, and 5xx responses record a breaker failure
+# ---------------------------------------------------------------------------
+
+
+def test_upstream_connection_error_returns_502():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    _install_mock_client("bad-upstream", httpx.MockTransport(handler))
+    app = _build_app("http://upstream", "bad-upstream")
+
+    with TestClient(app) as client:
+        resp = client.get("/api/t/anything")
+
+    assert resp.status_code == 502
+    assert b"Bad Gateway" in resp.content
+    assert team_proxy.circuit_breaker.is_open("bad-upstream") is False  # only 1 failure, threshold is 5
+
+
+def test_upstream_5xx_records_circuit_breaker_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "boom"})
+
+    _install_mock_client("server-error-team", httpx.MockTransport(handler))
+    app = _build_app("http://upstream", "server-error-team")
+
+    with TestClient(app) as client:
+        for _ in range(5):
+            resp = client.get("/api/t/anything")
+            assert resp.status_code == 500
+
+    assert team_proxy.circuit_breaker.is_open("server-error-team") is True
+
+
 def test_resp_aclose_called_on_error_path():
     """When the upstream stream raises, the response is still closed cleanly."""
     closed = {"count": 0}

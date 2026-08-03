@@ -40,12 +40,13 @@ backend/agents/branding_team/
 │   ├── worker.py            # start_branding_temporal_worker_thread
 │   └── start_workflow.py    # start_branding_workflow (sync -> async dispatch)
 └── tests/
-    ├── _fake_postgres.py
+    ├── _memory_stores.py
     ├── test_api.py
     ├── test_assistant.py
+    ├── test_conversation_store.py
     ├── test_orchestrator.py
-    ├── test_store.py
-    └── test_store_real_postgres.py
+    ├── test_session_store.py
+    └── test_store.py
 ```
 
 ## Domain model
@@ -263,14 +264,13 @@ which wraps `shared.postgres.get_conn` with `_fetch_one`/`_fetch_all`/`_execute`
 3. **Chat conversations + messages + mission + latest output** —
    `BrandingConversationStore` (`assistant/store.py:161`).
 
-`BrandingStore` tests (`tests/test_store.py`) run against live Postgres via
+Store SQL is exercised against live Postgres via
 `shared.postgres.testing.real_postgres_schema` (skip when `POSTGRES_HOST` is
-unset). Other suites still use `tests/_fake_postgres.py`, an in-memory fake
-that matches SQL by prefix. `tests/test_store_real_postgres.py` keeps a
-distinct `BrandingConversationStore` check (`append_message` / LEFT JOIN load /
-list aggregate) until that store migrates off the fake. Methods such as
-`BrandingConversationStore.update_mission`/`update_output` and
-`BrandingSessionStore` create/get/save currently run only against the fake.
+unset): `BrandingStore` in `tests/test_store.py`,
+`BrandingConversationStore` in `tests/test_conversation_store.py`, and
+`BrandingSessionStore` in `tests/test_session_store.py`. Higher-level API,
+assistant, and orchestrator suites use in-memory store doubles from
+`tests/_memory_stores.py` instead of live Postgres.
 
 ### Postgres schema
 

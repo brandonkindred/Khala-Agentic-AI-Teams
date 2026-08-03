@@ -15,6 +15,7 @@ discovery paths.
 from __future__ import annotations
 
 import hashlib
+from typing import NamedTuple
 
 from agent_registry.models import (
     AgentManifest,
@@ -181,12 +182,28 @@ def is_generated_manifest(manifest: AgentManifest) -> bool:
     return "generated" in manifest.tags
 
 
+class ManifestRegistrationResult(NamedTuple):
+    """Outcome of a successful :func:`register_team_manifests` call.
+
+    Supports both attribute access (``result.manifests``) and positional
+    unpacking (``manifests, registered = register_team_manifests(...)``).
+
+    On success ``registered`` is always ``True`` (registry / store failures
+    propagate rather than returning ``registered=False``), so chat-save can roll
+    back the roster write when registration fails. ``registered`` remains part of
+    the result shape for callers that already destructure it.
+    """
+
+    manifests: list[AgentManifest]
+    registered: bool
+
+
 def register_team_manifests(
     team_id: str,
     agents: list[AgenticTeamAgent],
     *,
     conn: object | None = None,
-) -> list[AgentManifest]:
+) -> ManifestRegistrationResult:
     """Build and install the live registry entries for a team's roster.
 
     Generated agents are not discovered from disk, so they are registered into the
@@ -208,14 +225,15 @@ def register_team_manifests(
     Preconditions:
         * ``team_id`` is non-empty.
     Postconditions:
-        * Returns one validated manifest per **generated** roster agent (registry-
-          source agents are skipped — they're already in the registry), each
-          registered (``get_registry().get(m.id)`` returns it). Acts as a full
-          replace for the
-          team: previously-registered generated manifests for ``team_id`` that are
-          absent from this roster are unregistered, so removed/renamed agents stop
-          appearing in the catalog. Idempotent; persisted to the dynamic store
-          when one is active, in-memory-only otherwise (see Scope above).
+        * Returns a :class:`ManifestRegistrationResult` whose ``manifests`` holds
+          one validated manifest per **generated** roster agent (registry-source
+          agents are skipped — they're already in the registry) and whose
+          ``registered`` is ``True``. Every returned manifest is registered
+          (``get_registry().get(m.id)`` returns it). Acts as a full replace for
+          the team: previously-registered generated manifests for ``team_id`` that
+          are absent from this roster are unregistered, so removed/renamed agents
+          stop appearing in the catalog. Idempotent; persisted to the dynamic
+          store when one is active, in-memory-only otherwise (see Scope above).
           Registry / store failures propagate — callers that must keep the DB
           roster and registry in sync (e.g. chat-save ``on_merged``) let the
           raise roll back the roster write; import-time retroactive registration
@@ -256,4 +274,4 @@ def register_team_manifests(
     # Single atomic replace: shared-store upserts + deletes commit together (or
     # join ``conn`` when provided), then local memory is updated.
     registry.replace_dynamic_manifests(manifests, stale, conn=conn)
-    return manifests
+    return ManifestRegistrationResult(manifests=manifests, registered=True)

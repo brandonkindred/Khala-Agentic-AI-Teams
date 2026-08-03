@@ -19,13 +19,11 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-
-from strands import Agent
+from typing import Any
 
 from ...models import StrategySpec
-from ._llm_envelope import run_structured_agent
+from ._agent_runner import run_single_shot_agent
 from ._prompt_context import spec_prompt_fields
-from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -95,28 +93,25 @@ class CodeSynthesisAgent:
             target_symbols=list(spec.target_symbols),
         )
 
-        agent = Agent(
+        def _on_failure(exc: Exception) -> Any:
+            logger.warning("CodeSynthesisAgent transport failure: %s", exc)
+            raise CodeSynthesisError(f"{type(exc).__name__}: {exc}") from exc
+
+        _, raw = run_single_shot_agent(
+            agent_key="strategy_code_synthesis",
+            phase="code_synthesis",
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            parse=lambda text: text,
+            charge=False,
+            guard_design_budget=False,
             # ``response_format="text"``: code synthesis emits a raw Python file
             # (recovered via ``_strip_code_fence``), not a JSON object, so it
             # must not be routed through the llm_service ``json_object`` wire mode.
-            model=get_strands_model("strategy_code_synthesis", response_format="text"),
-            system_prompt=_SYSTEM_PROMPT,
-            tools=[],
+            model_kwargs={"response_format": "text"},
+            logger=logger,
+            on_failure=_on_failure,
         )
-
-        try:
-            raw = run_structured_agent(
-                agent,
-                user_prompt,
-                agent_key="strategy_code_synthesis",
-                phase="code_synthesis",
-                parse=lambda text: text,
-                charge=False,
-                logger=logger,
-            )
-        except Exception as exc:  # noqa: BLE001 — wrap any transport fault
-            logger.warning("CodeSynthesisAgent transport failure: %s", exc)
-            raise CodeSynthesisError(f"{type(exc).__name__}: {exc}") from exc
 
         code = _strip_code_fence(raw).strip()
         if not code:

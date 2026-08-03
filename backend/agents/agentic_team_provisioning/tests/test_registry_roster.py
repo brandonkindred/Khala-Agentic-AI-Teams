@@ -442,10 +442,11 @@ def test_register_team_manifests_skips_registry_agents(
         manifest_id="blogging.planner",
     )
 
-    manifests = register_team_manifests(team_id, [gen, reg])
-    assert len(manifests) == 1  # only the generated agent is wrapped
+    result = register_team_manifests(team_id, [gen, reg])
+    assert result.registered is True
+    assert len(result.manifests) == 1  # only the generated agent is wrapped
     # The generated wrapper is actually installed (path exercised, not swallowed).
-    assert registry.get(manifests[0].id) is manifests[0]
+    assert registry.get(result.manifests[0].id) is result.manifests[0]
     # The stale generated wrapper was unregistered by the prefix scan.
     assert registry.get(stale.id) is None
     # The original registry manifest is untouched; no generated wrapper was added.

@@ -1,9 +1,11 @@
-"""Unit tests for the generic ``run_json_with_parse_retry`` driver.
+"""Unit tests for the generic ``run_json_with_parse_retry`` and
+``run_single_shot_agent`` drivers.
 
-These tests exercise the driver in isolation — no dependency on
-``design.py``/``refinement.py`` — by monkeypatching the module-level
-``Agent``/``get_strands_model`` symbols the same way the sibling call-site
-tests do (see ``test_strategy_lab_refinement_parse_retry.py``).
+These tests exercise the drivers in isolation — no dependency on
+``design.py``/``refinement.py``/the six migrated call sites — by
+monkeypatching the module-level ``Agent``/``get_strands_model`` symbols the
+same way the sibling call-site tests do (see
+``test_strategy_lab_refinement_parse_retry.py``).
 """
 
 from __future__ import annotations
@@ -14,7 +16,10 @@ from typing import Any, Dict, List
 import pytest
 
 from investment_team.strategy_lab.agents import _agent_runner as mod
-from investment_team.strategy_lab.agents._agent_runner import run_json_with_parse_retry
+from investment_team.strategy_lab.agents._agent_runner import (
+    run_json_with_parse_retry,
+    run_single_shot_agent,
+)
 from investment_team.strategy_lab.exceptions import StrategyLabLLMError
 
 _GOOD = '{"a": 1}'
@@ -451,3 +456,238 @@ def test_logs_warning_on_each_unparseable_attempt(
     warnings = [r for r in caplog.records if "unparseable JSON" in r.message]
     assert len(warnings) == 1
     assert "attempt 1/3" in warnings[0].message
+
+
+# ---------------------------------------------------------------------------
+# run_single_shot_agent
+# ---------------------------------------------------------------------------
+
+
+def _unreachable_on_failure(exc: Exception) -> Any:
+    raise AssertionError(f"on_failure should not have been called: {exc}")
+
+
+def test_single_shot_returns_ok_true_and_parsed_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent([_GOOD])
+    _patch_agent(monkeypatch, agent)
+
+    ok, result = run_single_shot_agent(
+        agent_key="strategy_x",
+        phase="phase_x",
+        system_prompt="sys",
+        user_prompt="task",
+        logger=logging.getLogger("test"),
+        on_failure=_unreachable_on_failure,
+    )
+
+    assert ok is True
+    assert result == _GOOD_PARSED
+    assert agent.calls == 1
+
+
+def test_single_shot_generic_exception_calls_on_failure_and_returns_ok_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent(["not json"])
+    _patch_agent(monkeypatch, agent)
+    seen: List[Exception] = []
+
+    def _on_failure(exc: Exception) -> str:
+        seen.append(exc)
+        return "fallback-value"
+
+    ok, result = run_single_shot_agent(
+        agent_key="strategy_x",
+        phase="phase_x",
+        system_prompt="sys",
+        user_prompt="task",
+        logger=logging.getLogger("test"),
+        on_failure=_on_failure,
+    )
+
+    assert ok is False
+    assert result == "fallback-value"
+    assert len(seen) == 1
+    assert isinstance(seen[0], ValueError)
+
+
+def test_single_shot_on_failure_raising_propagates_unmodified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent(["not json"])
+    _patch_agent(monkeypatch, agent)
+
+    class _DomainError(Exception):
+        pass
+
+    def _on_failure(exc: Exception) -> Any:
+        raise _DomainError(f"wrapped: {exc}") from exc
+
+    with pytest.raises(_DomainError, match="wrapped:"):
+        run_single_shot_agent(
+            agent_key="strategy_x",
+            phase="phase_x",
+            system_prompt="sys",
+            user_prompt="task",
+            logger=logging.getLogger("test"),
+            on_failure=_on_failure,
+        )
+
+
+def test_single_shot_design_budget_exhausted_reraised_bare_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent([_GOOD])
+    _patch_agent(monkeypatch, agent)
+
+    def _raise_budget_exhausted(*_a: Any, **_k: Any) -> Any:
+        raise mod.DesignBudgetExhausted(limit=3, calls_made=3)
+
+    monkeypatch.setattr(mod, "run_structured_agent", _raise_budget_exhausted)
+
+    with pytest.raises(mod.DesignBudgetExhausted, match="budget exhausted"):
+        run_single_shot_agent(
+            agent_key="strategy_x",
+            phase="phase_x",
+            system_prompt="sys",
+            user_prompt="task",
+            logger=logging.getLogger("test"),
+            on_failure=_unreachable_on_failure,
+        )
+
+
+def test_single_shot_design_budget_exhausted_routed_through_on_failure_when_unguarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent([_GOOD])
+    _patch_agent(monkeypatch, agent)
+
+    budget_exc = mod.DesignBudgetExhausted(limit=3, calls_made=3)
+
+    def _raise_budget_exhausted(*_a: Any, **_k: Any) -> Any:
+        raise budget_exc
+
+    monkeypatch.setattr(mod, "run_structured_agent", _raise_budget_exhausted)
+    seen: List[Exception] = []
+
+    def _on_failure(exc: Exception) -> str:
+        seen.append(exc)
+        return "fallback-value"
+
+    ok, result = run_single_shot_agent(
+        agent_key="strategy_x",
+        phase="phase_x",
+        system_prompt="sys",
+        user_prompt="task",
+        logger=logging.getLogger("test"),
+        guard_design_budget=False,
+        on_failure=_on_failure,
+    )
+
+    assert ok is False
+    assert result == "fallback-value"
+    assert seen == [budget_exc]
+
+
+def test_single_shot_max_attempts_forwarded_to_run_structured_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent([_GOOD])
+    _patch_agent(monkeypatch, agent)
+    captured_kwargs: Dict[str, Any] = {}
+
+    original = mod.run_structured_agent
+
+    def _capturing(*args: Any, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "run_structured_agent", _capturing)
+
+    run_single_shot_agent(
+        agent_key="strategy_x",
+        phase="phase_x",
+        system_prompt="sys",
+        user_prompt="task",
+        logger=logging.getLogger("test"),
+        max_attempts=5,
+        on_failure=_unreachable_on_failure,
+    )
+
+    assert captured_kwargs["max_attempts"] == 5
+
+
+def test_single_shot_model_kwargs_forwarded_to_get_strands_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent([_GOOD])
+    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    captured_kwargs: Dict[str, Any] = {}
+
+    def _capturing_get_strands_model(_key: str, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(mod, "get_strands_model", _capturing_get_strands_model)
+
+    run_single_shot_agent(
+        agent_key="strategy_x",
+        phase="phase_x",
+        system_prompt="sys",
+        user_prompt="task",
+        logger=logging.getLogger("test"),
+        model_kwargs={"response_format": "text"},
+        on_failure=_unreachable_on_failure,
+    )
+
+    assert captured_kwargs == {"response_format": "text"}
+
+
+def test_single_shot_custom_parse_function_used_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent(["raw python source, not JSON"])
+    _patch_agent(monkeypatch, agent)
+
+    ok, result = run_single_shot_agent(
+        agent_key="strategy_x",
+        phase="phase_x",
+        system_prompt="sys",
+        user_prompt="task",
+        logger=logging.getLogger("test"),
+        parse=lambda text: text,
+        on_failure=_unreachable_on_failure,
+    )
+
+    assert ok is True
+    assert result == "raw python source, not JSON"
+
+
+def test_single_shot_charge_forwarded_to_run_structured_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _ScriptedAgent([_GOOD])
+    _patch_agent(monkeypatch, agent)
+    captured_kwargs: Dict[str, Any] = {}
+
+    original = mod.run_structured_agent
+
+    def _capturing(*args: Any, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "run_structured_agent", _capturing)
+
+    run_single_shot_agent(
+        agent_key="strategy_x",
+        phase="phase_x",
+        system_prompt="sys",
+        user_prompt="task",
+        logger=logging.getLogger("test"),
+        charge=False,
+        on_failure=_unreachable_on_failure,
+    )
+
+    assert captured_kwargs["charge"] is False

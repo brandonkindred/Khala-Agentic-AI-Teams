@@ -59,14 +59,8 @@ def test_resume_after_llm_check_accepts_correct_status(client, fake_job_client):
         status="paused_llm_connectivity",
         failed_tasks=[{"task_id": "t1"}, {"task_id": "t2"}],
     )
-    # Patch the launch try-block so we don't actually spawn a thread
-    with (
-        patch.object(_api_main, "_run_retry_background"),
-        patch(
-            "software_engineering_team.temporal.client.is_temporal_enabled",
-            return_value=False,
-        ),
-    ):
+    # Patch the launch try-block so we don't actually dispatch to Temporal
+    with patch("software_engineering_team.temporal.start_workflow.start_retry_failed_workflow"):
         resp = client.post(f"/run-team/{job_id}/resume-after-llm-check")
     assert resp.status_code == 200
     body = resp.json()
@@ -299,13 +293,7 @@ def test_retry_failed_tasks_happy_path(client, fake_job_client):
     job_id = "job-rf2"
     fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
     fake_job_client.update_job(job_id, failed_tasks=[{"task_id": "t1"}], status="failed")
-    with (
-        patch.object(_api_main, "_run_retry_background"),
-        patch(
-            "software_engineering_team.temporal.client.is_temporal_enabled",
-            return_value=False,
-        ),
-    ):
+    with patch("software_engineering_team.temporal.start_workflow.start_retry_failed_workflow"):
         resp = client.post(f"/run-team/{job_id}/retry-failed")
     assert resp.status_code == 200
 
@@ -485,13 +473,7 @@ def test_run_team_upload_rejects_empty_spec(monkeypatch, tmp_path: Path, client)
 
 def test_run_team_upload_happy_path(monkeypatch, tmp_path: Path, client):
     monkeypatch.setenv("SE_WORKSPACE_DIR", str(tmp_path))
-    with (
-        patch.object(_api_main, "_run_orchestrator_background"),
-        patch(
-            "software_engineering_team.temporal.client.is_temporal_enabled",
-            return_value=False,
-        ),
-    ):
+    with patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow"):
         resp = client.post(
             "/run-team/upload",
             files={"spec_file": ("spec.md", b"# Spec\nFeature", "text/markdown")},

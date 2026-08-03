@@ -63,7 +63,10 @@ drains memory into the graph since a per-agent watermark; `retrieval.build_graph
 reads it back into the invoke side channel; and `reflection` optionally grounds its rule
 proposals with graph context — always additive, the human approval gate is never bypassed.
 Per-agent attachment is declared in the manifest `cognition.knowledge_graph` block
-(on by default). Gated on `NEO4J_BOLT_URL`; see `shared.neo4j/README.md`.
+(on by default). Gated on `NEO4J_BOLT_URL` in the process that runs Graphiti; see
+`shared.neo4j/README.md`. Compose leaves the URL unset on the unified API (`khala`)
+by default so reverse-proxy deploys skip Graphiti client/sync overhead — set
+`NEO4J_BOLT_URL=bolt://neo4j:7687` on a process that should own graph sync.
 
 ## Rollup engine
 

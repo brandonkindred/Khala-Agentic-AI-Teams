@@ -320,8 +320,17 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         dump or None>, "last_code": str, "failure_phase": str|None,
         "design_context": {...}|None, "convergence_tracker_state": ...,
         "gate_results": [...], "budget_calls": int, "drift": {...}}`` when
-        ``_run_design_attempt`` raised ``SpecImplementabilityError``. Any other
-        exception maps to ``ApplicationError`` via
+        ``_run_design_attempt`` raised ``SpecImplementabilityError``, or
+        ``{"kind": "skipped", "reason": "no_market_data",
+        "convergence_tracker_state": ..., "gate_results": [...],
+        "budget_calls": int, "drift": {...}}`` when this attempt recorded a
+        failed ``"market_data"`` gate (no data available for the asset class —
+        ``_fetch_market_data``/``_fetch_market_data_for_synthesis`` degrade to
+        this gate rather than raising; a bare ``HTTPException(502)`` is also
+        still honored as a secondary/defense-in-depth signal, matching thread
+        mode's wave loop). Either case is cycle-terminal — no further
+        design-attempt retry. Any other exception (including a non-502
+        ``HTTPException``) maps to ``ApplicationError`` via
         :func:`_map_exception_to_application_error`.
     Invariants:
         The returned ``convergence_tracker_state``/``gate_results``/
@@ -330,6 +339,8 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         collector — the workflow owns the parent copy-on-entry/merge across
         attempts.
     """
+    from fastapi import HTTPException
+
     from investment_team.models import (
         BacktestConfig,
         CodeRevision,
@@ -388,6 +399,24 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "gate_timeline": [r.model_dump(mode="json") for r in collector.gate_timeline],
         }
 
+    def _skipped_outcome() -> Dict[str, Any]:
+        return {
+            "kind": "skipped",
+            "reason": "no_market_data",
+            "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
+            "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
+            "budget_calls": budget.calls_made,
+            "drift": _drift_to_wire(drift_collector),
+        }
+
+    # ``cumulative_gate_results`` is ``all_gate_results`` in
+    # ``_run_design_attempt``'s frame — mutated in place, so a "market_data"
+    # gate this attempt records lands here too. Snapshot the length first so
+    # the post-call scan only sees THIS attempt's own additions, never a
+    # market_data failure recorded by an earlier re-entered attempt (whose
+    # own outcome already returned separately as "reentry").
+    gate_results_len_before = len(cumulative_gate_results)
+
     try:
         with use_budget(budget):
             record = orch._run_design_attempt(
@@ -429,8 +458,33 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "budget_calls": budget.calls_made,
             "drift": _drift_to_wire(drift_collector),
         }
+    except HTTPException as exc:
+        # Defense-in-depth: no current code path in the design-attempt
+        # pipeline raises this (market-data failures degrade to the
+        # "market_data" gate checked below instead), but thread mode's wave
+        # loop still honors a bare 502 the same way, so this stays a live
+        # secondary signal rather than being removed. Any other
+        # HTTPException status is still a deep failure.
+        if exc.status_code == 502:
+            return _skipped_outcome()
+        raise _map_exception_to_application_error(exc) from exc
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
+
+    # Primary "no market data" signal: ``_fetch_market_data``/
+    # ``_fetch_market_data_for_synthesis`` never raise on a failed/empty
+    # fetch — they record a critical "market_data" gate and the synthesis
+    # loop breaks immediately, and ``_run_design_attempt`` still returns a
+    # normal (failing) record rather than short-circuiting. Detect that gate
+    # among this attempt's own additions and report it as a skip instead of
+    # a real record, matching what thread mode's now-dead HTTPException(502)
+    # branch was actually meant to catch.
+    if any(
+        g.gate_name == "market_data" and not g.passed
+        for g in cumulative_gate_results[gate_results_len_before:]
+    ):
+        return _skipped_outcome()
+
     return {
         "kind": "record",
         "record": record.model_dump(mode="json"),
@@ -561,15 +615,23 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     reconstruction of ``StrategyLabRecord``/``QualityGateResult`` and the tracker
     math stay outside the temporalio sandbox.
 
+    Mirrors thread mode's per-cycle isolation of the merge step (``api/main.py``):
+    a single record's ``merge_from`` failure is captured, not fatal — the wave's
+    other records still merge and the activity still succeeds.
+
     Preconditions:
         ``params`` = ``{"primary_tracker_state": <dto wire dict>, "wave_results":
         [{"cycle_index": int, "record": <StrategyLabRecord JSON dump>,
         "cycle_tracker_state": <dto wire dict>}, ...]}``.
     Postconditions:
-        Returns ``{"primary_tracker_state": <updated dto wire dict>}`` — the
-        primary tracker with every settled cycle in the wave merged in
-        cycle-index order (reproducible across runs). Raises ``ApplicationError``
-        on an unexpected exception.
+        Returns ``{"primary_tracker_state": <updated dto wire dict>, "merge_errors":
+        [{"cycle_index": int, "error": str, "exception_type": str, "reason":
+        "tracker_merge_failed"}, ...]}`` — the primary tracker with every settled
+        cycle in the wave recorded/merged in cycle-index order (reproducible
+        across runs), and one ``merge_errors`` entry per record whose
+        ``merge_from`` call raised (that record's ``.record(...)`` call still
+        ran). Raises ``ApplicationError`` on an exception outside the isolated
+        ``merge_from`` step (e.g. malformed input).
     """
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
@@ -577,6 +639,7 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         primary = ConvergenceTracker.from_wire_dict(params["primary_tracker_state"])
+        merge_errors: List[Dict[str, Any]] = []
         for wr in sorted(params["wave_results"], key=lambda w: w["cycle_index"]):
             record = StrategyLabRecord.parse_persisted(wr["record"])
             gate_results = [
@@ -584,10 +647,20 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 for g in record.quality_gate_results
             ]
             primary.record(record.strategy, gate_results)
-            primary.merge_from(ConvergenceTracker.from_wire_dict(wr["cycle_tracker_state"]))
+            try:
+                primary.merge_from(ConvergenceTracker.from_wire_dict(wr["cycle_tracker_state"]))
+            except Exception as exc:  # noqa: BLE001
+                merge_errors.append(
+                    {
+                        "cycle_index": wr["cycle_index"] + 1,
+                        "error": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "reason": "tracker_merge_failed",
+                    }
+                )
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
-    return {"primary_tracker_state": primary.to_wire_dict()}
+    return {"primary_tracker_state": primary.to_wire_dict(), "merge_errors": merge_errors}
 
 
 ACTIVITIES = [

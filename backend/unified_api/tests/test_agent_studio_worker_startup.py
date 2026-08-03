@@ -77,6 +77,42 @@ def test_worker_start_skipped_when_disabled(monkeypatch: pytest.MonkeyPatch) -> 
     assert called == []
 
 
+def test_worker_start_skipped_when_temporal_worker_flag_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false must skip starting the worker
+    even when the agent_studio team itself is enabled."""
+    called: list[bool] = []
+    monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", False)
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr(
+        "agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        lambda: called.append(True),
+    )
+    infos, warns = _capture_logs(monkeypatch)
+
+    main._start_agent_studio_temporal_worker()
+
+    assert called == []
+    assert any("disabled" in m for m in infos)
+    assert warns == []
+
+
+def test_worker_start_invoked_when_temporal_worker_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default (flag true, or unset) must preserve today's always-on behavior."""
+    called: list[bool] = []
+
+    def _start() -> bool:
+        called.append(True)
+        return True
+
+    monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", True)
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start)
+
+    main._start_agent_studio_temporal_worker()
+
+    assert called == [True]
+
+
 def test_worker_start_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom() -> bool:
         raise RuntimeError("worker exploded")

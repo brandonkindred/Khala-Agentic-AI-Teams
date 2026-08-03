@@ -330,6 +330,63 @@ def cancel_workflow_sync(
     asyncio.run_coroutine_threadsafe(handle.cancel(), loop).result(timeout=timeout_s)
 
 
+def terminate_and_await_workflow_sync(
+    workflow_id: str,
+    *,
+    reason: str | None = None,
+    client_ready_timeout_s: float | None = None,
+    timeout_s: float = START_WORKFLOW_TIMEOUT_S,
+) -> None:
+    """Terminate a Temporal workflow and block until it's confirmed closed.
+
+    Unlike :func:`cancel_workflow_sync` (cooperative — the workflow only
+    observes ``asyncio.CancelledError`` at its next await point, with no
+    guarantee of when that is), termination is immediate server-side: the
+    execution is marked terminated right away, with no cooperative wait. This
+    additionally blocks on the handle's result so a caller that needs to
+    start a *new* execution under the same deterministic workflow id right
+    after can do so without racing the old one's still-in-flight activities.
+
+    Preconditions:
+        - ``workflow_id`` is non-empty.
+
+    Postconditions:
+        - Returns once the workflow with id ``workflow_id`` is confirmed
+          terminal. A workflow that doesn't exist (already closed/GC'd) is
+          treated as already terminal — a no-op, not an error. Raises
+          ``RuntimeError`` if the worker client never becomes available
+          within ``client_ready_timeout_s`` (defaulting to
+          ``CLIENT_READY_TIMEOUT_S``). Raises ``TimeoutError`` if termination
+          isn't confirmed within ``timeout_s`` — the terminate request was
+          still sent to the server; the caller decides how to handle "not
+          yet confirmed done" (e.g. reject and let the client retry).
+    """
+    assert workflow_id, "workflow_id must be non-empty"
+    client, loop = _await_client(client_ready_timeout_s)
+    handle = client.get_workflow_handle(workflow_id)
+
+    from temporalio.client import WorkflowFailureError
+    from temporalio.service import RPCError, RPCStatusCode
+
+    async def _terminate_and_wait() -> None:
+        try:
+            await handle.terminate(reason=reason)
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+            return  # nothing running under this id — already terminal
+        try:
+            await handle.result()
+        except WorkflowFailureError:
+            return  # confirmed terminal (terminated, as requested)
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+            return  # closed/GC'd between terminate() and result()
+
+    asyncio.run_coroutine_threadsafe(_terminate_and_wait(), loop).result(timeout=timeout_s)
+
+
 def _get_job_manager(team: str) -> Any:
     # Import lazily (not at module top) on purpose: only ``run_team_job`` — the
     # job-store-backed dispatch path — needs ``JobServiceClient`` (and its transitive

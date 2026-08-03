@@ -163,7 +163,7 @@ def test_pause_turn_raises_truncated():
 def test_max_tokens_env_zero_is_treated_as_unset(monkeypatch):
     from llm_service.clients.claude import DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
 
-    monkeypatch.setenv("LLM_MAX_TOKENS", "0")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "0")
     client, capture = _make_client(_text_message("{}"))
     client.complete_json("q", objective="t")
     assert capture["max_tokens"] == DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS

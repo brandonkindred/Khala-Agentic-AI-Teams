@@ -143,10 +143,11 @@ def test_register_team_manifests_installs_into_registry(monkeypatch: pytest.Monk
         AgenticTeamAgent(agent_name="A", role="r1"),
         AgenticTeamAgent(agent_name="B", role="r2"),
     ]
-    manifests = register_team_manifests("team-1", agents)
+    result = register_team_manifests("team-1", agents)
 
-    assert len(manifests) == 2
-    for m in manifests:
+    assert result.registered is True
+    assert len(result.manifests) == 2
+    for m in result.manifests:
         assert reg.get(m.id) is m
         assert reg.get(m.id).cognition.rule_packs == ["default_guardrails"]
 
@@ -162,7 +163,7 @@ def test_register_team_manifests_replaces_stale_roster(monkeypatch: pytest.Monke
         "team-1",
         [AgenticTeamAgent(agent_name="A", role="r"), AgenticTeamAgent(agent_name="B", role="r")],
     )
-    stale_id = next(m.id for m in first if m.name == "B")
+    stale_id = next(m.id for m in first.manifests if m.name == "B")
 
     # New roster drops B and renames to C → B's manifest must be unregistered.
     register_team_manifests(
@@ -218,10 +219,10 @@ def test_register_team_manifests_isolates_teams_with_shared_slug(monkeypatch: py
 
     team_a = "team-aaaaaaaaaa-1"
     team_b = "team-aaaaaaaaaa-2"
-    a_manifests = register_team_manifests(team_a, [AgenticTeamAgent(agent_name="A", role="r")])
+    a_result = register_team_manifests(team_a, [AgenticTeamAgent(agent_name="A", role="r")])
     # Registering team B (same 12-char slug) must not unregister team A's manifest.
     register_team_manifests(team_b, [AgenticTeamAgent(agent_name="B", role="r")])
-    assert reg.get(a_manifests[0].id) is not None
+    assert reg.get(a_result.manifests[0].id) is not None
 
 
 def test_register_team_manifests_propagates_registry_failure(
@@ -253,7 +254,7 @@ def test_register_team_manifests_propagates_atomic_replace_failure(
         "team-1",
         [AgenticTeamAgent(agent_name="A", role="prior-A")],
     )
-    prior_a_id = first[0].id
+    prior_a_id = first.manifests[0].id
 
     def _boom(upserts, delete_ids, *, conn=None):
         raise RuntimeError("replace boom")

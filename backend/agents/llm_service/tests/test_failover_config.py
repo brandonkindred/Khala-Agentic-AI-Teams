@@ -24,19 +24,27 @@ def test_fast_429_env_override(monkeypatch, val, expected):
 
 
 def test_window_defaults_and_overrides(monkeypatch):
-    """Rate/weekly fallback windows default sensibly and honor a positive env
+    """Rate/session/weekly fallback windows default sensibly and honor a positive env
     override; non-positive or unparseable overrides fall back to the default."""
     monkeypatch.delenv("LLM_FAILOVER_RATE_WINDOW_S", raising=False)
+    monkeypatch.delenv("LLM_FAILOVER_SESSION_WINDOW_S", raising=False)
     monkeypatch.delenv("LLM_FAILOVER_WEEKLY_WINDOW_S", raising=False)
     assert llm_config.failover_rate_window_seconds() == 300.0
-    assert llm_config.failover_weekly_window_seconds() == 7 * 24 * 3600.0
+    assert llm_config.failover_session_window_seconds() == 5 * 3600.0
+    assert llm_config.failover_weekly_window_seconds() == 24 * 3600.0
     monkeypatch.setenv("LLM_FAILOVER_RATE_WINDOW_S", "900")
     assert llm_config.failover_rate_window_seconds() == 900.0
+    monkeypatch.setenv("LLM_FAILOVER_SESSION_WINDOW_S", "7200")
+    assert llm_config.failover_session_window_seconds() == 7200.0
     # Non-positive / garbage falls back to the default.
     monkeypatch.setenv("LLM_FAILOVER_RATE_WINDOW_S", "-5")
     assert llm_config.failover_rate_window_seconds() == 300.0
+    monkeypatch.setenv("LLM_FAILOVER_SESSION_WINDOW_S", "garbage")
+    assert llm_config.failover_session_window_seconds() == 5 * 3600.0
     monkeypatch.setenv("LLM_FAILOVER_WEEKLY_WINDOW_S", "garbage")
-    assert llm_config.failover_weekly_window_seconds() == 7 * 24 * 3600.0
+    assert llm_config.failover_weekly_window_seconds() == 24 * 3600.0
+    monkeypatch.setenv("LLM_FAILOVER_WEEKLY_WINDOW_S", "172800")
+    assert llm_config.failover_weekly_window_seconds() == 172800.0
 
 
 def test_ollama_rate_limit_override_applies(monkeypatch):

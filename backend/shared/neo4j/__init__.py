@@ -6,10 +6,12 @@ Neo4j async driver. Graphiti ingests agent memories as temporal episodes and
 extracts entities/relationships with bi-temporal (recency-aware) edges, partitioned
 per agent via Graphiti's ``group_id`` (set to the ``agent_id``).
 
-Enablement is gated on ``NEO4J_BOLT_URL``. A real deployment always runs Neo4j as
-required infrastructure (Graphiti depends on it); the disabled path exists only so
-the unit-test suite can run against a faked Graphiti without a live database —
-mirroring how ``shared.postgres`` runs without a live Postgres.
+Enablement is gated on ``NEO4J_BOLT_URL``. Neo4j is required stack infrastructure for
+agents (Graphiti depends on it); individual processes leave the URL unset when they
+should not open a Graphiti client or run graph sync (compose defaults the unified API
+that way). The disabled path is also how the unit-test suite runs against a faked
+Graphiti without a live database — mirroring how ``shared.postgres`` runs without a
+live Postgres.
 
 Typical usage::
 

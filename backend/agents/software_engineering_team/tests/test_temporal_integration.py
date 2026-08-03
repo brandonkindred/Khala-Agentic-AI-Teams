@@ -1,4 +1,4 @@
-"""Tests for Temporal integration: when enabled, API starts workflows instead of threads.
+"""Tests for Temporal integration: dispatch routes always start a workflow, no thread fallback.
 
 Routed through the in-memory ``FakeJobServiceClient`` so they run as unit tests
 without a live job service.  A real-Temporal smoke run is still possible by
@@ -42,37 +42,23 @@ def temp_work_path(tmp_path: Path) -> Path:
     return work
 
 
+@patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
 @patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=False)
-def test_run_team_without_temporal_starts_thread(
+def test_run_team_dispatches_to_temporal_even_when_disabled(
     mock_temporal_enabled: MagicMock,
+    mock_start_workflow: MagicMock,
     client: TestClient,
     temp_work_path: Path,
 ) -> None:
-    """When Temporal is not enabled, POST /run-team starts a background thread."""
-    # ``wraps=`` makes the Thread mock a spy, not a stub: the real Thread still
-    # gets constructed AND started. Left on its own that runs the real
-    # multi-phase pipeline in the background — outliving this test (and the
-    # monkeypatch-scoped job-store patch it depends on) by a wide margin, so a
-    # later, unrelated test can observe it fall through to a real HTTP call
-    # against the unroutable placeholder JOB_SERVICE_URL. Stubbing the
-    # orchestrator entry point itself keeps the "was Thread constructed with
-    # the right target" assertion below meaningful while making that thread's
-    # actual run a no-op.
-    with (
-        patch("threading.Thread", wraps=_api_main.threading.Thread) as mock_thread_class,
-        patch.object(_api_main, "_run_orchestrator_background"),
-    ):
-        r = client.post("/run-team", json={"repo_path": str(temp_work_path)})
-        assert r.status_code == 200
-        assert "job_id" in r.json()
-        # Thread should have been constructed (target=_run_orchestrator_background)
-        assert mock_thread_class.call_count >= 1
-        found_orchestrator_thread = any(
-            (c[1].get("target") == _api_main._run_orchestrator_background)
-            or (c[0] and len(c[0]) >= 2 and c[0][0] == _api_main._run_orchestrator_background)
-            for c in mock_thread_class.call_args_list
-        )
-        assert found_orchestrator_thread
+    """POST /run-team always calls start_run_team_workflow — no thread fallback when Temporal is "disabled"."""
+    r = client.post("/run-team", json={"repo_path": str(temp_work_path)})
+    assert r.status_code == 200
+    data = r.json()
+    assert "job_id" in data
+    mock_start_workflow.assert_called_once()
+    args = mock_start_workflow.call_args[0]
+    assert args[0] == data["job_id"]
+    assert args[1] == str(temp_work_path)
 
 
 @patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
@@ -83,23 +69,97 @@ def test_run_team_with_temporal_starts_workflow(
     client: TestClient,
     temp_work_path: Path,
 ) -> None:
-    """When Temporal is enabled, POST /run-team calls start_run_team_workflow and does not start orchestrator thread."""
-    with patch("threading.Thread", wraps=_api_main.threading.Thread) as mock_thread_class:
-        r = client.post("/run-team", json={"repo_path": str(temp_work_path)})
-        assert r.status_code == 200
-        data = r.json()
-        assert "job_id" in data
-        mock_start_workflow.assert_called_once()
-        args = mock_start_workflow.call_args[0]
-        assert args[0] == data["job_id"]
-        assert args[1] == str(temp_work_path)
-        # No thread for orchestrator (thread_calls with target _run_orchestrator_background)
-        orchestrator_thread_calls = [
-            c
-            for c in mock_thread_class.call_args_list
-            if c[1].get("target") == _api_main._run_orchestrator_background
-        ]
-        assert len(orchestrator_thread_calls) == 0
+    """When Temporal is enabled, POST /run-team calls start_run_team_workflow."""
+    r = client.post("/run-team", json={"repo_path": str(temp_work_path)})
+    assert r.status_code == 200
+    data = r.json()
+    assert "job_id" in data
+    mock_start_workflow.assert_called_once()
+    args = mock_start_workflow.call_args[0]
+    assert args[0] == data["job_id"]
+    assert args[1] == str(temp_work_path)
+
+
+@patch("software_engineering_team.api.routes.jobs._preflight_sprint_scope")
+@patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
+@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+def test_run_team_with_sprint_id_succeeds_under_temporal(
+    mock_temporal_enabled: MagicMock,
+    mock_start_workflow: MagicMock,
+    mock_preflight_sprint_scope: MagicMock,
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """POST /run-team with sprint_id succeeds (no more 400 from the deleted Temporal-sprint guard)
+    and forwards sprint_id to start_run_team_workflow."""
+    work = tmp_path / "sprint_work"
+    work.mkdir()
+
+    r = client.post("/run-team", json={"repo_path": str(work), "sprint_id": "sprint-1"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "job_id" in data
+    mock_start_workflow.assert_called_once()
+    assert mock_start_workflow.call_args.kwargs["sprint_id"] == "sprint-1"
+
+
+@patch("software_engineering_team.api.routes.jobs._preflight_sprint_scope")
+@patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
+@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+def test_run_team_with_valid_sprint_id_succeeds_under_workflow_v2(
+    mock_temporal_enabled: MagicMock,
+    mock_start_workflow: MagicMock,
+    mock_preflight_sprint_scope: MagicMock,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /run-team with a valid sprint_id under SE_WORKFLOW_V2 succeeds (200) and forwards
+    sprint_id to start_run_team_workflow — the old blanket-reject guard is gone now that V2
+    can actually synthesize sprint scope (#3983)."""
+    monkeypatch.setenv("SE_WORKFLOW_V2", "true")
+    work = tmp_path / "sprint_work_v2_valid"
+    work.mkdir()
+
+    r = client.post("/run-team", json={"repo_path": str(work), "sprint_id": "sprint-1"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "job_id" in data
+    mock_start_workflow.assert_called_once()
+    assert mock_start_workflow.call_args.kwargs["sprint_id"] == "sprint-1"
+
+
+@patch("software_engineering_team.temporal.start_workflow.start_run_team_workflow")
+@patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
+def test_run_team_with_invalid_sprint_id_400s_before_dispatch_under_workflow_v2(
+    mock_temporal_enabled: MagicMock,
+    mock_start_workflow: MagicMock,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /run-team with an unplanned sprint_id under SE_WORKFLOW_V2 still fails fast (400)
+    via _preflight_sprint_scope before any job/workflow is created — the blanket V2 guard is
+    gone, but real pre-dispatch validation (shared with V1) takes its place."""
+    monkeypatch.setenv("SE_WORKFLOW_V2", "true")
+    work = tmp_path / "sprint_work_v2_invalid"
+    work.mkdir()
+
+    sprint_view = MagicMock()
+    sprint_view.stories = []
+    fake_store = MagicMock()
+    fake_store.get_sprint_with_stories.return_value = sprint_view
+
+    fake_module = MagicMock()
+    fake_module.TERMINAL_STORY_STATUSES = {"done", "cancelled"}
+    fake_module.ProductDeliveryStorageUnavailable = type("E", (Exception,), {})
+    fake_module.get_store = lambda: fake_store
+
+    with patch.dict("sys.modules", {"product_delivery": fake_module}):
+        r = client.post("/run-team", json={"repo_path": str(work), "sprint_id": "sprint-1"})
+
+    assert r.status_code == 400
+    mock_start_workflow.assert_not_called()
 
 
 @patch("software_engineering_team.temporal.start_workflow.start_retry_failed_workflow")
