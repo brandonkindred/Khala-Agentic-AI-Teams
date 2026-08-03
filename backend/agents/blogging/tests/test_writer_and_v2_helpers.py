@@ -585,7 +585,8 @@ def test_v2_extract_plan_keywords_drops_ordinary_short_words_below_length_floor(
     # "New" is an ordinary word, not an acronym, and short enough (3 chars)
     # that admitting it regardless of stopword status would let unrelated
     # plans match in the story bank purely on "new". Acronyms ("AI", "SQL")
-    # still survive since they're capitalized in the original text.
+    # still survive because they're in the _PLAN_KEYWORD_SHORT_TERMS
+    # allowlist, regardless of casing.
     assert "new" not in ai_kws
     assert "new" not in sql_kws
     assert "ai" in ai_kws

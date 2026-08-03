@@ -76,6 +76,8 @@ def test_ghost_plan_to_text_renders_sections() -> None:
     assert "Topic/thesis: Building scalable APIs" in text
     assert "Section: Intro" in text
     assert "Coverage: hook" in text
+    assert "Section: Body" in text
+    assert "Coverage: depth" in text
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +208,8 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -> None:
-    """Soft call sites map transient LLM errors to the default dict (planning_stage swallow risk)."""
+    """LLMRateLimitError from the evaluator is caught and the default not-sufficient dict is
+    returned, matching the behavior for other transient failures."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -279,15 +282,17 @@ def test_ghost_generate_follow_up_empty_response(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ghost_compile_narrative_empty_user_content() -> None:
+def test_ghost_compile_narrative_empty_user_content(monkeypatch) -> None:
     """No non-empty user turns in the conversation short-circuits to None (no LLM call)."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
+    state = _patch_agent(monkeypatch, [])
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._compile_narrative(_gap(), [{"role": "agent", "content": "hi"}])
     assert out is None
+    assert state["i"] == 0
 
 
 def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
