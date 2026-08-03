@@ -30,6 +30,10 @@ from software_engineering_team.ai_agent_development_team.phases.planning import 
 from software_engineering_team.ai_agent_development_team.phases.problem_solving import (
     run_problem_solving,
 )
+from software_engineering_team.ai_agent_development_team.phases.review import (
+    ARTIFACT_GATE_DESCRIPTION_PREFIX,
+    run_review,
+)
 from software_engineering_team.ai_agent_development_team.prompts import (
     intake_system_prompt,
     planning_system_prompt,
@@ -208,6 +212,9 @@ def test_ai_agent_development_workflow_problem_solving(tmp_path: Path):
     # final_files must reflect the problem-solving placeholder patches, not
     # the pre-loop snapshot of execution.files.
     assert any("_placeholder.md" in path for path in result.final_files)
+    # final_files must alias the execution result's own (post-rebind) files
+    # rather than a dict captured before problem-solving rebinds them.
+    assert result.final_files == result.execution_result.files
 
 
 def test_ai_agent_development_workflow_aborts_when_fix_unavailable(
@@ -500,3 +507,95 @@ def test_ai_agent_lead_wires_repo_briefing_contract(tmp_path: Path) -> None:
     assert cache._ext_set == lead._extensions
     assert cache._excl_set == lead._exclude_dirs
     assert cache._max_chars == 20_000
+
+
+def test_artifact_gate_description_prefix_stable() -> None:
+    """Review and problem-solving share this exact prefix string."""
+    assert ARTIFACT_GATE_DESCRIPTION_PREFIX == "Missing expected artifact category: "
+
+
+def test_run_review_artifact_gate_uses_shared_prefix() -> None:
+    """Missing categories produce descriptions that start with the shared prefix."""
+    result = run_review(execution_result=ExecutionResult(files={}, microtasks=[], notes=[]))
+    gate_issues = [i for i in result.issues if i.source == "artifact_gate"]
+    assert gate_issues
+    for issue in gate_issues:
+        assert issue.description.startswith(ARTIFACT_GATE_DESCRIPTION_PREFIX)
+        hint = issue.description[len(ARTIFACT_GATE_DESCRIPTION_PREFIX) :].strip()
+        assert hint
+        assert hint in issue.recommendation
+
+
+def test_run_problem_solving_synthesizes_placeholder_from_prefix() -> None:
+    """A well-formed artifact-gate issue yields ai_system/{hint}_placeholder.md."""
+    hint = "blueprint"
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description=f"{ARTIFACT_GATE_DESCRIPTION_PREFIX}{hint}",
+                recommendation=f"Add at least one artifact path containing '{hint}'.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(
+        execution_result=ExecutionResult(files={"existing.md": "# keep"}, microtasks=[]),
+        review_result=review,
+    )
+    assert result.resolved is True
+    assert f"ai_system/{hint}_placeholder.md" in result.files
+    assert "existing.md" in result.files
+    assert any(hint in fix for fix in result.fixes_applied)
+
+
+def test_run_problem_solving_skips_malformed_artifact_gate_description() -> None:
+    """artifact_gate issues without the shared prefix do not invent placeholder paths."""
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description="category missing somehow: not-a-hint",
+                recommendation="Fix the description format.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(
+        execution_result=ExecutionResult(files={}, microtasks=[]),
+        review_result=review,
+    )
+    assert result.resolved is False
+    assert result.files == {}
+    assert result.fixes_applied == []
+    assert not any("_placeholder.md" in path for path in result.files)
+
+
+def test_run_problem_solving_skips_empty_artifact_gate_token() -> None:
+    """Prefix-only (or whitespace-only) descriptions do not create empty-token paths."""
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description=f"{ARTIFACT_GATE_DESCRIPTION_PREFIX}   ",
+                recommendation="Add a real category hint.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(
+        execution_result=ExecutionResult(files={}, microtasks=[]),
+        review_result=review,
+    )
+    assert result.resolved is False
+    assert result.files == {}
+    assert "ai_system/_placeholder.md" not in result.files

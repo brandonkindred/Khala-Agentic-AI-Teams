@@ -859,6 +859,12 @@ def _review_body(**overrides: Any) -> dict[str, Any]:
 
 
 class TestReviewEndpoint:
+    """Integration tests for the POST /review-pr endpoint.
+
+    Exercises end-to-end review submission, severity accounting,
+    token scrubbing, and failure handling via the review_app fixture.
+    """
+
     def test_happy_path_posts_review(self, review_app) -> None:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -3107,14 +3113,10 @@ class TestFixedRunPrReview:
         assert job["review_summary"]["comment_findings"] == 1
         assert job["review_summary"]["pending_issue_proposals"] == []
 
-    def test_out_of_diff_finding_routing_depends_on_pre_existing_tag(self, review_app) -> None:
-        """Routing of an off-diff-file finding is driven ONLY by the reviewer's own
-        pre_existing tag, never by diff/file membership alone: explicitly tagged
-        pre_existing=True (and not proven is_within_diff) routes to a proposal and
-        is never posted; left at its default False, the same finding is an
-        in-scope PR finding and is posted as its own standalone comment.
+    def test_off_diff_file_pre_existing_true_routes_to_proposal(self, review_app) -> None:
+        """Off-diff-file findings tagged pre_existing=True (and not proven
+        is_within_diff) route to a pending issue proposal and are never posted.
         """
-        # pre_existing=True: routed to a proposal, never posted.
         review_app["github"]["client"] = _FakeReviewClient()
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -3145,8 +3147,10 @@ class TestFixedRunPrReview:
         assert len(proposals) == 1
         assert proposals[0]["description"] == "out-of-scope bug (tagged)"
 
-        # pre_existing left False (default): an in-scope PR finding, posted
-        # standalone, never a proposal.
+    def test_off_diff_file_pre_existing_false_posts_standalone(self, review_app) -> None:
+        """Off-diff-file findings left at default pre_existing=False are in-scope
+        PR findings and are posted as their own standalone conversation comment.
+        """
         review_app["github"]["client"] = _FakeReviewClient()
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[

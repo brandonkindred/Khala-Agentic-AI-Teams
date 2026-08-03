@@ -136,6 +136,14 @@ def test_build_batch_input_maps_request(monkeypatch):
 
     monkeypatch.setattr(config, "clamp_max_parallel", lambda n: min(n, 4))
     monkeypatch.setattr(run_state, "rehydrate_active_run_offset", lambda run_id: 6)
+    seed_counters = {
+        "skipped_cycles": 2,
+        "errored_cycles": 1,
+        "errored_details": [{"cycle_index": 3, "error": "boom"}],
+        "tracker_merge_error_count": 1,
+        "completed_record_ids": ["r1", "r2"],
+    }
+    monkeypatch.setattr(run_state, "get_resume_seed_counters", lambda run_id: seed_counters)
 
     bi = build_strategy_lab_batch_input("run-9", _FakeRequest())
     assert bi["run_id"] == "run-9"
@@ -150,6 +158,36 @@ def test_build_batch_input_maps_request(monkeypatch):
     # config is a JSON-shaped BacktestConfig dump with the cost-stress sweep on.
     assert bi["config"]["cost_stress"] is True
     assert bi["config"]["start_date"] == "2023-01-01"
+    # Resume-seed counters (#4014) are merged in verbatim.
+    assert bi["skipped_cycles"] == 2
+    assert bi["errored_cycles"] == 1
+    assert bi["errored_details"] == [{"cycle_index": 3, "error": "boom"}]
+    assert bi["tracker_merge_error_count"] == 1
+    assert bi["completed_record_ids"] == ["r1", "r2"]
+
+
+def test_build_batch_input_defaults_seed_counters_for_fresh_run(monkeypatch):
+    """A fresh run (no persisted state) seeds all five counters to
+    0/0/[]/0/[] — exercised end-to-end through the real
+    get_resume_seed_counters rather than a stub, so the wiring itself (not
+    just the merge) is covered."""
+    from investment_team.strategy_lab import config, run_state
+    from investment_team.strategy_lab.temporal.start_workflow import (
+        build_strategy_lab_batch_input,
+    )
+
+    monkeypatch.setattr(config, "clamp_max_parallel", lambda n: n)
+    monkeypatch.setattr(run_state, "rehydrate_active_run_offset", lambda run_id: 0)
+    monkeypatch.setattr(run_state, "active_runs", {})
+    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+
+    bi = build_strategy_lab_batch_input("run-fresh", _FakeRequest())
+
+    assert bi["skipped_cycles"] == 0
+    assert bi["errored_cycles"] == 0
+    assert bi["errored_details"] == []
+    assert bi["tracker_merge_error_count"] == 0
+    assert bi["completed_record_ids"] == []
 
 
 def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):

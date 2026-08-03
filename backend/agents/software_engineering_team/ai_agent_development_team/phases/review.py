@@ -5,6 +5,26 @@ from __future__ import annotations
 from ..constants import REQUIRED_ARTIFACT_HINTS
 from ..models import ExecutionResult, MicrotaskStatus, ReviewIssue, ReviewResult
 
+ARTIFACT_GATE_DESCRIPTION_PREFIX = "Missing expected artifact category: "
+
+
+def _artifact_gate_issue(hint: str) -> ReviewIssue:
+    """Build a high-severity artifact-gate issue for a missing category hint.
+
+    Preconditions: ``hint`` is a non-empty category token (callers pass entries
+      from ``REQUIRED_ARTIFACT_HINTS``).
+    Postconditions: returns a ``ReviewIssue`` with ``source="artifact_gate"``,
+      ``severity="high"``, description ``ARTIFACT_GATE_DESCRIPTION_PREFIX`` +
+      ``hint``, and a recommendation naming that hint. Does not mutate inputs.
+    """
+    assert isinstance(hint, str) and hint.strip(), "hint must be a non-empty string"
+    return ReviewIssue(
+        source="artifact_gate",
+        severity="high",
+        description=f"{ARTIFACT_GATE_DESCRIPTION_PREFIX}{hint}",
+        recommendation=f"Add at least one artifact path containing '{hint}'.",
+    )
+
 
 def run_review(*, execution_result: ExecutionResult) -> ReviewResult:
     """Deterministically check generated artifacts against required-category hints.
@@ -22,14 +42,7 @@ def run_review(*, execution_result: ExecutionResult) -> ReviewResult:
 
     for hint in REQUIRED_ARTIFACT_HINTS:
         if hint not in file_names:
-            issues.append(
-                ReviewIssue(
-                    source="artifact_gate",
-                    severity="high",
-                    description=f"Missing expected artifact category: {hint}",
-                    recommendation=f"Add at least one artifact path containing '{hint}'.",
-                )
-            )
+            issues.append(_artifact_gate_issue(hint))
 
     failed_microtasks = [
         m for m in execution_result.microtasks if m.status == MicrotaskStatus.FAILED

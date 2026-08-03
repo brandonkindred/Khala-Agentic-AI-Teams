@@ -5,14 +5,14 @@ Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 recovery and the map-phase cache (``mapping``) → false-positive verification
 (each genuine finding is re-checked against the *whole* submission, since a
 chunk reviewer saw only a slice, and confirmed false positives are dropped — see
-``false_positive_filter``) → architecture-consistency / cross-codebase-redundancy
-pass (a single additive, whole-repository check for architecture contradictions
-and duplicated capabilities the per-chunk view cannot see — see
-``architecture_consistency_pass``) → side-effect / blast-radius pass (a single
-additive, whole-repository check for behavior changes that break a caller
-elsewhere in the codebase, or ship undocumented — see
-``side_effect_impact_pass``) → deterministic merge (dedupe, severity gate,
-safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
+``false_positive_filter``) → merged architecture-consistency + side-effect /
+blast-radius pass (a single additive LLM call covering architecture
+contradictions, cross-codebase redundancy, and caller-impact / documentation
+mismatches the per-chunk view cannot see — see
+``merged_architecture_side_effect_pass``) → side-effect consolidation (merges
+related ``side-effects`` findings that share an enclosing construct or cite
+one another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
+severity gate, safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
 after recovery (retry, bisection, and a last-resort thinking-off retry) degrades
@@ -91,6 +91,7 @@ from collections import OrderedDict
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
+from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
@@ -100,7 +101,6 @@ from software_engineering_team.shared.context_sizing import (
     parse_env_int,
 )
 
-from .architecture_consistency_pass import find_architecture_and_redundancy_issues
 from .architecture_context import render_architecture_context as _render_architecture_context
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
@@ -135,6 +135,7 @@ from .mapping import (
     _symbol_surface,
     clear_chunk_outcome_cache,
 )
+from .merged_architecture_side_effect_pass import find_architecture_and_side_effect_issues
 from .models import (
     CodeReviewInput,
     CodeReviewIssue,
@@ -144,7 +145,12 @@ from .models import (
     notify_review_progress,
 )
 from .repo_reader import RepoReader
-from .side_effect_impact_pass import find_side_effect_impact_issues
+from .side_effect_consolidation import (
+    SIDE_EFFECT_CONSOLIDATION_ENV as _SIDE_EFFECT_CONSOLIDATION_ENV,
+)
+from .side_effect_consolidation import (
+    consolidate_side_effect_issues,
+)
 from .synthesis import synthesize_review_findings
 
 logger = logging.getLogger(__name__)
@@ -185,7 +191,6 @@ __all__ = [
     "_symbol_surface",
 ]
 
-
 # Process-global submission-level short-circuit cache (see module docstring).
 # Bounded LRU mapping a whole-submission fingerprint -> the approved
 # ``CodeReviewOutput`` it produced, so an identical, previously-approved
@@ -212,10 +217,17 @@ def _submission_cache_size() -> int:
     """Resolve the submission cache capacity from the environment.
 
     Postconditions:
-        - Returns ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` parsed as an int, clamped
-          to a floor of 0 (a negative or garbage value becomes the default, an
-          explicit 0 disables the short-circuit). ``0`` is load-bearing: callers
-          treat it as "no submission cache", so every review runs in full.
+        - Returns ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` parsed as an int,
+          clamped to a floor of 0: an unset or unparseable value falls back to
+          the default, while a negative value is clamped to 0 (not the
+          default) — same as any other floor. An explicit or clamped-to 0
+          disables the short-circuit; ``0`` is load-bearing: callers treat it
+          as "no submission cache", so every review runs in full.
+        - The return value is always a non-negative ``int`` (never ``None``,
+          never negative, never a non-int): ``parse_env_int`` never raises for
+          a hostile environment value and always clamps to the given floor
+          before returning, so callers (e.g. ``run_coordinator``'s eviction
+          loop) may treat this value as pre-validated and need not re-check it.
     """
     return parse_env_int("CODE_REVIEW_SUBMISSION_CACHE_SIZE", DEFAULT_SUBMISSION_CACHE_SIZE, 0)
 
@@ -310,6 +322,58 @@ def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
     return deduped
 
 
+# Hard ceiling on findings returned by one review. Applied after dedupe and
+# before the approval gate so approval and narrative synthesis see the same
+# capped list. Severity-first ranking keeps blocking findings ahead of nits.
+MAX_CODE_REVIEW_ISSUES = 30
+
+# Mirrors synthesis._SEVERITY_RANK so the reduce-phase cap and the findings
+# digest agree on presentation order (critical → high → medium → low → info).
+_CAP_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_CAP_UNKNOWN_SEVERITY_RANK = len(_CAP_SEVERITY_RANK)
+
+
+def _cap_issues(
+    issues: List[CodeReviewIssue],
+    limit: int = MAX_CODE_REVIEW_ISSUES,
+) -> List[CodeReviewIssue]:
+    """Keep at most ``limit`` issues, ranked severity-first (stable within rank).
+
+    Preconditions:
+        - ``issues`` is the deduped merged finding list (may be empty).
+        - ``limit`` is a non-negative integer.
+
+    Postconditions:
+        - Returns a new list of length ``min(len(issues), limit)``.
+        - When truncation occurs, ordering is ``critical → high → medium →
+          low → info`` (unknown severities last), preserving input order
+          within the same severity so blocking findings are never dropped
+          in favour of nits.
+        - When ``len(issues) <= limit``, returns a shallow copy in the
+          original order (no re-sort).
+        - Never mutates ``issues``.
+    """
+    assert limit >= 0, "limit must be non-negative"
+    if len(issues) <= limit:
+        return list(issues)
+    ordered = sorted(
+        enumerate(issues),
+        key=lambda pair: (
+            _CAP_SEVERITY_RANK.get(
+                (pair[1].severity or "").strip().lower(), _CAP_UNKNOWN_SEVERITY_RANK
+            ),
+            pair[0],
+        ),
+    )
+    capped = [issue for _, issue in ordered[:limit]]
+    logger.info(
+        "CodeReview: capped issues %s -> %s (severity-first)",
+        len(issues),
+        limit,
+    )
+    return capped
+
+
 def _reconcile_approval(
     llm_approved: bool,
     issues: List[CodeReviewIssue],
@@ -317,10 +381,11 @@ def _reconcile_approval(
     """Deterministic approval gate with the anti-loop safety nets.
 
     Preconditions:
-        - ``issues`` is the deduped merged issue list. Any rejecting
-          sub-review's summary has already been synthesized into a high issue
-          per sub-review (``_review_chunk_with_recovery``), so issue text and
-          verdicts are correctly paired before they reach this gate.
+        - ``issues`` is the deduped (and typically severity-capped) merged
+          issue list. Any rejecting sub-review's summary has already been
+          synthesized into a high issue per sub-review
+          (``_review_chunk_with_recovery``), so issue text and verdicts are
+          correctly paired before they reach this gate.
 
     Postconditions:
         - ``approved is False`` implies the returned issues contain at least
@@ -420,16 +485,15 @@ def _run_tail_passes(
     repo_reader: Optional[RepoReader],
     shared_index: CodebaseIndex,
 ) -> _TailPassResult:
-    """Run the false-positive / architecture / side-effect tail passes.
+    """Run the false-positive filter and the merged architecture/side-effect pass.
 
-    All three are once-per-submission, additive-only, read-only checks over
-    the same shared ``CodebaseIndex`` (built once by the caller): false-positive
-    verification re-checks each genuine chunk finding against the whole
-    submission and drops confirmed false positives; the architecture-consistency
-    pass flags architecture contradictions and cross-codebase redundancy the
-    per-chunk view cannot see; the side-effect pass flags a changed function's
-    blast radius on callers elsewhere in the codebase. None of the three reads
-    another's output, so they are independent of call order.
+    Both are once-per-submission, read-only checks over the same shared
+    ``CodebaseIndex`` (built once by the caller): false-positive verification
+    re-checks each genuine chunk finding against the whole submission and drops
+    confirmed false positives; the merged pass runs architecture-consistency and
+    side-effect / blast-radius checks in a single LLM call and returns the two
+    finding lists separately. Neither reads the other's output, so they are
+    independent of call order.
 
     Preconditions:
         - ``genuine_issues`` is the deduped set of genuine chunk findings
@@ -441,27 +505,16 @@ def _run_tail_passes(
         - Returns a :class:`_TailPassResult` whose ``issues`` is the
           false-positive-filtered (or, when ``input_data.skip_false_positive_filter``
           is set, unfiltered) ``genuine_issues``, followed by the architecture
-          pass's findings, followed by the side-effect pass's findings — the
-          same order the caller's merge produced before this fan-out existed,
-          regardless of which pass's underlying call actually completes first —
-          and whose ``has_additive_findings`` is True iff the architecture
-          and/or side-effect pass contributed at least one finding.
+          findings, followed by the side-effect findings — the same order the
+          caller's merge produced before this fan-out existed — and whose
+          ``has_additive_findings`` is True iff either half of the merged pass
+          contributed at least one finding.
         - When ``llm`` is (or wraps) a ``DummyLLMClient`` (see
-          ``_tail_passes_run_sequentially`` — such doubles use a shared
-          non-thread-safe scripted response index), fewer than two passes are
-          scheduled, or ``_map_parallelism()`` resolves to <= 1 (the operator
-          set ``CODE_REVIEW_MAP_PARALLELISM=1``, e.g. because the configured
-          provider cannot accept concurrent requests — the false-positive
-          filter's own internal verification workers are sized from this same
-          knob via ``_verify_parallelism()``, so running the filter fanned out
-          alongside the architecture/side-effect passes would silently exceed
-          it), the passes run sequentially in the order below, exactly as
-          before this fan-out existed. Otherwise they run concurrently via
-          ``parallel_map`` against the same shared, read-only index/repo_reader,
-          producing byte-identical results to the sequential path since none of
-          the three passes has a cross-pass dependency.
+          ``_tail_passes_run_sequentially``), fewer than two passes are
+          scheduled, or ``_map_parallelism()`` resolves to <= 1, the passes run
+          sequentially. Otherwise they run concurrently via ``parallel_map``.
     """
-    calls: List[Tuple[str, Callable[[], List[CodeReviewIssue]]]] = []
+    calls: List[Tuple[str, Callable[[], object]]] = []
     if not input_data.skip_false_positive_filter:
         calls.append(
             (
@@ -473,16 +526,8 @@ def _run_tail_passes(
         )
     calls.append(
         (
-            "architecture",
-            lambda: find_architecture_and_redundancy_issues(
-                llm, input_data, repo_reader=repo_reader, index=shared_index
-            ),
-        )
-    )
-    calls.append(
-        (
-            "side_effect",
-            lambda: find_side_effect_impact_issues(
+            "merged",
+            lambda: find_architecture_and_side_effect_issues(
                 llm, input_data, repo_reader=repo_reader, index=shared_index
             ),
         )
@@ -503,8 +548,7 @@ def _run_tail_passes(
         results = {name: output for (name, _), output in zip(calls, outputs)}
 
     verified = results.get("filter", genuine_issues)
-    architecture_findings = results["architecture"]
-    side_effect_findings = results["side_effect"]
+    architecture_findings, side_effect_findings = results["merged"]
     if architecture_findings:
         verified = [*verified, *architecture_findings]
     if side_effect_findings:
@@ -528,7 +572,8 @@ def run_coordinator(
           and, unless it is (or wraps) a ``DummyLLMClient``, must tolerate
           concurrent calls from worker threads: the map phase already fans
           chunk reviews out (see ``_map_chunks``), and the false-positive /
-          architecture-consistency / side-effect tail passes fan out the same
+          merged architecture/side-effect tail pass fan out
+          the same
           way (see ``_run_tail_passes``) unless ``_tail_passes_run_sequentially(llm)``
           returns True or the ``CODE_REVIEW_MAP_PARALLELISM`` budget resolves to
           <= 1, either of which forces the sequential fallback instead. The
@@ -561,29 +606,60 @@ def run_coordinator(
           approves (a chunk-local false positive never blocks the merge). The
           check is fail-safe — any verifier failure keeps the findings — and
           never touches the not-reviewed coverage findings. This pass and the
-          architecture-consistency / side-effect passes below it run
+          merged architecture/side-effect pass below it run
           concurrently via ``shared.concurrency.parallel_map`` when safe to do
           so, falling back to the sequential order (false-positive filter,
-          then architecture, then side-effect) otherwise; either way the
+          then the merged architecture/side-effect pass) otherwise; either way the
           merged ``issues`` order and content are identical (see
-          ``_run_tail_passes``).
+          ``_run_tail_passes``). The merged pass's response is partitioned into
+          architecture-consistency and side-effect-impact finding lists before
+          deduplication and approval, preserving the downstream behavior of the
+          former separate passes.
+        - After the false-positive filter and the merged additive pass, related
+          ``side-effects`` findings may be optionally consolidated (gated by
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
+          the consolidation step in the body) before the deterministic
+          dedupe/severity gate.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
-          fully reviewed* (same code + context + model; no unreviewed ranges)
-          returns the recorded approved output with no LLM call at all —
-          unless a ``repo_reader`` is given, in which case this short-circuit
-          never fires (a verdict that reads the rest of the repository cannot
-          be safely reproduced from an input-only cache key).
+          fully reviewed* (same code + context + model + output-affecting
+          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; no
+          unreviewed ranges) returns the recorded approved output with no LLM
+          call at all — unless a ``repo_reader`` is given, in which case this
+          short-circuit never fires (a verdict that reads the rest of the
+          repository cannot be safely reproduced from an input-only cache key).
+          The cache-hit check, its LRU touch, and the deep clone of the served
+          output all happen under a single ``_SUBMISSION_OUTCOME_CACHE_LOCK``
+          acquisition, so a concurrent write-back (see below) can never
+          interleave with a hit being read; the lock is released before
+          ``progress_callback`` runs, since caller-supplied code must never
+          execute while this process-global, non-reentrant lock is held.
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
+        - The total number of concurrent chunk-review ``reviewer.run()`` calls
+          for this run — top-level chunks and every concurrently in-flight
+          bisection-recovery half combined — never exceeds ``_map_parallelism()``:
+          a semaphore sized to that budget is created once here and threaded
+          through the map phase (see ``_map_chunks``'s ``run_limiter``), so
+          ``CODE_REVIEW_MAP_PARALLELISM`` is a true run-wide ceiling in thread
+          mode, not just a bound on the outer per-chunk fan-out width. Temporal
+          mode reviews each chunk via an independent, stateless
+          ``review_chunk_activity`` invocation with no such object shared across
+          activities, so this ceiling does not apply there — see
+          ``docs/ENV_VARS.md``'s ``CODE_REVIEW_MAP_PARALLELISM`` entry for its
+          Temporal-mode bound.
 
     Raises:
         CodeReviewUnavailableError: when the review model is unavailable
             (an infrastructure failure: rate limit, unreachable endpoint, or
             auth/config error), or when *no* chunk could be reviewed at all —
-            the run never renders a verdict on a submission it did not see.
+            the run never renders a verdict on a submission it did not see. In
+            the latter case, ``unreviewed`` names only the not-reviewed range
+            labels recorded before the failure — never genuine reviewer
+            findings, none of which can exist in this branch (a chunk that
+            fails contributes no ``issues`` entry; see ``_ChunkOutcome``).
         Exception: an unexpected reviewer defect (not a known LLM content
             failure) propagates unchanged, failing closed so the bug surfaces
             instead of being masked as a not-reviewed finding.
@@ -596,22 +672,32 @@ def run_coordinator(
     # Submission-level short-circuit: an identical submission that was already
     # approved reproduces the same verdict, so return its cached output before any
     # LLM work (map, false-positive verification, and merge all skipped). Keyed on
-    # the raw input + model only — no compaction — so the check itself costs no
-    # model call. Skipped entirely when disabled (size 0) or when a ``repo_reader``
-    # is given: the verdict can then also depend on the rest of the repository,
-    # which the key cannot see, so a hit could mask a since-added architecture/
-    # redundancy finding or a since-resolved false positive. On a miss the run
-    # proceeds and stores its verdict below if approved.
+    # the raw input + model + output-affecting toggles (including
+    # ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``) — no compaction — so the check
+    # itself costs no model call. Skipped entirely when disabled (size 0) or when
+    # a ``repo_reader`` is given: the verdict can then also depend on the rest of
+    # the repository, which the key cannot see, so a hit could mask a since-added
+    # architecture/redundancy finding or a since-resolved false positive. On a
+    # miss the run proceeds and stores its verdict below if approved.
     submission_size = _submission_cache_size()
     submission_key: Optional[str] = None
     cached: Optional[CodeReviewOutput] = None
     if submission_size > 0 and repo_reader is None:
         submission_key = _submission_fingerprint(input_data, model_fingerprint)
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
-            cached = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
-            if cached is not None:
+            hit = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
+            if hit is not None:
                 _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)
+                # Clone while still locked so the served copy is independent of
+                # the cache entry; done here (not after release) keeps the
+                # dict read + LRU touch + clone as one atomic critical section.
+                cached = hit.model_copy(deep=True)
         if cached is not None:
+            # Released the lock before this point: progress_callback is
+            # caller-supplied and may be slow (e.g. a synchronous job-service
+            # update) or re-entrant (e.g. it calls clear_submission_outcome_cache()
+            # or run_coordinator() again) -- either would deadlock against this
+            # process-global, non-reentrant lock if still held here.
             logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
             notify_review_progress(
                 progress_callback,
@@ -619,7 +705,7 @@ def run_coordinator(
                 "identical approved submission; review skipped",
                 _PROGRESS_DONE,
             )
-            return cached.model_copy(deep=True)
+            return cached
 
     notify_review_progress(
         progress_callback, "preparing", "preparing review input", _PROGRESS_PREPARING_INPUT
@@ -703,8 +789,30 @@ def run_coordinator(
 
     chunk_reviewer = ChunkReviewAgent(llm)
     outcome = _ChunkOutcome()
+    # Review-run-scoped concurrency ceiling: one semaphore, created once for this
+    # call and shared by every chunk, sized to this run's ``_map_parallelism()``
+    # budget. Threaded through ``_map_chunks`` -> ``_cached_review_chunk`` ->
+    # ``_review_chunk_with_recovery`` down to every actual ``reviewer.run()``
+    # call, so it caps the TOTAL number of concurrent chunk-review LLM calls for
+    # this run -- the top-level per-chunk fan-out *and* every concurrently
+    # in-flight bisection-recovery half together -- rather than only the outer
+    # map-phase fan-out width. Without this, each top-level worker that bisects
+    # would add its own independent 2-worker pool on top of whatever else is
+    # already running, letting the true concurrency exceed the configured
+    # ceiling when multiple chunks bisect at the same time (see
+    # ``_review_chunk_with_recovery``'s bisection branch). Thread-mode only: see
+    # ``docs/ENV_VARS.md``'s ``CODE_REVIEW_MAP_PARALLELISM`` entry for why
+    # Temporal mode cannot share this object across per-chunk activities and is
+    # bounded differently instead.
+    run_limiter = threading.Semaphore(_map_parallelism())
     for per_chunk in _map_chunks(
-        chunk_reviewer, chunks, base_input, context_fp, surface_by_path, progress_callback
+        chunk_reviewer,
+        chunks,
+        base_input,
+        context_fp,
+        surface_by_path,
+        progress_callback,
+        run_limiter=run_limiter,
     ):
         outcome.absorb(per_chunk)
 
@@ -716,7 +824,7 @@ def run_coordinator(
     if not outcome.approved_flags:
         raise CodeReviewUnavailableError(
             "No chunk could be reviewed after recovery; no verdict was produced for this submission.",
-            unreviewed=[i.description for i in (outcome.not_reviewed_issues + outcome.issues)],
+            unreviewed=[i.description for i in outcome.not_reviewed_issues],
         )
 
     # False-positive verification: re-check each genuine reviewer finding against
@@ -734,29 +842,30 @@ def run_coordinator(
         f"verifying {len(genuine_issues)} findings against the full codebase",
         _PROGRESS_VERIFYING,
     )
-    # Built once and shared with the architecture-consistency pass below: both read the
-    # same submission/repo_reader, so a single index avoids parsing the submission twice.
+    # Built once and shared with the false-positive filter, the merged
+    # architecture/side-effect pass, and the side-effect consolidation step
+    # below: all read the same submission/repo_reader,
+    # so a single index avoids parsing the submission twice.
     # CodebaseIndex is read-only after construction (see its own docstring's Invariants),
-    # so this one instance is safe to hand to all three tail passes when they run
+    # so this one instance is safe to hand to the tail passes when they run
     # concurrently in worker threads (see ``_run_tail_passes``).
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
-    # False-positive verification (skipped when the calling gate opted out via
-    # ``skip_false_positive_filter`` -- e.g. a gate whose findings must never be
-    # silently dropped; skipping only removes the drop-false-positives step, so
-    # it can only ever keep more findings), the architecture-consistency /
-    # cross-codebase-redundancy pass (whether the change contradicts the
-    # architecture document, or duplicates a capability that already exists
-    # elsewhere in the repository), and the side-effect / blast-radius pass
-    # (whether a changed function/method breaks a caller elsewhere in the
-    # codebase, or leaves a docstring/comment that no longer matches the
-    # implementation) are three separate, additive, once-per-submission checks
-    # the per-chunk map phase structurally cannot see. None reads another's
-    # output, so they run concurrently when safe (see ``_run_tail_passes``) and
-    # fold straight into the same dedupe/severity-gate/merge machinery below.
-    # (The latter two are restricted internally to the default CODE_REVIEW
-    # profile -- see their own docstrings for why the other profiles must never
-    # receive these findings.)
+    # False-positive verification remains its own once-per-submission pass
+    # (skipped when the calling gate opted out via ``skip_false_positive_filter``
+    # -- e.g. a gate whose findings must never be silently dropped; skipping
+    # only removes the drop-false-positives step, so it can only ever keep more
+    # findings). Architecture-consistency and side-effect-impact are produced by
+    # a single merged LLM call (architecture contradictions + cross-codebase
+    # redundancy, plus caller-impact / documentation mismatches) and then split
+    # back into the two finding lists for downstream dedupe/gate/synthesis.
+    # Neither reads the other's output, so they run concurrently when safe (see
+    # ``_run_tail_passes``). After those passes, related ``side-effects`` findings
+    # may optionally be consolidated (gated by
+    # ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error) before the
+    # same dedupe/severity-gate/merge machinery below. The merged halves are
+    # restricted internally to the default CODE_REVIEW profile -- see their own
+    # docstrings for why the other profiles must never receive these findings.
     tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,
@@ -765,6 +874,19 @@ def run_coordinator(
         shared_index=shared_index,
     )
     tail_pass_issues = tail_pass_result.issues
+    # Merge related "side-effects" findings (same enclosing function, or one
+    # citing another's) into single consolidated issues before the exact-match
+    # dedupe below -- see side_effect_consolidation's own docstring for the
+    # grouping rules. Additive-only inputs in, fewer-but-richer issues out;
+    # every other category passes through untouched.
+    if env_flag_enabled(_SIDE_EFFECT_CONSOLIDATION_ENV):
+        try:
+            tail_pass_issues = consolidate_side_effect_issues(tail_pass_issues, shared_index)
+        except Exception:
+            logger.exception(
+                "CodeReviewCoordinator: side-effect consolidation failed; "
+                "using unconsolidated tail-pass issues"
+            )
 
     notify_review_progress(
         progress_callback,
@@ -779,7 +901,9 @@ def run_coordinator(
     # defect). They are still surfaced non-blockingly via ``not_reviewed_ranges``
     # below and in the telemetry log. Set CODE_REVIEW_BLOCK_ON_UNREVIEWED to
     # restore the legacy fail-closed behavior where they block the merge.
-    not_reviewed_ranges = [_not_reviewed_range_label(i) for i in outcome.not_reviewed_issues]
+    not_reviewed_ranges: List[str] = [
+        _not_reviewed_range_label(i) for i in outcome.not_reviewed_issues
+    ]
     if _block_on_unreviewed():
         deduped = _dedupe_issues([*tail_pass_issues, *outcome.not_reviewed_issues, *skipped_issues])
     else:
@@ -791,7 +915,9 @@ def run_coordinator(
                 not_reviewed_ranges,
             )
         deduped = _dedupe_issues([*tail_pass_issues, *skipped_issues])
-    assert outcome.approved_flags, "unreachable: guarded by the total-failure check above"
+    deduped = _cap_issues(deduped)
+    # outcome.approved_flags is non-empty here: the total-failure guard above
+    # already raised otherwise, and nothing between there and here mutates it.
     all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
@@ -832,10 +958,12 @@ def run_coordinator(
     # reviewed (a semantic-exhaustion/truncation hiccup may not recur), matching
     # the map-phase rule that degraded chunk outcomes are never cached. Store a
     # clone so a later hit can be mutated freely without corrupting the entry.
-    if submission_key is not None and result.approved and not not_reviewed_ranges:
+    if submission_key is not None and result.approved and len(not_reviewed_ranges) == 0:
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
             _SUBMISSION_OUTCOME_CACHE[submission_key] = result.model_copy(deep=True)
             _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)
+            # submission_size is a validated non-negative int by
+            # _submission_cache_size()'s postcondition — no re-check needed here.
             while len(_SUBMISSION_OUTCOME_CACHE) > submission_size:
                 _SUBMISSION_OUTCOME_CACHE.popitem(last=False)
     return result

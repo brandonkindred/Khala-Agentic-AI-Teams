@@ -138,6 +138,10 @@ def _child_record(lab_record_id: str) -> Dict[str, Any]:
     }
 
 
+def _child_skipped() -> Dict[str, Any]:
+    return {"kind": "skipped", "convergence_tracker_state": {"trial_count": 1}}
+
+
 def _run(batch_input: Dict[str, Any], harness: _Harness) -> Dict[str, Any]:
     p1, p2 = harness.patch()
     with p1, p2:
@@ -256,6 +260,82 @@ def test_multiple_waves_when_wave_exceeds_max_parallel():
 
 
 # ---------------------------------------------------------------------------
+# Skipped cycles (no market data)
+# ---------------------------------------------------------------------------
+
+
+def test_skipped_cycle_is_counted_and_not_finalized():
+    captured: Dict[str, Any] = {}
+
+    def _merge(args):
+        captured["wave_results"] = args[0]["wave_results"]
+        return {"primary_tracker_state": {"ok": True}}
+
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_skipped()},
+        activity_handlers=_default_activity_handlers(merge_wave_results_activity=_merge),
+    )
+    result = _run(_batch_input(), harness)
+
+    assert result["status"] == "completed"
+    assert result["skipped_cycles"] == 1
+    assert result["errored_cycles"] == 0
+    # Only the surviving cycle was finalized/collected/merged into the tracker.
+    assert result["completed_record_ids"] == ["rec-0"]
+    assert harness.activity_calls.count("finalize_cycle_record_activity") == 1
+    assert [w["cycle_index"] for w in captured["wave_results"]] == [0]
+
+
+def test_seeded_skipped_cycles_are_additive_not_overwritten():
+    """A resumed run's skipped_cycles seed (#4014) is added to, not
+    overwritten by, new skips in this dispatch."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_skipped(), "run-1-c1": _child_skipped()},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(skipped_cycles=3), harness)
+    assert result["skipped_cycles"] == 5  # 3 seeded + 2 new
+
+
+def test_seeded_completed_record_ids_are_extended_not_overwritten():
+    """A resumed run's completed_record_ids seed is extended with newly
+    finalized ids, not overwritten — required because persist_run_state's
+    job-service write replaces the field's value wholesale rather than
+    appending, so the seed is the only way pre-resume ids survive the first
+    mid-run persist after resume."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(completed_record_ids=["prior-1", "prior-2"]), harness)
+    assert result["completed_record_ids"] == ["prior-1", "prior-2", "rec-0", "rec-1"]
+
+
+def test_completed_record_ids_seed_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(completed_record_ids=["prior-1"]), harness)
+    assert any(p.get("completed_record_ids") == ["prior-1", "rec-0", "rec-1"] for p in persisted)
+
+
+def test_skipped_cycles_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_skipped()},
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(), harness)
+    assert any(s.get("skipped_cycles") == 1 for s in persisted)
+
+
+# ---------------------------------------------------------------------------
 # Cancellation + errored cycles
 # ---------------------------------------------------------------------------
 
@@ -346,6 +426,207 @@ def test_errored_cycle_is_counted_and_yields_completed_with_errors():
     assert harness.activity_calls.count("finalize_cycle_record_activity") == 1
 
 
+def test_errored_details_captures_structured_entry_for_failed_cycle():
+    harness = _Harness(
+        child_results={
+            "run-1-c0": _child_record("0"),
+            "run-1-c1": RuntimeError("cycle blew up"),
+        },
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 2,
+            "batch_index": 1,
+            "error": "cycle blew up",
+            "exception_type": "RuntimeError",
+        }
+    ]
+
+
+def test_errored_details_walks_full_cause_chain_to_terminal_failure():
+    """A real child-workflow failure surfaces as a multi-hop chain —
+    ChildWorkflowError -> ActivityError -> ApplicationError (the domain
+    error) — so ``exception_type``/``error`` must reflect the terminal cause,
+    not just one ``__cause__`` hop (which would only reach the generic
+    RPC-boundary wrapper, e.g. ActivityError, not the real failure)."""
+
+    class _OuterChildWorkflowError(Exception):
+        pass
+
+    class _MiddleActivityError(Exception):
+        pass
+
+    class _DomainValueError(Exception):
+        pass
+
+    terminal = _DomainValueError("root cause")
+    middle = _MiddleActivityError("activity task failed")
+    middle.__cause__ = terminal
+    outer = _OuterChildWorkflowError("child workflow execution failed")
+    outer.__cause__ = middle
+
+    harness = _Harness(
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 1,
+            "batch_index": 1,
+            "error": "root cause",
+            "exception_type": "_DomainValueError",
+        }
+    ]
+
+
+def test_errored_details_uses_application_error_type_not_class_name():
+    """The real terminal cause is usually the ApplicationError
+    ``_map_exception_to_application_error`` produced, whose actionable
+    classification lives in ``.type`` (e.g. "ValueError" or an LLM outcome) —
+    the Python class name is just "ApplicationError" for every such failure,
+    which would defeat the whole point of walking the chain."""
+    from temporalio.exceptions import ApplicationError
+
+    terminal = ApplicationError("bad json", type="ValueError", non_retryable=True)
+    middle = Exception("activity task failed")
+    middle.__cause__ = terminal
+    outer = Exception("child workflow execution failed")
+    outer.__cause__ = middle
+
+    harness = _Harness(
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"][0]["exception_type"] == "ValueError"
+
+
+def test_errored_details_cap_enforced():
+    n = 55
+    child_results = {f"run-1-c{i}": RuntimeError(f"boom-{i}") for i in range(n)}
+    harness = _Harness(
+        child_results=child_results,
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(batch_size=n, max_parallel=n), harness)
+    assert result["errored_cycles"] == n
+    assert len(result["errored_details"]) == wf._ERRORED_DETAILS_MAX
+
+
+def test_seeded_errored_details_are_extended_not_overwritten():
+    seed = [{"cycle_index": 99, "batch_index": 9, "error": "old", "exception_type": "OldError"}]
+    harness = _Harness(
+        child_results={
+            "run-1-c0": _child_record("0"),
+            "run-1-c1": RuntimeError("new failure"),
+        },
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(errored_details=seed), harness)
+    assert result["errored_details"][0] == seed[0]
+    assert len(result["errored_details"]) == 2
+    assert result["errored_details"][1]["error"] == "new failure"
+
+
+def test_errored_details_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={
+            "run-1-c0": _child_record("0"),
+            "run-1-c1": RuntimeError("cycle blew up"),
+        },
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(), harness)
+    assert any("errored_details" in p and p["errored_details"] for p in persisted)
+
+
+def test_merge_error_is_folded_without_failing_the_batch():
+    """A tracker-merge failure reported by ``merge_wave_results_activity``
+    (isolated per-record, per #4016/#4017) degrades to a soft counter bump —
+    it never propagates as an exception through ``run()``."""
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+        ),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["status"] == "completed_with_errors"
+    assert result["errored_cycles"] == 1
+    assert result["tracker_merge_error_count"] == 1
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 1,
+            "batch_index": 1,
+            "error": "merge boom",
+            "exception_type": "ValueError",
+            "reason": "tracker_merge_failed",
+        }
+    ]
+    # Both cycles were still finalized — the merge failure didn't drop a record.
+    assert sorted(result["completed_record_ids"]) == ["rec-0", "rec-1"]
+
+
+def test_seeded_tracker_merge_error_count_is_added_not_overwritten():
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+        ),
+    )
+    result = _run(_batch_input(tracker_merge_error_count=4), harness)
+    assert result["tracker_merge_error_count"] == 5
+
+
+def test_tracker_merge_error_count_persisted_mid_run():
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            merge_wave_results_activity=lambda a: {
+                "primary_tracker_state": {"merged": True},
+                "merge_errors": [
+                    {
+                        "cycle_index": 1,
+                        "error": "merge boom",
+                        "exception_type": "ValueError",
+                        "reason": "tracker_merge_failed",
+                    }
+                ],
+            },
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_batch_input(), harness)
+    assert any(p.get("tracker_merge_error_count") == 1 for p in persisted)
+
+
 def test_signal_brief_refreshed_once_per_batch():
     harness = _Harness(
         child_results={f"run-1-c{i}": _child_record(str(i)) for i in range(4)},
@@ -354,6 +635,98 @@ def test_signal_brief_refreshed_once_per_batch():
     # 2 batches × batch_size 2.
     _run(_batch_input(batch_size=2, batch_count=2), harness)
     assert harness.activity_calls.count("compute_signal_brief_activity") == 2
+
+
+# ---------------------------------------------------------------------------
+# Resume carry-forward regression — ported from test_strategy_lab_resume.py
+# (which exercised thread-mode's _strategy_lab_worker directly). A skip
+# encountered after resume must ADD to the pre-resume skipped count, not
+# overwrite it, and every persisted snapshot's progress counters must be
+# monotonically non-decreasing from the pre-resume floor.
+# ---------------------------------------------------------------------------
+
+
+def _resume_batch_input(**overrides: Any) -> Dict[str, Any]:
+    """A 10-cycle run (2 batches x 5) resumed after 3 contiguous completions
+    and 2 prior skips — mirrors the pre-resume snapshot
+    ``resume_strategy_lab_run`` would have carried into ``batch_input`` via
+    ``rehydrate_active_run_offset``/``get_resume_seed_counters``.
+    ``max_parallel=1`` keeps waves single-cycle so persisted snapshots are
+    deterministic and individually inspectable."""
+    return _batch_input(
+        batch_size=5,
+        batch_count=2,
+        max_parallel=1,
+        start_cycle_offset=3,
+        skipped_cycles=2,
+        completed_record_ids=["r1", "r2", "r3"],
+        **overrides,
+    )
+
+
+def test_resume_carries_forward_skipped_cycles():
+    """A skip encountered after resume must ADD to the pre-resume skipped
+    count. Before #4014/#4015 existed, the Temporal path had no seed at all,
+    so any post-resume skip would have been the run's only recorded skip."""
+    harness = _Harness(
+        child_results={
+            "run-1-c3": _child_skipped(),  # first resumed cycle: no market data
+            **{f"run-1-c{i}": _child_record(str(i)) for i in range(4, 10)},
+        },
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_resume_batch_input(), harness)
+
+    # 2 prior skips + 1 new skip = 3.
+    assert result["skipped_cycles"] == 3
+    # 3 prior completions + 6 new successes = 9 (cycle index 3 skipped, 4..9 succeed).
+    assert result["completed_record_ids"] == [
+        "r1",
+        "r2",
+        "r3",
+        "rec-4",
+        "rec-5",
+        "rec-6",
+        "rec-7",
+        "rec-8",
+        "rec-9",
+    ]
+    assert result["status"] == "completed"
+
+
+def test_resume_progress_never_moves_backward():
+    """Across every persisted snapshot, completed_cycles and skipped_cycles
+    must be monotonically non-decreasing from the pre-resume floor."""
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={f"run-1-c{i}": _child_record(str(i)) for i in range(3, 10)},
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    _run(_resume_batch_input(), harness)
+
+    last_completed = 3  # pre-resume floor
+    last_skipped = 2  # pre-resume floor
+    saw_completed_cycles = False
+    for snap in persisted:
+        if "completed_cycles" not in snap:
+            continue
+        saw_completed_cycles = True
+        completed = snap["completed_cycles"]
+        skipped = snap.get("skipped_cycles", last_skipped)
+        assert completed >= last_completed, (
+            f"completed_cycles moved backward: {last_completed} -> {completed}"
+        )
+        assert skipped >= last_skipped, (
+            f"skipped_cycles moved backward: {last_skipped} -> {skipped}"
+        )
+        last_completed = completed
+        last_skipped = skipped
+
+    assert saw_completed_cycles
+    assert last_completed == 3 + 7  # 3 prior + 7 new successful cycles (3..9)
+    assert last_skipped == 2  # no post-resume skips in this scenario
 
 
 # ---------------------------------------------------------------------------

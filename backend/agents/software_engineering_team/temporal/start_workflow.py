@@ -43,34 +43,47 @@ def _run_async(coro: Any) -> Any:
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
 
+def is_workflow_v2_enabled() -> bool:
+    """Whether ``SE_WORKFLOW_V2`` selects ``RunTeamWorkflowV2`` for ``start_run_team_workflow``."""
+    import os
+
+    return os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
+
+
 def start_run_team_workflow(
     job_id: str,
     repo_path: str,
     spec_content_override: Optional[str] = None,
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
+    sprint_id: Optional[str] = None,
 ) -> None:
-    """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id."""
-    import os
+    """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id.
 
+    ``sprint_id`` is forwarded on both paths — ``RunTeamWorkflow`` and
+    ``RunTeamWorkflowV2`` both accept it as their trailing positional arg.
+    """
     workflow_id = f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"
     client = get_temporal_client()
     if client is None:
         raise RuntimeError("Temporal client not available")
 
-    use_v2 = os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
+    use_v2 = is_workflow_v2_enabled()
     workflow_cls = RunTeamWorkflowV2 if use_v2 else RunTeamWorkflow
+
+    args: List[Any] = [
+        job_id,
+        repo_path,
+        spec_content_override,
+        resolved_questions_override,
+        planning_only,
+        sprint_id,
+    ]
 
     _run_async(
         client.start_workflow(
             workflow_cls.run,
-            args=[
-                job_id,
-                repo_path,
-                spec_content_override,
-                resolved_questions_override,
-                planning_only,
-            ],
+            args=args,
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )

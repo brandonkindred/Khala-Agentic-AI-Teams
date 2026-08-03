@@ -21,7 +21,6 @@ from software_engineering_team.temporal.activities import (
     run_orchestrator_activity,
     run_product_analysis_activity,
 )
-from software_engineering_team.temporal.client import is_temporal_enabled
 from software_engineering_team.temporal.constants import TASK_QUEUE
 from software_engineering_team.temporal.workflows import (
     RetryFailedWorkflow,
@@ -47,11 +46,10 @@ def start_se_temporal_worker_thread() -> bool:
     """Start the SE Temporal worker in a daemon thread (if Temporal is enabled).
 
     Postconditions:
-        - Returns False when Temporal is disabled and starts nothing.
+        - Returns False when Temporal is disabled and starts nothing (checked
+          by ``start_team_worker`` itself).
         - Otherwise delegates to ``start_team_worker``, which is idempotent
           per team: a second call while the worker thread is alive returns
           True without starting a duplicate thread.
     """
-    if not is_temporal_enabled():
-        return False
     return start_team_worker("software_engineering", WORKFLOWS, ACTIVITIES, task_queue=TASK_QUEUE)

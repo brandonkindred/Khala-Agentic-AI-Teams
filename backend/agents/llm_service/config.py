@@ -707,8 +707,8 @@ def resolve_model_for_provider(
     Preconditions: ``provider`` is the already-resolved active provider id, or
         ``None`` to resolve it here (a caller that already has it passes it to
         avoid a redundant :func:`resolve_provider` lock acquisition).
-    Postconditions: returns a non-empty model id appropriate for
-        :func:`resolve_provider`. Never raises.
+    Postconditions: returns a non-empty model id appropriate for the
+        active provider. Never raises.
     """
     active = provider or resolve_provider()
     if active == "claude":
@@ -742,8 +742,14 @@ def resolve_timeout(agent_key: Optional[str] = None) -> float:
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:
     """
-    Resolve context size (tokens) for a model: env LLM_CONTEXT_SIZE (global override),
-    then KNOWN_MODEL_CONTEXT[model], else None (caller may use /api/show or default).
+    Resolve context size (tokens) for a model.
+
+    Order: env ``LLM_CONTEXT_SIZE`` (global override, clamped to a minimum of
+    2048), then ``KNOWN_MODEL_CONTEXT[model]``, else ``None`` (caller may use
+    ``/api/show`` or default).
+
+    Postconditions: when an env override is a valid int, returns ``>= 2048``;
+        otherwise returns the known-model value or ``None``. Never raises.
     """
     # Not expressible via shared.env.parse_int: an unset *or* invalid override must
     # fall through to the model-specific KNOWN_MODEL_CONTEXT value (an Optional[int]),

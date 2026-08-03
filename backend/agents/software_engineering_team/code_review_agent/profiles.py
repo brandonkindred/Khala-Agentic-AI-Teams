@@ -431,9 +431,14 @@ def build_review_system_prompt(profile: ReviewProfile | str) -> str:
         * Returns a non-empty prompt string whose JSON output contract is
           identical across all profiles (so the coordinator parser and test
           stubs are profile-agnostic).
-        * ``code_review_agent.prompts.CODE_REVIEW_PROMPT`` is derived from
-          ``build_review_system_prompt(ReviewProfile.CODE_REVIEW)``.
         * Pure; no side effects.
+
+    Note:
+        Callers such as ``code_review_agent.prompts`` derive
+        ``CODE_REVIEW_PROMPT`` by calling this function with
+        ``ReviewProfile.CODE_REVIEW``; this function does not create or
+        enforce that derivation itself (see the module-level ``Invariants``
+        above for the authoritative statement of that relationship).
     """
     spec = REVIEW_PROFILES[ReviewProfile(profile)]
     return (

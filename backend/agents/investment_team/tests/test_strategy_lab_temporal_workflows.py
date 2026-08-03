@@ -98,6 +98,19 @@ def _record_outcome(**overrides: Any) -> Dict[str, Any]:
     return base
 
 
+def _skipped_outcome(**overrides: Any) -> Dict[str, Any]:
+    base = {
+        "kind": "skipped",
+        "reason": "no_market_data",
+        "convergence_tracker_state": {"trial_count": 1},
+        "gate_results": [],
+        "budget_calls": 3,
+        "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
+    }
+    base.update(overrides)
+    return base
+
+
 def _run(cycle_input: Dict[str, Any]) -> Dict[str, Any]:
     return asyncio.run(wf.StrategyLabCycleWorkflow().run(cycle_input))
 
@@ -129,6 +142,30 @@ def test_run_returns_record_from_first_successful_attempt():
     assert calls.count("run_design_attempt_activity") == 1
     assert "build_short_circuit_record_activity" not in calls
     assert "compute_regime_summary_activity" not in calls
+
+
+def test_run_returns_skipped_outcome_immediately():
+    """A ``kind='skipped'`` attempt outcome (no market data) is cycle-terminal
+    right away — no further design-attempt retry, no short-circuit build."""
+    calls: List[str] = []
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": lambda a: _skipped_outcome(),
+    }
+    with _patch_execute(handlers, calls=calls):
+        result = _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "signal_brief": None,
+                "exclude_asset_classes": None,
+                "convergence_tracker_state": {},
+            }
+        )
+    assert result == {"kind": "skipped", "convergence_tracker_state": {"trial_count": 1}}
+    assert "record" not in result
+    assert calls.count("run_design_attempt_activity") == 1
+    assert "build_short_circuit_record_activity" not in calls
 
 
 def test_run_skips_config_resolution_when_already_supplied():

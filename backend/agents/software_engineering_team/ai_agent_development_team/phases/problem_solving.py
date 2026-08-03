@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..constants import REQUIRED_ARTIFACT_HINTS
 from ..models import ExecutionResult, ProblemSolvingResult, ReviewResult
+from .review import ARTIFACT_GATE_DESCRIPTION_PREFIX
 
 
 def run_problem_solving(
@@ -13,8 +14,11 @@ def run_problem_solving(
 
     Preconditions: ``review_result.issues`` may be empty. This is a purely
       deterministic, non-LLM fix — it only ever addresses ``artifact_gate``-
-      sourced issues whose category token is in ``REQUIRED_ARTIFACT_HINTS``;
-      it cannot resolve ``execution``-sourced issues (failed microtasks).
+      sourced issues whose description starts with
+      ``ARTIFACT_GATE_DESCRIPTION_PREFIX``, yields a non-empty hint token, and
+      that token is in ``REQUIRED_ARTIFACT_HINTS``; it cannot resolve
+      ``execution``-sourced issues (failed microtasks), malformed artifact-gate
+      descriptions, or unknown category tokens.
     Postconditions: returns a ``ProblemSolvingResult`` where ``resolved`` is
       True iff at least one placeholder file was synthesized; ``files`` is a
       new dict — ``execution_result.files`` merged with the placeholder
@@ -28,8 +32,10 @@ def run_problem_solving(
     for issue in review_result.issues:
         if issue.source != "artifact_gate":
             continue
-        token = issue.description.split(":")[-1].strip()
-        if token not in REQUIRED_ARTIFACT_HINTS:
+        if not issue.description.startswith(ARTIFACT_GATE_DESCRIPTION_PREFIX):
+            continue
+        token = issue.description[len(ARTIFACT_GATE_DESCRIPTION_PREFIX) :].strip()
+        if not token or token not in REQUIRED_ARTIFACT_HINTS:
             continue
         path = f"ai_system/{token}_placeholder.md"
         patched_files[path] = (

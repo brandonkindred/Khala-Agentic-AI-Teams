@@ -17,6 +17,9 @@ the reduce-phase synthesis pass (which fires whenever a run has >1 sub-review).
 
 The process-global cache is cleared around every test by the autouse
 ``_reset_code_review_chunk_cache`` fixture in ``conftest.py``.
+
+Text-field truncation/length-limit behavior is out of scope here; it is
+covered by the ``build_findings_digest`` tests in ``test_code_review_synthesis.py``.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.models import (
+    ChunkReviewOutput,
     CodeReviewInput,
     CodeReviewUnavailableError,
     FileSegment,
@@ -210,6 +214,30 @@ def test_changed_model_invalidates_cache(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(coord, "_review_model_fingerprint", lambda _llm: "model-B")
     run_coordinator(client, data)
     assert client.map_calls == 2
+
+
+class _EnumLike:
+    """Minimal stand-in for an enum member: exposes ``.value``, nothing else."""
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+def test_context_fingerprint_normalizes_non_profile_enum_values() -> None:
+    """Every ``base_input`` field is ``.value``-normalized, not only ``profile``."""
+    plain = {"task_description": "shared", "language": "python", "profile": "code_review"}
+    with_enum = {**plain, "language": _EnumLike("python")}
+
+    # An enum-like value whose .value matches the plain string hashes identically.
+    assert mapping._context_fingerprint(plain, "model-A") == mapping._context_fingerprint(
+        with_enum, "model-A"
+    )
+
+    # A different underlying .value still invalidates the digest.
+    different_enum = {**plain, "language": _EnumLike("typescript")}
+    assert mapping._context_fingerprint(plain, "model-A") != mapping._context_fingerprint(
+        different_enum, "model-A"
+    )
 
 
 def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
@@ -666,6 +694,89 @@ def test_waiter_reraises_resolved_inflight_exception() -> None:
     assert reviewer.calls == 0
 
 
+def test_clear_chunk_outcome_cache_empties_registries() -> None:
+    """A clear empties both the outcome cache and the in-flight registry."""
+    chunk = _single_chunk()
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+    mapping._CHUNK_OUTCOME_CACHE[key] = _simple_outcome()
+    mapping._CHUNK_INFLIGHT[key] = Future()
+
+    mapping.clear_chunk_outcome_cache()
+
+    assert mapping._CHUNK_OUTCOME_CACHE == {}
+    assert mapping._CHUNK_INFLIGHT == {}
+
+
+class _BlockingReviewer:
+    """Reviewer stand-in whose ``run`` signals entry, blocks, then approves.
+
+    Drives a real leader through ``_cached_review_chunk`` so a test can pause
+    it mid-review (LLM call in flight) and clear the cache from the main
+    thread, rather than faking the leader's cache write directly.
+    """
+
+    def __init__(self, entered: threading.Event, release: threading.Event) -> None:
+        self._entered = entered
+        self._release = release
+        self.calls = 0
+
+    def run(self, chunk_input: Any) -> ChunkReviewOutput:
+        self.calls += 1
+        self._entered.set()
+        assert self._release.wait(timeout=5), "test deadlocked waiting for release"
+        return ChunkReviewOutput(approved=True, issues=[], summary="ok")
+
+
+def test_clear_mid_flight_does_not_prevent_leader_from_caching() -> None:
+    """Clearing while a leader is in flight does not stop it from later caching.
+
+    Pins the corrected postcondition on ``clear_chunk_outcome_cache``: the
+    guaranteed-miss promise holds only when no review of that chunk is already
+    in flight. A leader in flight when the clear runs holds no lock across its
+    LLM call, so it can still publish its outcome afterward. Exercised through
+    the real ``_cached_review_chunk`` leader path (a worker thread blocked
+    inside its "LLM call" via ``_BlockingReviewer``, released only after the
+    clear returns) rather than a direct cache write, so a future change to the
+    caching logic itself — e.g. a generation check meant to suppress a stale
+    post-clear write — would be caught by this test.
+    """
+    chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+
+    entered = threading.Event()
+    release = threading.Event()
+    reviewer = _BlockingReviewer(entered, release)
+    outcomes: List[mapping._ChunkOutcome] = []
+
+    def _run_leader() -> None:
+        outcomes.append(mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp))
+
+    leader_thread = threading.Thread(target=_run_leader)
+    leader_thread.start()
+    try:
+        # The leader registers its in-flight slot before calling reviewer.run,
+        # so this confirms the clear below races a genuinely in-flight review.
+        assert entered.wait(timeout=5), "leader never reached its blocking review call"
+        assert key in mapping._CHUNK_INFLIGHT
+
+        mapping.clear_chunk_outcome_cache()
+        assert key not in mapping._CHUNK_OUTCOME_CACHE
+        assert key not in mapping._CHUNK_INFLIGHT
+
+        # Let the (unaware) leader finish; it should still cache its outcome.
+        release.set()
+    finally:
+        leader_thread.join(timeout=5)
+        assert not leader_thread.is_alive(), "leader thread did not finish"
+
+    assert reviewer.calls == 1
+    assert key in mapping._CHUNK_OUTCOME_CACHE  # the "guaranteed miss" did not hold
+    assert outcomes[0].approved_flags == [True]
+
+
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Past capacity, the oldest entry is evicted and re-reviewed on return."""
     monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "1")
@@ -826,6 +937,23 @@ def test_submission_cache_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -
     assert spy["n"] == 0
     run_coordinator(client, a)  # A was evicted → full review again
     assert spy["n"] == 1
+
+
+def test_submission_cache_size_clamps_negative_and_garbage_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_submission_cache_size()`` never returns ``None``/negative/non-int
+    regardless of a hostile ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` value -- the
+    eviction loop in ``run_coordinator`` relies on this without re-checking
+    (see its postcondition)."""
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "-5")
+    assert coord._submission_cache_size() == 0
+
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "not-a-number")
+    assert coord._submission_cache_size() == coord.DEFAULT_SUBMISSION_CACHE_SIZE
+
+    monkeypatch.delenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", raising=False)
+    assert coord._submission_cache_size() == coord.DEFAULT_SUBMISSION_CACHE_SIZE
 
 
 def test_submission_cache_bypassed_when_repo_reader_given(

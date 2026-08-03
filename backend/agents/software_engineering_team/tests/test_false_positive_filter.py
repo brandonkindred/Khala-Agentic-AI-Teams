@@ -678,6 +678,22 @@ def test_find_function_at_line_hunk_separator_not_treated_as_construct() -> None
     assert "..." not in result  # separator must not appear in the output as a construct
 
 
+def test_find_function_at_line_module_level_hunk_not_broken_by_sibling_hunk() -> None:
+    """A module-level target in its own valid hunk still resolves when a
+    *different* hunk elsewhere in the file would fail to parse if joined."""
+    # Three hunks: a complete function, a standalone module-level statement
+    # (the target), and a dangling indented continuation with no declaration
+    # in its own excerpt. Naively re-parsing the whole stripped content would
+    # raise IndentationError on the third hunk and misreport the target
+    # (module-level line 2 of hunk B) as unparseable.
+    content = "10: def first():\n11:     return 1\n...\n20: x = 1\n...\n30:     changed()\n"
+    idx = CodebaseIndex(files={"worker.py": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("worker.py", 20)
+    assert "module level" in result.lower()
+    assert "could not parse" not in result.lower()
+
+
 # --------------------------------------------------------------------------- verdict parsing
 
 
@@ -767,9 +783,7 @@ def test_parse_verdicts_keeps_first_on_duplicate_index(caplog) -> None:
     assert set(parsed) == {0}
     assert parsed[0].is_false_positive is False
     assert parsed[0].reasoning == "first"
-    assert any(
-        "duplicate verdict for index 0" in r.message for r in caplog.records
-    )
+    assert any("duplicate verdict for index 0" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- prompt
@@ -995,16 +1009,20 @@ def test_resolve_dot_slash_prefers_exact_normalized_over_nested_suffix() -> None
 
 
 def test_resolve_does_not_strip_parent_directory_prefix() -> None:
-    """A ``../`` citation must not resolve by treating parent dots as a ``./`` strip.
+    """``../`` must not be treated as a strippable ``./`` / ``/`` prefix.
 
     Preconditions:
-        - Index contains only ``config.py``.
+        - Index contains only a root ``main.py``.
 
     Postconditions:
-        - ``../config.py`` returns ``None`` (not ``config.py``).
+        - ``_normalize_leading("../main.py")`` preserves the parent prefix.
+        - ``../main.py`` returns ``None`` (does not alias the root file).
+        - ``./main.py`` still resolves to the root file.
     """
-    idx = CodebaseIndex(files={"config.py": "x"})
-    assert idx.resolve_path("../config.py") is None
+    idx = CodebaseIndex(files={"main.py": "ROOT"})
+    assert CodebaseIndex._normalize_leading("../main.py") == "../main.py"
+    assert idx.resolve_path("../main.py") is None
+    assert idx.resolve_path("./main.py") == "main.py"
 
 
 def test_resolve_preserves_hidden_file_basename() -> None:

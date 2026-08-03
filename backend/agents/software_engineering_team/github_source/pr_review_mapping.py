@@ -82,8 +82,9 @@ def _fallback_title(description: str) -> str:
     Postconditions:
         - Returns the description's first line, trimmed to at most
           ``_TITLE_MAX_LEN`` characters TOTAL (including a trailing "…" when
-          truncated) at a word boundary. Returns "" only when ``description``
-          is blank.
+          truncated); prefers breaking at a word boundary, but falls back to a
+          hard character boundary when the first word is longer than the limit.
+          Returns "" only when ``description`` is blank.
     """
     stripped = (description or "").strip()
     if not stripped:
@@ -138,8 +139,10 @@ def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_O
             valid.add(new_line)
             new_line += 1
         elif tag == " " or raw == "":
-            # Context line (a blank context line may arrive as an empty string):
-            # it advances the new-file counter regardless of whether we comment on it.
+            # Context line. A legitimate blank line in the source carries a leading
+            # space in the diff (tag == " "); raw == "" is a defensive fallback for a
+            # malformed/empty line in the patch text itself. Either way it advances
+            # the new-file counter regardless of whether we comment on it.
             if not added_only:
                 valid.add(new_line)
             new_line += 1
@@ -192,12 +195,17 @@ def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optio
 
     Postconditions:
         - Returns the matching diff path, or None when no confident match exists.
-          Tries an exact match, then a leading-``./`` strip, then a unique basename
-          match (ambiguous basenames yield None rather than a wrong anchor).
+          Tries an exact match, then strips a literal leading ``./`` (not any
+          combination of ``.``/``/`` characters — a dotfile like ``.gitignore`` is
+          left untouched), then strips a literal leading ``/``, then a unique
+          basename match (ambiguous basenames yield None rather than a wrong
+          anchor).
     """
     if not file_path:
         return None
-    for candidate in (file_path, file_path.lstrip("./"), file_path.lstrip("/")):
+    dot_slash_stripped = file_path[2:] if file_path.startswith("./") else file_path
+    slash_stripped = file_path[1:] if file_path.startswith("/") else file_path
+    for candidate in (file_path, dot_slash_stripped, slash_stripped):
         if candidate in valid_by_path:
             return candidate
     base = file_path.rsplit("/", 1)[-1]
@@ -325,8 +333,9 @@ def split_review_comments(
           entry carrying a ``line`` key and ``file_level`` is every other entry.
           The split is exhaustive: the two groups' lengths always sum to
           ``len(comments)`` (no entry is dropped or duplicated), so a finding can
-          never be silently lost even if a future producer emits an unexpected
-          shape — it falls into ``file_level`` and is still posted (file-level).
+          never be silently lost. Entries carrying a ``line`` key are classified as
+          line-anchored; all other entries — including any future producer's
+          unexpected shape — fall into ``file_level`` and are still posted.
           Input order is preserved within each group.
     """
     line_anchored = [c for c in comments if "line" in c]

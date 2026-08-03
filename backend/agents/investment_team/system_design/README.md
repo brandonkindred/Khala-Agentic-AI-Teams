@@ -66,7 +66,7 @@ with implementation detail for individual Strategy Lab capabilities:
 | Strategy Lab agents (SignalIntelligenceExpert, StrategyIdeationAgent, BacktestingAgent, PaperTradingAgent, TradeSimulationEngine) | [`agents/`](../agents/) |
 | Orchestrator state machine, 6 queues, promotion entry point | [`orchestrator.py`](../orchestrator.py) (133 lines) |
 | Pydantic domain models (profile, IPS, strategy, backtest, promotion, advisor, paper trading) | [`models.py`](../models.py) (477 lines) |
-| Strategy Lab background worker + per-cycle loop | [`api/main.py`](../api/main.py) `_strategy_lab_worker`, `_run_one_strategy_lab_cycle` |
+| Strategy Lab batch workflow + per-cycle loop | [`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py) `StrategyLabBatchWorkflow`, [`api/main.py`](../api/main.py) `_run_one_strategy_lab_cycle` |
 | SSE fan-out for run progress | [`api/job_event_bus.py`](../api/job_event_bus.py) |
 | Persistence wrapper over Khala job service | [`api/main.py`](../api/main.py) `_PersistentDict` (line 85) |
 | Multi-provider OHLCV fetcher | [`market_data_service.py`](../market_data_service.py) |

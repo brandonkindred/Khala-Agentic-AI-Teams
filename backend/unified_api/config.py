@@ -36,6 +36,36 @@ DEFAULT_HOST = os.getenv("UNIFIED_API_HOST", "0.0.0.0")
 # Security gateway: when True (default), scan requests to team APIs before forwarding.
 SECURITY_GATEWAY_ENABLED = os.getenv("SECURITY_GATEWAY_ENABLED", "true").lower() in ("true", "1", "yes")
 
+# Agent Console sandbox reaper/worker: when True (default), the lifespan starts
+# the sandbox idle reaper (and, when Temporal is enabled, this process's own
+# sandbox-only Temporal worker thread). Set false to run unified-api without it.
+UNIFIED_API_SANDBOX_TEMPORAL_WORKER = os.getenv("UNIFIED_API_SANDBOX_TEMPORAL_WORKER", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
+# Team-assistant conversational sub-apps: when True (default), unified-api
+# registers every TEAM_ASSISTANT_CONFIGS entry into a mount-spec registry at
+# startup; each team's assistant sub-app is then actually constructed and
+# mounted lazily, on that team's first `{prefix}/assistant` request. Set
+# false to skip registration entirely (no assistant sub-app is ever mounted,
+# regardless of traffic); team proxy routes and health checks are unaffected.
+UNIFIED_API_TEAM_ASSISTANTS_ENABLED = os.getenv("UNIFIED_API_TEAM_ASSISTANTS_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
+# Agent Studio Temporal worker: when True (default), the lifespan starts this
+# process's in-process Agent Studio Temporal worker thread (Agent Studio is
+# Temporal-only). Set false to run unified-api without booting it.
+UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER = os.getenv("UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 # Temporal (software engineering team workflows). When TEMPORAL_ADDRESS is set, SE team uses Temporal instead of threads.
 TEMPORAL_ADDRESS = os.getenv("TEMPORAL_ADDRESS", "").strip() or None
 TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default").strip()

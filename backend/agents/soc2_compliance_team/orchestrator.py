@@ -84,9 +84,9 @@ class SOC2AuditOrchestrator:
             - Returns a ``SOC2AuditResult``: ``status="completed"`` with
               per-criterion results and a report/next-steps document on success,
               or ``status="failed"`` with ``error`` set on failure. A failure
-              after the criteria audits already succeeded (report synthesis
-              failed or timed out) still carries those completed results
-              rather than discarding them.
+              after the criteria audits already succeeded (report synthesis,
+              result assembly, or either timing out) still carries those
+              completed results rather than discarding them.
         """
         repo_path = Path(repo_path).resolve()
         logger.info("SOC2 audit starting for repo: %s", repo_path)
@@ -95,7 +95,7 @@ class SOC2AuditOrchestrator:
             context = pipeline.load_context(repo_path)
         except Exception as e:
             logger.exception("Failed to load repo context")
-            return pipeline.failed_result(repo_path, str(e))
+            return pipeline.failed_result(str(repo_path), str(e))
 
         try:
             tsc_results = _run_with_timeout(
@@ -105,7 +105,7 @@ class SOC2AuditOrchestrator:
             )
         except Exception as e:
             logger.exception("SOC2 criteria audit failed")
-            return pipeline.failed_result(repo_path, str(e))
+            return pipeline.failed_result(str(repo_path), str(e))
 
         try:
             compliance_report, next_steps_document = _run_with_timeout(
@@ -115,11 +115,15 @@ class SOC2AuditOrchestrator:
             )
         except Exception as e:
             logger.exception("SOC2 report synthesis failed")
-            return pipeline.failed_result(repo_path, str(e), tsc_results=tsc_results)
+            return pipeline.failed_result(str(repo_path), str(e), tsc_results=tsc_results)
 
-        return pipeline.assemble_result(
-            str(repo_path), tsc_results, compliance_report, next_steps_document
-        )
+        try:
+            return pipeline.assemble_result(
+                str(repo_path), tsc_results, compliance_report, next_steps_document
+            )
+        except Exception as e:
+            logger.exception("SOC2 result assembly failed")
+            return pipeline.failed_result(str(repo_path), str(e), tsc_results=tsc_results)
 
 
 def run_soc2_audit(repo_path: str | Path) -> SOC2AuditResult:

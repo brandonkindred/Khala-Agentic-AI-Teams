@@ -48,6 +48,7 @@ class RunTeamWorkflow:
         spec_content_override: Optional[str] = None,
         resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
         planning_only: bool = False,
+        sprint_id: Optional[str] = None,
     ) -> None:
         # Generated via workflow.uuid4() (Temporal's replay-safe UUID source), not
         # shared.observability.new_trace_id()/uuid.uuid4() directly — workflow code
@@ -63,6 +64,7 @@ class RunTeamWorkflow:
                 resolved_questions_override,
                 planning_only,
                 trace_id,
+                sprint_id,
             ],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=RUN_ORCHESTRATOR_TIMEOUT,
@@ -102,6 +104,7 @@ class RunTeamWorkflowV2:
         spec_content_override: Optional[str] = None,
         resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
         planning_only: bool = False,
+        sprint_id: Optional[str] = None,
     ) -> None:
         # One trace id for every phase of this job — generated via workflow.uuid4()
         # (Temporal's replay-safe UUID source) rather than
@@ -116,7 +119,7 @@ class RunTeamWorkflowV2:
         # Phase 1: Spec parsing + Product Requirements Analysis
         spec_result = await workflow.execute_activity(
             _activities.parse_spec_activity,
-            args=[job_id, repo_path, spec_content_override, trace_id],
+            args=[job_id, repo_path, spec_content_override, trace_id, sprint_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=timedelta(hours=4),
             heartbeat_timeout=timedelta(minutes=5),

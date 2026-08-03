@@ -371,8 +371,7 @@ def test_no_callback_behaves_identically() -> None:
     with_cb_calls: list = []
     result_no_cb = agent.run(_input())
     result_with_cb = agent.run(_input(), progress_callback=_recording_callback(with_cb_calls))
-    assert result_no_cb.approved == result_with_cb.approved
-    assert result_no_cb.issues == result_with_cb.issues
+    assert result_no_cb == result_with_cb
     assert with_cb_calls, "callback must have been invoked when provided"
 
 
@@ -425,6 +424,5 @@ def test_raising_callback_is_swallowed_and_never_changes_the_review(caplog):
     with caplog.at_level(logging.WARNING):
         result = agent.run(_input(), progress_callback=_boom)
 
-    assert result.approved == baseline.approved
-    assert result.issues == baseline.issues
+    assert result == baseline
     assert any("callback failed (ignored" in r.message for r in caplog.records)
