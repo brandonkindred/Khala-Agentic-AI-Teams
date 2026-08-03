@@ -73,6 +73,47 @@ def test_build_phase3_graph_is_a_graph() -> None:
     assert isinstance(build_phase3_graph(), Graph)
 
 
+def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
+    """Phase 3 diverge is a Graph fan-out into CreativeDirector (not a Swarm).
+
+    ``structured_output=`` stops the agent loop, so handoff-based Swarm
+    sequencing cannot drive the moodboard conceptualists.
+    """
+    from branding_team.graphs.phase3_visual import (
+        _PHASE3_CONCEPTUALIST_VARIANTS,
+        _PHASE3_SPECIALIST_FACTORIES,
+    )
+
+    graph = build_phase3_graph()
+    edges = {(e.from_node.node_id, e.to_node.node_id) for e in graph.edges}
+    node_ids = set(graph.nodes.keys())
+
+    assert "diverge_swarm" not in node_ids
+
+    conceptualists = {
+        f"MoodBoardConceptualist_{variant}" for variant in _PHASE3_CONCEPTUALIST_VARIANTS
+    }
+    assert {n.node_id for n in graph.entry_points} == conceptualists
+
+    for conceptualist in conceptualists:
+        assert (conceptualist, "CreativeDirector") in edges
+    assert ("CreativeDirector", "converge_decider") in edges
+
+    for specialist in _PHASE3_SPECIALIST_FACTORIES:
+        assert ("converge_decider", specialist) in edges
+        assert (specialist, "visual_compositor") in edges
+
+
+def test_make_moodboard_conceptualist_rejects_blank_variant() -> None:
+    """Documented variant precondition is enforced before agent construction."""
+    from branding_team.agents import make_moodboard_conceptualist
+
+    with pytest.raises(AssertionError, match="variant must be a non-empty string"):
+        make_moodboard_conceptualist("")
+    with pytest.raises(AssertionError, match="variant must be a non-empty string"):
+        make_moodboard_conceptualist("   ")
+
+
 def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
 
