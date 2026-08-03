@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
+from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
@@ -865,6 +866,57 @@ def test_review_chunk_allows_distinct_paths_including_empty() -> None:
         ]
     )
     assert len(chunk.segments) == 2
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "line1\nline2\nline3",  # no trailing newline
+        "line1\nline2\nline3\n",  # trailing newline terminates the last line
+        "line1\nline2\nline3\n\n",  # blank line before EOF
+    ],
+    ids=["no-trailing-newline", "trailing-newline", "blank-line-before-eof"],
+)
+def test_file_segment_line_count_matches_total_lines_convention(content: str) -> None:
+    """A whole-file segment's line_count must equal the total_lines that
+    chunking.split_block_into_segments computes for identical content (the
+    same `len(content.splitlines()) or 1` formula), so end_line always lands
+    on total_lines and is_partial is False -- regardless of a trailing
+    newline or a blank final line."""
+    total_lines = len(content.splitlines()) or 1
+    seg = FileSegment(path="a.py", content=content, start_line=1, total_lines=total_lines)
+    assert seg.line_count == total_lines
+    assert seg.end_line == total_lines
+    assert seg.is_partial is False
+
+
+def test_bisect_segment_first_half_end_line_reflects_its_own_content(monkeypatch) -> None:
+    """Both halves of a bisected segment must report their own true range, not
+    the original segment's — end_line/is_partial are computed from
+    start_line + content on FileSegment, so model_copy(update={"content": ...})
+    alone (no explicit end_line update) already keeps them correct."""
+    monkeypatch.setenv("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", "1000")  # env floor is 1000
+    lines = [f"line{i}\n" for i in range(1, 301)]  # 300 lines, ~2.3KB, clears the 2x-floor gate
+    seg = FileSegment(path="a.py", content="".join(lines), start_line=1, total_lines=300)
+
+    halves = _bisect_segment(seg)
+    assert halves is not None
+    first, second = halves
+
+    assert first.content + second.content == seg.content
+    assert first.start_line == seg.start_line
+    assert first.end_line == seg.start_line + first.line_count - 1
+    assert first.end_line < seg.end_line
+    assert second.start_line == first.end_line + 1
+    assert second.end_line == seg.end_line
+    assert first.is_partial is True
+    assert second.is_partial is True
+    # Concrete cross-check against the known input (not the property under
+    # test): the split boundary derived from first.line_count must match
+    # where the original `lines` were actually cut.
+    assert first.line_count + second.line_count == seg.line_count == 300
+    assert first.content == "".join(lines[: first.line_count])
+    assert second.content == "".join(lines[first.line_count :])
 
 
 # ---------------------------------------------------------------------------
@@ -1970,6 +2022,47 @@ def test_total_failure_still_raises_even_with_graceful_default(monkeypatch) -> N
         )
     unreviewed = " ".join(excinfo.value.unreviewed)
     assert "bad1.py" in unreviewed and "bad2.py" in unreviewed
+
+
+def test_total_failure_unreviewed_excludes_genuine_issue_descriptions(monkeypatch) -> None:
+    """``CodeReviewUnavailableError.unreviewed`` must name only not-reviewed
+    ranges, never genuine reviewer findings -- even if a ``_ChunkOutcome``
+    somehow carried both (violating its own invariant that a failed chunk
+    never contributes to ``issues``). Regression guard for the coordinator
+    once concatenating ``outcome.issues`` into ``unreviewed``."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent import mapping
+
+    genuine = CodeReviewIssue(
+        severity="high",
+        category="logic",
+        file_path="reviewed.py",
+        description="a genuine finding a chunk actually reviewed",
+        suggestion="fix it",
+    )
+    not_reviewed = CodeReviewIssue(
+        severity="high",
+        category="general",
+        file_path="unreviewed.py",
+        description="reviewed.py (lines 1-2) could not be reviewed automatically",
+        suggestion="",
+    )
+    # approved_flags is deliberately empty (no chunk succeeded) while issues is
+    # non-empty, to prove the coordinator's own construction of ``unreviewed``
+    # never leaks genuine findings, independent of whether mapping's own
+    # invariant always holds elsewhere.
+    forced_outcome = mapping._ChunkOutcome(
+        issues=[genuine], not_reviewed_issues=[not_reviewed], approved_flags=[]
+    )
+    monkeypatch.setattr(coord, "_map_chunks", lambda *args, **kwargs: [forced_outcome])
+
+    with pytest.raises(CodeReviewUnavailableError) as excinfo:
+        run_coordinator(
+            DummyLLMClient(),
+            CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t", language="python"),
+        )
+    assert excinfo.value.unreviewed == [not_reviewed.description]
+    assert genuine.description not in excinfo.value.unreviewed
 
 
 # ---------------------------------------------------------------------------

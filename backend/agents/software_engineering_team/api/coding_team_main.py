@@ -212,7 +212,6 @@ from software_engineering_team.token_crypto import (  # noqa: F401
     encrypt_token,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 app = create_team_app(
@@ -250,7 +249,7 @@ app.include_router(reviews.router)
 # A few route handlers are also invoked directly (not only over HTTP) by sibling
 # modules — e.g. the answers route returns get_status(job_id). Expose them on the
 # hub so those in-process calls (``_main.get_status``) resolve.
-get_status = jobs.get_status  # noqa: F811
-post_run = jobs.post_run  # noqa: F811
-resume_job = hitl_routes.resume_job  # noqa: F811
-submit_pending_answers = hitl_routes.submit_pending_answers  # noqa: F811
+get_status = jobs.get_status
+post_run = jobs.post_run
+resume_job = hitl_routes.resume_job
+submit_pending_answers = hitl_routes.submit_pending_answers

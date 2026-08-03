@@ -10,6 +10,18 @@ and none of them import from ``orchestrator.py`` or any mixin. Hosting them
 in a sibling module keeps each of those files focused on its own cluster's
 surface instead of re-deriving these helpers.
 
+Only dataclasses that are genuinely constructed in one cluster and consumed
+in another live here (``_MarketDataFetch``, ``_VerificationOutcome``,
+``_AlignmentLoopOutcome``, ``_DesignPersistContext``, ``_DriftCollector``,
+``RefinementStallTracker``, ``_CodeSynthesisPhaseResult``,
+``_RefinementAlignmentResult``, ``_SynthesisLoopOutcome``). Dataclasses used
+by only a single mixin file live in that file instead (e.g.
+``_DesignLoopOutcome``/``_DesignPhaseResult`` in ``orchestrator_design.py``,
+``_AnomalyRecoveryOutcome``/``_SynthesisEvaluateResult`` in
+``orchestrator_synthesis.py``, ``_AlignmentRoundOutcome`` in
+``orchestrator_alignment.py``) — see ``MIXIN_BOUNDARIES.md`` for the full
+audit of which dataclasses were merged, relocated, or left as-is and why.
+
 External callers (``zero_trade_repair.py``, the test suite,
 ``agents/refinement.py``'s docstring reference) historically imported
 these names via ``investment_team.strategy_lab.orchestrator``.
@@ -168,12 +180,20 @@ class _MarketDataFetch:
     reading the service attribute later) is required because the service's
     ``provider_used`` dict is mutable shared state that accumulates across
     fetches; a later cycle's fetch would otherwise pollute earlier rows.
+
+    ``should_break`` is unused by the base fetch (``_fetch_market_data``,
+    always ``False``) and is set by the synthesis loop's fetch
+    (``_fetch_market_data_for_synthesis``) to signal that the loop should
+    short-circuit — no data came back or a critical fetch-coverage failure
+    fired. Shared here rather than in a separate envelope since both
+    call sites otherwise carry identical fields.
     """
 
     data: Optional[Dict[str, List[OHLCVBar]]]
     requested_symbols: List[str]
     fetched_symbols: List[str]
     provider_used: Dict[str, str] = field(default_factory=dict)
+    should_break: bool = False
 
 
 @dataclass
@@ -227,74 +247,6 @@ class _AlignmentLoopOutcome:
     @property
     def alignment_rounds(self) -> int:
         return len(self.alignment_attempts)
-
-
-@dataclass
-class _AlignmentRoundOutcome:
-    """One iteration of ``_run_trade_alignment_loop``.
-
-    Semantics:
-    - ``terminate=True`` ⇒ caller breaks the loop. The spec/code/trades/
-      metrics fields carry the pre-iteration state (either because the
-      audit reported aligned, the proposal was rejected, or the round
-      budget is spent).
-    - ``terminate=False`` ⇒ caller continues. The spec/code/trades/
-      metrics fields carry the just-committed proposal as the new
-      known-good state.
-
-    The helper mutates ``alignment_reports``, ``alignment_attempts``,
-    and ``all_gate_results`` in place; callers observe those lists
-    directly.
-    """
-
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
-    terminate: bool
-    # Set on a committing round (``terminate=False``) to the conformance
-    # verdict of the just-committed code; ignored on terminate rounds (which
-    # carry the unchanged pre-iteration state).
-    ran_on_non_conforming_code: bool = False
-
-
-@dataclass
-class _AnomalyRecoveryOutcome:
-    """Bundle of state returned by ``_handle_critical_anomalies``.
-
-    The synthesis loop's evaluation phase delegates to that helper when
-    the backtest produces critical anomaly gates. The helper either
-    commits a zero-trade-repair proposal, applies a generic refinement,
-    or exhausts the round budget — and the loop body needs to know which
-    outcome happened so it can continue or break.
-
-    Invariants on return:
-    - ``exhausted=True`` ⇒ caller breaks the synthesis loop with
-      ``max_rounds_exhausted=True``; the spec/code/trades/metrics fields
-      carry the last failed-round values (callers should not commit them).
-    - ``exhausted=False`` ⇒ caller continues to the next round; the
-      spec/code/trades/metrics/exec_result fields carry the new known-good
-      state (either ZTR-committed proposal or generic-refined source).
-    """
-
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
-    exec_result: StrategyRunResult
-    exhausted: bool
-    # Set only when a zero-trade repair commits new code (which replaces the
-    # persisted trades but is not otherwise conformance-gated): the conformance
-    # verdict of the committed repair code. ``None`` on the generic-refinement
-    # path, which leaves ``trades`` unchanged so the round's existing verdict
-    # still applies and must not be overwritten.
-    ran_on_non_conforming_code: Optional[bool] = None
-    # True iff ``exhausted`` was caused by the refinement-loop stall guard
-    # (``RefinementStallTracker``) rather than genuine round-cap exhaustion.
-    # Only the generic-refinement path (``_refine_or_exhaust``) can set this;
-    # a committed zero-trade repair always returns ``exhausted=False`` and
-    # this field's default (``False``) applies.
-    stalled: bool = False
 
 
 @dataclass(frozen=True)
@@ -749,70 +701,6 @@ def _extract_code_line_refs(code: str, rule_ids: List[str]) -> Dict[str, List[Li
 
 
 @dataclass
-class _DesignLoopOutcome:
-    """Bundle returned by ``_run_design_loop``.
-
-    The design loop iterates (DesignAgent → SpecReadinessGate →
-    DesignReviewAgent → DesignAgent.revise) until either the reviewer
-    marks the spec ready or the configured round budget is exhausted.
-
-    Invariants on return:
-    - ``ready=True`` ⇒ ``spec`` passed both the deterministic readiness
-      gate and the LLM reviewer on the most recent round; downstream
-      code synthesis may proceed.
-    - ``ready=False`` ⇒ the round budget exhausted; ``critique_history``
-      carries one entry per round (synthetic critiques produced from
-      readiness findings count); the orchestrator must short-circuit
-      the cycle rather than running code against a not-ready spec.
-    - ``rounds`` equals ``len(critique_history)`` in both branches.
-    - ``spec`` is the final candidate the loop produced (whether ready
-      or not), so the audit trail always carries the spec the cycle
-      stopped on.
-    - ``budget_exhausted=True`` ⇒ ``ready=False`` and the per-cycle
-      LLM-call budget was hit mid-loop; ``spec`` / ``critique_history``
-      carry whatever state existed at the trip. It disambiguates the two
-      reasons a ``ready=False`` outcome can arise: round-budget exhaustion
-      (``False``) versus LLM-call-budget exhaustion (``True``), which the
-      orchestrator maps to ``failed: design_not_ready`` and
-      ``failed: budget_exhausted`` respectively.
-    """
-
-    spec: StrategySpec
-    rationale: str
-    ready: bool
-    rounds: int
-    # NB: typed as ``Any`` to avoid a cycle with ``agents/design_review``.
-    # The orchestrator passes a ``List[SpecCritique]`` through.
-    critique_history: List[Any]
-    budget_exhausted: bool = False
-    # Why the loop stopped: "ready" | "round_cap" | "stalled" |
-    # "budget_exhausted". Disambiguates the not-ready short-circuit status
-    # (stall vs honest round-cap exhaustion).
-    stop_reason: str = ""
-    # Design-loop slice of the persisted telemetry summary (round count,
-    # stop reason, critique-ledger totals). Gate counts + the
-    # compiled-vs-custom flag are merged in at record-build time.
-    loop_telemetry: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class _DesignPhaseResult:
-    """Return envelope for ``_run_design_attempt``'s design + review phase.
-
-    ``record`` is a short-circuit ``StrategyLabRecord`` (typed ``Any`` to avoid
-    an import cycle) when the design loop did not reach readiness — the caller
-    returns it immediately. Otherwise ``record`` is ``None`` and the
-    ``spec`` / ``rationale`` / ``design_context`` carry the converged design
-    forward into code synthesis.
-    """
-
-    record: Optional[Any]
-    spec: Optional[StrategySpec] = None
-    rationale: str = ""
-    design_context: Optional[_DesignPersistContext] = None
-
-
-@dataclass
 class _CodeSynthesisPhaseResult:
     """Return envelope for ``_run_design_attempt``'s initial code-synthesis.
 
@@ -913,56 +801,6 @@ class _SynthesisLoopOutcome:
     # report ``status="failed: refinement_stalled"`` distinctly from
     # ``"failed: max_refinement_rounds"``.
     refinement_stalled: bool = False
-
-
-@dataclass
-class _SynthesisFetchResult:
-    """Return envelope for the synthesis loop's one-time market-data fetch.
-
-    Mirrors the four cached fields the loop carries forward
-    (``data`` / ``requested_symbols`` / ``fetched_symbols`` / ``provider_used``)
-    plus ``should_break``: ``True`` when no data came back or a critical
-    fetch-coverage failure fired, signalling the loop to short-circuit. The
-    symbol/provider fields are populated even when ``should_break`` is set so
-    the final ``_SynthesisLoopOutcome`` carries the fetch audit trail.
-    """
-
-    data: Optional[Dict[str, List[OHLCVBar]]]
-    requested_symbols: List[str]
-    fetched_symbols: List[str]
-    provider_used: Dict[str, str]
-    should_break: bool
-
-
-@dataclass
-class _SynthesisEvaluateResult:
-    """Return envelope for the synthesis loop's backtest-evaluation step.
-
-    ``action`` is one of:
-    - ``"success"`` — gates clean, the caller marks ``execution_succeeded`` and
-      breaks the loop;
-    - ``"continue"`` — a critical anomaly was recovered (refined/repaired) and
-      the caller continues to the next round;
-    - ``"exhausted"`` — recovery ran the round budget out, the caller marks
-      ``max_rounds_exhausted`` and breaks.
-
-    The remaining fields carry the (possibly recovery-mutated) round state back
-    to the loop so it can thread them into the final outcome.
-    """
-
-    action: str
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
-    exec_result: StrategyRunResult
-    ran_on_non_conforming_code: Optional[bool]
-    runtime_lookahead_violation: bool
-    # True iff ``action="exhausted"`` was caused by the refinement-loop
-    # stall guard rather than genuine round-cap exhaustion. Carried from
-    # ``_AnomalyRecoveryOutcome.stalled`` on the anomaly-recovery path;
-    # ``False`` on the direct "success" return (no recovery ran).
-    stalled: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────

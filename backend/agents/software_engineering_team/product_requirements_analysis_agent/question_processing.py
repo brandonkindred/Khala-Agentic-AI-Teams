@@ -28,6 +28,7 @@ from .prompts import (
     GENERATE_QUESTION_RECOMMENDATIONS_PROMPT,
     REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
 )
+from .qa_history import content_words
 
 logger = logging.getLogger(__name__)
 
@@ -371,10 +372,17 @@ def filter_duplicate_questions(
     """Filter out questions that appear to be duplicates of answered ones.
 
     Filters out questions whose keyword stems (plus simple plural/past-tense
-    variants) appear verbatim in the Q&A history. A question is considered a
-    duplicate when at least 90% of its keyword stems are found in the history.
+    variants) appear as whole words in the Q&A history. A question is considered
+    a duplicate when at least 90% of its keyword stems are found in the history.
     Below-90% coverage is kept for possible consolidation elsewhere. This is
     keyword coverage, not a similarity ratio between the question and history.
+
+    Uses :func:`content_words` (stopword-based, not length-based) for the same
+    keyword-admission rule as :func:`qa_history.extract_answer_from_qa_history`,
+    so a short-keyword question (e.g. one about an acronym) that the extractor
+    can now match isn't excluded from ``duplicates`` here first — otherwise it
+    would never reach the extractor at all and would be re-asked regardless of
+    the extractor's own behavior.
 
     Returns:
         Tuple of (filtered_questions, duplicate_questions).
@@ -396,7 +404,7 @@ def filter_duplicate_questions(
     duplicates = []
 
     qa_stem_infos = [
-        _stem_info(tok) for tok in re.findall(r"[a-z0-9]+", qa_history_lower) if len(tok) >= 3
+        _stem_info(tok) for tok in re.findall(r"[a-z0-9]+", qa_history_lower) if len(tok) >= 2
     ]
     # Exact set excludes restoration-only stubs so species/cases cannot hit spec/cas.
     qa_exact_stems = {stem for stem, _, _, exact_ok in qa_stem_infos if exact_ok}
@@ -411,10 +419,13 @@ def filter_duplicate_questions(
 
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
-        words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
-        key_stem_infos = [_stem_info(_clean_token(w)) for w in words]
+        # Same keyword admission as qa_history.extract_answer_from_qa_history
+        # (stopword-based via content_words, not a length>3 gate).
+        key_stem_infos = [_stem_info(_clean_token(w)) for w in content_words(q_text_lower)]
         key_by_stem: dict[str, tuple[bool, bool, bool]] = {}
         for stem, silent_e, y_or_ie, exact_ok in key_stem_infos:
+            if not stem:
+                continue
             prev_s, prev_y, prev_x = key_by_stem.get(stem, (False, False, False))
             key_by_stem[stem] = (
                 prev_s or silent_e,

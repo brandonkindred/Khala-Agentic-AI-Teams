@@ -2,13 +2,11 @@
 
 Wraps ``shared.temporal.start_workflow_sync`` for the synchronous FastAPI
 dispatch path to call, translating a ``RunStrategyLabRequest`` into the
-JSON-shaped ``batch_input`` that ``StrategyLabBatchWorkflow.run`` consumes —
-mirroring the config/clamp/exclusion construction ``_strategy_lab_worker`` does
-today, so the two entrypoints stay behaviorally aligned.
+JSON-shaped ``batch_input`` that ``StrategyLabBatchWorkflow.run`` consumes.
 
-Called by ``_dispatch_strategy_lab_run`` (``api/main.py``) on the Temporal
-branch — the coarse ``start_strategy_lab_workflow`` it replaced has been
-deleted. Import-time side-effect-free.
+Called by ``_dispatch_strategy_lab_run`` (``api/main.py``), the sole,
+Temporal-only Strategy Lab dispatch path — the coarse ``start_strategy_lab_workflow``
+it replaced has been deleted. Import-time side-effect-free.
 """
 
 from __future__ import annotations
@@ -25,11 +23,10 @@ if TYPE_CHECKING:
 def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) -> Dict[str, Any]:
     """Translate a ``RunStrategyLabRequest`` into ``StrategyLabBatchWorkflow`` input.
 
-    Reproduces ``_strategy_lab_worker``'s ``BacktestConfig`` construction
-    (``cost_stress=True``), the ``clamp_max_parallel`` concurrency clamp, the
-    ``allowed_asset_classes`` → ``exclude_asset_classes`` translation, and the
-    resume-offset rehydration — so the Temporal batch runs with the same inputs
-    the thread-mode worker would.
+    Builds the ``BacktestConfig`` (forcing ``cost_stress=True``), applies the
+    ``clamp_max_parallel`` concurrency clamp, translates
+    ``allowed_asset_classes`` → ``exclude_asset_classes``, and rehydrates the
+    resume offset/seed counters for the batch workflow to consume.
 
     Preconditions:
         ``request`` is a ``RunStrategyLabRequest``.
@@ -44,10 +41,9 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
     """
     # ``clamp_max_parallel``/``rehydrate_active_run_offset``/
     # ``get_resume_seed_counters`` live in the shared ``strategy_lab.config``/
-    # ``strategy_lab.run_state`` modules (also imported by ``api.main``) so the
-    # Temporal batch runs with byte-for-byte the same offset/clamp/counters the
-    # thread-mode worker uses, without reaching into api.main's private module
-    # state.
+    # ``strategy_lab.run_state`` modules (also imported by ``api.main``) so this
+    # reads the same offset/clamp/counters state without reaching into
+    # api.main's private module state.
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab.config import clamp_max_parallel
     from investment_team.strategy_lab.run_state import (

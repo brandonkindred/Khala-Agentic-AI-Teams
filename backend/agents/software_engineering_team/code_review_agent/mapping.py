@@ -140,8 +140,14 @@ def clear_chunk_outcome_cache() -> None:
     """Drop every cached map-phase outcome and any in-flight registration.
 
     Postconditions:
-        - The process-global cache is empty; the next review of any chunk is a
-          guaranteed miss. Intended for tests (the cache persists across
+        - The process-global cache is empty when this function returns. The next
+          review of a chunk is a guaranteed miss only when no review of that
+          chunk is currently in flight; a leader already in flight when this is
+          called holds no lock across its LLM call (see ``_CHUNK_INFLIGHT``
+          above) and can still write its outcome to the cache after this
+          returns. Callers that must force a cold review should ensure no
+          review is in flight (or await in-flight completion) before relying on
+          a miss. Intended for tests (the cache persists across
           ``run_coordinator`` calls by design) and for callers that must force a
           cold review.
         - The in-flight registry is cleared too. In production it is empty
@@ -150,6 +156,9 @@ def clear_chunk_outcome_cache() -> None:
     """
     with _CHUNK_OUTCOME_CACHE_LOCK:
         _CHUNK_OUTCOME_CACHE.clear()
+        # A leader already in flight (see _CHUNK_INFLIGHT) holds no lock across
+        # its LLM call, so it can still write its outcome to the cache below
+        # after this clear returns — see the postcondition above.
         _CHUNK_INFLIGHT.clear()
 
 
@@ -961,8 +970,11 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     Preconditions:
         - ``base_input`` is the shared ``ChunkReviewInput`` field dict built in
           ``run_coordinator``. Every value must be natively JSON-serializable
-          (str/number/bool/list/dict/None) except ``profile``, which is a
-          ``ReviewProfile`` normalized to its ``.value`` here.
+          (str/number/bool/list/dict/None) or an object exposing a ``.value``
+          attribute whose value is JSON-serializable — every value (not just
+          ``profile``) is normalized via ``getattr(value, "value", value)``
+          before hashing; ``profile`` is typically a ``ReviewProfile`` handled
+          the same way as any other enum-like field.
 
     Postconditions:
         - Returns a hex digest that changes whenever any shared review input

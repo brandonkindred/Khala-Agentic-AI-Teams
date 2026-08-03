@@ -24,6 +24,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
     format_comment_body,
     format_issue_comment,
     inline_comment_to_timeline_body,
+    is_within_diff,
     map_issues_to_comments,
     parse_valid_lines,
     render_annotated_hunks,
@@ -184,6 +185,18 @@ def test_map_normalizes_leading_dot_slash() -> None:
     assert comments[0]["line"] == 3
 
 
+def test_map_does_not_over_strip_dotfile_into_unrelated_match() -> None:
+    # Before the fix, _normalize_path used file_path.lstrip("./"), which strips any
+    # combination of "." and "/" -- turning ".gitignore" into "gitignore" and risking
+    # a match against an unrelated file that happens to be named "gitignore" in the
+    # diff. The fix only strips a literal leading "./" prefix, so this must NOT match.
+    valid = {"gitignore": {1}}
+    issues = [_Issue(file_path=".gitignore", line=1)]
+    comments, leftover = map_issues_to_comments(issues, valid)
+    assert comments == []
+    assert leftover == issues
+
+
 def test_map_basename_fallback_when_unique() -> None:
     valid = {"src/app/main.py": {4}}
     issues = [_Issue(file_path="main.py", line=4)]
@@ -231,6 +244,43 @@ def test_map_mixed_findings_split_three_ways() -> None:
         "body": format_comment_body(off_diff),
     } in comments
     assert len(comments) == 2
+
+
+# ---------------------------------------------------------------------------
+# is_within_diff
+# ---------------------------------------------------------------------------
+
+
+def test_is_within_diff_true_for_commentable_line() -> None:
+    valid = {"app/main.py": {2, 5}}
+    finding = _Issue(file_path="app/main.py", line=5)
+    assert is_within_diff(finding, valid) is True
+
+
+def test_is_within_diff_false_for_off_diff_line() -> None:
+    valid = {"app/main.py": {2}}
+    finding = _Issue(file_path="app/main.py", line=99)
+    assert is_within_diff(finding, valid) is False
+
+
+def test_is_within_diff_false_for_unknown_file() -> None:
+    valid = {"app/main.py": {2}}
+    finding = _Issue(file_path="other.py", line=2)
+    assert is_within_diff(finding, valid) is False
+
+
+def test_is_within_diff_false_for_missing_line() -> None:
+    valid = {"app/main.py": {2}}
+    finding = _Issue(file_path="app/main.py", line=None)
+    assert is_within_diff(finding, valid) is False
+
+
+def test_is_within_diff_false_for_non_numeric_line_does_not_raise() -> None:
+    # A malformed finding with a non-numeric line must not raise ValueError -- it is
+    # simply treated as not within the diff.
+    valid = {"app/main.py": {2}}
+    finding = _Issue(file_path="app/main.py", line="N/A")  # type: ignore[arg-type]
+    assert is_within_diff(finding, valid) is False
 
 
 # ---------------------------------------------------------------------------

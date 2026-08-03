@@ -103,6 +103,9 @@ from investment_team.strategy_lab.config import (
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.run_state import (
+    acquire_run_transition_lock as _acquire_run_transition_lock,
+)
+from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
 )
 from investment_team.strategy_lab.run_state import (
@@ -2023,6 +2026,38 @@ def _ensure_no_active_run() -> None:
         raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
 
 
+def _require_run_transition_lock(run_id: str) -> threading.Lock:
+    """Acquire run_id's transition lock, or raise 409 when another transition
+    for the same run_id is already in flight.
+
+    Shared guard for the run/resume/restart endpoints: serializes same-run_id
+    transitions so two concurrent calls (e.g. two restarts, or a resume
+    racing a restart) for the same run_id can't both pass the check-then-act
+    window between ``_ensure_no_active_run()`` and this run_id's state being
+    written (#4028).
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns the acquired ``threading.Lock`` — held by the caller, who
+          MUST release it (``try/finally: run_lock.release()``) — when no
+          other run/resume/restart transition for this ``run_id`` is
+          currently in flight.
+
+    Raises:
+        - ``HTTPException`` 409 when another transition for this ``run_id``
+          is already in flight. Never blocks; holds nothing in that case.
+    """
+    run_lock = _acquire_run_transition_lock(run_id)
+    if run_lock is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Another transition for this run is already in progress; retry shortly.",
+        )
+    return run_lock
+
+
 def _build_run_state(
     run_id: str,
     *,
@@ -2304,28 +2339,39 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
 
     Use ``GET /strategy-lab/runs/{run_id}/stream`` for real-time SSE progress updates,
     or ``GET /strategy-lab/runs/{run_id}/status`` for polling.
+
+    Raises ``HTTPException(409)`` when another run is already active, or
+    (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
+    when another transition for this freshly-minted run_id is already in
+    flight (#4028). The global check runs before minting a run_id/acquiring
+    its transition lock, so a rejected request never allocates a registry
+    entry that would otherwise never be looked up again.
     """
     _ensure_no_active_run()
 
     run_id = f"run-{uuid.uuid4().hex[:8]}"
-    now = _now()
-    total_cycles = request.batch_size * request.batch_count
+    run_lock = _require_run_transition_lock(run_id)
+    try:
+        now = _now()
+        total_cycles = request.batch_size * request.batch_count
 
-    initial_state = _build_run_state(
-        run_id,
-        started_at=now,
-        total_cycles=total_cycles,
-        batch_size=request.batch_size,
-        batch_count=request.batch_count,
-        request_payload=request.model_dump(),
-    )
-    with _lock:
-        _active_runs[run_id] = initial_state
-    _persist_run_state(run_id, initial_state, create=True)
+        initial_state = _build_run_state(
+            run_id,
+            started_at=now,
+            total_cycles=total_cycles,
+            batch_size=request.batch_size,
+            batch_count=request.batch_count,
+            request_payload=request.model_dump(),
+        )
+        with _lock:
+            _active_runs[run_id] = initial_state
+        _persist_run_state(run_id, initial_state, create=True)
 
-    # Dispatch the run as a durable Temporal workflow so it survives a
-    # worker/process restart and is visible in the Temporal UI.
-    _dispatch_strategy_lab_run(run_id, request)
+        # Dispatch the run as a durable Temporal workflow so it survives a
+        # worker/process restart and is visible in the Temporal UI.
+        _dispatch_strategy_lab_run(run_id, request)
+    finally:
+        run_lock.release()
 
     return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
 
@@ -2487,12 +2533,26 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status (via
-          ``_get_run_state``) is in ``RESUMABLE_STATUSES`` (pending/running/
-          failed/interrupted/agent_crash).
+        - ``run_id`` identifies a run whose persisted status — read INSIDE
+          the transition lock below, not beforehand — is in
+          ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/
+          agent_crash). Reading it (or the counters/payload derived from it)
+          before acquiring the lock could observe a stale snapshot: another
+          transition for this same run_id could fully complete — write its
+          own state, dispatch, and even reach a terminal status — before
+          this request obtains the lock, at which point ``_ensure_no_active_run()``
+          no longer sees a ``"running"`` entry to block on, and a resume
+          built from the stale snapshot would rebuild the run from
+          outdated counters/payload and dispatch duplicate work. Only a
+          cheap existence check (``run_id`` resolves to *some* known run)
+          runs before the lock, so a request for a nonexistent run_id never
+          allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict
           (the original ``RunStrategyLabRequest`` payload).
         - No other run currently has status ``"running"``.
+        - No other run/resume/restart transition for this run_id is
+          currently in flight (checked first, before re-reading state or
+          calling ``_ensure_no_active_run()``).
 
     Postconditions:
         - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
@@ -2510,54 +2570,67 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - ``HTTPException`` 400: the run's status is not in
           ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
           dict.
-        - ``HTTPException`` 409: another run is already ``"running"``.
+        - ``HTTPException`` 409: another transition for this run_id is
+          already in flight (#4028), or another run is already ``"running"``.
     """
-    state = _get_run_state(run_id)
+    # Cheap existence-only check (no lock): avoids growing the transition-lock
+    # registry for a run_id that was never created (or already purged).
+    if _get_run_state(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
+
+    run_lock = _require_run_transition_lock(run_id)
     try:
-        validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+        # Re-read + derive everything from state INSIDE the lock — see
+        # Preconditions for why reading it beforehand risks a stale-snapshot
+        # duplicate dispatch.
+        state = _get_run_state(run_id)
+        try:
+            validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
+        except ValueError as exc:
+            code = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
 
-    payload = state.get("request_payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available.")
+        payload = state.get("request_payload")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Original request payload not available.")
 
-    completed_cycles = state.get("completed_cycles", 0)
-    # contiguous_cycles tracks the highest unbroken sequence from index 0
-    # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
-    contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
-    request = RunStrategyLabRequest(**payload)
-    total_cycles = request.batch_size * request.batch_count
-    completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+        completed_cycles = state.get("completed_cycles", 0)
+        # contiguous_cycles tracks the highest unbroken sequence from index 0
+        # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
+        contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
+        request = RunStrategyLabRequest(**payload)
+        total_cycles = request.batch_size * request.batch_count
+        completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
 
-    _ensure_no_active_run()
+        _ensure_no_active_run()
 
-    # Re-initialize in-memory state
-    resumed_state = _build_run_state(
-        run_id,
-        started_at=state.get("started_at", _now()),
-        total_cycles=total_cycles,
-        batch_size=request.batch_size,
-        batch_count=request.batch_count,
-        request_payload=payload,
-        completed_cycles=completed_cycles,
-        contiguous_cycles=contiguous_cycles,
-        skipped_cycles=state.get("skipped_cycles", 0),
-        errored_cycles=state.get("errored_cycles", 0),
-        errored_details=state.get("errored_details", []),
-        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
-        completed_record_ids=state.get("completed_record_ids", []),
-        completed_batches=completed_batches,
-    )
-    with _lock:
-        _active_runs[run_id] = resumed_state
-    _persist_run_state(run_id, resumed_state)
+        # Re-initialize in-memory state
+        resumed_state = _build_run_state(
+            run_id,
+            started_at=state.get("started_at", _now()),
+            total_cycles=total_cycles,
+            batch_size=request.batch_size,
+            batch_count=request.batch_count,
+            request_payload=payload,
+            completed_cycles=completed_cycles,
+            contiguous_cycles=contiguous_cycles,
+            skipped_cycles=state.get("skipped_cycles", 0),
+            errored_cycles=state.get("errored_cycles", 0),
+            errored_details=state.get("errored_details", []),
+            tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
+            completed_record_ids=state.get("completed_record_ids", []),
+            completed_batches=completed_batches,
+        )
+        with _lock:
+            _active_runs[run_id] = resumed_state
+        _persist_run_state(run_id, resumed_state)
 
-    # The Temporal activity derives its resume offset from the persisted
-    # contiguous-cycle count (set above), so a durable resume picks up where the
-    # run left off.
-    _dispatch_strategy_lab_run(run_id, request)
+        # The Temporal activity derives its resume offset from the persisted
+        # contiguous-cycle count (set above), so a durable resume picks up where the
+        # run left off.
+        _dispatch_strategy_lab_run(run_id, request)
+    finally:
+        run_lock.release()
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
@@ -2576,11 +2649,22 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Restart a strategy lab run from the beginning.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status (via
-          ``_get_run_state``) is in ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
+        - ``run_id`` identifies a run whose persisted status — read INSIDE
+          the transition lock below, not beforehand — is in
+          ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
           (completed/failed/cancelled/interrupted/agent_crash/completed_with_errors).
+          Reading it before acquiring the lock could observe another
+          transition's transiently-written "running" reset and misreport a
+          genuine in-flight-elsewhere race as a permanent 400 instead of a
+          retryable 409 ("running" is deliberately excluded from
+          ``RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
+          resolves to *some* known run) runs before the lock, so a request
+          for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
         - No other run currently has status ``"running"``.
+        - No other run/resume/restart transition for this run_id is
+          currently in flight (checked first, before re-reading state or
+          calling ``_ensure_no_active_run()``).
 
     Postconditions:
         - Any prior Temporal execution still running under this run_id's
@@ -2605,8 +2689,9 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
         - ``HTTPException`` 400: the run's status is not restartable, or its
           ``request_payload`` is missing/not a dict.
-        - ``HTTPException`` 409: another run is already ``"running"``, the
-          prior execution couldn't be confirmed terminated within budget
+        - ``HTTPException`` 409: another transition for this run_id is
+          already in flight (#4028), another run is already ``"running"``,
+          the prior execution couldn't be confirmed terminated within budget
           (retry shortly), or a residual dispatch collision occurred despite
           that confirmation (a collision the dispatch layer refuses to
           silently resume — see ``_dispatch_strategy_lab_run``'s
@@ -2615,101 +2700,118 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - ``HTTPException`` 503: Temporal is disabled/unavailable, or the
           prior execution couldn't be resolved due to a Temporal-side error.
 
-    Known, accepted residual races (each requires multiple unlikely events
-    to align; closing either is a real feature, not a quick patch — tracked
-    as follow-ups rather than fixed here):
-        - Two concurrent restart/resume calls for the *same* run_id both
-          pass ``_ensure_no_active_run()`` before either writes state (it's
-          check-then-release, not a reservation) — the second's termination
-          call can then target the *first's* freshly-started workflow
-          instead of the stale one it meant to clean up (tracked as #4028).
+    Two concurrent restart/resume calls for the same run_id can no longer
+    both pass the check-then-write window (#4028, closed by
+    ``_require_run_transition_lock``, which reserves this run_id for the
+    whole check→terminate→write→dispatch sequence below).
+
+    Known, accepted residual race (requires multiple unlikely events to
+    align; closing it is a real feature, not a quick patch — tracked as a
+    follow-up rather than fixed here):
         - Confirming the old *workflow* terminated does not guarantee an
           already in-flight, non-heartbeating *activity* has stopped —
           Strategy Lab's activities aren't cooperatively cancellable, so one
           can still commit a cycle record or paper trade after the new
           cycle-0 workflow has started (tracked as #4029).
     """
-    state = _get_run_state(run_id)
-    # "completed_with_errors" is a terminal outcome of the same workflow as
-    # "completed" and must be restartable. Extend the shared set locally
-    # rather than leaking a lab-specific status into job_service_client.
-    _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
+    # Cheap existence-only check (no lock): avoids growing the transition-lock
+    # registry for a run_id that was never created (or already purged),
+    # mirroring run_strategy_lab's own check-before-lock ordering.
+    if _get_run_state(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
+
+    run_lock = _require_run_transition_lock(run_id)
     try:
-        validate_job_for_action(state, run_id, _lab_restartable, "restarted")
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+        # Re-read + validate state INSIDE the lock: reading it beforehand
+        # could observe a concurrent restart's transiently-written "running"
+        # reset (written while that request still holds this same lock) and
+        # incorrectly reject with 400 "not restartable" instead of the
+        # promised retryable 409 — "running" is deliberately excluded from
+        # RESTARTABLE_STATUSES, so status is only trustworthy once no other
+        # transition for this run_id can be concurrently rewriting it.
+        state = _get_run_state(run_id)
+        # "completed_with_errors" is a terminal outcome of the same workflow as
+        # "completed" and must be restartable. Extend the shared set locally
+        # rather than leaking a lab-specific status into job_service_client.
+        _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
+        try:
+            validate_job_for_action(state, run_id, _lab_restartable, "restarted")
+        except ValueError as exc:
+            code = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
 
-    payload = state.get("request_payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available.")
+        payload = state.get("request_payload")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Original request payload not available.")
 
-    _ensure_no_active_run()
+        _ensure_no_active_run()
 
-    request = RunStrategyLabRequest(**payload)
-    total_cycles = request.batch_size * request.batch_count
+        request = RunStrategyLabRequest(**payload)
+        total_cycles = request.batch_size * request.batch_count
 
-    # Resolve any prior execution BEFORE writing anything: a still-running
-    # workflow polls persisted status between waves (strategy_lab_external_
-    # terminal_status), so writing the optimistic "running" reset first would
-    # let it observe that transient state and run an extra wave before a
-    # dispatch collision is even detected.
-    _require_temporal()
-    from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
-    from shared.temporal import terminate_and_await_workflow_sync
+        # Resolve any prior execution BEFORE writing anything: a still-running
+        # workflow polls persisted status between waves (strategy_lab_external_
+        # terminal_status), so writing the optimistic "running" reset first would
+        # let it observe that transient state and run an extra wave before a
+        # dispatch collision is even detected.
+        _require_temporal()
+        from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
+        from shared.temporal import terminate_and_await_workflow_sync
 
-    try:
-        terminate_and_await_workflow_sync(
-            f"{WORKFLOW_ID_PREFIX}{run_id}",
-            reason=f"Restarted via /strategy-lab/runs/{run_id}/restart",
+        try:
+            terminate_and_await_workflow_sync(
+                f"{WORKFLOW_ID_PREFIX}{run_id}",
+                reason=f"Restarted via /strategy-lab/runs/{run_id}/restart",
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="A prior execution for this run is still winding down; retry shortly.",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to resolve the prior strategy-lab execution before "
+                    "restarting; Temporal worker unavailable."
+                ),
+            ) from exc
+
+        restarted_state = _build_run_state(
+            run_id,
+            started_at=_now(),
+            total_cycles=total_cycles,
+            batch_size=request.batch_size,
+            batch_count=request.batch_count,
+            request_payload=payload,
+            # Reset the resume offset the Temporal activity reads, so a durable
+            # restart re-runs from cycle 0 instead of resuming a prior run's
+            # contiguous-cycle count persisted on this run_id.
+            contiguous_cycles=0,
         )
-    except TimeoutError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="A prior execution for this run is still winding down; retry shortly.",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Failed to resolve the prior strategy-lab execution before "
-                "restarting; Temporal worker unavailable."
-            ),
-        ) from exc
+        with _lock:
+            _active_runs[run_id] = restarted_state
+        _persist_run_state(run_id, restarted_state)
 
-    restarted_state = _build_run_state(
-        run_id,
-        started_at=_now(),
-        total_cycles=total_cycles,
-        batch_size=request.batch_size,
-        batch_count=request.batch_count,
-        request_payload=payload,
-        # Reset the resume offset the Temporal activity reads, so a durable
-        # restart re-runs from cycle 0 instead of resuming a prior run's
-        # contiguous-cycle count persisted on this run_id.
-        contiguous_cycles=0,
-    )
-    with _lock:
-        _active_runs[run_id] = restarted_state
-    _persist_run_state(run_id, restarted_state)
-
-    # Restart from scratch through Temporal (offset 0, per the reset
-    # persisted state above). allow_already_started=False: unlike resume, a
-    # collision here means an old, un-reset execution is still running, not
-    # that the intended restart is already in flight.
-    try:
-        _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
-    except HTTPException as exc:
-        if exc.status_code == 409:
-            # The reset above never actually took effect (an old execution
-            # is still running under this run_id) — restore the pre-restart
-            # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
-            # "running" entry, blocking every future run/resume/restart call
-            # until the stale execution happens to overwrite it on its own.
-            with _lock:
-                _active_runs[run_id] = state
-            _persist_run_state(run_id, state)
-        raise
+        # Restart from scratch through Temporal (offset 0, per the reset
+        # persisted state above). allow_already_started=False: unlike resume, a
+        # collision here means an old, un-reset execution is still running, not
+        # that the intended restart is already in flight.
+        try:
+            _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                # The reset above never actually took effect (an old execution
+                # is still running under this run_id) — restore the pre-restart
+                # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
+                # "running" entry, blocking every future run/resume/restart call
+                # until the stale execution happens to overwrite it on its own.
+                with _lock:
+                    _active_runs[run_id] = state
+                _persist_run_state(run_id, state)
+            raise
+    finally:
+        run_lock.release()
 
     return StrategyLabRunStartResponse(
         run_id=run_id,

@@ -18,6 +18,7 @@ from .activities import (
     filter_false_positives_activity,
     finalize_review_activity,
     find_architecture_and_redundancy_activity,
+    find_architecture_and_side_effect_activity,
     find_side_effect_impact_activity,
     prepare_review_activity,
     review_chunk_activity,
@@ -32,12 +33,18 @@ from .config import (
 from .workflows import CodeReviewWorkflow
 
 WORKFLOWS = [CodeReviewWorkflow]
+# find_architecture_and_redundancy_activity / find_side_effect_impact_activity
+# are superseded by find_architecture_and_side_effect_activity for new workflow
+# executions (see workflows.py's _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH),
+# but stay registered so a worker can still replay/execute them for in-flight
+# histories recorded before that patch existed.
 ACTIVITIES = [
     prepare_review_activity,
     review_chunk_activity,
     filter_false_positives_activity,
     find_architecture_and_redundancy_activity,
     find_side_effect_impact_activity,
+    find_architecture_and_side_effect_activity,
     consolidate_side_effect_issues_activity,
     finalize_review_activity,
     synthesize_findings_activity,
@@ -54,6 +61,7 @@ __all__ = [
     "filter_false_positives_activity",
     "find_architecture_and_redundancy_activity",
     "find_side_effect_impact_activity",
+    "find_architecture_and_side_effect_activity",
     "consolidate_side_effect_issues_activity",
     "finalize_review_activity",
     "synthesize_findings_activity",
