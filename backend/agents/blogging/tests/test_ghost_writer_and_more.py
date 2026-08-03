@@ -433,6 +433,7 @@ def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None
 
 
 def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
+    """Array items that are not dicts are silently dropped; valid dicts are kept."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -459,6 +460,7 @@ def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch) -> None:
+    """Null and non-string JSON fields are coerced to strings instead of causing failures."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
