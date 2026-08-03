@@ -59,7 +59,10 @@ def test_rejects_lower_token_error_message_includes_context() -> None:
 
 
 def test_provided_token_must_be_int() -> None:
-    with pytest.raises(AssertionError):
+    """Regression: enforced with an explicit TypeError, not assert -- assertions
+    are stripped under Python's -O flag, which would otherwise silently
+    disable this precondition check in an optimized deployment."""
+    with pytest.raises(TypeError, match="provided_token must be an int"):
         check_fencing_token(
             agent_id="run-1", resource="strategy_lab_run", provided_token="1", current_token=1
         )

@@ -64,7 +64,13 @@ def check_fencing_token(
     """Reject ``provided_token`` if it is older than ``current_token``.
 
     Preconditions:
-        * ``provided_token`` is an ``int``.
+        * ``provided_token`` is an ``int``. Enforced with an explicit
+          ``TypeError`` rather than ``assert``: assertions are stripped
+          under Python's ``-O`` flag, which would otherwise silently disable
+          this check in an optimized deployment and let a non-int token
+          reach the comparison below, raising an unrelated ``TypeError``
+          from the comparison itself instead of a clear precondition
+          violation.
         * ``current_token`` is the highest token this resource has recorded
           for ``(resource, agent_id)`` so far, or ``None`` if this resource
           has never recorded a token for that key yet (bootstrap).
@@ -74,11 +80,13 @@ def check_fencing_token(
           required: concurrent writers fanned out from a single
           acquired/renewed token all present the *same* value: a strict
           "``>``" would wrongly reject the 2nd..Nth concurrent writer.
-        * Raises :class:`StaleFencingTokenError` otherwise.
+        * Raises :class:`StaleFencingTokenError` when the token comparison
+          fails, or ``TypeError`` when ``provided_token`` is not an ``int``.
         * Does not itself persist anything — callers persist
           ``provided_token`` as their own new high-water mark as part of
           their own write.
     """
-    assert isinstance(provided_token, int), "provided_token must be an int"
+    if not isinstance(provided_token, int):
+        raise TypeError(f"provided_token must be an int, got {type(provided_token).__name__}")
     if current_token is not None and provided_token < current_token:
         raise StaleFencingTokenError(agent_id, resource, provided_token, current_token)

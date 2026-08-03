@@ -1142,6 +1142,27 @@ def test_rehydrate_active_run_offset_propagates_durable_read_failure(
         run_state.rehydrate_active_run_offset("run-offset-fail")
 
 
+def test_rehydrate_active_run_offset_raises_on_corrupt_contiguous_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a durable-read succeeds but the persisted contiguous_cycles
+    field itself is corrupt (unparseable as an int). Silently defaulting to
+    offset 0 here would be indistinguishable from a genuinely fresh run and
+    cause a resumed run to replay already-completed cycles -- the same
+    replay risk this function's docstring already argues against for a
+    durable-read failure, so a corrupt field must raise too, not default."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "contiguous_cycles": "not-a-number"}
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted contiguous_cycles"):
+        run_state.rehydrate_active_run_offset("run-corrupt-offset")
+
+
 def test_get_resume_seed_counters_propagates_durable_read_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

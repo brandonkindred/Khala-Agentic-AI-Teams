@@ -61,11 +61,15 @@ failure mask a genuinely higher current generation. That raised lookup
 failure is kept RETRYABLE for a check with nothing committed yet (only an
 actual ``StaleFencingTokenError`` is non-retryable there), so a momentary
 job-service outage doesn't permanently fail the workflow — EXCEPT
-``finalize_cycle_record_activity``'s post-check, whose own lookup failure is
-deliberately non-retryable: by that point the write already committed, so a
-retry would re-execute ``_finalize_strategy_lab_cycle_record``'s
+``finalize_cycle_record_activity``'s post-check, whose lookup failure is
+non-retryable AT THE TEMPORAL LEVEL only once a few bounded local retries
+(``_POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS``) have already failed: by that
+point the write already committed, so a Temporal-level retry of the WHOLE
+ACTIVITY would re-execute ``_finalize_strategy_lab_cycle_record``'s
 non-idempotent side effects (a fresh paper-trading session, orphaning the
-first) a second time rather than safely re-attempting nothing-yet-done work.
+first) a second time — but a local retry of just the cheap read doesn't
+re-trigger that write at all, so it absorbs a momentary blip for free before
+that non-retryable fallback ever applies.
 
 A run created before generation fencing shipped has no persisted
 ``generation`` field at all; its first post-upgrade restart mints
@@ -82,12 +86,25 @@ but the workflow_id it's executing under does not.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 logger = logging.getLogger(__name__)
+
+# Local, in-process retry delays (seconds) for finalize_cycle_record_activity's
+# post-write fencing check's durable-generation read. Empty for every other
+# fencing check (nothing committed yet there, so Temporal's own activity-level
+# retry already safely covers a lookup failure by re-running the whole,
+# side-effect-free-so-far activity). This one is different: by the time it
+# runs, _finalize_strategy_lab_cycle_record has already durably committed, so
+# a Temporal-level retry of the whole activity would re-execute that
+# non-idempotent write a second time -- a bounded LOCAL retry of just the
+# cheap read absorbs a momentary job-service blip without ever re-triggering
+# the write, sidestepping that concern entirely.
+_POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS: Tuple[float, ...] = (0.5, 1.0)
 
 
 def _map_exception_to_application_error(exc: Exception) -> ApplicationError:
@@ -154,7 +171,11 @@ def _infer_run_id_from_activity_context() -> Optional[str]:
 
 
 def _check_generation_fencing(
-    run_id: str, provided_generation: int, *, retry_on_lookup_failure: bool
+    run_id: str,
+    provided_generation: int,
+    *,
+    retry_on_lookup_failure: bool,
+    lookup_retry_delays: Tuple[float, ...] = (),
 ) -> None:
     """Raise unless ``provided_generation`` is current or newer than ``run_id``'s
     durable generation. Shared by ``persist_run_state_activity`` and
@@ -167,15 +188,24 @@ def _check_generation_fencing(
         ``retry_on_lookup_failure`` is ``True`` when nothing has been written
         yet (safe to retry the whole activity on a transient durable-read
         failure) and ``False`` once a non-idempotent write may already have
-        committed (a retry would re-execute it).
+        committed (a retry would re-execute it). ``lookup_retry_delays`` is a
+        tuple of local, in-process retry delays (seconds) applied to a
+        transient durable-read failure before giving up -- empty for a
+        pre-write check (the whole activity is already safely Temporal-retryable
+        on a single lookup failure, so a local retry adds nothing), non-empty
+        for a post-write check (a bounded local retry of just the read
+        absorbs a momentary job-service blip without ever re-triggering the
+        non-idempotent write a Temporal-level activity retry would).
     Postconditions:
         Returns normally when ``provided_generation`` is current or newer.
         Raises ``ApplicationError(type="StaleFencingTokenError",
         non_retryable=True)`` when it's stale — not handled via
         ``_map_exception_to_application_error``, since that helper's
         documented precondition is an exception raised by a strategy-lab
-        agent-class method, which ``check_fencing_token`` is not. A durable
-        lookup failure raises ``ApplicationError`` with
+        agent-class method, which ``check_fencing_token`` is not. The durable
+        lookup is retried locally up to ``len(lookup_retry_delays)`` more
+        times (sleeping the corresponding delay between attempts) before a
+        persisting failure raises ``ApplicationError`` with
         ``non_retryable=(not retry_on_lookup_failure)``. Any other exception
         from ``check_fencing_token`` (a caller precondition violation, e.g. a
         non-int ``provided_generation`` — pure comparison, no I/O, so this is
@@ -186,14 +216,23 @@ def _check_generation_fencing(
     from investment_team.strategy_lab.run_state import get_run_generation_strict
     from shared.fencing import StaleFencingTokenError, check_fencing_token
 
-    try:
-        current_generation = get_run_generation_strict(run_id)
-    except Exception as exc:  # noqa: BLE001
+    current_generation: Optional[int] = None
+    lookup_exc: Optional[Exception] = None
+    for attempt in range(len(lookup_retry_delays) + 1):
+        try:
+            current_generation = get_run_generation_strict(run_id)
+            lookup_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            lookup_exc = exc
+            if attempt < len(lookup_retry_delays):
+                time.sleep(lookup_retry_delays[attempt])
+    if lookup_exc is not None:
         raise ApplicationError(
-            f"{type(exc).__name__}: {exc}",
-            type=type(exc).__name__,
+            f"{type(lookup_exc).__name__}: {lookup_exc}",
+            type=type(lookup_exc).__name__,
             non_retryable=not retry_on_lookup_failure,
-        ) from exc
+        ) from lookup_exc
     try:
         check_fencing_token(
             agent_id=run_id,
@@ -775,13 +814,17 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         non-retryable ``ApplicationError`` when ``generation`` is stale at
         either check. The pre-check is a cheap early exit for an
         already-known-stale call; the post-check catches a restart that
-        mints a newer generation WHILE this activity was running — its own
-        lookup failure is deliberately NOT retryable (unlike the pre-check's),
-        since ``_finalize_strategy_lab_cycle_record`` already durably
-        committed by that point and retrying the whole activity would
-        re-execute its non-idempotent side effects (a fresh paper-trading
-        session, orphaning the first). Neither check is a true atomic
-        conditional write against the record store — see the module
+        mints a newer generation WHILE this activity was running. A durable
+        lookup failure (as opposed to an actual stale token) at the
+        post-check is retried locally, bounded, before giving up — see
+        ``_POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS`` — since
+        ``_finalize_strategy_lab_cycle_record`` already durably committed by
+        that point and retrying the WHOLE ACTIVITY (as Temporal would on a
+        non-retryable-free failure) would re-execute its non-idempotent side
+        effects (a fresh paper-trading session, orphaning the first); a
+        persisting lookup failure after those local retries are exhausted is
+        still raised non-retryable for that reason. Neither check is a true
+        atomic conditional write against the record store — see the module
         docstring's honest accounting of what's actually closed here.
         Otherwise returns ``{"record": <finalized StrategyLabRecord JSON
         dump>}`` — the same record with ``paper_trading_*`` resolved and
@@ -791,10 +834,16 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.run_state import DEFAULT_FENCING_GENERATION
 
-    def _check_generation(run_id: str, *, retry_on_lookup_failure: bool) -> None:
+    def _check_generation(
+        run_id: str, *, retry_on_lookup_failure: bool, lookup_retry_delays: Tuple[float, ...] = ()
+    ) -> None:
         _check_generation_fencing(
-            run_id, params.get("generation", 1), retry_on_lookup_failure=retry_on_lookup_failure
+            run_id,
+            params.get("generation", DEFAULT_FENCING_GENERATION),
+            retry_on_lookup_failure=retry_on_lookup_failure,
+            lookup_retry_delays=lookup_retry_delays,
         )
 
     run_id = params.get("run_id") or _infer_run_id_from_activity_context()
@@ -819,10 +868,19 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         # above was running (market data + paper trading can take a while) --
         # this can no longer prevent the write that already happened, but it
         # does stop the workflow from treating this cycle's result as trusted.
-        # NOT retryable on a lookup failure here: the write already committed,
-        # so retrying the whole activity would re-run _finalize_strategy_lab_
-        # cycle_record's non-idempotent side effects a second time.
-        _check_generation(run_id, retry_on_lookup_failure=False)
+        # The durable-read lookup itself gets a few bounded local retries
+        # (_POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS) so a momentary job-service
+        # blip doesn't permanently fail an otherwise-successful run: retrying
+        # the WHOLE ACTIVITY (as a non-retryable=False failure would let
+        # Temporal do) would re-run _finalize_strategy_lab_cycle_record's
+        # non-idempotent side effects a second time, but retrying just this
+        # cheap read locally does not. Only a failure that persists through
+        # those local retries -- or an actual stale token -- is non-retryable.
+        _check_generation(
+            run_id,
+            retry_on_lookup_failure=False,
+            lookup_retry_delays=_POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS,
+        )
     return {"record": finalized.model_dump(mode="json")}
 
 

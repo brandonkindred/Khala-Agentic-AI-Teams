@@ -832,13 +832,53 @@ def test_finalize_cycle_record_activity_defaults_generation_when_omitted(monkeyp
     assert out["record"] == {"lab_record_id": "rec-final-default"}
 
 
+def test_finalize_cycle_record_activity_omitted_generation_rejected_against_restarted_run(
+    monkeypatch,
+):
+    """Regression: an omitted "generation" key defaults to 1 (the legacy
+    generation) -- that default must be REJECTED as stale when the run has
+    since been restarted (persisted generation > 1), not just accepted
+    against a fresh run's persisted generation of 1. Without this, a
+    regression that defaulted the missing generation to the current value
+    (or otherwise bypassed the fencing check) would go undetected."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 3)
+
+    finalize_calls = []
+    monkeypatch.setattr(
+        api_main,
+        "_finalize_strategy_lab_cycle_record",
+        lambda *a, **k: finalize_calls.append((a, k)),
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.finalize_cycle_record_activity(
+            {"run_id": "run-final-stale-default", "record": {"lab_record_id": "raw-1"}}
+        )
+
+    assert exc_info.value.type == "StaleFencingTokenError"
+    assert exc_info.value.non_retryable is True
+    assert finalize_calls == []  # the durable record write never happened
+
+
 def test_finalize_cycle_record_activity_rejects_generation_that_went_stale_during_finalize(
     monkeypatch,
 ):
     """Regression: the post-check (after _finalize_strategy_lab_cycle_record
     returns) must catch a restart that mints a newer generation WHILE that call
     was running -- market-data fetch + paper-trading execution is a real amount
-    of time, so a pre-check alone (which passes here) is not enough."""
+    of time, so a pre-check alone (which passes here) is not enough. Also
+    verifies the delegate call actually happened between the two checks: a
+    regression that performed both fencing lookups but skipped the durable
+    write would otherwise still pass a test that only checks the raised
+    exception, without proving the post-check guards a real finalize
+    operation."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
@@ -853,9 +893,13 @@ def test_finalize_cycle_record_activity_rejects_generation_that_went_stale_durin
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
             return {"lab_record_id": "rec-final"}
 
-    monkeypatch.setattr(
-        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
-    )
+    finalize_calls = []
+
+    def _fake_finalize(*a, **k):
+        finalize_calls.append((a, k))
+        return _FakeRecord()
+
+    monkeypatch.setattr(api_main, "_finalize_strategy_lab_cycle_record", _fake_finalize)
     monkeypatch.setattr(
         "investment_team.models.StrategyLabRecord.parse_persisted",
         staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
@@ -868,6 +912,7 @@ def test_finalize_cycle_record_activity_rejects_generation_that_went_stale_durin
 
     assert exc_info.value.type == "StaleFencingTokenError"
     assert exc_info.value.non_retryable is True
+    assert finalize_calls  # the durable write was attempted before the post-check caught it
 
 
 def test_finalize_cycle_record_activity_fails_closed_on_generation_lookup_failure(monkeypatch):
@@ -1057,14 +1102,21 @@ def test_finalize_cycle_record_activity_recovered_run_id_still_rejects_stale_gen
 
 
 def test_finalize_cycle_record_activity_post_check_lookup_failure_is_not_retryable(monkeypatch):
-    """Regression: unlike the pre-check, the post-check's OWN lookup failure must
-    NOT be retryable -- _finalize_strategy_lab_cycle_record already durably
-    committed by that point, so retrying the whole activity would re-execute
-    its non-idempotent side effects (a fresh paper-trading session) again."""
+    """Regression: unlike the pre-check, the post-check's lookup failure must
+    NOT be Temporal-retryable once its bounded local retries are exhausted --
+    _finalize_strategy_lab_cycle_record already durably committed by that
+    point, so retrying the whole activity would re-execute its non-idempotent
+    side effects (a fresh paper-trading session) again. The local retries
+    themselves are exercised here too: every post-check attempt fails, so all
+    of them (1 initial + len(_POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS) retries)
+    must run before the ApplicationError is raised."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
-    # First call (pre-check) succeeds; second call (post-check) fails.
+    monkeypatch.setattr(act.time, "sleep", lambda seconds: None)
+
+    # First call (pre-check) succeeds; every subsequent call (post-check,
+    # including its local retries) fails.
     call_count = {"n": 0}
 
     def _get_generation(run_id):
@@ -1093,7 +1145,53 @@ def test_finalize_cycle_record_activity_post_check_lookup_failure_is_not_retryab
         )
 
     assert exc_info.value.non_retryable is True
-    assert call_count["n"] == 2  # both checks ran; the write already happened by the second
+    # 1 pre-check + (1 initial + 2 retries) post-check attempts.
+    assert call_count["n"] == 1 + (1 + len(act._POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS))
+
+
+def test_finalize_cycle_record_activity_post_check_recovers_from_transient_lookup_failure(
+    monkeypatch,
+):
+    """A post-check lookup failure that succeeds on a bounded local retry must
+    NOT fail the activity at all -- this is the actual availability fix: a
+    momentary job-service blip no longer permanently fails an
+    otherwise-successful run."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    sleeps: List[float] = []
+    monkeypatch.setattr(act.time, "sleep", sleeps.append)
+
+    # Pre-check succeeds (call 1); post-check fails once then succeeds (calls 2-3).
+    call_count = {"n": 0}
+
+    def _get_generation(run_id):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise ConnectionError("connection refused")
+        return 2
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _get_generation)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-final"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    out = act.finalize_cycle_record_activity(
+        {"run_id": "run-final-7", "generation": 2, "record": {"lab_record_id": "raw-1"}}
+    )
+
+    assert out["record"] == {"lab_record_id": "rec-final"}
+    assert call_count["n"] == 3  # pre-check + 1 failed + 1 successful post-check attempt
+    assert sleeps == [act._POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS[0]]
 
 
 def test_merge_wave_results_activity_merges_in_cycle_index_order():

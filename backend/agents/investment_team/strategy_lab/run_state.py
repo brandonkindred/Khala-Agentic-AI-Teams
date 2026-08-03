@@ -16,11 +16,14 @@ single shared lock is constructed.
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from job_service_client import JobServiceClient
+
+logger = logging.getLogger(__name__)
 
 lock = threading.Lock()
 
@@ -81,7 +84,7 @@ def acquire_run_transition_lock(run_id: str) -> Optional[threading.Lock]:
     return run_lock if run_lock.acquire(blocking=False) else None
 
 
-def get_run_generation_strict(run_id: str, *, client: Any = None) -> int:
+def get_run_generation_strict(run_id: str, *, client: Optional["JobServiceClient"] = None) -> int:
     """Return run_id's current fencing generation, propagating durable-read failures.
 
     The sole authoritative read path for a run's fencing generation. Used by
@@ -115,10 +118,17 @@ def get_run_generation_strict(run_id: str, *, client: Any = None) -> int:
           a separate one a test wouldn't have patched.
 
     Postconditions:
-        - Returns the run's durably persisted ``generation`` field, or ``1``
-          for a run with no ``generation`` field yet, a ``None``/empty
-          value, or a run that does not exist (all "not a read failure"
-          cases indistinguishable from a fresh/never-restarted run). Raises
+        - Returns the run's durably persisted ``generation`` field, clamped
+          up to at least ``DEFAULT_FENCING_GENERATION`` (so a persisted value
+          below it, e.g. ``0`` or a negative number, is treated the same as
+          a missing one rather than returned verbatim — the generation
+          sequence is defined to start at ``DEFAULT_FENCING_GENERATION`` and
+          only increase, so a sub-default persisted value already indicates
+          the same kind of uninitialized/corrupt state a missing field
+          would). Returns exactly ``DEFAULT_FENCING_GENERATION`` for a run
+          with no ``generation`` field yet, a ``None``/empty value, or a run
+          that does not exist (all "not a read failure" cases
+          indistinguishable from a fresh/never-restarted run). Raises
           ``ValueError`` when the persisted ``generation`` field is present
           but unparseable as an int (e.g. a non-numeric string, list, or
           dict) — that's durable-record corruption, not a legitimate
@@ -139,6 +149,12 @@ def get_run_generation_strict(run_id: str, *, client: Any = None) -> int:
     if raw_generation is None or raw_generation == "":
         return DEFAULT_FENCING_GENERATION
     try:
+        # A persisted value below DEFAULT_FENCING_GENERATION is treated as
+        # uninitialized/corrupt, not returned verbatim: the generation
+        # sequence starts at DEFAULT_FENCING_GENERATION and only increases,
+        # so clamping here (rather than raising, unlike the unparseable case
+        # below) prevents a stale pre-restart activity from passing
+        # check_fencing_token against an implausibly low durable value.
         return max(DEFAULT_FENCING_GENERATION, int(raw_generation))
     except (TypeError, ValueError) as exc:
         raise ValueError(
@@ -202,11 +218,17 @@ def load_run_from_job_service(run_id: str) -> Optional[Dict[str, Any]]:
         - ``run_id`` names a strategy-lab run (may not exist).
     Postconditions:
         - Returns the persisted state, or ``None`` when the job does not
-          exist OR the durable read failed for any reason. Never raises.
+          exist OR the durable read failed for any reason. Never raises. A
+          swallowed durable-read failure (as opposed to a genuine "job not
+          found") is logged at warning level so operators can distinguish
+          the two cases in production, even though both return ``None`` here.
     """
     try:
         return _load_run_from_job_service_strict(run_id)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to load run %s from job service; treating as missing: %s", run_id, exc
+        )
         return None
 
 
@@ -288,6 +310,12 @@ def rehydrate_active_run_offset(run_id: str) -> int:
           Raises whatever the underlying job-service client raises on a
           durable-read failure; the caller's caller
           (``_dispatch_strategy_lab_run``) maps that to a 503 + failed run.
+          Also raises ``ValueError`` when durable state exists but its
+          ``contiguous_cycles`` field is present and unparseable as an int
+          (e.g. a non-numeric string) — for the identical replay-risk reason
+          the durable-read failure above raises rather than defaulting: a
+          silent ``0`` here is indistinguishable from a genuinely fresh run
+          and would replay already-completed cycles.
     """
     state = get_run_state_strict(run_id)
     if state is not None:
@@ -298,8 +326,11 @@ def rehydrate_active_run_offset(run_id: str) -> int:
         return 0
     try:
         return max(0, int(state.get("contiguous_cycles", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid persisted contiguous_cycles for run {run_id}: "
+            f"{state.get('contiguous_cycles')!r}"
+        ) from exc
 
 
 def get_resume_seed_counters(run_id: str) -> Dict[str, Any]:
