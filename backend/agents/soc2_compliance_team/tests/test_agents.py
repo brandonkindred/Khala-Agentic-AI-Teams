@@ -262,6 +262,43 @@ def test_run_tsc_agent_critical_finding_marks_non_compliant_via_default() -> Non
     assert out.compliant is False
 
 
+def test_run_tsc_agent_overrides_llm_compliant_when_inconsistent_with_findings() -> None:
+    """The LLM's own verdict must never win over the computed one: a
+    critical finding forces ``compliant=False`` even if the LLM said True."""
+    llm = _FakeLLM(
+        {
+            "summary": "s",
+            "findings": [
+                {"severity": "critical", "title": "Hardcoded secret"},
+            ],
+            "compliant": True,
+        }
+    )
+    out = _run_tsc_agent(
+        llm,
+        TSCCategory.SECURITY,
+        "Security",
+        "secrets",
+        _ctx(),
+    )
+    assert out.compliant is False
+
+
+def test_run_tsc_agent_null_compliant_does_not_crash() -> None:
+    """``"compliant": null`` in the LLM response must not reach
+    ``TSCAuditResult`` (which types ``compliant`` as ``bool``) — it is
+    ignored in favor of the computed value rather than raising."""
+    llm = _FakeLLM({"summary": "s", "findings": [], "compliant": None})
+    out = _run_tsc_agent(
+        llm,
+        TSCCategory.SECURITY,
+        "Security",
+        "secrets",
+        _ctx(),
+    )
+    assert out.compliant is True
+
+
 # ---------------------------------------------------------------------------
 # Per-TSC agent classes — they all just delegate to _run_tsc_agent
 # ---------------------------------------------------------------------------
