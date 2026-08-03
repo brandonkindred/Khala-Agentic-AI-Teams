@@ -128,7 +128,10 @@ class _StubLabClient:
 
     def delete_job(self, jid: str) -> bool:
         self.deleted.append(jid)
-        return jid in self.by_id
+        existed = jid in self.by_id
+        self.by_id.pop(jid, None)
+        self.jobs = [j for j in self.jobs if j.get("job_id") != jid]
+        return existed
 
     def apply_and_get(
         self,
@@ -142,10 +145,12 @@ class _StubLabClient:
         """Minimal stand-in for JobServiceClient.apply_and_get's increment-and-read-back.
 
         Auto-vivifies an entry for jid rather than requiring get_job/create_job to have
-        been called first (this stub's other write paths, e.g. update_job/create_job,
-        aren't implemented at all — callers rely on _persist_run_state swallowing that
-        AttributeError), so tests exercising restart's generation mint don't need to
-        separately seed the job store.
+        been called first, so tests exercising restart's generation mint don't need to
+        separately seed the job store. Only increment and merge_fields are honored;
+        merge_nested and append_to are accepted (to match the real client's signature)
+        but not implemented -- no current test relies on either. create_job isn't
+        implemented (route tests that hit this path stub _persist_run_state to a
+        no-op instead); update_job is implemented separately below.
         """
         record = self.by_id.setdefault(jid, {"job_id": jid})
         if increment:

@@ -725,6 +725,63 @@ def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):
     assert out["record"] == {"lab_record_id": "rec-final"}
 
 
+def test_finalize_cycle_record_activity_accepts_generation_newer_than_persisted(monkeypatch):
+    """check_fencing_token only rejects provided < current; a provided
+    generation strictly NEWER than the persisted one (not just equal) must
+    also be accepted -- distinct from the equal-tokens case already covered
+    by test_finalize_cycle_record_activity_accepts_current_generation."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-final-newer"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    out = act.finalize_cycle_record_activity(
+        {"run_id": "run-final-newer", "generation": 5, "record": {"lab_record_id": "raw-1"}}
+    )
+    assert out["record"] == {"lab_record_id": "rec-final-newer"}
+
+
+def test_finalize_cycle_record_activity_defaults_generation_when_omitted(monkeypatch):
+    """A payload with run_id but no "generation" key (a caller predating the
+    field, distinct from the no-run_id-at-all backward-compat path already
+    covered elsewhere) must default to generation 1 -- accepted against a
+    fresh/never-restarted run's persisted generation of 1."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-final-default"}
+
+    monkeypatch.setattr(
+        api_main, "_finalize_strategy_lab_cycle_record", lambda *a, **k: _FakeRecord()
+    )
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    # No "generation" key at all.
+    out = act.finalize_cycle_record_activity(
+        {"run_id": "run-final-default", "record": {"lab_record_id": "raw-1"}}
+    )
+    assert out["record"] == {"lab_record_id": "rec-final-default"}
+
+
 def test_finalize_cycle_record_activity_rejects_generation_that_went_stale_during_finalize(
     monkeypatch,
 ):

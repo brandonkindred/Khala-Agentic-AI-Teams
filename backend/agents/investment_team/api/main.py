@@ -1858,6 +1858,13 @@ def _persist_run_state(
           write; omitting ``generation`` here means such a write can never
           regress the durable high-water mark back down, without needing an
           atomic conditional-write primitive the job service doesn't expose.
+        - Failure handling: if the job-service call raises (e.g. the store is
+          unreachable), the exception is caught, logged at warning level, and
+          this function returns normally — the caller is not notified the
+          write failed. This is a deliberate best-effort design (callers use
+          this for progress checkpoints, not the primary source of truth for
+          run state), not an oversight; a caller that needs to know the write
+          landed must verify it independently.
     """
     try:
         client = _get_lab_run_job_client()
@@ -2883,9 +2890,15 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           execution couldn't be resolved due to a Temporal-side error,
           minting the new generation failed, or the pre-dispatch
           revalidation read of it failed (job service unavailable in any
-          case). The revalidation failure additionally marks the run
-          ``"failed"`` (state was already written by this point, so leaving
-          it ``"running"`` with no workflow ever dispatched would wedge it).
+          case). "Minting failed" covers both ways ``apply_and_get`` can
+          fail: it raises on a transport error, or returns a falsy value
+          when the job no longer exists in the job service — the latter
+          also 503s rather than some other status, since the prior workflow
+          was already confirmed terminated above and the run cannot safely
+          be left without a fencing generation. The revalidation failure
+          additionally marks the run ``"failed"`` (state was already written
+          by this point, so leaving it ``"running"`` with no workflow ever
+          dispatched would wedge it).
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
@@ -3031,8 +3044,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 "get_job failed during restart's legacy-generation check for %s: %s", run_id, exc
             )
             durable_job = None
-        durable_data = durable_job.get("data", durable_job) if durable_job else {}
-        generation_increment = 2 if not durable_data or "generation" not in durable_data else 1
+        # get_job's contract is Optional[Dict[str, Any]] -- a JSONB "data"
+        # column merged into the top-level dict server-side (job_service.db's
+        # _row_to_dict), never returned as a separate nested key. `or {}`
+        # normalizes only the "no job" case; no further shape-guessing needed.
+        durable_data = durable_job or {}
+        generation_increment = 2 if "generation" not in durable_data else 1
         try:
             updated_generation_record = client.apply_and_get(
                 run_id, increment={"generation": generation_increment}

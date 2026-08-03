@@ -153,6 +153,62 @@ def _infer_run_id_from_activity_context() -> Optional[str]:
     return None
 
 
+def _check_generation_fencing(
+    run_id: str, provided_generation: int, *, retry_on_lookup_failure: bool
+) -> None:
+    """Raise unless ``provided_generation`` is current or newer than ``run_id``'s
+    durable generation. Shared by ``persist_run_state_activity`` and
+    ``finalize_cycle_record_activity``, whose fencing checks are otherwise
+    identical apart from the retryability of a lookup failure.
+
+    Preconditions:
+        ``run_id`` names a strategy-lab run; ``provided_generation`` is the
+        fencing generation the calling activity was dispatched with.
+        ``retry_on_lookup_failure`` is ``True`` when nothing has been written
+        yet (safe to retry the whole activity on a transient durable-read
+        failure) and ``False`` once a non-idempotent write may already have
+        committed (a retry would re-execute it).
+    Postconditions:
+        Returns normally when ``provided_generation`` is current or newer.
+        Raises ``ApplicationError(type="StaleFencingTokenError",
+        non_retryable=True)`` when it's stale — not handled via
+        ``_map_exception_to_application_error``, since that helper's
+        documented precondition is an exception raised by a strategy-lab
+        agent-class method, which ``check_fencing_token`` is not. A durable
+        lookup failure raises ``ApplicationError`` with
+        ``non_retryable=(not retry_on_lookup_failure)``. Any other exception
+        from ``check_fencing_token`` (a caller precondition violation, e.g. a
+        non-int ``provided_generation`` — pure comparison, no I/O, so this is
+        the only other failure mode) is also raised non-retryable, preserving
+        the original exception's type name rather than conflating it with a
+        stale token.
+    """
+    from investment_team.strategy_lab.run_state import get_run_generation_strict
+    from shared.fencing import StaleFencingTokenError, check_fencing_token
+
+    try:
+        current_generation = get_run_generation_strict(run_id)
+    except Exception as exc:  # noqa: BLE001
+        raise ApplicationError(
+            f"{type(exc).__name__}: {exc}",
+            type=type(exc).__name__,
+            non_retryable=not retry_on_lookup_failure,
+        ) from exc
+    try:
+        check_fencing_token(
+            agent_id=run_id,
+            resource="strategy_lab_run",
+            provided_token=provided_generation,
+            current_token=current_generation,
+        )
+    except StaleFencingTokenError as exc:
+        raise ApplicationError(str(exc), type="StaleFencingTokenError", non_retryable=True) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise ApplicationError(
+            f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=True
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Market data
 # ---------------------------------------------------------------------------
@@ -274,34 +330,9 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
         permanently failing the workflow over a momentary blip.
     """
     from investment_team.api.main import _persist_run_state
-    from investment_team.strategy_lab.run_state import get_run_generation_strict
-    from shared.fencing import StaleFencingTokenError, check_fencing_token
 
-    try:
-        current_generation = get_run_generation_strict(run_id)
-    except Exception as exc:  # noqa: BLE001
-        raise ApplicationError(
-            f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=False
-        ) from exc
-    try:
-        check_fencing_token(
-            agent_id=run_id,
-            resource="strategy_lab_run",
-            provided_token=generation,
-            current_token=current_generation,
-        )
-    except StaleFencingTokenError as exc:
-        # Handled directly rather than via _map_exception_to_application_error:
-        # that helper's documented precondition is an exception raised by a
-        # strategy-lab agent-class method, which check_fencing_token is not.
-        raise ApplicationError(str(exc), type="StaleFencingTokenError", non_retryable=True) from exc
-    except Exception as exc:  # noqa: BLE001
-        # check_fencing_token is a pure comparison with no I/O -- the only
-        # other failure mode is a caller precondition violation (e.g. a
-        # non-int generation), a bug that a retry cannot fix either.
-        raise ApplicationError(
-            f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=True
-        ) from exc
+    # Nothing has been written yet, so a lookup failure is safe to retry.
+    _check_generation_fencing(run_id, generation, retry_on_lookup_failure=True)
     _persist_run_state(run_id, state, create=create)
 
 
@@ -760,38 +791,11 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
-    from investment_team.strategy_lab.run_state import get_run_generation_strict
-    from shared.fencing import StaleFencingTokenError, check_fencing_token
 
     def _check_generation(run_id: str, *, retry_on_lookup_failure: bool) -> None:
-        try:
-            current_generation = get_run_generation_strict(run_id)
-        except Exception as exc:  # noqa: BLE001
-            raise ApplicationError(
-                f"{type(exc).__name__}: {exc}",
-                type=type(exc).__name__,
-                non_retryable=not retry_on_lookup_failure,
-            ) from exc
-        try:
-            check_fencing_token(
-                agent_id=run_id,
-                resource="strategy_lab_run",
-                provided_token=params.get("generation", 1),
-                current_token=current_generation,
-            )
-        except StaleFencingTokenError as exc:
-            # Handled directly rather than via _map_exception_to_application_error:
-            # that helper's documented precondition is an exception raised by
-            # a strategy-lab agent-class method, which check_fencing_token is
-            # not.
-            raise ApplicationError(str(exc), type="StaleFencingTokenError", non_retryable=True) from exc
-        except Exception as exc:  # noqa: BLE001
-            # check_fencing_token is a pure comparison with no I/O -- the
-            # only other failure mode is a caller precondition violation
-            # (e.g. a non-int generation), a bug a retry cannot fix either.
-            raise ApplicationError(
-                f"{type(exc).__name__}: {exc}", type=type(exc).__name__, non_retryable=True
-            ) from exc
+        _check_generation_fencing(
+            run_id, params.get("generation", 1), retry_on_lookup_failure=retry_on_lookup_failure
+        )
 
     record = StrategyLabRecord.parse_persisted(params["record"])
     run_id = params.get("run_id") or _infer_run_id_from_activity_context()
