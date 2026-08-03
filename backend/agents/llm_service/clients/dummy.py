@@ -756,13 +756,19 @@ class DummyLLMClient(LLMClient):
             json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
         )
 
-        # Check if Strands is requesting structured output via a tool
+        # Prefer the stable tool name; keep description matching as a fallback
+        # for older Strands StructuredOutputTool metadata shapes.
         structured_tool_name = None
         if tool_specs:
             for spec in tool_specs:
+                name = spec.get("name", "") or ""
                 desc = (spec.get("description") or "").lower()
-                if "structuredoutputtool" in desc or "structured_output" in desc:
-                    structured_tool_name = spec.get("name", "structured_output")
+                if (
+                    name == "structured_output"
+                    or "structuredoutputtool" in desc
+                    or "structured_output" in desc
+                ):
+                    structured_tool_name = name or "structured_output"
                     break
 
         yield {"messageStart": {"role": "assistant"}}
@@ -851,23 +857,22 @@ class DummyLLMClient(LLMClient):
         # test stub call to pass an objective adds churn with no attribution value.
         # Production enforcement lives in the real OllamaLLMClient (required, and
         # rejects empty strings).
-        # Pattern-match against the user prompt only. Callers (including
+        # Pattern-match mostly against the user prompt. Callers (including
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the
         # branches below look for in the user prompt they build. Scanning
-        # ``system_prompt`` was tried and reverted because loose single-word
-        # branches (``"pipeline"``, ``"security"``) cross-contaminated other
-        # teams' prompts that happened to mention those words in their persona
+        # ``system_prompt`` with loose single-word anchors (``"pipeline"``,
+        # ``"security"``) was tried and reverted because it cross-contaminated
+        # other teams' prompts that happened to mention those words in persona
         # text.
         #
-        # Exception: the branding Phase 1 / Phase 2 / Phase 3 branches further
-        # down DO anchor on ``system_prompt`` (via ``system_lowered`` later in
-        # this method) — every agent in those phases receives the same
+        # Branding Phase 1 / Phase 2 / Phase 3 branches are the exception:
+        # they anchor on ``system_prompt`` (via ``system_lowered`` later in
+        # this method) because every agent in those phases receives the same
         # serialized mission/phase context as its user message, so only each
         # agent's own system_prompt (its required output field names) can
         # distinguish which one is asking. Those anchors are multi-token
-        # combinations unique to one agent's prompt, not the loose single
-        # words that caused the earlier revert.
+        # combinations unique to one agent's prompt.
         lowered = prompt.lower()
         # Shared across instances so sequential coding stubs can mint distinct
         # module/component names when the task hint alone is not enough.
@@ -1807,10 +1812,10 @@ class DummyLLMClient(LLMClient):
             }
         # Branding Phase 3 stubs live in ``_branding_phase3_structured_stub``
         # so ``complete_json`` stays under the mccabe complexity ceiling.
-        return _branding_phase3_structured_stub(system_lowered) or {
-            "output": "Dummy response",
-            "status": "ok",
-        }
+        # Only ``None`` means "unmatched" — an intentional empty dict must not
+        # fall through to the generic default.
+        stub = _branding_phase3_structured_stub(system_lowered)
+        return stub if stub is not None else {"output": "Dummy response", "status": "ok"}
 
     def chat(
         self,
@@ -1857,8 +1862,16 @@ class DummyLLMClient(LLMClient):
             structured_tool = None
             for t in tools:
                 fn = (t or {}).get("function") or {}
+                # Prefer the stable tool name; description substring is a
+                # fallback for StructuredOutputTool metadata that embeds
+                # "StructuredOutputTool" in the human-readable description.
+                name = fn.get("name") or ""
                 desc = (fn.get("description") or "").lower()
-                if "structuredoutputtool" in desc:
+                if (
+                    name == "structured_output"
+                    or "structuredoutputtool" in desc
+                    or "structured_output" in desc
+                ):
                     structured_tool = fn
                     break
 

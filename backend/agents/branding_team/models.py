@@ -695,9 +695,10 @@ class MoodBoardCandidatesOutput(BaseModel):
     """Agent-facing CreativeDirector schema: collected moodboard candidates.
 
     ``min_length``/``max_length`` encode the diverge fan-out of 2–3 concepts.
+    Nested entries use ``MoodBoardConceptOutput`` so blank concepts fail validation.
     """
 
-    mood_board_candidates: List[MoodBoardConcept] = Field(min_length=2, max_length=3)
+    mood_board_candidates: List[MoodBoardConceptOutput] = Field(min_length=2, max_length=3)
 
 
 class CreativeRefinementDecisionOutput(BaseModel):
@@ -714,13 +715,31 @@ class CreativeRefinementDecisionOutput(BaseModel):
     decision_criteria: List[str] = Field(min_length=1)
 
 
+class LogoUsageRuleOutput(BaseModel):
+    """Agent-facing logo usage rule; requires non-empty fields."""
+
+    variant: str = Field(min_length=1)
+    usage_context: str = Field(min_length=1)
+    minimum_size: str = Field(min_length=1)
+    clear_space: str = Field(min_length=1)
+
+
 class LogoSuiteOutput(BaseModel):
     """Agent-facing logo_specifier schema.
 
     ``min_length``/``max_length`` encode the prompt's four logo variants.
     """
 
-    logo_suite: List[LogoUsageRule] = Field(min_length=4, max_length=4)
+    logo_suite: List[LogoUsageRuleOutput] = Field(min_length=4, max_length=4)
+
+
+class ColorEntryOutput(BaseModel):
+    """Agent-facing color entry; requires non-empty fields."""
+
+    name: str = Field(min_length=1)
+    hex_value: str = Field(min_length=1)
+    usage: str = Field(min_length=1)
+    psychological_rationale: str = Field(min_length=1)
 
 
 class ColorPaletteSystemOutput(BaseModel):
@@ -730,7 +749,16 @@ class ColorPaletteSystemOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated "5-7 colors".
     """
 
-    color_palette: List[ColorEntry] = Field(min_length=5, max_length=7)
+    color_palette: List[ColorEntryOutput] = Field(min_length=5, max_length=7)
+
+
+class TypographySpecOutput(BaseModel):
+    """Agent-facing typography spec; requires non-empty fields."""
+
+    role: str = Field(min_length=1)
+    font_family: str = Field(min_length=1)
+    weight_range: str = Field(min_length=1)
+    usage_notes: str = Field(min_length=1)
 
 
 class TypographySystemOutput(BaseModel):
@@ -739,7 +767,7 @@ class TypographySystemOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated "3-4 type roles".
     """
 
-    typography_system: List[TypographySpec] = Field(min_length=3, max_length=4)
+    typography_system: List[TypographySpecOutput] = Field(min_length=3, max_length=4)
 
 
 class IconographyOutput(BaseModel):
@@ -760,13 +788,21 @@ class PhotographyVideoOutput(BaseModel):
     motion_principles: List[str] = Field(min_length=3, max_length=4)
 
 
+class VoiceToneEntryOutput(BaseModel):
+    """Agent-facing voice/tone entry; requires non-empty fields."""
+
+    context: str = Field(min_length=1)
+    tone: str = Field(min_length=1)
+    examples: List[str] = Field(min_length=1)
+
+
 class VoiceToneOutput(BaseModel):
     """Agent-facing voice_tone_builder schema.
 
     ``language_dos``/``language_donts`` match the prompt's stated "4-5" items.
     """
 
-    voice_tone_spectrum: List[VoiceToneEntry] = Field(min_length=1)
+    voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(min_length=1)
     language_dos: List[str] = Field(min_length=4, max_length=5)
     language_donts: List[str] = Field(min_length=4, max_length=5)
 

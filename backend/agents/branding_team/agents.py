@@ -342,10 +342,13 @@ def make_creative_director() -> Agent:
     """Build the Phase 3 Creative Director agent.
 
     Postconditions:
-        Returns an ``Agent`` named ``CreativeDirector`` that briefs each
-        ``MoodBoardConceptualist`` swarm member with a distinct visual
-        direction, reviews their candidate moodboards, and requests
-        revisions until at least 2-3 distinct candidates are produced.
+        Returns an ``Agent`` named ``CreativeDirector`` that collects the
+        moodboard concepts produced by the ``MoodBoardConceptualist_*``
+        Graph fan-out nodes into a unified ``MoodBoardCandidatesOutput``
+        list, preserving each concept's title, visual_direction,
+        color_story, typography_direction, and image_style. The agent does
+        not select a winner; ``converge_decider`` scores the candidates
+        and selects the winning direction.
     """
     return build_agent(
         name="CreativeDirector",
@@ -373,7 +376,7 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         whose prompt is specialized to ``variant`` and whose output is a
         moodboard concept (title, visual direction, color story,
         typography direction, image style) for the ``CreativeDirector``
-        swarm.
+        node in the Phase 3 Graph.
     """
     return build_agent(
         name=f"MoodBoardConceptualist_{variant}",
