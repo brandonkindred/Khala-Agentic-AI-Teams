@@ -7,6 +7,13 @@ workflow must do to resume correctly. It documents the current mechanism,
 then specifies the target contract and the open decisions any implementing
 sub-issue must resolve.
 
+> **Citation freshness:** file/line citations below (`module.py:NN-MM`) are
+> accurate as of the commit this document was written against and will drift
+> as the codebase changes. The symbol names (function/class names) they
+> accompany are the authoritative reference — resolve a citation that no
+> longer matches by re-locating the named symbol, not by trusting the line
+> numbers.
+
 ## Current mechanism (as-is)
 
 Today's pause is invisible to Temporal. `hitl.wait_for_answers`
@@ -19,10 +26,17 @@ every HITL gate in `coding_team_orchestrator.py` funnels through via
 the Tech Lead clarify/re-plan loop (capped at `MAX_TECH_LEAD_QUESTION_ROUNDS
 = 5`), and per-worker escalation during execution.
 
-`run_pipeline_activity` (`temporal/coding_team_workflow.py`) calls all the way
-down into this blocking loop and does not return until the job reaches a
-terminal state. Temporal therefore sees one very long-running activity: no
-`activity.heartbeat()` calls exist on this path, and its
+`run_pipeline_activity` (`temporal/coding_team_workflow.py:12`) calls all the
+way down into this blocking loop and does not return until the job reaches a
+terminal state. Its home file is deliberately named `coding_team_workflow.py`,
+not `activities.py`, despite the repo's general convention (activities in
+`activities.py`, workflows in `workflows.py`, as `code_review_agent`'s split
+follows) — the module docstring states it wraps "workflow + activity" in one
+file, co-locating this specific activity with its paired workflow rather than
+the SE-level `activities.py`/`workflows.py` split. This is not a typo; do not
+"correct" this citation to `temporal/activities.py`. Temporal therefore sees
+one very long-running activity: no `activity.heartbeat()` calls exist on this
+path, and its
 `start_to_close_timeout` is a hard 4 hours, uncoordinated with `hitl.py`'s own
 (separately configurable, default 1-hour) answer-wait timeout. The SE-level
 analogue, `execute_coding_team_activity` (`temporal/activities.py:643-753`),
@@ -138,7 +152,17 @@ re-emit it" rule would re-pause on every single resume before ever reaching
 the code that applies the resolved answers — an infinite loop, not just a
 retry-race fix. The two cases must be told apart explicitly: every resumed
 `request` therefore carries `request["acknowledged_resume_token"]`, set by
-the workflow to the `resume_token` it is resolving (see §2). On (re-)entry:
+the workflow to the `resume_token` it is resolving (see §2). This field's
+lifecycle is: set once per resolved pause round, sent on exactly the next
+activity call, and cleared from `request` immediately once that call returns
+(§2 shows this explicitly) — it is never persisted anywhere outside that one
+in-flight `request` dict, and the orchestrator must match it by **exact
+equality** against the *current* persisted pause's `resume_token`, never by
+mere presence. Since `resume_token` values are unique per pause round and
+never reused, a stale or absent value is automatically inert against this
+check on its own; the explicit clear is defense-in-depth against a future
+implementation that checks presence instead of equality, not a requirement
+for correctness of the equality check itself. On (re-)entry:
 - If a persisted, unresolved pause exists **and**
   `request.get("acknowledged_resume_token") == persisted_resume_token`: this
   invocation is the one meant to consume it. Apply the resolved
@@ -209,8 +233,14 @@ needs to cover hours of waiting.
 Shrinking it is not free, though: unlike the worker-escalation drain (which
 gains explicit cooperative cancellation and a quiescence wait above),
 `run_pipeline_activity`'s general planning/codegen/build work has no such
-path today — the "Current mechanism" section already notes it makes no
-`activity.heartbeat()` calls at all. If a single work segment between pause
+path today. The "Current mechanism" section above establishes that the
+*whole* `run_pipeline_activity` call — pause-wait included — makes zero
+`activity.heartbeat()` calls (confirmed by grepping for `activity.heartbeat`
+across `coding_team_orchestrator.py`, `swarm_implementation.py`, and
+`temporal/coding_team_workflow.py`: no matches), so the planning/codegen/build
+segments necessarily have none either, since they're a subset of that same
+call — not a separately-documented fact, just a direct consequence of it. If
+a single work segment between pause
 points takes longer than `start_to_close_timeout`, Temporal schedules a
 retry, but nothing stops the original attempt's Python execution on the
 worker; it keeps running, unaware it timed out, and can now mutate the same
@@ -371,6 +401,23 @@ while True:
     result = await workflow.execute_activity(
         run_pipeline_activity, request, start_to_close_timeout=<short>,
     )
+    # request["acknowledged_resume_token"] (if this isn't the first iteration)
+    # has now done its job -- the just-completed activity call either
+    # consumed it (matched the persisted pause it named) or ignored it (no
+    # matching pause), per the §1 match rule. Clear it immediately, the same
+    # way self._submitted_answers / _pending_questions / _active_resume_token
+    # are reset below, rather than leaving the previous round's token sitting
+    # in `request` unbounded: the §1 rule already makes a stale leftover
+    # token inert on its own (it's compared for exact equality against the
+    # *current* persisted pause's resume_token, and tokens are never reused,
+    # so a stale value can't accidentally match a fresh pause) -- but a
+    # careless reimplementation that checks only "is a token present" rather
+    # than matching it would be vulnerable to exactly that, and this workflow
+    # dict is the only place this field lives (it isn't itself persisted
+    # anywhere). Clearing it here removes that failure mode by construction
+    # instead of relying solely on every future reader implementing the §1
+    # match rule correctly.
+    request.pop("acknowledged_resume_token", None)
     if result["outcome"] in ("completed", "failed"):
         return result
     # outcome == "paused". self._submitted_answers may already be populated
@@ -394,6 +441,15 @@ while True:
     # tick regardless of what happened at the Temporal RPC layer. The
     # native design needs the same reconciliation, actually wired into the
     # loop rather than merely documented as a risk:
+    # RECONCILE_COUNT_LIMIT bounds workflow-history growth from this loop: each
+    # reconciliation tick below records a durable timer plus an activity
+    # execution, and unlike worker-escalation (bounded to a short drain
+    # window), an entry or Tech-Lead pause can legitimately wait on a human
+    # for days. At a 60s RECONCILE_INTERVAL, a limit of 500 ticks caps this
+    # loop's own contribution to history at ~8h of wall-clock reconciliation
+    # before rolling into a fresh run via continue_as_new -- tune both
+    # constants together against the worker's actual Temporal history limits.
+    reconcile_ticks = 0
     while self._submitted_answers is None:
         try:
             await workflow.wait_condition(
@@ -411,6 +467,14 @@ while True:
                 check_job_terminal_activity, request["job_id"],
                 start_to_close_timeout=<short>,
             )
+            if self._submitted_answers is not None:
+                # A signal was processed (by the signal handler in §2) while
+                # the activity call above was in flight -- the client has
+                # already been told delivery succeeded (§3). Fall through to
+                # resolve normally instead of treating this tick as a
+                # reconciliation cycle; do NOT continue_as_new here, or this
+                # already-accepted answer is silently dropped.
+                break
             if status["is_terminal"]:
                 # The job record, not this workflow, is authoritative for
                 # cancellation (§4 decision) -- a terminal record wins even
@@ -420,44 +484,32 @@ while True:
                     "job_id": request["job_id"],
                     "error": status.get("error"),
                 }
-            # Job record still active -- the timeout fired with nothing wrong;
-            # loop back into wait_condition rather than treating it as an
-            # error. If native Temporal cancellation eventually succeeds
-            # instead (the common case), it interrupts wait_condition on its
-            # own via Temporal's own cancellation propagation, independent of
-            # this reconciliation path.
-            #
-            # A short RECONCILE_INTERVAL is not free over a long pause: every
-            # iteration of this loop records a durable timer plus an activity
-            # execution in workflow history, and unlike worker-escalation
-            # (bounded to a short drain window), an entry or Tech-Lead pause
-            # can legitimately wait on a human for days -- at 60s that's
-            # thousands of iterations, each several history events, risking
-            # Temporal's workflow-history size/event-count limits before the
-            # human ever answers. This loop must therefore periodically
-            # `continue_as_new`, carrying `self._active_resume_token`,
-            # `self._pending_questions`, and any still-buffered
-            # `self._buffered_signals` entries forward as the new run's
-            # starting state, rather than looping in place indefinitely --
-            # resetting history growth without losing the pause it's mid-way
-            # through waiting on.
-            #
-            # `self._submitted_answers` must be rechecked immediately before
-            # continuing as new, not assumed still None just because the loop
-            # condition held at iteration start: a signal can be processed
-            # (setting it) while this branch's own `check_job_terminal_activity`
-            # await is in flight, and the native-signal route (§3) reports
-            # delivery success to its caller as soon as the signal is
-            # delivered -- the client believes the answer landed. If
-            # `continue_as_new` fires without checking this and without
-            # carrying it forward, the new run starts back at `None` and the
-            # already-accepted answer is silently lost, leaving the pause
-            # waiting on a submission the client thinks it already made.
-            # Either recheck `self._submitted_answers is None` right before
-            # the `continue_as_new` call and skip it (falling through to
-            # resolve normally) if an answer arrived in that window, or
-            # include `self._submitted_answers` itself in the carried-forward
-            # starting state alongside the other three fields.
+            # Job record still active -- the timeout fired with nothing wrong.
+            # If native Temporal cancellation eventually succeeds instead (the
+            # common case), it interrupts wait_condition on its own via
+            # Temporal's own cancellation propagation, independent of this
+            # reconciliation path.
+            reconcile_ticks += 1
+            if reconcile_ticks >= RECONCILE_COUNT_LIMIT:
+                # Re-check once more immediately before rolling the run over --
+                # the window between the check above and this point is narrow
+                # but not zero, and continue_as_new is irreversible once called.
+                if self._submitted_answers is not None:
+                    break
+                workflow.continue_as_new(
+                    build_continue_state(
+                        request=request,
+                        active_resume_token=self._active_resume_token,
+                        pending_questions=self._pending_questions,
+                        buffered_signals=self._buffered_signals,
+                        # submitted_answers is deliberately NOT carried here:
+                        # the break above already guarantees it's still None
+                        # at this exact point, so the new run correctly starts
+                        # back at "still waiting."
+                    )
+                )
+                # unreachable -- continue_as_new raises internally and never
+                # returns control to this frame
 
     # hitl.answers_to_resolved(submitted_answers, pending_questions) needs BOTH
     # args -- it recovers question_text/answer labels from pending_questions;
@@ -489,6 +541,14 @@ while True:
         # answer text and could repeat the same decision. Reusing this exact
         # shape also keeps the existing per-task escalation-cap accounting
         # (which counts entries with source == "user_decision") intact.
+        # TODO(implementer): both `pause_cycle._format_decisions` and
+        # `v2_team_worker._feedback_lines` are module-private helpers this
+        # contract depends on for exact behavior parity -- couple the native
+        # implementation to them only for now, and promote them to a small
+        # public, stable API (e.g. a `format_decision_feedback(resolved)`
+        # helper with a documented output contract) before or alongside
+        # implementing this section, so a later rename/signature change in
+        # either module doesn't silently break the workflow's feedback path.
         # Replaced, not merged, on every round: an override is consumed by the
         # orchestrator on the very next invocation, so carrying a prior
         # round's entry forward would reapply it and duplicate history.
