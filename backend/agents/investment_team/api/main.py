@@ -476,8 +476,13 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
         lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
         and mapping a present ``current_cycle`` dict to a
-        ``StrategyLabCycleProgress`` (``None`` when absent). Pure: ``state`` is
-        not mutated.
+        ``StrategyLabCycleProgress`` (``None`` when absent). ``batch_size`` is
+        the one field that deliberately does NOT fall back to the model's
+        structural default of ``1``: an absent ``batch_size`` means this is a
+        legacy single-batch record predating multi-batch support, so it falls
+        back to ``total_cycles`` (the whole run was one batch) rather than to
+        ``1`` (which would misreport it as ``total_cycles`` batches of size 1).
+        Pure: ``state`` is not mutated.
     """
     cc = state.get("current_cycle")
     return StrategyLabRunStatusResponse(
