@@ -508,6 +508,26 @@ class ChannelGuideline(BaseModel):
     frequency_guidance: str = ""
 
 
+class ChannelGuidelineOutput(BaseModel):
+    """Agent-facing channel-guide schema for the six ``_make_channel_guide`` agents.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated cardinalities
+    ("3-4 best practices" / "3-4 things to avoid" / "3-5 recommended content
+    formats"). Field-for-field twin of ``ChannelGuideline``, which itself must
+    stay soft (all-default) since ``test_orchestrator.py`` and
+    ``ChannelActivationOutput.channel_guidelines`` construct/merge it with
+    only a subset of fields populated.
+    """
+
+    channel: str = Field(min_length=1)
+    strategy: str = Field(min_length=1)
+    dos: List[str] = Field(min_length=3, max_length=4)
+    donts: List[str] = Field(min_length=3, max_length=4)
+    content_types: List[str] = Field(min_length=3, max_length=5)
+    frequency_guidance: str = Field(min_length=1)
+
+
 class BrandArchitectureRule(BaseModel):
     """Brand architecture rules for multi-product organizations."""
 
@@ -565,17 +585,33 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     sensory_elements: List[str] = Field(min_length=2, max_length=4)
 
 
+class BrandArchitectureRuleOutput(BaseModel):
+    """Agent-facing brand architecture rule; requires non-empty fields.
+
+    Field-for-field twin of ``BrandArchitectureRule`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``)
+    and this file's own ``BrandInActionExampleOutput``/``BrandInActionExample``
+    split — ``BrandArchitectureRule`` itself must stay soft (all-default) since
+    it also backs ``ChannelActivationOutput.brand_architecture``'s merge target.
+    """
+
+    entity: str = Field(min_length=1)
+    relationship: str = Field(min_length=1)
+    naming_convention: str = Field(min_length=1)
+    visual_treatment: str = Field(min_length=1)
+
+
 class BrandArchitectureOutput(BaseModel):
     """Agent-facing brand_architecture_builder schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    Reuses ``BrandArchitectureRule`` directly (its fields default to "" for use
-    as ``ChannelActivationOutput.brand_architecture``'s merge target) — the
-    cardinality constraints here live on the wrapping list/dict fields, matching
-    ``DifferentiationPillarsOutput``'s reuse of ``DifferentiationPillar``.
+    Uses ``BrandArchitectureRuleOutput`` (not the soft ``BrandArchitectureRule``)
+    so each rule's fields are individually required — a fully populated
+    ``brand_architecture`` list of blank-field rules must fail validation.
     """
 
-    brand_architecture: List[BrandArchitectureRule] = Field(min_length=1)
+    brand_architecture: List[BrandArchitectureRuleOutput] = Field(min_length=1)
     naming_conventions: List[str] = Field(min_length=3, max_length=5)
     terminology_glossary: Dict[str, str] = Field(min_length=5, max_length=10)
 

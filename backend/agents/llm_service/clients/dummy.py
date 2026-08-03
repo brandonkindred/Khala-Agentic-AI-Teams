@@ -597,12 +597,34 @@ def _branding_phase4_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     Postconditions:
         Returns a dict that validates against the matching Phase 4 agent
         ``structured_output`` schema, or ``None`` when no Phase 4 agent matches.
-        Covers the three Phase 4 factories with required (non-default) fields:
-        ``brand_experience_principler``, ``brand_architecture_builder``, and
-        ``brand_in_action_illustrator``. The six ``_make_channel_guide`` agents
-        (``ChannelGuideline``) need no stub — every field on that model defaults,
-        so the generic fallback dict already validates.
+        Covers all four distinct Phase 4 schemas: ``brand_experience_principler``,
+        the six ``_make_channel_guide`` agents (all share ``ChannelGuidelineOutput``,
+        so one stub branch covers all six), ``brand_architecture_builder``, and
+        ``brand_in_action_illustrator``.
     """
+    if "content_types" in system_lowered and "frequency_guidance" in system_lowered:
+        channel_match = re.search(r"channel:\s*'([a-z_]+)'", system_lowered)
+        channel_value = channel_match.group(1) if channel_match else "channel"
+        return {
+            "channel": channel_value,
+            "strategy": f"Lead with proof points tailored to the {channel_value} audience (dummy).",
+            "dos": [
+                "Match the channel's native format (dummy).",
+                "Lead with the strongest proof point (dummy).",
+                "Keep a consistent voice across posts (dummy).",
+            ],
+            "donts": [
+                "Don't repurpose copy verbatim from other channels (dummy).",
+                "Don't bury the call to action (dummy).",
+                "Don't ignore channel-specific limits (dummy).",
+            ],
+            "content_types": [
+                "Short-form updates (dummy).",
+                "Case study highlights (dummy).",
+                "Behind-the-scenes moments (dummy).",
+            ],
+            "frequency_guidance": "Publish on a predictable weekly cadence (dummy).",
+        }
     if "brand_experience_principles" in system_lowered and "sensory_elements" in system_lowered:
         return {
             "brand_experience_principles": [

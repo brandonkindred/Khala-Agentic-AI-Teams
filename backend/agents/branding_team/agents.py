@@ -28,7 +28,7 @@ from .models import (
     BrandInActionOutput,
     BrandingMission,
     BrandStoryOutput,
-    ChannelGuideline,
+    ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
     CreativeRefinementDecisionOutput,
@@ -616,7 +616,7 @@ def _make_channel_guide(
         is a lowercase identifier suitable for use in an agent name
         (e.g. ``"website"``). ``structured_output`` is the Pydantic model
         for this channel's guideline output (currently always
-        ``ChannelGuideline``, passed explicitly by each call site).
+        ``ChannelGuidelineOutput``, passed explicitly by each call site).
 
     Postconditions:
         Returns an ``Agent`` named ``f"{channel}_guide"`` whose prompt
@@ -657,7 +657,7 @@ def make_website_guide() -> Agent:
         function's contract.
     """
     return _make_channel_guide(
-        "website", "Company website, landing pages, product pages.", ChannelGuideline
+        "website", "Company website, landing pages, product pages.", ChannelGuidelineOutput
     )
 
 
@@ -669,7 +669,7 @@ def make_social_guide() -> Agent:
         function's contract.
     """
     return _make_channel_guide(
-        "social", "Social media platforms (LinkedIn, Twitter, Instagram).", ChannelGuideline
+        "social", "Social media platforms (LinkedIn, Twitter, Instagram).", ChannelGuidelineOutput
     )
 
 
@@ -681,7 +681,7 @@ def make_email_guide() -> Agent:
         function's contract.
     """
     return _make_channel_guide(
-        "email", "Email marketing, newsletters, transactional emails.", ChannelGuideline
+        "email", "Email marketing, newsletters, transactional emails.", ChannelGuidelineOutput
     )
 
 
@@ -693,7 +693,7 @@ def make_events_guide() -> Agent:
         function's contract.
     """
     return _make_channel_guide(
-        "events", "Conferences, webinars, meetups, trade shows.", ChannelGuideline
+        "events", "Conferences, webinars, meetups, trade shows.", ChannelGuidelineOutput
     )
 
 
@@ -705,7 +705,7 @@ def make_partnerships_guide() -> Agent:
         function's contract.
     """
     return _make_channel_guide(
-        "partnerships", "Co-branding, sponsorships, partner marketing.", ChannelGuideline
+        "partnerships", "Co-branding, sponsorships, partner marketing.", ChannelGuidelineOutput
     )
 
 
@@ -717,7 +717,7 @@ def make_internal_guide() -> Agent:
         function's contract.
     """
     return _make_channel_guide(
-        "internal", "Internal comms, employee branding, onboarding.", ChannelGuideline
+        "internal", "Internal comms, employee branding, onboarding.", ChannelGuidelineOutput
     )
 
 
