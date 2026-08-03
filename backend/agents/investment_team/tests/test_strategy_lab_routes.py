@@ -22,7 +22,8 @@ strategy-lab cycles execute.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from collections.abc import MutableMapping
+from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
 
@@ -30,7 +31,14 @@ from investment_team.api.main import _dispatch_strategy_lab_run as _real_dispatc
 from investment_team.api.main import _persist_run_state as _real_persist_run_state
 
 
-class _InMemoryDict:
+class _InMemoryDict(MutableMapping):
+    """Plain-dict stand-in for monkeypatching api.main's module-level record
+    stores. Subclasses MutableMapping (rather than hand-rolling the dict
+    protocol) so it gets correct semantics -- including __iter__/__len__/
+    keys/items/update/setdefault and a real KeyError on deleting a missing
+    key -- for free, matching what production code calling these stores
+    would see from an actual dict."""
+
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
 
@@ -40,22 +48,33 @@ class _InMemoryDict:
     def __getitem__(self, k):
         return self._d[k]
 
-    def get(self, k, default=None):
-        return self._d.get(k, default)
-
-    def __contains__(self, k):
-        return k in self._d
-
     def __delitem__(self, k):
-        self._d.pop(k, None)
+        del self._d[k]
 
-    def pop(self, k, *args):
-        if args:
-            return self._d.pop(k, args[0])
-        return self._d.pop(k)
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._d)
 
-    def values(self):
-        return list(self._d.values())
+    def __len__(self) -> int:
+        return len(self._d)
+
+
+def test_in_memory_dict_matches_real_dict_protocol() -> None:
+    """Regression: the hand-rolled predecessor of this MutableMapping-based
+    test double was missing __iter__/__len__/keys/items/update/setdefault,
+    and its __delitem__ silently no-op'd on a missing key instead of
+    raising KeyError like a real dict -- gaps that could mask a bug in
+    production code exercising the full mapping protocol against these
+    monkeypatched stores."""
+    d = _InMemoryDict()
+    d["a"] = 1
+    d.setdefault("b", 2)
+    d.update({"c": 3})
+    assert len(d) == 3
+    assert set(iter(d)) == {"a", "b", "c"}
+    assert dict(d.items()) == {"a": 1, "b": 2, "c": 3}
+    assert set(d.keys()) == {"a", "b", "c"}
+    with pytest.raises(KeyError):
+        del d["missing"]
 
 
 @pytest.fixture

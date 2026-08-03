@@ -17,7 +17,10 @@ single shared lock is constructed.
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from job_service_client import JobServiceClient
 
 lock = threading.Lock()
 
@@ -106,23 +109,37 @@ def get_run_generation_strict(run_id: str, *, client: Any = None) -> int:
 
     Postconditions:
         - Returns the run's durably persisted ``generation`` field, or ``1``
-          for a run with no ``generation`` field yet (a fresh/never-restarted
-          run — not a read failure) or a run that does not exist. Raises
-          whatever the underlying job-service client raises on a transport
-          failure — callers must let this propagate, not swallow it.
+          for a run with no ``generation`` field yet, a ``None``/empty
+          value, or a run that does not exist (all "not a read failure"
+          cases indistinguishable from a fresh/never-restarted run). Raises
+          ``ValueError`` when the persisted ``generation`` field is present
+          but unparseable as an int (e.g. a non-numeric string, list, or
+          dict) — that's durable-record corruption, not a legitimate
+          "missing field" case, and returning the permissive default ``1``
+          for it would let a stale pre-restart activity (carrying token
+          ``1``) pass ``check_fencing_token`` (which accepts
+          ``provided_token >= current_token``), reopening the exact race
+          this module's fencing exists to close. Also raises whatever the
+          underlying job-service client raises on a transport failure —
+          callers must let both propagate, not swallow them.
     """
     client = client or get_lab_run_job_client()
     job = client.get_job(run_id)
     if not job:
         return 1
     data = job.get("data", job)
-    try:
-        return max(1, int(data.get("generation", 1) or 1))
-    except (TypeError, ValueError):
+    raw_generation = data.get("generation", 1)
+    if raw_generation is None or raw_generation == "":
         return 1
+    try:
+        return max(1, int(raw_generation))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid persisted generation for run {run_id}: {raw_generation!r}"
+        ) from exc
 
 
-def get_lab_run_job_client():
+def get_lab_run_job_client() -> "JobServiceClient":
     """Return a JobServiceClient scoped to strategy lab runs."""
     from job_service_client import JobServiceClient
 
@@ -144,13 +161,18 @@ def _load_run_from_job_service_strict(run_id: str) -> Optional[Dict[str, Any]]:
     Postconditions:
         - Returns the persisted state, or ``None`` when the job genuinely
           does not exist. Raises whatever the underlying job-service client
-          raises on a transport failure.
+          raises on a transport failure. The returned dict is always a copy
+          -- when the job has no ``"data"`` key, ``job.get("data", job)``
+          would otherwise alias the exact object ``client.get_job`` returned,
+          and mutating it in place (setting ``run_id``/``status`` below)
+          could leak those mutations back into the client's response if it
+          ever caches or reuses that object.
     """
     client = get_lab_run_job_client()
     job = client.get_job(run_id)
     if not job:
         return None
-    data = job.get("data", job)
+    data = dict(job.get("data", job))
     data["run_id"] = run_id
     data.setdefault("status", job.get("status", "completed"))
     return data

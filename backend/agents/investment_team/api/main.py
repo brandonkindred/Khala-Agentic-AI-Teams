@@ -420,6 +420,56 @@ GENERATION_INCREMENT_LEGACY_BOOTSTRAP = 2
 _GENERATION_EXCLUDE_FIELDS = frozenset({"generation"})
 
 
+def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
+    """Return the fencing-generation increment ``restart_strategy_lab_run``
+    should atomically apply for this run's durable record.
+
+    A run created before generation fencing shipped has no "generation"
+    field in its persisted record at all, and the job service's atomic
+    increment treats an absent field as 0 -- so a plain +1 would mint
+    generation 1 for such a run's first restart. That's exactly the
+    generation ``persist_run_state_activity``/``finalize_cycle_record_activity``
+    fall back to for a caller that omits ``generation`` entirely (an activity
+    scheduled before the field existed), and ``check_fencing_token`` accepts
+    equal tokens -- so that stale activity would pass fencing again. Jumping
+    straight to ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` in that one case
+    makes the minted value strictly exceed the legacy default; a run that
+    already has an explicit "generation" field (every run created after this
+    change, and any legacy run past its first post-upgrade restart)
+    increments by the ordinary ``GENERATION_INCREMENT_NORMAL`` instead.
+
+    Preconditions:
+        - ``durable_data`` is the run's durable job record (its ``"data"``
+          column merged in) -- or ``{}`` when the durable read failed or the
+          job doesn't exist. Callers MUST pass the DURABLE record here, not
+          `_get_run_state`'s process-local ``active_runs`` snapshot: a
+          resume of this same legacy run can already have populated that
+          in-memory entry with a ``generation=1`` default
+          (``resume_strategy_lab_run`` deliberately excludes "generation"
+          from ITS durable write, so the durable record stays legacy even
+          after that). Passing the in-memory snapshot instead would see
+          "generation" present, mint only +1, and land on durable generation
+          1 -- exactly what a still-in-flight legacy activity (which omits
+          ``generation`` entirely, defaulting to 1) presents, defeating
+          fencing.
+
+    Postconditions:
+        - Returns ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` when
+          ``durable_data`` has no "generation" key, else
+          ``GENERATION_INCREMENT_NORMAL``. A durable read that failed (and
+          was passed here as ``{}`` by the caller) is treated the same as a
+          genuinely legacy/fieldless record: incrementing one extra is
+          harmless (fencing only needs strict monotonic increase), while
+          defaulting to +1 when the record really was legacy would reopen
+          the bug above.
+    """
+    return (
+        GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+        if "generation" not in durable_data
+        else GENERATION_INCREMENT_NORMAL
+    )
+
+
 class StrategyLabRunStartResponse(BaseModel):
     """Returned immediately when a strategy lab batch is started."""
 
@@ -3109,42 +3159,18 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # still-in-flight activity (terminating the workflow doesn't stop an
         # already-dispatched, non-heartbeating activity) is fenced instead of
         # silently landing. Atomic increment-and-read-back mirrors
-        # software_engineering_team/job_store.py's claim_resume.
-        #
-        # A run created before generation fencing shipped has no "generation"
-        # field in its persisted record at all, and the job service's atomic
-        # increment treats an absent field as 0 -- so a plain +1 would mint
-        # generation 1 for such a run's first restart. That's exactly the
-        # default persist_run_state_activity/finalize_cycle_record_activity
-        # fall back to for a caller that omits generation entirely (an
-        # activity scheduled before the field existed), and check_fencing_token
-        # accepts equal tokens -- so that stale activity would pass fencing
-        # again. Jump straight to generation 2 in that one case so it strictly
-        # exceeds the legacy default; a run that already has an explicit
-        # generation field (every run created after this change, and any
-        # legacy run past its first post-upgrade restart) increments normally.
-        #
-        # This must be judged against the DURABLE record, not `state` above:
-        # `state` may be `_get_run_state`'s process-local `active_runs` entry,
-        # which a resume of this same legacy run can already have populated
-        # with an in-memory `generation=1` default (resume_strategy_lab_run
-        # deliberately excludes "generation" from ITS durable write, so the
-        # durable record stays legacy even after that). Checking `state` here
-        # would see "generation" present, mint only +1, land on durable
-        # generation 1 -- exactly what a still-in-flight legacy activity
-        # (which omits generation entirely, defaulting to 1) presents, and
-        # check_fencing_token accepts that as current rather than fencing it
-        # out. A durable read that fails defaults to the legacy/+2 branch:
-        # incrementing one extra is harmless (fencing only needs strict
-        # monotonic increase), while defaulting to +1 when the record really
-        # was legacy would reopen this exact bug.
+        # software_engineering_team/job_store.py's claim_resume. The
+        # increment amount itself accounts for a legacy (pre-fencing) run's
+        # missing "generation" field -- see
+        # `_legacy_generation_bootstrap_increment`'s own docstring.
         client = _get_lab_run_job_client()
         try:
             durable_job = client.get_job(run_id)
         except Exception as exc:
-            # Best-effort: falling back to the legacy/+2 branch below is safe
-            # regardless of why this read failed (see above), but log it so a
-            # non-transient job-service problem isn't silently invisible.
+            # Best-effort: falling back to the legacy/+2 branch is safe
+            # regardless of why this read failed (see
+            # _legacy_generation_bootstrap_increment's docstring), but log it
+            # so a non-transient job-service problem isn't silently invisible.
             logger.warning(
                 "get_job failed during restart's legacy-generation check for %s: %s", run_id, exc
             )
@@ -3154,11 +3180,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # _row_to_dict), never returned as a separate nested key. `or {}`
         # normalizes only the "no job" case; no further shape-guessing needed.
         durable_data = durable_job or {}
-        generation_increment = (
-            GENERATION_INCREMENT_LEGACY_BOOTSTRAP
-            if "generation" not in durable_data
-            else GENERATION_INCREMENT_NORMAL
-        )
+        generation_increment = _legacy_generation_bootstrap_increment(durable_data)
         try:
             updated_generation_record = client.apply_and_get(
                 run_id, increment={"generation": generation_increment}

@@ -415,6 +415,38 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _legacy_generation_bootstrap_increment
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() -> None:
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert _legacy_generation_bootstrap_increment({}) == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    assert (
+        _legacy_generation_bootstrap_increment({"status": "completed"})
+        == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    )
+
+
+def test_legacy_generation_bootstrap_increment_normal_when_field_present() -> None:
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_NORMAL,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert (
+        _legacy_generation_bootstrap_increment({"generation": 1}) == GENERATION_INCREMENT_NORMAL
+    )
+    assert (
+        _legacy_generation_bootstrap_increment({"generation": 7}) == GENERATION_INCREMENT_NORMAL
+    )
+
+
+# ---------------------------------------------------------------------------
 # _PersistentDict (in-process FakeJobClient roundtrip)
 # ---------------------------------------------------------------------------
 
@@ -1067,6 +1099,30 @@ def test_get_run_state_strict_returns_none_for_genuinely_unknown_run(
     assert run_state.get_run_state_strict("run-nonexistent") is None
 
 
+def test_get_run_state_strict_does_not_mutate_job_service_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: when a job has no "data" key, `job.get("data", job)`
+    aliases the exact dict the client returned. The returned state must be
+    a copy -- mutating it in place (setting run_id/status) would otherwise
+    leak those mutations back into the client's response object, which
+    could be cached/reused."""
+    from investment_team.strategy_lab import run_state
+
+    original_job = {"job_id": "run-alias", "status": "running"}
+
+    class _Ok:
+        def get_job(self, jid):
+            return original_job
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    state = run_state.get_run_state_strict("run-alias")
+
+    assert state is not original_job
+    assert "run_id" not in original_job  # the caller's object is untouched
+    assert state["run_id"] == "run-alias"
+
+
 def test_rehydrate_active_run_offset_propagates_durable_read_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1136,18 +1192,53 @@ def test_get_run_generation_strict_ignores_active_runs_cache(monkeypatch: pytest
         del run_state.active_runs["run-live"]
 
 
-@pytest.mark.parametrize("bad_value", [None, "not-a-number", [], 0, -1])
-def test_get_run_generation_strict_malformed_or_nonpositive_value_defaults_to_one(
-    monkeypatch: pytest.MonkeyPatch, bad_value
+@pytest.mark.parametrize("empty_value", [None, ""])
+def test_get_run_generation_strict_missing_or_empty_value_defaults_to_one(
+    monkeypatch: pytest.MonkeyPatch, empty_value
 ) -> None:
     from investment_team.strategy_lab import run_state
 
     class _Ok:
         def get_job(self, jid):
-            return {"job_id": jid, "status": "running", "generation": bad_value}
+            return {"job_id": jid, "status": "running", "generation": empty_value}
 
     monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
     assert run_state.get_run_generation_strict("run-bad") == 1
+
+
+@pytest.mark.parametrize("nonpositive_value", [0, -1])
+def test_get_run_generation_strict_nonpositive_value_clamps_to_one(
+    monkeypatch: pytest.MonkeyPatch, nonpositive_value
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": nonpositive_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-bad") == 1
+
+
+@pytest.mark.parametrize("unparseable_value", ["not-a-number", [], {}, object()])
+def test_get_run_generation_strict_raises_on_unparseable_value(
+    monkeypatch: pytest.MonkeyPatch, unparseable_value
+) -> None:
+    """Regression: an unparseable persisted `generation` (durable-record
+    corruption, not a legitimate missing-field case) must raise rather than
+    silently defaulting to the permissive generation 1 -- returning 1 here
+    would let a stale pre-restart activity (carrying token 1) pass
+    check_fencing_token (which accepts provided_token >= current_token),
+    reopening the exact race generation fencing exists to close."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": unparseable_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted generation"):
+        run_state.get_run_generation_strict("run-bad")
 
 
 def test_get_run_generation_strict_returns_one_for_unknown_run(monkeypatch: pytest.MonkeyPatch) -> None:
