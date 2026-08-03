@@ -637,14 +637,17 @@ def test_merge_wave_results_activity_isolates_single_merge_failure(monkeypatch):
 
     params = {
         "primary_tracker_state": primary_state,
+        # Non-adjacent indices so the reported ``cycle_index`` below can only
+        # match via the documented ``+ 1`` offset, not by coincidence with a
+        # neighboring record's index.
         "wave_results": [
             {
-                "cycle_index": 0,
+                "cycle_index": 5,
                 "record": _record_dump("stocks"),
                 "cycle_tracker_state": primary_state,
             },
             {
-                "cycle_index": 1,
+                "cycle_index": 12,
                 "record": _record_dump("crypto"),
                 "cycle_tracker_state": primary_state,
             },
@@ -654,9 +657,12 @@ def test_merge_wave_results_activity_isolates_single_merge_failure(monkeypatch):
     # Both records still recorded for diversity steering (outside the isolated try).
     merged = ConvergenceTracker.from_wire_dict(out["primary_tracker_state"])
     assert merged._asset_class_history == ["stocks", "crypto"]
+    # The failing record is the first processed in sorted (cycle-index) order,
+    # i.e. the one with input cycle_index=5; the reported cycle_index is the
+    # 1-based cycle number (input + 1), not the raw 0-based input value.
     assert out["merge_errors"] == [
         {
-            "cycle_index": 1,
+            "cycle_index": 6,
             "error": "merge boom",
             "exception_type": "ValueError",
             "reason": "tracker_merge_failed",
