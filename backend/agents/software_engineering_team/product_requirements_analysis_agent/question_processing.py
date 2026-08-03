@@ -600,6 +600,7 @@ def consolidate_open_questions(
             for q in open_questions
         ],
         indent=2,
+        default=str,
     )
     prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
     consolidated = _fetch_llm_list(
@@ -676,7 +677,7 @@ def review_question_answer_alignment(
         }
         for q in open_questions
     ]
-    questions_json = json.dumps(questions_payload, indent=2)
+    questions_json = json.dumps(questions_payload, indent=2, default=str)
     prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
     aligned = _fetch_llm_list(
         model, prompt, "aligned_questions", "Question-answer alignment review"
@@ -751,7 +752,7 @@ def add_recommendations(
         }
         for q in open_questions
     ]
-    questions_json = json.dumps(questions_payload, indent=2)
+    questions_json = json.dumps(questions_payload, indent=2, default=str)
     spec_content_str = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
         spec_content=spec_content_str,
