@@ -585,7 +585,7 @@ def make_design_system_codifier() -> Agent:
 
 
 def make_brand_experience_principler() -> Agent:
-    """Build the Phase 4 Brand Experience Architect agent.
+    """Build the Phase 4 Brand Experience Principler agent.
 
     Postconditions:
         Returns an ``Agent`` named ``brand_experience_principler`` whose
@@ -624,6 +624,13 @@ def _make_channel_guide(
         output defines that channel's strategy, dos/don'ts, content
         types, and cadence per ``structured_output``.
     """
+    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
+    assert isinstance(description, str) and description.strip(), (
+        "description must be a non-empty string"
+    )
+    assert isinstance(structured_output, type) and issubclass(structured_output, BaseModel), (
+        "structured_output must be a Pydantic BaseModel subclass"
+    )
     return build_agent(
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",

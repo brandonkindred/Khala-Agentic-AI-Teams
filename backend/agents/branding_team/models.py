@@ -526,6 +526,20 @@ class BrandInActionExample(BaseModel):
     rationale: str = ""
 
 
+class BrandInActionExampleOutput(BaseModel):
+    """Agent-facing brand-in-action example; requires non-empty fields.
+
+    Field-for-field twin of ``BrandInActionExample`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``).
+    """
+
+    context: str = Field(min_length=1)
+    correct_example: str = Field(min_length=1)
+    incorrect_example: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+
 class ChannelActivationOutput(BaseModel):
     """Phase 4 output: activation playbook for marketing execution."""
 
@@ -571,9 +585,12 @@ class BrandInActionOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "3-5 applied examples".
+    Uses ``BrandInActionExampleOutput`` (not the soft ``BrandInActionExample``)
+    so each example's fields are individually required — a fully populated
+    list of blank-field examples must fail validation.
     """
 
-    brand_in_action: List[BrandInActionExample] = Field(min_length=3, max_length=5)
+    brand_in_action: List[BrandInActionExampleOutput] = Field(min_length=3, max_length=5)
 
 
 # ---------------------------------------------------------------------------
