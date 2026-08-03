@@ -2807,8 +2807,13 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
           carried forward — and persists the new state. A freshly minted
           ``generation`` (atomically incremented in the job store) is set on
-          the new state, fencing out any write a still-in-flight activity
-          from the just-terminated workflow attempts afterward.
+          the in-memory state, fencing out any write a still-in-flight
+          activity from the just-terminated workflow attempts afterward. The
+          durable write omits ``generation`` — ``apply_and_get`` already
+          persisted it atomically, and re-asserting it here could regress an
+          even newer value a different restart on another process/replica
+          minted in the gap since (the same reasoning as the rollback's own
+          write below).
         - Dispatches the durable Temporal workflow starting at cycle 0. If
           that dispatch still 409s (a residual collision — e.g. a second
           restart/resume racing in after the termination check above), the
@@ -3015,7 +3020,18 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         )
         with _lock:
             _active_runs[run_id] = restarted_state
-        _persist_run_state(run_id, restarted_state)
+        # Exclude "generation" from this write: `apply_and_get` above already
+        # durably persisted it atomically, so re-asserting it here is
+        # redundant at best -- and actively harmful in a multi-process/
+        # multi-replica deployment, where a DIFFERENT restart on another
+        # process/replica could mint (and already dispatch under) an even
+        # newer generation in the gap between this request's own mint and
+        # this write. Writing this request's now-stale minted value here
+        # would regress the durable high-water mark and un-fence that
+        # legitimately newer, already-running incarnation -- the exact
+        # regression the rollback path below already guards against for its
+        # own write; this is the same guard for the non-collision path.
+        _persist_run_state(run_id, restarted_state, exclude_fields=frozenset({"generation"}))
 
         # Restart from scratch through Temporal (offset 0, per the reset
         # persisted state above). allow_already_started=False: unlike resume, a

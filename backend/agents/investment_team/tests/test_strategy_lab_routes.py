@@ -656,6 +656,51 @@ def test_restart_strategy_lab_run_mints_new_generation(
     assert stub.by_id["run-gen"]["generation"] == 4
 
 
+def test_restart_strategy_lab_run_write_does_not_regress_concurrently_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: apply_and_get already durably persists the freshly minted
+    generation atomically -- this restart's own subsequent full-state
+    persist write is redundant for that field. If a DIFFERENT restart on
+    another process/replica mints (and dispatches under) an even newer
+    generation in the gap between this restart's own mint and its own
+    write, that write must not regress the durable value back down to this
+    request's now-stale mint (a non-colliding restart, unlike the dispatch-
+    collision rollback path, which already has its own dedicated test)."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-race3"] = {
+        "run_id": "run-race3",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-race3", "generation": 1}])
+    real_apply_and_get = stub.apply_and_get
+
+    def _apply_and_get_then_concurrent_mint(jid, **kwargs):
+        result = real_apply_and_get(jid, **kwargs)
+        # Simulate a different restart on another replica minting (and
+        # dispatching under) generation 3 immediately after this restart's
+        # own mint (to 2) above.
+        stub.by_id[jid]["generation"] = 3
+        return result
+
+    monkeypatch.setattr(stub, "apply_and_get", _apply_and_get_then_concurrent_mint)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # Override the api_client fixture's blanket _persist_run_state no-op
+    # stub: this test needs the real durable-write behavior to observe the
+    # regression.
+    monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+
+    resp = api_client.post("/strategy-lab/runs/run-race3/restart")
+
+    assert resp.status_code == 200
+    # The concurrently minted generation 3 must survive this restart's own
+    # (non-colliding) persist write untouched.
+    assert stub.by_id["run-race3"]["generation"] == 3
+
+
 def test_restart_strategy_lab_run_dispatches_with_the_minted_generation(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
