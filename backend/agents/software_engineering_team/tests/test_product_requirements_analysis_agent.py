@@ -33,6 +33,7 @@ from product_requirements_analysis_agent.question_data import (
     _sop_phase1_fallback_questions,
 )
 from product_requirements_analysis_agent.question_processing import (
+    _stem_candidates,
     filter_duplicate_questions,
     parse_question_option,
     parse_spec_review_response,
@@ -2943,6 +2944,137 @@ def test_filter_duplicate_questions_stems_plural_and_past_tense() -> None:
         OpenQuestion(id="q1", question_text="Where are the config options documented for the service?")
     ]
     qa_history = "Q: Should we document the config option for the service?\nA: Yes, use Confluence."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_silent_e_past_tense() -> None:
+    """A past-tense word formed from a silent-e root (e.g. 'based' from
+    'base') must match the root word in qa_history.
+
+    The question/history pair share no other content word, so this can only
+    pass if the stemmer actually derives 'base' from 'based' (blindly
+    stripping the 'ed' suffix, based -> 'bas', would never match 'base').
+    """
+    questions = [OpenQuestion(id="q1", question_text="Is it based?")]
+    qa_history = "Q: Is it base?\nA: Yes."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_silent_e_past_tense_reverse_direction() -> None:
+    """The same silent-e match must also work in reverse: a root-form
+    keyword ('base') matching an inflected history word ('based').
+
+    This is the direction a single optional 's'/'ed' history-side suffix
+    cannot cover (stem "base" + literal "ed" = "baseed", not "based"), so it
+    requires stemming the history word itself, not just the keyword.
+    """
+    questions = [OpenQuestion(id="q1", question_text="Is it base?")]
+    qa_history = "Q: Is it based?\nA: Yes."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_es_plural_dropping_e() -> None:
+    """A plural formed by adding '-es' to a root with no silent 'e' (e.g.
+    'classes' from 'class') must match the root word in qa_history.
+
+    The question/history pair share no other content word, so this can only
+    pass if the stemmer actually derives 'class' from 'classes' (stripping
+    only the trailing 's', classes -> 'classe', would never match 'class').
+    """
+    questions = [OpenQuestion(id="q1", question_text="Are there classes?")]
+    qa_history = "Q: Are there class?\nA: Yes."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_es_plural_reverse_direction() -> None:
+    """The same '-es' plural match must also work in reverse: a root-form
+    keyword ('class') matching an inflected history word ('classes')."""
+    questions = [OpenQuestion(id="q1", question_text="Is it a class?")]
+    qa_history = "Q: Are these classes?\nA: Yes."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_ies_plural() -> None:
+    """A plural formed by '-ies' (e.g. 'policies' from 'policy') must match
+    the root word in qa_history, with no other shared content word."""
+    questions = [OpenQuestion(id="q1", question_text="What policies are there?")]
+    qa_history = "Q: What policy is there?\nA: One."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_ies_plural_reverse_direction() -> None:
+    """The same '-ies' plural match must also work in reverse: a root-form
+    keyword ('policy') matching an inflected history word ('policies')."""
+    questions = [OpenQuestion(id="q1", question_text="What is the policy?")]
+    qa_history = "Q: What are the policies?\nA: Retry logic."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_ied_verb() -> None:
+    """A '-ied' past tense verb (e.g. 'studied' from 'study') must match the
+    root word in qa_history, in both directions."""
+    questions = [OpenQuestion(id="q1", question_text="Was this studied?")]
+    qa_history = "Q: Did we study this?\nA: Yes."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_ied_verb_reverse_direction() -> None:
+    questions = [OpenQuestion(id="q1", question_text="Did they study this?")]
+    qa_history = "Q: Was this studied?\nA: Yes."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_stem_candidates_double_s_word_returns_only_itself() -> None:
+    """A word ending in a doubled 's' (e.g. 'address', 'process') is never
+    treated as a plural/past-tense form: no shortened candidate (e.g.
+    'addres') is ever generated that could accidentally match an unrelated
+    word in qa_history."""
+    assert _stem_candidates("address") == {"address"}
+    assert _stem_candidates("process") == {"process"}
+    assert _stem_candidates("success") == {"success"}
+
+
+def test_filter_duplicate_questions_double_s_word_is_not_stemmed() -> None:
+    """A word ending in a doubled 's' (e.g. 'address') is still matched
+    against its literal and regularly-suffixed forms in qa_history."""
+    questions = [OpenQuestion(id="q1", question_text="What should the email address format be?")]
+    qa_history = "Q: What email format and address rules apply?\nA: Follow RFC 5322 for addresses."
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
 
