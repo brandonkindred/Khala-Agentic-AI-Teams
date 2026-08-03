@@ -464,15 +464,15 @@ def dedupe_questions_by_answer_similarity(
         return " ".join((t or "").lower().split()).strip()
 
     # Build set of existing answers (normalized) we already have
-    existing_answers: List[str] = []
+    existing_answers: set[str] = set()
     for aq in answered_questions:
         s = norm(aq.selected_answer)
         if s:
-            existing_answers.append(s)
+            existing_answers.add(s)
         if getattr(aq, "other_text", None) and aq.other_text.strip():
             o = norm(aq.other_text)
-            if o and o not in existing_answers:
-                existing_answers.append(o)
+            if o:
+                existing_answers.add(o)
 
     if not existing_answers:
         return list(open_questions)
