@@ -19,10 +19,22 @@ from branding_team.store import BrandingStore, get_default_store
 
 @pytest.fixture(autouse=True)
 def _reset_singleton():
-    """Ensure each test starts/ends with no cached store."""
+    """Give each test a clean slate, then restore whatever was cached before it.
+
+    Other modules (notably ``branding_team.api.main``) call
+    ``get_default_store()`` once at import time and hold onto that instance
+    (e.g. tests elsewhere patch methods on ``main_mod.branding_store``). If
+    this fixture left the module global cleared after the test, any later
+    test in the same process that expects ``get_default_store()`` to keep
+    returning that same cached instance would silently get a fresh,
+    unpatched one instead. Restoring the pre-test value (rather than always
+    resetting to ``None``) keeps this file's tests isolated without leaking
+    that state into the rest of the session.
+    """
+    original = store_mod._default_store
     store_mod._default_store = None
     yield
-    store_mod._default_store = None
+    store_mod._default_store = original
 
 
 def test_get_default_store_returns_cached_singleton() -> None:
