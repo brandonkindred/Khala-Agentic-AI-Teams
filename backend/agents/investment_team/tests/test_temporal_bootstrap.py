@@ -576,10 +576,27 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
     class _GenerationClient:
-        def apply_and_get(self, jid, **kwargs):
-            return {"generation": 2}
+        """Stateful stub: get_job reflects apply_and_get's latest mint, so the
+        restart route's bootstrap check, mint, and pre-dispatch/rollback
+        revalidation reads (all added by generation fencing) see a
+        consistent durable value rather than a fixed, un-mutating one."""
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _GenerationClient())
+        def __init__(self):
+            self.generation = 1
+
+        def get_job(self, jid):
+            return {"generation": self.generation}
+
+        def apply_and_get(self, jid, **kwargs):
+            self.generation += (kwargs.get("increment") or {}).get("generation", 0)
+            return {"generation": self.generation}
+
+    # A single shared instance: _get_lab_run_job_client() is called multiple
+    # times per request (bootstrap check, mint, pre-dispatch/rollback
+    # revalidation) and each call must observe the same durable state, not
+    # a fresh instance reset back to generation 1.
+    generation_client = _GenerationClient()
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: generation_client)
 
     persisted_calls = []
     monkeypatch.setattr(
@@ -907,10 +924,27 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
     class _GenerationClient:
-        def apply_and_get(self, jid, **kwargs):
-            return {"generation": 2}
+        """Stateful stub: get_job reflects apply_and_get's latest mint, so the
+        restart route's bootstrap check and pre-dispatch revalidation reads
+        (both added by generation fencing) see a consistent durable value
+        rather than a fixed, un-mutating one."""
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _GenerationClient())
+        def __init__(self):
+            self.generation = 1
+
+        def get_job(self, jid):
+            return {"generation": self.generation}
+
+        def apply_and_get(self, jid, **kwargs):
+            self.generation += (kwargs.get("increment") or {}).get("generation", 0)
+            return {"generation": self.generation}
+
+    # A single shared instance: _get_lab_run_job_client() is called multiple
+    # times per request (bootstrap check, mint, pre-dispatch revalidation)
+    # and each call must observe the same durable state, not a fresh
+    # instance reset back to generation 1.
+    generation_client = _GenerationClient()
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: generation_client)
 
     started = []
     monkeypatch.setattr(

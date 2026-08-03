@@ -735,6 +735,95 @@ def test_restart_strategy_lab_run_dispatches_with_the_minted_generation(
     assert api_main._active_runs["run-dispatch-gen"]["generation"] == 5
 
 
+def test_restart_strategy_lab_run_dispatches_with_revalidated_generation_not_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a DIFFERENT restart on another process/replica can mint
+    (and dispatch under) an even newer generation immediately after this
+    restart's own mint. Dispatching this restart's workflow under the
+    earlier, now-stale minted value would permanently fence out its own
+    activities if it wins the workflow-id race -- so the value actually
+    handed to _dispatch_strategy_lab_run must reflect a revalidated read
+    taken as close to dispatch as possible, not this restart's own earlier
+    mint."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-restart-revalidate"] = {
+        "run_id": "run-restart-revalidate",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-revalidate", "generation": 1}])
+    real_apply_and_get = stub.apply_and_get
+
+    def _apply_and_get_then_concurrent_mint(jid, **kwargs):
+        result = real_apply_and_get(jid, **kwargs)
+        # Simulate a different restart on another replica minting (and
+        # dispatching under) generation 9 immediately after this restart's
+        # own mint above.
+        stub.by_id[jid]["generation"] = 9
+        return result
+
+    monkeypatch.setattr(stub, "apply_and_get", _apply_and_get_then_concurrent_mint)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main,
+        "_dispatch_strategy_lab_run",
+        lambda run_id, request, *, generation, allow_already_started=True: captured.update(
+            generation=generation
+        ),
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-revalidate/restart")
+
+    assert resp.status_code == 200
+    assert captured["generation"] == 9  # revalidated value, not this restart's own stale mint (2)
+    assert api_main._active_runs["run-restart-revalidate"]["generation"] == 9
+
+
+def test_restart_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The pre-dispatch revalidation read (added alongside the mint-time
+    bootstrap check) must also fail closed -- and, unlike the bootstrap
+    check's failure, this failure happens after restart already wrote
+    "running" state, so it must also mark the run "failed" rather than
+    leaving it wedged as "running" with no workflow ever dispatched."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-restart-revalidate-fail"] = {
+        "run_id": "run-restart-revalidate-fail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-revalidate-fail", "generation": 1}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_failing_on_second_read(jid: str):
+        read_calls.append(jid)
+        if len(read_calls) == 2:
+            raise ConnectionError("connection refused")
+        return real_get_job(jid)
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing_on_second_read)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-revalidate-fail/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    # Two get_job reads: the mint-time legacy-bootstrap check, then the
+    # pre-dispatch revalidation that's made to fail here.
+    assert read_calls == ["run-restart-revalidate-fail", "run-restart-revalidate-fail"]
+    assert api_main._active_runs["run-restart-revalidate-fail"]["status"] == "failed"
+
+
 def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

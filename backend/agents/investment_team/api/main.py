@@ -2814,6 +2814,14 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           even newer value a different restart on another process/replica
           minted in the gap since (the same reasoning as the rollback's own
           write below).
+        - Re-reads the durable generation once more immediately before
+          dispatch and, if it has since advanced past this restart's own
+          mint (a different restart on another process/replica minted a
+          newer one in the gap), dispatches with the newer value instead —
+          narrowing, not eliminating, the window in which this restart's
+          workflow could otherwise win the deterministic workflow-id race
+          while carrying a generation that is already stale, which would
+          permanently fence out its own activities.
         - Dispatches the durable Temporal workflow starting at cycle 0. If
           that dispatch still 409s (a residual collision — e.g. a second
           restart/resume racing in after the termination check above), the
@@ -2842,8 +2850,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           ``allow_already_started`` parameter; the optimistic reset is rolled
           back in this case, see Postconditions).
         - ``HTTPException`` 503: Temporal is disabled/unavailable, the prior
-          execution couldn't be resolved due to a Temporal-side error, or
-          minting the new generation failed (job service unavailable).
+          execution couldn't be resolved due to a Temporal-side error,
+          minting the new generation failed, or the pre-dispatch
+          revalidation read of it failed (job service unavailable in any
+          case). The revalidation failure additionally marks the run
+          ``"failed"`` (state was already written by this point, so leaving
+          it ``"running"`` with no workflow ever dispatched would wedge it).
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
@@ -3032,6 +3044,35 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # regression the rollback path below already guards against for its
         # own write; this is the same guard for the non-collision path.
         _persist_run_state(run_id, restarted_state, exclude_fields=frozenset({"generation"}))
+
+        # Revalidate the generation immediately before dispatch: `new_generation`
+        # above is a snapshot from this restart's own mint, and a DIFFERENT
+        # restart on another process/replica could have minted (and already
+        # dispatched under) an even newer one in the gap since. If THIS
+        # request's dispatch then wins the deterministic workflow-id race
+        # (the other replica's collides instead), dispatching under the
+        # stale value here would permanently fence out the only live
+        # workflow's own activities the moment they tried to persist
+        # anything. Re-reading here narrows that window to the residual gap
+        # between this read and the dispatch call itself -- the same
+        # narrowing already applied to resume's dispatch, and the same
+        # out-of-scope multi-process limitation acknowledged there.
+        try:
+            dispatch_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception as exc:
+            _fail_strategy_lab_run(run_id, f"Failed to revalidate generation before dispatch: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to revalidate the current generation before restarting; job service unavailable.",
+            ) from exc
+        if dispatch_generation != restarted_state["generation"]:
+            # `restarted_state` is the same dict object installed at
+            # `_active_runs[run_id]` above, so mutating it in place keeps
+            # both in sync -- guard the mutation with `_lock` since a
+            # concurrent same-process reader (e.g. the run-status endpoint)
+            # may be iterating `_active_runs` at the same time.
+            with _lock:
+                restarted_state["generation"] = dispatch_generation
 
         # Restart from scratch through Temporal (offset 0, per the reset
         # persisted state above). allow_already_started=False: unlike resume, a
