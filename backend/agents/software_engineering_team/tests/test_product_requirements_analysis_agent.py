@@ -1260,6 +1260,24 @@ def test_parse_spec_review_response_logs_non_list_issues_and_gaps(
     assert any("Expected list for 'gaps'" in r.message for r in caplog.records)
 
 
+def test_parse_spec_review_response_logs_non_list_open_questions(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-list open_questions fields are logged and treated as an empty list."""
+    with caplog.at_level(logging.WARNING):
+        result = parse_spec_review_response(
+            {
+                "summary": "ok",
+                "issues": [],
+                "gaps": [],
+                "open_questions": "not a list",
+            }
+        )
+
+    assert result.open_questions == []
+    assert any("Expected list for 'open_questions'" in r.message for r in caplog.records)
+
+
 def test_parse_spec_review_response_skips_open_questions_missing_required_fields(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -2185,9 +2203,13 @@ def test_record_answers_supersede_removes_old_qa_from_history(tmp_path: Path) ->
     agent._record_answers(tmp_path, [new_answer], iteration=3)
     content = qa_file.read_text(encoding="utf-8")
     assert "**Answer:** GitHub" not in content
+    assert "### Which OAuth provider?" not in content
     assert "Which OAuth provider for the MVP?" in content
     assert "**Answer:** SAML" in content
+    assert "### Use SAML for SSO?" in content
+    assert "## Iteration 2" in content
     assert "Iteration 3" in content
+    assert content.count("## Iteration") == 2
 
 
 def test_record_answers_different_topic_keeps_existing_qa(tmp_path: Path) -> None:

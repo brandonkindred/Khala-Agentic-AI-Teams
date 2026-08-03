@@ -15,7 +15,7 @@ import json
 import logging
 import re
 from difflib import SequenceMatcher
-from typing import Any, List
+from typing import Any, Iterable, List, Sequence
 
 from strands.models.model import Model
 
@@ -525,8 +525,9 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         ``MAX_OPEN_QUESTIONS`` after semantic consolidation and
         answer-similarity deduplication so near-duplicates do not crowd out
         distinct topics). Malformed open-question items are skipped and logged;
-        non-dict top-level ``raw`` and non-list ``issues``/``gaps`` are logged and
-        treated as empty; this function never raises to callers.
+        non-dict top-level ``raw`` and non-list ``issues``/``gaps``/
+        ``open_questions`` are logged and treated as empty; this function never
+        raises to callers.
     """
     if not isinstance(raw, dict):
         preview = repr(raw)
@@ -599,6 +600,12 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
                     exc,
                     q,
                 )
+    else:
+        logger.warning(
+            "Expected list for 'open_questions', got %s: %r",
+            type(raw_questions).__name__,
+            raw_questions,
+        )
 
     return SpecReviewResult(
         issues=issues,
@@ -848,7 +855,10 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
     Postconditions: returns a valid :class:`QuestionOption` for a dict or a string
         label; a non-numeric, ``None``, out-of-range, or overflowing
         ``confidence`` value defaults to 0.5 (or is clamped to ``[0.0, 1.0]``)
-        instead of raising. Raises ``ValueError`` for unsupported non-dict,
+        instead of raising. For a string label, the returned option uses
+        ``id=f"opt{index}"``, treats the first element (``index == 0``) as the
+        default, sets ``rationale`` to an empty string, and assigns
+        ``confidence`` 0.5. Raises ``ValueError`` for unsupported non-dict,
         non-string entries (``null``, numbers, …) and for present ``null`` or
         non-string ``id``/``label`` values so callers can drop them rather than
         materializing blank default options.
@@ -874,6 +884,15 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
     raise ValueError(f"unsupported option type {type(opt_data).__name__!r} at index {index}")
 
 
+def _norm_answer_text(t: Any) -> str:
+    """Normalize answer/option text for similarity comparison.
+
+    Preconditions: none; ``t`` may be any value.
+    Postconditions: returns a lowercased, whitespace-collapsed string; never raises.
+    """
+    return " ".join(str(t or "").lower().split()).strip()
+
+
 def dedupe_questions_by_answer_similarity(
     open_questions: List[OpenQuestion],
     answered_questions: List[AnsweredQuestion],
@@ -885,6 +904,12 @@ def dedupe_questions_by_answer_similarity(
     semantically the same as an answer we already have, we do not ask that question
     again. Preserves order of open_questions.
 
+    Complexity note: existing answers and option labels are normalized once.
+    Exact normalized matches short-circuit via a set; fuzzy matches use
+    ``SequenceMatcher.ratio`` with a pair cache. Worst case remains
+    O(open_questions × option_labels × existing_answers × L²) in string length L,
+    which is acceptable while batches stay capped near ``MAX_OPEN_QUESTIONS``.
+
     Preconditions: both arguments are lists of the respective models.
     Postconditions: returns a sublist of ``open_questions`` (order preserved);
         questions with no options/labels are always kept; never raises.
@@ -892,22 +917,19 @@ def dedupe_questions_by_answer_similarity(
     if not open_questions:
         return list(open_questions)
 
-    def norm(t: Any) -> str:
-        return " ".join(str(t or "").lower().split()).strip()
-
     # Build set of existing answers (normalized) we already have.
     # Keep a list for stable iteration order during SequenceMatcher checks.
     existing_answers: List[str] = []
     existing_answers_set: set[str] = set()
     for aq in answered_questions:
-        s = norm(aq.selected_answer)
+        s = _norm_answer_text(aq.selected_answer)
         if s:
             if s not in existing_answers_set:
                 existing_answers.append(s)
                 existing_answers_set.add(s)
         other = getattr(aq, "other_text", None)
         if other is not None and str(other).strip():
-            o = norm(other)
+            o = _norm_answer_text(other)
             if o and o not in existing_answers_set:
                 existing_answers.append(o)
                 existing_answers_set.add(o)
@@ -918,23 +940,41 @@ def dedupe_questions_by_answer_similarity(
     # Same threshold as shared deduplication for "same meaning"
     SIMILARITY_THRESHOLD = ANSWER_SIMILARITY_THRESHOLD
     kept: List[OpenQuestion] = []
+    ratio_cache: dict[tuple[str, str], float] = {}
+
+    def _cached_ratio(a: str, b: str) -> float:
+        key = (a, b) if a <= b else (b, a)
+        cached = ratio_cache.get(key)
+        if cached is not None:
+            return cached
+        ratio = SequenceMatcher(None, a, b).ratio()
+        ratio_cache[key] = ratio
+        return ratio
 
     for q in open_questions:
         if not q.options:
             # No options: we cannot know what answer this would get; keep it
             kept.append(q)
             continue
-        option_labels = [norm(opt.label) for opt in q.options if opt.label]
+        option_labels = [_norm_answer_text(opt.label) for opt in q.options if opt.label]
+        option_labels = [label for label in option_labels if label]
         if not option_labels:
             kept.append(q)
             continue
         # If any option is the same as an answer we already have, skip this question
         already_covered = False
         for opt_label in option_labels:
-            if not opt_label:
-                continue
+            if opt_label in existing_answers_set:
+                logger.info(
+                    "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
+                    q.id,
+                    opt_label,
+                    opt_label,
+                )
+                already_covered = True
+                break
             for existing in existing_answers:
-                if SequenceMatcher(None, opt_label, existing).ratio() >= SIMILARITY_THRESHOLD:
+                if _cached_ratio(opt_label, existing) >= SIMILARITY_THRESHOLD:
                     logger.info(
                         "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
                         q.id,
@@ -949,6 +989,73 @@ def dedupe_questions_by_answer_similarity(
             kept.append(q)
 
     return kept
+
+
+_OPTION_FULL_FIELDS: Sequence[str] = ("id", "label", "is_default", "rationale", "confidence")
+_OPTION_RECOMMEND_FIELDS: Sequence[str] = ("id", "label", "rationale")
+_CONSOLIDATE_QUESTION_FIELDS: Sequence[str] = (
+    "id",
+    "question_text",
+    "context",
+    "recommendation",
+    "source",
+    "category",
+    "priority",
+    "allow_multiple",
+    "constraint_domain",
+    "constraint_layer",
+    "depends_on",
+    "blocking",
+    "owner",
+    "section_impact",
+    "due_date",
+    "status",
+    "asked_via",
+    "options",
+)
+_ALIGN_QUESTION_FIELDS: Sequence[str] = (
+    "id",
+    "question_text",
+    "context",
+    "category",
+    "priority",
+    "allow_multiple",
+    "constraint_domain",
+    "constraint_layer",
+    "depends_on",
+    "blocking",
+    "owner",
+    "section_impact",
+    "due_date",
+    "status",
+    "asked_via",
+    "options",
+)
+_RECOMMEND_QUESTION_FIELDS: Sequence[str] = ("id", "question_text", "context", "options")
+
+
+def _open_question_to_dict(
+    q: OpenQuestion,
+    fields: Iterable[str],
+    *,
+    option_fields: Sequence[str] = _OPTION_FULL_FIELDS,
+) -> dict[str, Any]:
+    """Serialize an :class:`OpenQuestion` for LLM prompt payloads.
+
+    Preconditions: ``q`` is an :class:`OpenQuestion`; ``fields`` names attributes
+        on that model (``options`` is expanded via ``option_fields``).
+    Postconditions: returns a new dict with the requested fields; never mutates
+        ``q``. Nested option dicts only include ``option_fields``.
+    """
+    payload: dict[str, Any] = {}
+    for field in fields:
+        if field == "options":
+            payload["options"] = [
+                {name: getattr(opt, name) for name in option_fields} for opt in q.options
+            ]
+        else:
+            payload[field] = getattr(q, field)
+    return payload
 
 
 def _fetch_llm_list(
@@ -1005,7 +1112,9 @@ def consolidate_open_questions(
         within the LLM batch are skipped (first wins). When the LLM echoes a known
         id, metadata is merged by starting from the original question and overlaying
         only fields the LLM actually supplied (so omitted owner/due_date/status/
-        asked_via/section_impact/etc. are preserved). Never raises to callers;
+        asked_via/section_impact/etc. are preserved). If the LLM supplies an empty
+        or ``spec_review`` source, the original source is retained; blank
+        recommendations likewise fall back to the original. Never raises to callers;
         precondition violations raise ``AssertionError``.
     """
     assert isinstance(model, Model), "model must be a Strands Model"
@@ -1017,38 +1126,7 @@ def consolidate_open_questions(
         # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
         # payload in memory is intentional and cheap at that scale.
         questions_json = json.dumps(
-            [
-                {
-                    "id": q.id,
-                    "question_text": q.question_text,
-                    "context": q.context,
-                    "recommendation": q.recommendation,
-                    "source": q.source,
-                    "category": q.category,
-                    "priority": q.priority,
-                    "allow_multiple": q.allow_multiple,
-                    "constraint_domain": q.constraint_domain,
-                    "constraint_layer": q.constraint_layer,
-                    "depends_on": q.depends_on,
-                    "blocking": q.blocking,
-                    "owner": q.owner,
-                    "section_impact": q.section_impact,
-                    "due_date": q.due_date,
-                    "status": q.status,
-                    "asked_via": q.asked_via,
-                    "options": [
-                        {
-                            "id": o.id,
-                            "label": o.label,
-                            "is_default": o.is_default,
-                            "rationale": o.rationale,
-                            "confidence": o.confidence,
-                        }
-                        for o in q.options
-                    ],
-                }
-                for q in open_questions
-            ],
+            [_open_question_to_dict(q, _CONSOLIDATE_QUESTION_FIELDS) for q in open_questions],
             indent=2,
         )
         prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
@@ -1136,37 +1214,10 @@ def review_question_answer_alignment(
     try:
         # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
         # payload in memory is intentional and cheap at that scale.
-        questions_payload = [
-            {
-                "id": q.id,
-                "question_text": q.question_text,
-                "context": q.context,
-                "category": q.category,
-                "priority": q.priority,
-                "allow_multiple": q.allow_multiple,
-                "constraint_domain": q.constraint_domain,
-                "constraint_layer": q.constraint_layer,
-                "depends_on": q.depends_on,
-                "blocking": q.blocking,
-                "owner": q.owner,
-                "section_impact": q.section_impact,
-                "due_date": q.due_date,
-                "status": q.status,
-                "asked_via": q.asked_via,
-                "options": [
-                    {
-                        "id": o.id,
-                        "label": o.label,
-                        "is_default": o.is_default,
-                        "rationale": o.rationale,
-                        "confidence": o.confidence,
-                    }
-                    for o in q.options
-                ],
-            }
-            for q in open_questions
-        ]
-        questions_json = json.dumps(questions_payload, indent=2)
+        questions_json = json.dumps(
+            [_open_question_to_dict(q, _ALIGN_QUESTION_FIELDS) for q in open_questions],
+            indent=2,
+        )
         prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
         aligned = _fetch_llm_list(
             model, prompt, "aligned_questions", "Question-answer alignment review"
@@ -1235,23 +1286,15 @@ def add_recommendations(
     try:
         # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
         # payload in memory is intentional and cheap at that scale.
-        questions_payload = [
-            {
-                "id": q.id,
-                "question_text": q.question_text,
-                "context": q.context,
-                "options": [
-                    {
-                        "id": o.id,
-                        "label": o.label,
-                        "rationale": o.rationale,
-                    }
-                    for o in q.options
-                ],
-            }
-            for q in open_questions
-        ]
-        questions_json = json.dumps(questions_payload, indent=2)
+        questions_json = json.dumps(
+            [
+                _open_question_to_dict(
+                    q, _RECOMMEND_QUESTION_FIELDS, option_fields=_OPTION_RECOMMEND_FIELDS
+                )
+                for q in open_questions
+            ],
+            indent=2,
+        )
         spec_content_str = spec_content or ""
         prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
             spec_content=spec_content_str,
