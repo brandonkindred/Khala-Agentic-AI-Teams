@@ -1857,6 +1857,26 @@ class TestBackwardCompatibility:
         ):
             assert name not in params
 
+    @pytest.mark.parametrize(
+        "removed_kwarg",
+        [
+            "architecture",
+            "existing_pipeline",
+            "tech_stack",
+            "max_iterations",
+            "devops_review_agent",
+        ],
+    )
+    def test_run_workflow_rejects_removed_kwargs(self, removed_kwarg: str) -> None:
+        agent = DevOpsTeamLeadAgent(MagicMock())
+        with pytest.raises(TypeError):
+            agent.run_workflow(
+                repo_path=Path("/tmp"),
+                task_description="Add CI/CD",
+                requirements="staging",
+                **{removed_kwarg: "value"},
+            )
+
     def test_build_legacy_spec_prod_detection(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-1",
