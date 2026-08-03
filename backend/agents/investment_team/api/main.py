@@ -3557,9 +3557,11 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     # 2a — Concurrency guard (spec §7.2): one live session per strategy_id.
     # Only enforced for the live path — the legacy recent-OHLCV path
     # completes in seconds and isn't subject to the "one at a time"
-    # invariant.
-    if use_live:
-        with _lock:
+    # invariant. The scan, session construction, and dict insertion below all
+    # happen under a single lock acquisition so two concurrent requests for
+    # the same strategy_id can't both pass the scan before either inserts.
+    with _lock:
+        if use_live:
             for existing in _paper_trading_sessions.values():
                 existing_session = PaperTradingSession.parse_persisted(existing)
                 if (
@@ -3579,20 +3581,19 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                         ),
                     )
 
-    running_session = PaperTradingSession(
-        session_id=session_id,
-        lab_record_id=request.lab_record_id,
-        strategy=strategy,
-        status=PaperTradingStatus.OPENING if use_live else PaperTradingStatus.RUNNING,
-        initial_capital=request.initial_capital,
-        current_capital=request.initial_capital,
-        symbols_traded=[],
-        data_source="live" if use_live else "yahoo_finance",
-        data_period_start="",
-        data_period_end="",
-        started_at=now,
-    )
-    with _lock:
+        running_session = PaperTradingSession(
+            session_id=session_id,
+            lab_record_id=request.lab_record_id,
+            strategy=strategy,
+            status=PaperTradingStatus.OPENING if use_live else PaperTradingStatus.RUNNING,
+            initial_capital=request.initial_capital,
+            current_capital=request.initial_capital,
+            symbols_traded=[],
+            data_source="live" if use_live else "yahoo_finance",
+            data_period_start="",
+            data_period_end="",
+            started_at=now,
+        )
         _paper_trading_sessions[session_id] = running_session
 
     # 3 — Dispatch the durable paper-trading workflow (Temporal-only). The live
