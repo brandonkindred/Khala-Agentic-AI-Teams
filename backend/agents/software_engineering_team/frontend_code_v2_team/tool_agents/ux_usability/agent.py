@@ -125,7 +125,22 @@ class UxUsabilityToolAgent(BaseReviewToolAgent):
     review_model_attr = "_model_json"
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Generate UX design artifacts: user journeys, wireframes, interaction rules, microcopy."""
+        """Generate UX design artifacts: user journeys, wireframes, interaction rules, microcopy.
+
+        Preconditions:
+            ``inp`` is a :class:`ToolAgentPhaseInput`; ``task_description`` and
+            ``spec_context`` are optional strings.
+
+        Postconditions:
+            When no LLM is configured (``self._model`` is falsy), returns a
+            stub plan and makes no LLM call. Otherwise formats
+            ``UX_DESIGNER_PLAN_PROMPT`` with ``inp.task_description`` (falling
+            back to ``"N/A"``) for ``{task_description}`` and
+            ``inp.spec_context`` (falling back to ``""``) for
+            ``{spec_content}``, and returns the parsed recommendations/summary;
+            an LLM error or unparsable response falls back to a default
+            recommendation.
+        """
         if not self._model:
             return ToolAgentPhaseOutput(
                 recommendations=[
@@ -137,7 +152,7 @@ class UxUsabilityToolAgent(BaseReviewToolAgent):
             )
         prompt = UX_DESIGNER_PLAN_PROMPT.format(
             task_description=inp.task_description or "N/A",
-            spec_content=(inp.task_description or ""),
+            spec_content=(inp.spec_context or ""),
         )
         try:
             raw = self._run_agent(self._model_json, prompt)
