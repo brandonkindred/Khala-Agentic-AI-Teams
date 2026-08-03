@@ -373,6 +373,98 @@ def test_run_paper_trading_background_crashes_into_failed(
     assert "Paper trading crashed" in (updated.error or "")
 
 
+def test_run_paper_trading_background_import_failure_marks_failed(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ImportError raised by the function-scoped imports (e.g. a missing
+    dependency or circular import in ``market_data_service``) is caught by the
+    same handler as any other in-worker exception, so the session still ends
+    in FAILED instead of leaving the background thread to crash silently.
+    """
+    import sys
+
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        PaperTradingSession,
+        PaperTradingStatus,
+        StrategySpec,
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=BacktestResult(
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        ),
+        trades=[],
+    )
+    running = PaperTradingSession(
+        session_id="pt-import-fail",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-import-fail"] = running
+
+    # Force `from investment_team.market_data_service import MarketDataService`
+    # to raise ModuleNotFoundError, simulating a missing dependency / circular
+    # import at import time (not a runtime failure inside the try body).
+    monkeypatch.setitem(sys.modules, "investment_team.market_data_service", None)
+
+    api_main._run_paper_trading_background(
+        "pt-import-fail",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    updated = api_main._paper_trading_sessions.get("pt-import-fail")
+    assert updated.status == PaperTradingStatus.FAILED
+    assert updated.completed_at
+    assert "Paper trading crashed" in (updated.divergence_analysis or "")
+    assert "Paper trading crashed" in (updated.error or "")
+
+
 # ---------------------------------------------------------------------------
 # stop_live_paper_trading
 # ---------------------------------------------------------------------------

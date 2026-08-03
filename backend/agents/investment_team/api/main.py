@@ -3419,14 +3419,21 @@ def _run_paper_trading_background(
         - On the success path, ``_paper_trading_sessions[session_id]`` is always written
           (COMPLETED or FAILED with ``completed_at`` set), which can recreate a concurrently
           deleted session
+        - Import failures for ``MarketDataService``/``PaperTradingAgent`` (e.g. a missing
+          dependency or circular import) are caught by the same handler as any other
+          in-worker exception and also transition the session to FAILED
         - On the empty-data and exception paths, the terminal write runs only when the session
           entry still exists at write time; concurrent deletion (e.g. via
           ``DELETE /strategy-lab/records/{lab_record_id}``) then leaves no terminal record
-    """
-    from investment_team.market_data_service import MarketDataService
-    from investment_team.paper_trading_agent import PaperTradingAgent
 
+    Raises:
+        - None. All failures, including import errors for the two lazily-imported
+          dependencies, are caught and logged; the session is marked FAILED instead.
+    """
     try:
+        from investment_team.market_data_service import MarketDataService
+        from investment_team.paper_trading_agent import PaperTradingAgent
+
         market_service = MarketDataService()
         # Issue #523 — match the orchestrator backtest's universe choice.
         symbols = market_service.resolve_strategy_symbols(strategy)
