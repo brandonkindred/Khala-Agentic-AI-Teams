@@ -33,6 +33,19 @@ class RunRequest(BaseModel):
         default=None,
         description="Optional plan from Planning team (CodingTeamPlanInput); if omitted, job is created but orchestrator expects to be run in-process with plan_input.",
     )
+    acknowledged_resume_token: Optional[str] = Field(
+        default=None,
+        description=(
+            "Set by CodingTeamWorkflow (system_design/hitl_pause_resume_contract.md "
+            "§2/§3) on the invocation resolving a pause, naming the resume_token of "
+            "the persisted pause it resolves. Declared here so Pydantic's default "
+            "ignore-extra-keys behavior does not silently drop it; not yet consumed "
+            "by run_pipeline_activity or the orchestrator re-entry check — that "
+            "requires the orchestrator to first mint and persist a resume_token per "
+            "pause, which is separate, not-yet-implemented activity-side work "
+            "(contract §1, sibling issues #3987/#3988)."
+        ),
+    )
 
 
 class RunResponse(BaseModel):
