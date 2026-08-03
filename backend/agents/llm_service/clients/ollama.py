@@ -46,6 +46,7 @@ from ..interface import (
     LLMTemporaryError,
     LLMTruncatedError,
 )
+from ..limit_classification import classify_ollama_limit_kind
 from ..telemetry import record_llm_call
 from ..util import sha256_fingerprint
 
@@ -509,6 +510,40 @@ def _parse_retry_after_seconds(headers: Any) -> Optional[float]:
     return value if value > 0 else None
 
 
+def _rate_limit_error_from_response(
+    *,
+    body: str,
+    headers: Any,
+    attempt: int,
+    cause: Optional[Exception] = None,
+) -> LLMRateLimitError:
+    """Build an ``LLMRateLimitError`` from a 429 response, classifying the body.
+
+    Preconditions: ``attempt`` is a non-negative int (1-based attempt count in
+        the raised message); ``body`` is the response text (may be empty).
+    Postconditions: returns an ``LLMRateLimitError`` with ``limit_kind`` set from
+        :func:`classify_ollama_limit_kind`, ``retry_after_seconds`` from headers
+        when honoring is enabled, and a message that includes a body snippet.
+        Never raises.
+    """
+    body_text = body or ""
+    limit_kind = classify_ollama_limit_kind(body_text)
+    snippet = body_text.strip().replace("\n", " ")
+    if len(snippet) > 300:
+        snippet = snippet[:300] + "…"
+    detail = f": {snippet}" if snippet else ""
+    retry_after = (
+        _parse_retry_after_seconds(headers) if _honor_retry_after_enabled() else None
+    )
+    return LLMRateLimitError(
+        f"LLM rate limited (429) after {attempt} attempt(s) [{limit_kind}]{detail}",
+        status_code=429,
+        cause=cause,
+        retry_after_seconds=retry_after,
+        limit_kind=limit_kind,
+    )
+
+
 def _rate_limit_backoff_sleep(
     rate_limit_attempt: int,
     rate_limit_max_retries: int,
@@ -543,7 +578,7 @@ class OllamaLLMClient(LLMClient):
 
     def __init__(
         self,
-        model: str = "llama3.1",
+        model: str = "qwen3.5:9b-mlx",
         *,
         base_url: str = "https://ollama.com",
         timeout: float = 3600.0,
@@ -739,20 +774,20 @@ class OllamaLLMClient(LLMClient):
     def _resolve_max_tokens(self, explicit: Optional[int]) -> int:
         """Resolve the output-token cap for a request.
 
-        Precedence: an explicit ``max_tokens`` arg, else ``LLM_MAX_TOKENS`` (via the
-        centralized ``llm_config.resolve_max_tokens``), else the model's context
+        Precedence: an explicit ``max_tokens`` arg, else ``LLM_MAX_OUTPUT_TOKENS`` (via the
+        centralized ``llm_config.resolve_max_output_tokens``), else the model's context
         window — always capped at ``DEFAULT_MAX_OUTPUT_TOKENS``.
 
         Preconditions: none.
         Postconditions: returns an ``int`` ``<= DEFAULT_MAX_OUTPUT_TOKENS``; a
-            malformed or non-positive ``LLM_MAX_TOKENS`` falls back to the model
+            malformed or non-positive ``LLM_MAX_OUTPUT_TOKENS`` falls back to the model
             context. Never raises.
         """
         max_tokens = explicit
         if max_tokens is None:
-            # Centralized resolver returns 0 when LLM_MAX_TOKENS is unset, malformed,
+            # Centralized resolver returns 0 when LLM_MAX_OUTPUT_TOKENS is unset, malformed,
             # or non-positive — in which case fall back to the model's context window.
-            env_max = llm_config.resolve_max_tokens()
+            env_max = llm_config.resolve_max_output_tokens()
             if env_max > 0:
                 max_tokens = min(env_max, DEFAULT_MAX_OUTPUT_TOKENS)
             else:
@@ -1338,15 +1373,10 @@ class OllamaLLMClient(LLMClient):
                                 # loop-level `except LLMRateLimitError` handler.
                                 rl_log_body = response.text
                                 rl_log_headers = response.headers
-                                retry_after = (
-                                    _parse_retry_after_seconds(response.headers)
-                                    if _honor_retry_after_enabled()
-                                    else None
-                                )
-                                raise LLMRateLimitError(
-                                    f"LLM rate limited (429) after {attempt + 1} attempt(s)",
-                                    status_code=429,
-                                    retry_after_seconds=retry_after,
+                                raise _rate_limit_error_from_response(
+                                    body=rl_log_body,
+                                    headers=rl_log_headers,
+                                    attempt=attempt + 1,
                                 )
                             if 500 <= status < 600:
                                 hint = ""
@@ -1602,7 +1632,14 @@ class OllamaLLMClient(LLMClient):
                         )
                         rate_limit_attempt += 1
                         continue
-                    raise LLMRateLimitError(str(e), status_code=429, cause=e)
+                    body = resp.text if resp is not None else ""
+                    headers = resp.headers if resp is not None else None
+                    raise _rate_limit_error_from_response(
+                        body=body,
+                        headers=headers,
+                        attempt=attempt + 1,
+                        cause=e,
+                    )
                 if status and 500 <= status < 600:
                     last_error = LLMTemporaryError(str(e), status_code=status, cause=e)
                     if _retry_transient_step(f"server error {status}", kind="server error"):

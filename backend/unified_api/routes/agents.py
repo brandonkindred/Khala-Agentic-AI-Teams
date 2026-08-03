@@ -52,11 +52,6 @@ from agent_provisioning_team.sandbox import (
     note_activity,
 )
 from agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
-
-# Temporal-aware sandbox acquire (durable workflow when Temporal is enabled, direct
-# in-process call otherwise). Bound at module scope so it dispatches correctly and
-# stays patchable by the route tests.
-from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox as acquire
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
 from shared.agent_invoke.limits import (
@@ -164,6 +159,29 @@ def get_sample(agent_id: str, name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Phase 2 — invoke
 # ---------------------------------------------------------------------------
+
+
+async def acquire(agent_id: str):
+    """Warm ``agent_id``'s sandbox via the Temporal-aware acquire dispatch.
+
+    Imports ``agent_provisioning_team.temporal.sandbox_dispatch`` lazily so
+    non-sandbox routes (registry listing, schema resolution, run history)
+    never pull in ``temporalio`` at module-import time — only a call into
+    this function (i.e. an actual invoke) does. Kept as a real module-level
+    name, rather than an inline import at the call site, so route tests can
+    still monkeypatch ``agents_route_mod.acquire`` directly.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; called from a running event loop.
+    Postconditions:
+        * Returns the resulting sandbox handle, or raises the same
+          ``UnknownAgentError`` / ``DockerUnavailableError`` types
+          ``acquire_sandbox`` raises — this wrapper adds no error handling of
+          its own.
+    """
+    from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox
+
+    return await acquire_sandbox(agent_id)
 
 
 @router.post("/{agent_id}/invoke")

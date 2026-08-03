@@ -41,6 +41,11 @@ class LLMRateLimitError(LLMError):
     ``Retry-After`` response header so the retry loop that catches this error can
     honor it (raising the wait to at least that long, never below the configured
     floor). ``None`` when no header was present or honoring is disabled.
+
+    ``limit_kind`` optionally carries a structured classification (``session``,
+    ``weekly``, or ``rate``) so failover marking can park the provider for the
+    correct window without re-parsing opaque message text. ``None`` when the
+    raiser did not classify the 429.
     """
 
     def __init__(
@@ -50,9 +55,11 @@ class LLMRateLimitError(LLMError):
         status_code: Optional[int] = None,
         cause: Optional[Exception] = None,
         retry_after_seconds: Optional[float] = None,
+        limit_kind: Optional[str] = None,
     ):
         super().__init__(message, status_code=status_code, cause=cause)
         self.retry_after_seconds = retry_after_seconds
+        self.limit_kind = limit_kind
 
 
 class LLMTemporaryError(LLMError):

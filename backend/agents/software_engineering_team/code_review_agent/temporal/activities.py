@@ -15,7 +15,18 @@ phase, with independent retries and resumability:
   ``architecture_consistency_pass.find_architecture_and_redundancy_issues``).
 - :func:`find_side_effect_impact_activity` — once-per-submission side-effect /
   blast-radius pass (wraps
-  ``side_effect_impact_pass.find_side_effect_impact_issues``).
+  ``side_effect_impact_pass.find_side_effect_impact_issues``). Kept alongside
+  :func:`find_architecture_and_side_effect_activity` (below) so in-flight
+  workflow histories recorded before the merged pass existed keep replaying.
+- :func:`find_architecture_and_side_effect_activity` — once-per-submission
+  merged architecture-consistency + side-effect-impact pass, one LLM call
+  (wraps
+  ``merged_architecture_side_effect_pass.find_architecture_and_side_effect_issues``).
+  Current workflow executions use this in place of the two passes above.
+- :func:`consolidate_side_effect_issues_activity` — optional merge of related
+  ``side-effects`` findings after the three tail passes (wraps
+  ``side_effect_consolidation.consolidate_side_effect_issues``; gated by
+  ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``, fail-safe on error).
 - :func:`finalize_review_activity` — deterministic reduce gate: dedupe +
   approval reconciliation (wraps ``coordinator._dedupe_issues`` /
   ``_reconcile_approval``).
@@ -305,20 +316,21 @@ def find_architecture_and_redundancy_activity(
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, no architecture document, or any setup/LLM failure all degrade
           to an empty list) -- and so is this activity as a whole, including
-          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
-          the wrapped function's own env/profile early-return checks run, so
-          without this activity's own try/except a client-resolution failure
-          (e.g. no LLM provider configured) would raise even when this
-          optional, additive pass would have no-op'd anyway -- turning an
-          inapplicable pass into a failure of the whole durable review. An
-          activity failure here would only ever be an unexpected defect, not
-          an expected outcome.
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client both happen
+          BEFORE the wrapped function's own env/profile early-return checks
+          run, so without this activity's own try/except a validation or
+          client-resolution failure (e.g. malformed payload, no LLM provider
+          configured) would raise even when this optional, additive pass
+          would have no-op'd anyway -- turning an inapplicable pass into a
+          failure of the whole durable review. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
     """
     from ..architecture_consistency_pass import find_architecture_and_redundancy_issues
     from ..models import CodeReviewInput
 
-    input_data = CodeReviewInput.model_validate(review_input)
     try:
+        input_data = CodeReviewInput.model_validate(review_input)
         llm = _resolve_llm()
         findings = find_architecture_and_redundancy_issues(
             llm, input_data, repo_reader=_repo_reader_from_input(input_data)
@@ -367,12 +379,14 @@ def find_side_effect_impact_activity(
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, wrong profile, or any setup/LLM failure all degrade to an empty
           list) -- and so is this activity as a whole, including
-          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
-          the wrapped function's own env/profile/``pre_numbered`` early-return
-          checks run, so without this activity's own try/except a
-          client-resolution failure (e.g. no LLM provider configured) would
-          raise even when this optional, additive pass would have no-op'd
-          anyway (``CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS=false``, a non-default
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client both happen
+          BEFORE the wrapped function's own env/profile/``pre_numbered``
+          early-return checks run, so without this activity's own try/except a
+          validation or client-resolution failure (e.g. malformed payload, no
+          LLM provider configured) would raise even when this optional,
+          additive pass would have no-op'd anyway
+          (``CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS=false``, a non-default
           profile, or hunk-mode input) -- turning an inapplicable pass into a
           failure of the whole durable review. An activity failure here would
           only ever be an unexpected defect, not an expected outcome.
@@ -380,8 +394,8 @@ def find_side_effect_impact_activity(
     from ..models import CodeReviewInput
     from ..side_effect_impact_pass import find_side_effect_impact_issues
 
-    input_data = CodeReviewInput.model_validate(review_input)
     try:
+        input_data = CodeReviewInput.model_validate(review_input)
         llm = _resolve_llm()
         findings = find_side_effect_impact_issues(
             llm, input_data, repo_reader=_repo_reader_from_input(input_data)
@@ -396,6 +410,125 @@ def find_side_effect_impact_activity(
     return [i.model_dump(mode="json") for i in findings]
 
 
+@activity.defn(name="code_review_merged_architecture_side_effect")
+def find_architecture_and_side_effect_activity(
+    review_input: Dict[str, Any],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Once-per-submission merged architecture-consistency + side-effect pass.
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict
+          (the same one every other activity in this module reconstructs from).
+
+    Postconditions:
+        - Returns ``{"architecture_findings": [...], "side_effect_findings": [...]}``,
+          each a list of zero or more NEW ``CodeReviewIssue`` dicts in the same
+          shapes :func:`find_architecture_and_redundancy_activity` /
+          :func:`find_side_effect_impact_activity` return; never mutates or
+          removes any finding from the caller's perspective — this activity is
+          purely additive, mirroring
+          ``find_architecture_and_side_effect_issues``'s own contract (one LLM
+          call covering both checks instead of two). When
+          ``review_input.repo_root`` names a disk checkout reachable by this
+          worker, a ``DiskRepoReader`` is rebuilt from it (via
+          ``_repo_reader_from_input``, the same helper the other tail-pass
+          activities use) so both halves regain the off-diff read access they
+          have in thread mode; otherwise the reader is ``None`` and each half
+          degrades exactly as its standalone counterpart does.
+        - Never raises: the wrapped function is itself fail-safe (disabled via
+          env, wrong profile, or any setup/LLM failure all degrade to
+          ``([], [])``) -- and so is this activity as a whole, including
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client both happen
+          BEFORE the wrapped function's own env/profile early-return checks
+          run, so without this activity's own try/except a validation or
+          client-resolution failure (e.g. malformed payload, no LLM provider
+          configured) would raise even when this optional, additive pass
+          would have no-op'd anyway -- turning an inapplicable pass into a
+          failure of the whole durable review. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
+    """
+    from ..merged_architecture_side_effect_pass import find_architecture_and_side_effect_issues
+    from ..models import CodeReviewInput
+
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        llm = _resolve_llm()
+        architecture_findings, side_effect_findings = find_architecture_and_side_effect_issues(
+            llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
+        logger.warning(
+            "MergedArchitectureSideEffectPass: activity failed (%s: %s); "
+            "returning no additional findings",
+            type(exc).__name__,
+            exc,
+        )
+        return {"architecture_findings": [], "side_effect_findings": []}
+    return {
+        "architecture_findings": [i.model_dump(mode="json") for i in architecture_findings],
+        "side_effect_findings": [i.model_dump(mode="json") for i in side_effect_findings],
+    }
+
+
+@activity.defn(name="code_review_side_effect_consolidation")
+def consolidate_side_effect_issues_activity(
+    review_input: Dict[str, Any],
+    issues: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge related ``side-effects`` findings before the final dedupe/gate.
+
+    Called after the false-positive, architecture, and side-effect tail passes
+    have contributed their findings, and before ``finalize_review_activity``
+    applies the exact-match dedupe and approval reconciliation.
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict.
+        - ``issues`` is the post-tail-pass issue list (each a
+          ``CodeReviewIssue.model_dump(mode="json")`` dict), already including
+          any architecture / side-effect additions.
+
+    Postconditions:
+        - When ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` is disabled, returns
+          ``issues`` unchanged (same length and content).
+        - When enabled, returns the consolidated issue list from
+          ``consolidate_side_effect_issues`` (related ``side-effects`` findings
+          merged; every other category passes through untouched), serialized as
+          ``model_dump(mode="json")`` dicts.
+        - Never raises: any reconstruction / index / consolidation failure
+          logs a warning and returns the original ``issues`` unchanged
+          (fail-safe), matching the in-process coordinator's try/except around
+          the same step.
+    """
+    from shared.env import env_flag_enabled
+
+    from ..false_positive_filter import CodebaseIndex
+    from ..models import CodeReviewInput, CodeReviewIssue
+    from ..side_effect_consolidation import (
+        SIDE_EFFECT_CONSOLIDATION_ENV,
+        consolidate_side_effect_issues,
+    )
+
+    if not env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV):
+        return issues
+
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        parsed_issues = [CodeReviewIssue.model_validate(i) for i in issues]
+        index = CodebaseIndex.from_input(
+            input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+        consolidated = consolidate_side_effect_issues(parsed_issues, index)
+    except Exception as exc:  # noqa: BLE001 - fail-safe: keep unconsolidated issues
+        logger.warning(
+            "SideEffectConsolidation: activity failed (%s: %s); using unconsolidated issues",
+            type(exc).__name__,
+            exc,
+        )
+        return issues
+    return [i.model_dump(mode="json") for i in consolidated]
+
+
 @activity.defn(name="code_review_finalize")
 def finalize_review_activity(
     verified_issues: List[Dict[str, Any]],
@@ -403,7 +536,7 @@ def finalize_review_activity(
     skipped_issues: List[Dict[str, Any]],
     approved_flags: List[bool],
 ) -> Dict[str, Any]:
-    """Deterministic reduce gate: dedupe the merged findings and reconcile approval.
+    """Deterministic reduce gate: dedupe, cap, and reconcile approval.
 
     Preconditions:
         - ``verified_issues`` are the post-false-positive genuine findings,
@@ -416,12 +549,13 @@ def finalize_review_activity(
 
     Postconditions:
         - Returns ``{"approved": bool, "issues": [issue dicts]}`` computed by
-          ``coordinator._dedupe_issues`` over the merged findings and
-          ``coordinator._reconcile_approval`` with the anti-loop safety nets — the
-          identical deterministic gate ``run_coordinator`` applies, so the verdict
-          matches thread mode.
+          ``coordinator._dedupe_issues`` over the merged findings,
+          ``coordinator._cap_issues`` (severity-first, at most
+          ``MAX_CODE_REVIEW_ISSUES``), and ``coordinator._reconcile_approval``
+          with the anti-loop safety nets — the identical deterministic gate
+          ``run_coordinator`` applies, so the verdict matches thread mode.
     """
-    from ..coordinator import _dedupe_issues, _reconcile_approval
+    from ..coordinator import _cap_issues, _dedupe_issues, _reconcile_approval
     from ..models import CodeReviewIssue
 
     verified = [CodeReviewIssue.model_validate(i) for i in verified_issues]
@@ -429,6 +563,7 @@ def finalize_review_activity(
     skipped = [CodeReviewIssue.model_validate(i) for i in skipped_issues]
 
     deduped = _dedupe_issues([*verified, *not_reviewed, *skipped])
+    deduped = _cap_issues(deduped)
     assert approved_flags, "unreachable: workflow raises before calling this activity when empty"
     all_llm_approved = all(approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
@@ -455,19 +590,36 @@ def synthesize_findings_activity(
           on any failure (so the workflow falls back to deterministic
           concatenation). Wraps ``synthesis.synthesize_review_findings``, which
           never raises and never touches the verdict.
+        - Never raises: this activity as a whole is fail-safe, including
+          ``CodeReviewInput.model_validate`` and ``_resolve_llm()``.
+          Reconstructing the input and resolving the LLM client happen before
+          (and outside) the wrapped function's own failure handling, so without
+          this activity's own try/except a validation or client-resolution
+          failure (e.g. malformed payload, no LLM provider configured) would
+          raise instead of returning ``None`` and letting the workflow fall
+          back to deterministic concatenation. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
     """
     from ..models import CodeReviewInput, CodeReviewIssue
     from ..synthesis import synthesize_review_findings
 
-    input_data = CodeReviewInput.model_validate(review_input)
-    result = synthesize_review_findings(
-        _resolve_llm(),
-        input_data=input_data,
-        approved=approved,
-        issues=[CodeReviewIssue.model_validate(i) for i in issues],
-        chunk_summaries=chunk_summaries,
-        chunk_spec_notes=chunk_spec_notes,
-    )
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        result = synthesize_review_findings(
+            _resolve_llm(),
+            input_data=input_data,
+            approved=approved,
+            issues=[CodeReviewIssue.model_validate(i) for i in issues],
+            chunk_summaries=chunk_summaries,
+            chunk_spec_notes=chunk_spec_notes,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: synthesis must never break the review
+        logger.warning(
+            "SynthesizeFindings: activity failed (%s: %s); returning None",
+            type(exc).__name__,
+            exc,
+        )
+        return None
     if result is None:
         return None
     return {"summary": result.summary, "spec_compliance_notes": result.spec_compliance_notes}

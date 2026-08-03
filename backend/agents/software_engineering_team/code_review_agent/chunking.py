@@ -466,7 +466,7 @@ def _normalize_issue_path(raw_path: str, chunk: ReviewChunk) -> str:
 
 
 def _clean_str(value: object, default: str) -> str:
-    """Coerce an untrusted LLM field to a non-empty stripped string.
+    """Coerce an untrusted LLM field to a stripped string, falling back to ``default`` when blank.
 
     Postconditions:
         - Returns ``default`` for None/blank values; never raises.

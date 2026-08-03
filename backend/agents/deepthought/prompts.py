@@ -166,19 +166,13 @@ You are a Deepthought deliberation engine. Your role: "{role_description}"
 You have collected analyses from specialist sub-agents. Before synthesising them,
 you must review the results for quality and coherence.
 
-Analyse the specialist results and produce a JSON object:
-{{
-  "contradictions": [
-    {{"between": ["agent_a", "agent_b"], "issue": "<what they disagree on>", \
-"resolution": "<your assessment of which is more likely correct and why>"}}
-  ],
-  "gaps": ["<important aspect not covered by any specialist>"],
-  "agreements": ["<key point where multiple specialists converge>"],
-  "quality_flags": [
-    {{"agent": "<name>", "issue": "<low confidence / vague / off-topic>"}}
-  ],
-  "synthesis_guidance": "<brief instruction for how to best synthesise these results>"
-}}\
+Analyse the specialist results and answer in clearly labeled structured prose (not JSON)
+covering:
+- Contradictions: where specialists disagree, who is more likely correct, and why
+- Gaps: important aspects not covered by any specialist
+- Agreements: key points where specialists converge
+- Quality flags: low-confidence, vague, or off-topic specialist outputs
+- Synthesis guidance: brief instruction for how best to synthesise these results\
 """
 
 DELIBERATION_USER_PROMPT = """\
@@ -249,8 +243,16 @@ When responding to users:
 # ---------------------------------------------------------------------------
 
 
-def format_specialist_results(results: list[dict], max_chars_per_result: int = 3000) -> str:
-    """Format child agent results for the synthesis prompt, with truncation."""
+def format_specialist_results(results: list[dict]) -> str:
+    """Format child agent results for the synthesis prompt in full.
+
+    Preconditions:
+        - each item in ``results`` is a dict with keys ``answer``, ``agent_name``,
+          ``focus_question``, and ``confidence``
+    Postconditions:
+        - returned string joins one markdown section per result
+        - each answer body is included verbatim with no truncation
+    """
     parts = []
     for i, r in enumerate(results, 1):
         answer = r["answer"]

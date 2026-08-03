@@ -1,6 +1,32 @@
-"""Tests for DummyLLMClient: complete_json returns dict; get_max_context_tokens; complete returns str."""
+"""Tests for DummyLLMClient heuristic stubs and Strands Model surface.
+
+Covers ``complete`` / ``complete_json`` / ``complete_text``, ``get_max_context_tokens``,
+async ``structured_output`` (including multi-turn routing), ``stream`` with
+``system_prompt_content`` (branding Phase 1 anchors and empty-list overrides),
+and helpers (``_extract_name_from_hint``, strip-filter frozensets,
+``_content_to_text`` / ``_last_user_text`` / ``_aggregated_user_tool_text``).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, cast
+
+import pytest
+from pydantic import BaseModel
 
 from llm_service import DummyLLMClient
+from llm_service.clients.dummy import (
+    _STRIP_FILLERS,
+    _STRIP_SUFFIXES,
+    _STRIP_VERBS,
+    CODE_REVIEW_MIN_PROMPT_LENGTH,
+    _aggregated_user_tool_text,
+    _content_to_text,
+    _extract_name_from_hint,
+    _last_user_text,
+)
 
 
 def test_dummy_get_max_context_tokens() -> None:
@@ -46,3 +72,276 @@ def test_dummy_complete_json_accepts_schema_kwarg_as_noop() -> None:
     assert c.supports_structured_output() is False
     j = c.complete_json("hello", temperature=0.1, schema={"type": "object"})
     assert isinstance(j, dict)
+
+
+def test_content_to_text_serializes_json_tool_result_blocks() -> None:
+    content = [
+        {"json": {"request": "architecture_document with components and overview"}},
+    ]
+    text = _content_to_text(content)
+    assert "architecture_document" in text
+    assert "components" in text
+    assert "overview" in text
+
+
+@pytest.mark.asyncio
+async def test_structured_output_routes_on_json_tool_result_content() -> None:
+    class _ArchStub(BaseModel):
+        overview: str
+        architecture_document: str
+        components: list
+        diagrams: dict
+        decisions: list
+
+    c = DummyLLMClient()
+    prompt = [
+        {
+            "role": "tool",
+            "content": [
+                {"json": {"request": "architecture_document with components and overview"}},
+            ],
+        }
+    ]
+    events = []
+    async for event in c.structured_output(_ArchStub, prompt):
+        events.append(event)
+    assert isinstance(events[0]["output"], _ArchStub)
+    assert "Dummy architecture" in events[0]["output"].overview
+
+
+def _as_stream_messages(messages: list[dict[str, Any]]) -> Any:
+    """Cast plain dict fixtures to the Strands Message type expected by ``stream``."""
+    return cast(Any, messages)
+
+
+def _as_system_content(blocks: list[dict[str, str]]) -> Any:
+    """Cast plain dict fixtures to Strands ``SystemContentBlock`` list."""
+    return cast(Any, blocks)
+
+
+@pytest.mark.asyncio
+async def test_dummy_stream_empty_system_prompt_content_clears_stale_string() -> None:
+    """An explicit empty content list must override a stale branding system_prompt."""
+    c = DummyLLMClient()
+    messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
+    chunks: list[str] = []
+    async for event in c.stream(
+        _as_stream_messages(messages),
+        system_prompt=(
+            "You must return brand_purpose, mission_statement, and vision_statement "
+            "for the brand strategy agent."
+        ),
+        system_prompt_content=[],
+    ):
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        text = delta.get("text")
+        if text:
+            chunks.append(text)
+    assert chunks, "expected a text content delta"
+    data = json.loads(chunks[0])
+    assert "brand_purpose" not in data
+    assert data.get("status") == "ok" or "output" in data
+
+
+def test_last_user_text_concatenates_all_text_blocks() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"text": "prefix context"},
+                {"text": "architecture_document with components and overview"},
+            ],
+        }
+    ]
+    assert _last_user_text(messages) == (
+        "prefix context\narchitecture_document with components and overview"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_output_uses_later_user_text_blocks_for_routing() -> None:
+    """Anchors in a later content block must still select the intended stub."""
+
+    class _ArchStub(BaseModel):
+        overview: str
+        architecture_document: str
+        components: list
+        diagrams: dict
+        decisions: list
+
+    c = DummyLLMClient()
+    prompt = [
+        {
+            "role": "user",
+            "content": [
+                {"text": "Please produce the deliverable."},
+                {"text": "Need architecture_document with components and overview."},
+            ],
+        }
+    ]
+    events = []
+    async for event in c.structured_output(_ArchStub, prompt):
+        events.append(event)
+    assert isinstance(events[0]["output"], _ArchStub)
+    assert "Dummy architecture" in events[0]["output"].overview
+
+
+def test_aggregated_user_tool_text_preserves_earlier_turns() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [{"text": "Need architecture_document with components and overview."}],
+        },
+        {"role": "assistant", "content": [{"text": "Sure."}]},
+        {"role": "user", "content": [{"text": "return that as structured output"}]},
+    ]
+    assert "architecture_document" in _aggregated_user_tool_text(messages)
+    assert "return that as structured output" in _aggregated_user_tool_text(messages)
+    # stream path stays latest-turn-only
+    assert _last_user_text(messages) == "return that as structured output"
+
+
+@pytest.mark.asyncio
+async def test_structured_output_uses_earlier_user_turn_for_routing() -> None:
+    """Follow-up structured_output requests must still see original routing anchors."""
+
+    class _ArchStub(BaseModel):
+        overview: str
+        architecture_document: str
+        components: list
+        diagrams: dict
+        decisions: list
+
+    c = DummyLLMClient()
+    prompt = [
+        {
+            "role": "user",
+            "content": [{"text": "Need architecture_document with components and overview."}],
+        },
+        {"role": "assistant", "content": [{"text": "Generated architecture."}]},
+        {"role": "user", "content": [{"text": "return that as structured output"}]},
+    ]
+    events = []
+    async for event in c.structured_output(_ArchStub, prompt):
+        events.append(event)
+    assert isinstance(events[0]["output"], _ArchStub)
+    assert "Dummy architecture" in events[0]["output"].overview
+
+
+def test_extract_name_from_hint_keeps_usable_words() -> None:
+    assert _extract_name_from_hint("Implement User Auth Service") == "user-auth"
+    assert _extract_name_from_hint("Build PaymentWebhook", separator="_") == "payment_webhook"
+
+
+def test_extract_name_from_hint_all_stripped_returns_unique_placeholder() -> None:
+    a = _extract_name_from_hint("the component")
+    b = _extract_name_from_hint("create service module", separator="_")
+    c = _extract_name_from_hint("configure service module", separator="_")
+    assert a.startswith("item-")
+    assert b.startswith("item_")
+    assert c.startswith("item_")
+    assert a != _extract_name_from_hint("a component")
+    assert b != c  # distinct all-stripped hints must not collide on one path
+    assert re.fullmatch(r"item-[0-9a-f]+", a)
+    assert re.fullmatch(r"item_[0-9a-f]+", b)
+
+
+def test_strip_filter_constants_are_frozensets() -> None:
+    assert isinstance(_STRIP_VERBS, frozenset)
+    assert isinstance(_STRIP_FILLERS, frozenset)
+    assert isinstance(_STRIP_SUFFIXES, frozenset)
+    with pytest.raises(AttributeError):
+        _STRIP_VERBS.add("mutate")  # type: ignore[attr-defined]
+
+
+class _FallbackStub(BaseModel):
+    output: str
+    status: str
+
+
+@pytest.mark.asyncio
+async def test_dummy_structured_output_yields_validated_model() -> None:
+    c = DummyLLMClient()
+    prompt = [{"role": "user", "content": [{"text": "hello"}]}]
+    events = []
+    async for event in c.structured_output(_FallbackStub, prompt):
+        events.append(event)
+    assert len(events) == 1
+    assert "output" in events[0]
+    assert isinstance(events[0]["output"], _FallbackStub)
+    assert events[0]["output"].status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dummy_stream_uses_system_prompt_content_when_system_prompt_absent() -> None:
+    """Branding Phase 1: system text via content blocks alone selects purpose/vision stub."""
+    c = DummyLLMClient()
+    messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
+    system_prompt_content = [
+        {
+            "text": (
+                "You must return brand_purpose, mission_statement, and vision_statement "
+                "for the brand strategy agent."
+            )
+        }
+    ]
+    chunks: list[str] = []
+    async for event in c.stream(
+        _as_stream_messages(messages),
+        system_prompt=None,
+        system_prompt_content=_as_system_content(system_prompt_content),
+    ):
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        text = delta.get("text")
+        if text:
+            chunks.append(text)
+    assert chunks, "expected a text content delta"
+    data = json.loads(chunks[0])
+    assert "brand_purpose" in data
+    assert "vision_statement" in data
+
+
+@pytest.mark.asyncio
+async def test_dummy_stream_prefers_system_prompt_content_over_stale_string() -> None:
+    """Branding Phase 1: content blocks win over a non-matching legacy system_prompt."""
+    c = DummyLLMClient()
+    messages = [{"role": "user", "content": [{"text": "BrandingMission payload for Dummy Co."}]}]
+    system_prompt_content = [
+        {
+            "text": (
+                "You must return brand_purpose, mission_statement, and vision_statement "
+                "for the brand strategy agent."
+            )
+        }
+    ]
+    chunks: list[str] = []
+    async for event in c.stream(
+        _as_stream_messages(messages),
+        system_prompt="You are a generic assistant with no branding output fields.",
+        system_prompt_content=_as_system_content(system_prompt_content),
+    ):
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        text = delta.get("text")
+        if text:
+            chunks.append(text)
+    assert chunks, "expected a text content delta"
+    data = json.loads(chunks[0])
+    assert "brand_purpose" in data
+    assert "vision_statement" in data
+
+
+def test_code_review_catch_all_matches_long_prompt_with_approved() -> None:
+    c = DummyLLMClient()
+    # Build a prompt that mentions both "code to review" and "approved", longer
+    # than the named threshold so the catch-all still wins over short stubs.
+    padding = "x" * (CODE_REVIEW_MIN_PROMPT_LENGTH + 50)
+    prompt = f"Please code to review this chunk. approved={padding}"
+    assert len(prompt.lower()) > CODE_REVIEW_MIN_PROMPT_LENGTH
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["approved"] is True
+    assert j["summary"] == "Code review passed (dummy)."
+    assert "issues" in j
+
+
+def test_code_review_min_prompt_length_constant() -> None:
+    assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200

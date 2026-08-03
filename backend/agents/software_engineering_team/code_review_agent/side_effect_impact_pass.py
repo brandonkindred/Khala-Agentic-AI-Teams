@@ -133,8 +133,8 @@ def _search_repository(
         - ``max_matches`` > 0 and, when given explicitly, ``max_files_scanned`` > 0.
 
     Postconditions:
-        - Returns ``([], False)`` when ``index.repo_reader`` is None, when the
-          query is blank, or when the reader's own ``list_files`` fails.
+        - Returns ``([], False)`` when ``index.repo_reader`` is None or when the
+          query is blank.
         - When ``max_files_scanned`` is None (the normal call path), it resolves
           to ``_DISK_REPO_SEARCH_FILE_SCAN_LIMIT`` for a ``DiskRepoReader`` (no
           per-file fetch cost -- bounded only by the reader's own listing cap) or
@@ -179,7 +179,7 @@ def _search_repository(
         paths = index.repo_reader.list_files()
     except Exception as exc:  # noqa: BLE001 - fail-safe: a reader failure must never raise
         logger.debug("SideEffectImpactPass: repo_reader.list_files() failed: %s", exc)
-        return [], False
+        return [], True
 
     results: List[Tuple[str, int, str]] = []
     scanned = 0
@@ -233,8 +233,8 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
         Use this to find callers of a changed function/method that live
         outside the diff -- ``search_codebase`` only searches the files shown
         in this prompt. Requires a repository reader to be attached to this
-        review; when none is attached, fall back to ``list_files()``/
-        ``read_file()``.
+        review; when none is attached, this tool reports that no repository
+        access is available beyond the submission.
 
         Args:
             query: The substring to search for (e.g. a function or class name).
@@ -268,6 +268,11 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
         return result
 
     return [*_build_tools(index), search_repository]
+
+
+def build_side_effect_tools(index: CodebaseIndex) -> list:
+    """Public wrapper for :func:`_build_side_effect_tools`."""
+    return _build_side_effect_tools(index)
 
 
 def _build_prompt(index: CodebaseIndex, max_inline_chars: int) -> str:
@@ -389,6 +394,11 @@ def _parse_findings(data: object) -> List[CodeReviewIssue]:
     return [parsed for item in raw if (parsed := _coerce_finding(item)) is not None]
 
 
+def parse_findings(data: object) -> List[CodeReviewIssue]:
+    """Public wrapper for :func:`_parse_findings`."""
+    return _parse_findings(data)
+
+
 def _validate_finding_line(
     index: CodebaseIndex, file_path: str, line: Optional[int], pre_numbered: bool = False
 ) -> Optional[int]:
@@ -480,6 +490,13 @@ def _validate_findings(
             finding = finding.model_copy(update={"line": checked_line})
         validated.append(finding)
     return validated
+
+
+def validate_findings(
+    index: CodebaseIndex, findings: List[CodeReviewIssue], *, pre_numbered: bool = False
+) -> List[CodeReviewIssue]:
+    """Public wrapper for :func:`_validate_findings`."""
+    return _validate_findings(index, findings, pre_numbered=pre_numbered)
 
 
 def find_side_effect_impact_issues(

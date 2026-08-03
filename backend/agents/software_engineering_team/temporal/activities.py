@@ -38,6 +38,7 @@ def run_orchestrator_activity(
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
     trace_id: str = "",
+    sprint_id: Optional[str] = None,
 ) -> None:
     """Execute the main Tech Lead orchestrator (run_orchestrator).
 
@@ -46,6 +47,8 @@ def run_orchestrator_activity(
         Temporal can retry (per the workflow retry policy) and fail the workflow.
         ``trace_id`` (workflow-supplied, or freshly generated when blank) is
         forwarded to ``run_orchestrator``, which binds it for the whole 4-phase run.
+        ``sprint_id``, when set, is forwarded to ``run_orchestrator`` so it pulls
+        planned scope from that Product Delivery sprint instead of parsing a spec.
     """
     resolved_trace_id = trace_id or new_trace_id()
     try:
@@ -57,6 +60,7 @@ def run_orchestrator_activity(
             spec_content_override=spec_content_override,
             resolved_questions_override=resolved_questions_override,
             planning_only=planning_only,
+            sprint_id=sprint_id,
             trace_id=resolved_trace_id,
         )
     except Exception as e:
@@ -337,6 +341,7 @@ def parse_spec_activity(
     repo_path: str,
     spec_content_override: Optional[str] = None,
     trace_id: str = "",
+    sprint_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Phase 1: Parse spec + run Product Requirements Analysis.
 
@@ -344,15 +349,23 @@ def parse_spec_activity(
     generated when blank) is bound for the duration of this activity — this activity
     runs in its own process/thread, so unlike the thread-mode orchestrator the id
     must be passed explicitly rather than inherited via contextvars.
+
+    Postconditions:
+        When ``sprint_id`` is set, spec content is synthesized from the
+        ``product_delivery`` sprint's planned stories (via
+        ``shared.sprint_scope.load_requirements_from_sprint``) instead of read from
+        disk, and both the LLM spec-parse and the PRA agent are skipped — mirroring
+        the thread-mode orchestrator's sprint path (``discovery.py``).
     """
     with bind_trace_id(trace_id or new_trace_id()):
-        return _parse_spec_activity_body(job_id, repo_path, spec_content_override)
+        return _parse_spec_activity_body(job_id, repo_path, spec_content_override, sprint_id)
 
 
 def _parse_spec_activity_body(
     job_id: str,
     repo_path: str,
     spec_content_override: Optional[str],
+    sprint_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Body of :func:`parse_spec_activity`, run inside its ``bind_trace_id`` block.
 
@@ -387,14 +400,37 @@ def _parse_spec_activity_body(
         )
 
         initial_spec_path = None
-        if spec_content_override is not None:
+        requirements = None
+        # Sprint path: spec is synthesized from the product_delivery sprint's planned
+        # stories. Both the LLM spec-parse and the PRA agent are skipped below — the
+        # spec is already structured (per-story user_story + ACs) and validated by
+        # the upstream Sprint Planner. Mirrors discovery.py::resolve_spec_source.
+        if sprint_id is not None:
+            if spec_content_override is not None:
+                # Raise (rather than marking the job FAILED and returning a normal
+                # result) so the activity itself fails: RunTeamWorkflowV2 doesn't
+                # inspect SpecParseResult for a failure sentinel, so a normal return
+                # here would let the workflow barrel into Phase 2/3 on an empty spec
+                # even though the job was already marked FAILED.
+                raise ValueError(
+                    "parse_spec_activity received both sprint_id and "
+                    "spec_content_override; they are mutually exclusive."
+                )
+
+            from software_engineering_team.shared.sprint_scope import (
+                load_requirements_from_sprint,
+            )
+
+            requirements, spec_content = load_requirements_from_sprint(sprint_id)
+        elif spec_content_override is not None:
             spec_content = spec_content_override
         else:
             initial_spec_path = get_newest_spec_path(path)
             spec_content = get_newest_spec_content(path)
 
         context_files = gather_context_files(path)
-        requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
+        if sprint_id is None:
+            requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
         update_job(
             job_id, requirements_title=requirements.title, status_text="Specification parsed"
         )
@@ -402,33 +438,43 @@ def _parse_spec_activity_body(
         _check_cancellation(job_id)
         plan_dir = ensure_plan_dir(path)
 
-        # Run PRA
-        from software_engineering_team.orchestrator import _make_pra_job_updater
-        from software_engineering_team.product_requirements_analysis_agent import (
-            ProductRequirementsAnalysisAgent,
-        )
+        if sprint_id is not None:
+            # Sprint path: PRA's review/communicate/update/cleanup loop has nothing
+            # to do (the spec is already structured and validated), so the
+            # synthesized spec is used directly. Mirrors
+            # discovery.py::run_product_requirements_analysis's sprint path.
+            validated_spec = spec_content
+            pra_iterations = 0
+        else:
+            # Run PRA
+            from software_engineering_team.orchestrator import _make_pra_job_updater
+            from software_engineering_team.product_requirements_analysis_agent import (
+                ProductRequirementsAnalysisAgent,
+            )
 
-        # Shared with the thread path: rewrites current_phase into the analysis_*
-        # fields AND rescales the agent's own 0-100 progress onto the product-analysis
-        # band — without it the Temporal bar sprints to 100 during PRA and collapses
-        # at the next phase handoff.
-        _pra_updater = _make_pra_job_updater(job_id)
+            # Shared with the thread path: rewrites current_phase into the analysis_*
+            # fields AND rescales the agent's own 0-100 progress onto the
+            # product-analysis band — without it the Temporal bar sprints to 100
+            # during PRA and collapses at the next phase handoff.
+            _pra_updater = _make_pra_job_updater(job_id)
 
-        pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
-        pra_result = pra_agent.run_workflow(
-            spec_content=spec_content,
-            repo_path=path,
-            job_id=job_id,
-            job_updater=_pra_updater,
-            context_files=context_files,
-            initial_spec_path=Path(initial_spec_path) if initial_spec_path else None,
-        )
-        if not pra_result.success:
-            err = pra_result.failure_reason or "PRA did not complete"
-            update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
-            return SpecParseResult(spec_content=spec_content).model_dump()
+            pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
+            pra_result = pra_agent.run_workflow(
+                spec_content=spec_content,
+                repo_path=path,
+                job_id=job_id,
+                job_updater=_pra_updater,
+                context_files=context_files,
+                initial_spec_path=Path(initial_spec_path) if initial_spec_path else None,
+            )
+            if not pra_result.success:
+                err = pra_result.failure_reason or "PRA did not complete"
+                update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
+                return SpecParseResult(spec_content=spec_content).model_dump()
 
-        validated_spec = pra_result.final_spec_content or spec_content
+            validated_spec = pra_result.final_spec_content or spec_content
+            pra_iterations = pra_result.iterations
+
         _check_cancellation(job_id)
 
         return SpecParseResult(
@@ -437,7 +483,7 @@ def _parse_spec_activity_body(
             requirements_title=requirements.title,
             plan_dir=str(plan_dir),
             context_files_count=len(context_files),
-            pra_iterations=pra_result.iterations,
+            pra_iterations=pra_iterations,
         ).model_dump()
 
     except Exception as e:
@@ -478,7 +524,11 @@ def _plan_project_activity_body(
     Preconditions: a trace id is already bound (callers must go through
         :func:`plan_project_activity`); ``spec_parse_result`` validates as a ``SpecParseResult``.
     Postconditions: returns a ``PlanResult`` dict; on failure the job is marked FAILED and
-        the exception propagates to the activity wrapper.
+        the exception propagates to the activity wrapper. Uses ``spec_data.requirements_title``
+        (set by Phase 1) as the adapter's spec title rather than re-parsing
+        ``spec_data.spec_content`` via the LLM — avoids a second, nondeterministic parse and
+        an unnecessary spec-intake LLM dependency; required for the sprint path, where
+        ``spec_data.spec_content`` is synthesized Markdown, not LLM-parseable prose.
     """
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
 
@@ -495,10 +545,6 @@ def _plan_project_activity_body(
         from planning_team.orchestrator import run_workflow as run_planning_workflow
         from software_engineering_team.planning_adapter import adapt_planning_result
         from software_engineering_team.shared import planning_audit
-        from software_engineering_team.spec_parser import parse_spec_with_llm
-
-        # Re-parse requirements for the adapter (lightweight)
-        requirements = parse_spec_with_llm(spec_data.spec_content, get_client("spec_intake"))
 
         agents = _get_agents()
 
@@ -533,7 +579,7 @@ def _plan_project_activity_body(
         planning_audit.record_se_planning_run(job_id, planning_result)
 
         adapter_result = adapt_planning_result(
-            planning_result, spec_title=requirements.title, repo_path=str(path)
+            planning_result, spec_title=spec_data.requirements_title, repo_path=str(path)
         )
         adapter_result.shared_planning_doc_path = str(
             path / "plan" / "planning_team" / "planning_document.md"

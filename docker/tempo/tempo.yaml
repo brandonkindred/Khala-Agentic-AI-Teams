@@ -1,8 +1,13 @@
 # Grafana Tempo — trace backend for the Khala stack.
-# Receives OTLP traces (HTTP :4318 / gRPC :4317) from every app container and
+# Receives OTLP traces (HTTP :4318 / gRPC :4317) from opted-in app containers and
 # stores them locally. Metrics are NOT handled here — they stay on Prometheus
 # scraping (containers run with OTEL_METRICS_EXPORTER=none). Query API on :3200,
 # wired into Grafana as the "Tempo" datasource.
+#
+# Memory posture: this single-binary process is cgroup-capped at 1G in compose.
+# The knobs below flush live traces sooner, refuse oversized traces, and drop
+# blocks after a short local-debug window so the WAL/live store cannot grow
+# unbounded under agent-pipeline span volume.
 server:
   http_listen_port: 3200
 
@@ -15,6 +20,14 @@ distributor:
         grpc:
           endpoint: 0.0.0.0:4317
 
+# Flush completed traces out of the in-memory live store promptly. Shorter idle
+# / block windows trade a little write amplification for a smaller resident set
+# under the 1G cgroup limit.
+ingester:
+  trace_idle_period: 10s
+  max_block_duration: 5m
+  max_block_bytes: 50000000
+
 storage:
   trace:
     backend: local
@@ -26,7 +39,21 @@ storage:
 # Bound on-disk growth explicitly: the compactor deletes trace blocks older than
 # block_retention so the local /var/tempo volume can't fill unbounded on a
 # long-running stack. (Retention in Tempo lives under compactor.compaction, not
-# storage.trace.) 24h is plenty for local debugging.
+# storage.trace.) 6h is enough for local debugging while keeping compact/query
+# working sets small under the 1G cgroup.
 compactor:
   compaction:
-    block_retention: 24h
+    block_retention: 6h
+
+# Refuse traces that would balloon live-store memory (default is 5 MiB). Agent
+# pipelines with nested FastAPI + httpx + LLM spans can grow fat quickly; 1 MiB
+# is plenty for local debug traces and protects the 1G cgroup.
+overrides:
+  defaults:
+    global:
+      max_bytes_per_trace: 1000000
+    ingestion:
+      # Soft per-tenant ingest ceilings for the single-tenant local stack.
+      rate_limit_bytes: 3000000
+      burst_size_bytes: 5000000
+      max_traces_per_user: 5000

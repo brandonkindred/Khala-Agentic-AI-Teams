@@ -101,12 +101,10 @@ from investment_team.strategy_lab.config import (
 from investment_team.strategy_lab.config import (
     MAX_PARALLEL as _MAX_PARALLEL,
 )
-from investment_team.strategy_lab.config import (
-    clamp_max_parallel as _clamp_max_parallel,
-)
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
-from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
-from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.run_state import (
+    acquire_run_transition_lock as _acquire_run_transition_lock,
+)
 from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
 )
@@ -130,7 +128,6 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 from investment_team.strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
-    excluded_for_allowed,
     normalize_allowed_asset_classes,
 )
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
@@ -1722,10 +1719,8 @@ def _compute_signal_brief_snapshot(
 ) -> tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]:
     """Build a per-batch signal brief over all currently-persisted prior records.
 
-    Extracted from ``_strategy_lab_worker``'s ``_compute_signal_brief`` closure so
-    the Temporal ``compute_signal_brief_activity`` and the thread-mode wave driver
-    share one implementation. Called at the start of every batch so batch N+1 sees
-    results from batches 1..N (and prior runs).
+    Used by the Temporal ``compute_signal_brief_activity``. Called at the start
+    of every batch so batch N+1 sees results from batches 1..N (and prior runs).
 
     Preconditions:
         ``benchmark_symbol`` is the run's benchmark ticker.
@@ -1820,9 +1815,7 @@ def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
 def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
     """Return True if the run's job-store status is terminal (external cancel).
 
-    Extracted from ``_strategy_lab_worker``'s ``_is_run_cancelled`` closure so the
-    Temporal ``is_run_cancelled_activity`` and the thread-mode wave driver share
-    one implementation.
+    Used by the Temporal ``is_run_cancelled_activity``.
 
     Preconditions:
         ``run_id`` is the strategy-lab run identifier.
@@ -1885,27 +1878,132 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
         return False
 
 
-def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> bool:
-    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal.
+def _fail_strategy_lab_run(run_id: str, error: str) -> None:
+    """Mark a strategy-lab run "failed" (best-effort, idempotent).
+
+    Preconditions:
+        - ``run_id`` may or may not exist in ``_active_runs``.
+    Postconditions:
+        - If the run exists and isn't already in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
+          with ``error`` recorded, the new state persisted, and a delayed
+          cleanup of the ``_active_runs`` entry scheduled 900s out — so a
+          dispatch failure (e.g. a Temporal outage) doesn't leak the entry
+          forever. That cleanup is a no-op if
+          ``run_id`` gets resumed (and thus a new state object installed)
+          before the delay elapses, so it never tears down a live resumed
+          run. A missing run and an already-terminal run are both no-ops.
+          Never raises.
+    """
+    try:
+        with _lock:
+            state = _active_runs.get(run_id)
+            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            state["status"] = "failed"
+            state["error"] = error
+            state["current_cycle"] = None
+            _persist_run_state(run_id, state)
+
+        from investment_team.api.job_event_bus import cleanup_job
+
+        def _cleanup() -> None:
+            with _lock:
+                # resume/restart always replace the entry with a new dict
+                # rather than mutate this one in place, so an identity check
+                # reliably detects a run that got resumed within this delay
+                # window — pop/cleanup would otherwise tear down a live,
+                # freshly-resumed run's tracking state.
+                if _active_runs.get(run_id) is not state:
+                    return
+                _active_runs.pop(run_id, None)
+            cleanup_job(run_id)
+
+        timer = threading.Timer(900.0, _cleanup)
+        timer.daemon = True
+        timer.start()
+    except Exception:
+        logger.warning(
+            "Failed to mark strategy-lab run %s failed: %s", run_id, error, exc_info=True
+        )
+
+
+def _dispatch_strategy_lab_run(
+    run_id: str, request: RunStrategyLabRequest, *, allow_already_started: bool = True
+) -> None:
+    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
 
     Preconditions:
         - ``run_id``'s state is already registered in ``_active_runs`` and
           persisted (the activity reads its resume offset from that state).
 
     Postconditions:
-        - Returns ``True`` iff the durable workflow was started; ``False`` (with
-          the failure logged) when Temporal is disabled/unavailable, so the
-          caller falls back to its daemon-thread path. Never raises.
+        - The durable workflow is started. A collision with an already-running
+          workflow under this run_id's deterministic id (e.g. a resume issued
+          after an API-process restart, while the durable workflow itself kept
+          running) is handled per ``allow_already_started``:
+          - ``True`` (the default — used by the initial run and resume,
+            whose intent matches what's already running): treated as a
+            successful dispatch, a no-op; the run is NOT marked failed.
+          - ``False`` (used by restart, whose reset-to-cycle-0 intent does
+            NOT match a lingering old execution): raises
+            ``HTTPException(409)`` instead — also without marking the run
+            failed, since the old workflow may still be healthy and marking
+            it failed would cause that workflow to observe the status and
+            abort itself.
+          On any other failure (Temporal disabled/unavailable, or the start
+          RPC raising for any other reason), ``run_id`` is marked ``"failed"``
+          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised
+          — never spawns a thread.
     """
-
-    def _start() -> None:
+    try:
+        _require_temporal()
         from investment_team.strategy_lab.temporal.start_workflow import (
             start_strategy_lab_batch_workflow,
         )
 
         start_strategy_lab_batch_workflow(run_id, request)
+    except Exception as exc:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
 
-    return _dispatch_via_temporal(_start)
+        if isinstance(exc, WorkflowAlreadyStartedError):
+            if allow_already_started:
+                # The durable workflow for this run_id is already running
+                # (most commonly: resume was called after an API-process
+                # restart wiped _active_runs, but the workflow itself
+                # survived). Marking the run "failed" here would be observed
+                # by that still-running workflow as an external stop signal
+                # (via strategy_lab_external_terminal_status) and abort a
+                # healthy run, so treat the collision as the dispatch
+                # already having succeeded.
+                logger.info(
+                    "Strategy-lab workflow for run %s is already running; "
+                    "treating dispatch as a no-op success.",
+                    run_id,
+                )
+                return
+            # Restart's reset-to-cycle-0 intent does NOT match a lingering
+            # old execution the way resume's does — silently succeeding
+            # would tell the caller "restarted from scratch" while the old
+            # execution (old input, old progress) is what's actually still
+            # running. Reject distinctly from a real Temporal-down 503 so
+            # callers can tell "retry shortly" from "Temporal is down", and
+            # don't mark the run failed — the old workflow may still be
+            # healthy, and failing it would cause it to observe that status
+            # and abort itself.
+            raise HTTPException(
+                status_code=409,
+                detail="A prior execution for this run is still winding down; retry shortly.",
+            ) from exc
+        _fail_strategy_lab_run(
+            run_id, "Failed to start the strategy-lab workflow (Temporal unavailable)."
+        )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to start the strategy-lab workflow; Temporal worker unavailable.",
+        ) from exc
 
 
 def _ensure_no_active_run() -> None:
@@ -1926,6 +2024,38 @@ def _ensure_no_active_run() -> None:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
     if active:
         raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+
+
+def _require_run_transition_lock(run_id: str) -> threading.Lock:
+    """Acquire run_id's transition lock, or raise 409 when another transition
+    for the same run_id is already in flight.
+
+    Shared guard for the run/resume/restart endpoints: serializes same-run_id
+    transitions so two concurrent calls (e.g. two restarts, or a resume
+    racing a restart) for the same run_id can't both pass the check-then-act
+    window between ``_ensure_no_active_run()`` and this run_id's state being
+    written (#4028).
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns the acquired ``threading.Lock`` — held by the caller, who
+          MUST release it (``try/finally: run_lock.release()``) — when no
+          other run/resume/restart transition for this ``run_id`` is
+          currently in flight.
+
+    Raises:
+        - ``HTTPException`` 409 when another transition for this ``run_id``
+          is already in flight. Never blocks; holds nothing in that case.
+    """
+    run_lock = _acquire_run_transition_lock(run_id)
+    if run_lock is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Another transition for this run is already in progress; retry shortly.",
+        )
+    return run_lock
 
 
 def _build_run_state(
@@ -1982,41 +2112,6 @@ def _build_run_state(
     if contiguous_cycles is not None:
         state["contiguous_cycles"] = contiguous_cycles
     return state
-
-
-def _dispatch_or_thread(
-    run_id: str,
-    request: RunStrategyLabRequest,
-    *,
-    thread_name: str,
-    start_cycle_offset: Optional[int] = None,
-) -> None:
-    """Dispatch a run via Temporal, else fall back to an in-process daemon thread.
-
-    Shared dispatch path for the run/resume/restart endpoints.
-
-    Preconditions:
-        - ``run_id``'s state is already registered in ``_active_runs`` and persisted.
-
-    Postconditions:
-        - When ``_dispatch_strategy_lab_run`` starts the durable workflow, returns
-          without spawning a thread. Otherwise a daemon ``threading.Thread`` running
-          ``_strategy_lab_worker`` is started; ``start_cycle_offset`` is passed to the
-          worker only when not ``None`` (so initial/restart start from cycle 0).
-    """
-    if _dispatch_strategy_lab_run(run_id, request):
-        return
-    kwargs = {}
-    if start_cycle_offset is not None:
-        kwargs["start_cycle_offset"] = start_cycle_offset
-    thread = threading.Thread(
-        target=_strategy_lab_worker,
-        args=(run_id, request),
-        kwargs=kwargs,
-        name=thread_name,
-        daemon=True,
-    )
-    thread.start()
 
 
 def _dispatch_backtest_run(
@@ -2227,539 +2322,6 @@ def _backtest_job_status(job_id: str) -> Optional[str]:
     return data.get("status")
 
 
-# Bound memory for errored_details — enough for operators to diagnose
-# without letting a pathological run balloon the state dict.
-_ERRORED_DETAILS_MAX = 50
-
-
-def _strategy_lab_worker(
-    run_id: str, request: RunStrategyLabRequest, *, start_cycle_offset: int = 0
-) -> None:
-    """Background worker that executes the strategy lab batch and publishes progress via SSE.
-
-    Runs ``request.batch_count`` batches sequentially. Each batch generates
-    ``request.batch_size`` strategies, executed in waves of up to
-    ``request.max_parallel`` cycles in parallel via a ThreadPoolExecutor.
-    Between batches the signal-intelligence brief is regenerated so each new
-    batch's strategies are informed by every prior batch's persisted records.
-
-    Preconditions:
-        - ``run_id`` already has an entry in ``_active_runs`` (seeded by the
-          run/resume/restart route before dispatch) whose
-          ``completed_record_ids``/``errored_cycles``/``errored_details``/
-          ``skipped_cycles``/``tracker_merge_error_count`` reflect any prior
-          progress to carry forward (``0``/empty for a fresh run);
-          ``start_cycle_offset`` is the 0-based global cycle index to resume
-          from (``0`` for a fresh run).
-    Postconditions:
-        - ``_active_runs[run_id]`` is continuously updated via ``_update_run``
-          and mirrored to persistent storage as each cycle/batch completes.
-          ``errored_cycles``/``errored_details`` grow by one entry per failed
-          cycle (the latter capped at ``_ERRORED_DETAILS_MAX``);
-          ``skipped_cycles`` grows by one per cycle skipped for unavailable
-          market data; ``tracker_merge_error_count`` grows by one per
-          post-completion tracker-merge failure specifically, uncapped, so it
-          can always be subtracted from ``errored_cycles`` to recover an
-          exact double-count correction regardless of ``errored_details``'s
-          cap. On completion, ``status`` becomes ``"completed"`` or
-          ``"completed_with_errors"`` and a terminal ``complete`` SSE event
-          publishes; on a genuine user cancellation, ``status`` becomes
-          ``"cancelled"`` and a terminal ``cancelled`` SSE event publishes;
-          on an unhandled exception OR any other external stop (the run's
-          job-service status independently becoming ``"failed"`` or
-          ``"interrupted"``, e.g. a service-wide reconciliation), ``status``
-          becomes that same true value (never forced to ``"cancelled"``) and
-          a terminal ``error`` event publishes. Exactly one terminal SSE
-          event type (``complete``/``cancelled``/``error``) is published per
-          call.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    from investment_team.api.job_event_bus import cleanup_job, publish
-
-    def _update_run(updates: Dict[str, Any]) -> None:
-        with _lock:
-            state = _active_runs.get(run_id)
-            if state:
-                state.update(updates)
-                _persist_run_state(run_id, state)
-
-    def _publish(event_type: str, data: Optional[Dict[str, Any]] = None) -> None:
-        payload = data.copy() if data else {}
-        publish(run_id, payload, event_type=event_type)
-
-    try:
-        orchestrator = StrategyLabOrchestrator(convergence_tracker=ConvergenceTracker())
-
-        config = BacktestConfig(
-            start_date=request.start_date,
-            end_date=request.end_date,
-            initial_capital=request.initial_capital,
-            benchmark_symbol=request.benchmark_symbol,
-            transaction_cost_bps=request.transaction_cost_bps,
-            slippage_bps=request.slippage_bps,
-            # Realism cycle requires the cost-stress sweep on
-            # winning-candidate runs so a strategy whose edge collapses
-            # at 2× friction is rejected. The Strategy Lab worker always
-            # runs the walk-forward acceptance path, so we enable the
-            # sweep unconditionally here. Operators who want to disable
-            # it must edit BacktestConfig construction explicitly.
-            cost_stress=True,
-        )
-
-        batch_size = request.batch_size
-        batch_count = request.batch_count
-        total_cycles = batch_size * batch_count
-        # Clamp the request's concurrency to the env-configured ceiling so a
-        # memory-constrained host can bound the worker's peak footprint (each
-        # concurrent cycle holds its own market data + LLM contexts in-process).
-        max_parallel = _clamp_max_parallel(request.max_parallel)
-
-        # Translate the user's positive category selection into the exclusion
-        # list the design pipeline consumes. ``allowed_asset_classes`` is already
-        # normalized to canonical labels by the request validator; ``None`` (and
-        # a selection covering every class) means "no constraint".
-        exclude_asset_classes: Optional[List[str]] = None
-        if request.allowed_asset_classes:
-            # ``excluded_for_allowed`` returns ``[]`` when the selection covers
-            # every class; collapse that empty list to ``None`` so the downstream
-            # "no constraint" handling (which keys off ``None``) is uniform.
-            exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
-
-        # Resume support: derive starting batch + within-batch index from the flat offset.
-        start_batch_idx, start_within_batch = divmod(start_cycle_offset, batch_size)
-        if start_cycle_offset > 0:
-            logger.info(
-                "Strategy lab worker resuming from cycle %d (batch %d, step %d)",
-                start_cycle_offset + 1,
-                start_batch_idx + 1,
-                start_within_batch + 1,
-            )
-
-        with _lock:
-            _run_state_snapshot = _active_runs.get(run_id, {})
-            completed_ids: List[str] = list(_run_state_snapshot.get("completed_record_ids") or [])
-            # Carry forward skipped count on resume: resume_strategy_lab_run
-            # repopulates _active_runs[run_id]["skipped_cycles"] with the
-            # persisted pre-crash value, and run_strategy_lab seeds it to 0
-            # for fresh runs. Without this load the first post-resume
-            # _update_run({"skipped_cycles": ...}) would overwrite the
-            # persisted counter with only the new-since-resume count, making
-            # /strategy-lab/jobs and UI progress move backward.
-            skipped: int = int(_run_state_snapshot.get("skipped_cycles") or 0)
-            # Carry forward errored count on resume (same reasoning as skipped).
-            errored: int = int(_run_state_snapshot.get("errored_cycles") or 0)
-            errored_details: List[Dict[str, Any]] = list(
-                _run_state_snapshot.get("errored_details") or []
-            )
-            # Carry forward on resume (same reasoning as errored/errored_details).
-            tracker_merge_errors: int = int(
-                _run_state_snapshot.get("tracker_merge_error_count") or 0
-            )
-        completed_indices: set[int] = set(range(start_cycle_offset))
-        completed_batches = start_batch_idx
-        primary_tracker = orchestrator.convergence_tracker
-        run_failed = False
-        run_cancelled = False
-        # The specific external status ("cancelled"/"failed"/"interrupted")
-        # that triggered run_cancelled, so the terminal publish below can
-        # preserve it instead of assuming every external stop was a genuine
-        # user cancellation. Set alongside run_cancelled; None until then.
-        external_terminal_status: Optional[str] = None
-
-        for batch_idx in range(start_batch_idx, batch_count):
-            if run_failed or run_cancelled:
-                break
-
-            batch_num = batch_idx + 1
-            within_start = start_within_batch if batch_idx == start_batch_idx else 0
-
-            _update_run({"current_batch": batch_num, "completed_batches": completed_batches})
-            _publish(
-                "batch_start",
-                {
-                    "batch_index": batch_num,
-                    "total_batches": batch_count,
-                    "batch_size": batch_size,
-                    "completed_batches": completed_batches,
-                },
-            )
-
-            # Refresh the signal-intelligence brief at the start of every batch so the
-            # next batch's strategies are informed by every prior batch's results.
-            # Belt-and-suspenders: _compute_signal_brief_snapshot already catches
-            # expected failures, but an unexpected raise here must not kill the run.
-            try:
-                precomputed_brief, signal_brief_storage = _compute_signal_brief_snapshot(
-                    request.benchmark_symbol
-                )
-            except Exception as exc:  # pragma: no cover — signal brief failure path defensive; happy path covered by integration tests
-                logger.exception(
-                    "Signal brief computation raised unexpectedly at batch %d", batch_num
-                )
-                precomputed_brief = None
-                signal_brief_storage = {
-                    "skipped": True,
-                    "skipped_reason": "brief_failed",
-                    "error": str(exc),
-                }
-                _publish(
-                    "batch_warning",
-                    {"batch_index": batch_num, "reason": "signal_brief_failed"},
-                )
-
-            # Wave-based parallel execution within this batch.
-            # Cycle indices are global (1-based across the whole run): for batch B
-            # they range from (B-1) * batch_size + 1 to B * batch_size.
-            batch_start_cycle = batch_idx * batch_size  # 0-based
-            remaining = list(
-                range(batch_start_cycle + within_start, batch_start_cycle + batch_size)
-            )
-
-            while remaining and not run_failed and not run_cancelled:
-                wave_indices = remaining[:max_parallel]
-                remaining = remaining[max_parallel:]
-
-                wave_futures: Dict[Any, int] = {}
-                # Read + parse the prior records ONCE per wave and share the
-                # snapshot across all cycles in the wave, rather than having each
-                # concurrent cycle re-read and re-parse the whole table. Each cycle
-                # persists only at its end (after every sibling has already read at
-                # its start), so all cycles in a wave see the same pre-wave snapshot;
-                # reading it once here is equivalent and strictly more deterministic.
-                wave_prior_records = _snapshot_prior_records()
-                # Issue #269 — retain each cycle's orchestrator so the wave
-                # can merge its post-run ``convergence_tracker`` back into
-                # ``primary_tracker`` below. Keyed by 0-based cycle index
-                # for O(1) lookup during the deterministic merge loop.
-                wave_orchestrators: Dict[int, "StrategyLabOrchestrator"] = {}
-                with ThreadPoolExecutor(
-                    max_workers=len(wave_indices), thread_name_prefix="strat-lab"
-                ) as pool:
-                    for i in wave_indices:
-                        cn = i + 1  # cycle_num (1-based, global)
-
-                        def _make_on_phase(_cn: int):
-                            def on_phase(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
-                                cycle_data = {
-                                    "cycle_index": _cn,
-                                    "phase": phase,
-                                    **(data or {}),
-                                }
-                                _update_run({"current_cycle": cycle_data})
-                                _publish("progress", cycle_data)
-
-                            return on_phase
-
-                        cycle_orchestrator = StrategyLabOrchestrator(
-                            convergence_tracker=primary_tracker.snapshot(),
-                        )
-                        wave_orchestrators[i] = cycle_orchestrator
-                        future = pool.submit(
-                            _run_one_strategy_lab_cycle,
-                            config,
-                            cycle_orchestrator,
-                            precomputed_signal_brief=precomputed_brief,
-                            signal_brief_storage=signal_brief_storage,
-                            prior_records=wave_prior_records,
-                            on_phase=_make_on_phase(cn),
-                            exclude_asset_classes=exclude_asset_classes,
-                            paper_trading_enabled=request.paper_trading_enabled,
-                            paper_trading_lookback_days=request.paper_trading_lookback_days,
-                        )
-                        wave_futures[future] = cn
-
-                    # Collect results from this wave. Every future is drained
-                    # even after a deep failure sets run_failed: a sibling that
-                    # COMPLETED persisted its own record inside the cycle thread,
-                    # so skipping its future here would leave the record orphaned
-                    # (never counted in completed_record_ids/contiguous_cycles),
-                    # and a resume of the failed run — "failed" is resumable —
-                    # would re-run and duplicate that cycle. Draining also lets
-                    # each cycle's own handler clear current_cycle, so the
-                    # terminal state never keeps a stale in-progress cycle. The
-                    # run's single terminal 'error' event is instead deduplicated
-                    # at the deep-failure site below (guarded on run_failed).
-                    wave_results: List[tuple[int, StrategyLabRecord]] = []
-                    for future in as_completed(wave_futures):
-                        cn = wave_futures[future]
-                        try:
-                            record = future.result()
-                            completed_ids.append(record.lab_record_id)
-                            completed_indices.add(cn - 1)  # 0-based
-                            wave_results.append((cn - 1, record))
-
-                            # Track the highest contiguous completed index for
-                            # resume support; report the actual count for UI.
-                            contiguous = 0
-                            while contiguous in completed_indices:
-                                contiguous += 1
-                            _update_run(
-                                {
-                                    "completed_cycles": len(completed_ids),
-                                    "contiguous_cycles": contiguous,
-                                    "completed_record_ids": list(completed_ids),
-                                    "current_cycle": None,
-                                }
-                            )
-                            _publish(
-                                "cycle_complete",
-                                {
-                                    "cycle_index": cn,
-                                    "record_id": record.lab_record_id,
-                                    "completed_cycles": len(completed_ids),
-                                    "batch_index": batch_num,
-                                },
-                            )
-                        except HTTPException as exc:
-                            if exc.status_code == 502:
-                                logger.warning(
-                                    "Strategy lab cycle %d/%d skipped (no market data after fallback)",
-                                    cn,
-                                    total_cycles,
-                                )
-                                skipped += 1
-                                _update_run({"skipped_cycles": skipped, "current_cycle": None})
-                                _publish(
-                                    "cycle_skipped",
-                                    {
-                                        "cycle_index": cn,
-                                        "reason": "no_market_data",
-                                        "batch_index": batch_num,
-                                    },
-                                )
-                            else:  # non-502 HTTPException from a cycle is a deep failure
-                                logger.exception(
-                                    "Strategy lab cycle %d/%d failed", cn, total_cycles
-                                )
-                                # Only the FIRST deep failure in a wave publishes the
-                                # run's single terminal 'error' event. Concurrent
-                                # siblings that also deep-fail are logged above but must
-                                # not each publish a terminal event (as_completed yields
-                                # them one at a time to this single consumer, so the
-                                # run_failed check is race-free); the loop keeps draining
-                                # regardless so completed siblings are still counted.
-                                if not run_failed:
-                                    _update_run(
-                                        {
-                                            "status": "failed",
-                                            "error": f"Cycle {cn} failed: {exc}",
-                                            "current_cycle": None,
-                                        }
-                                    )
-                                    _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
-                                    run_failed = True
-                        except Exception as exc:
-                            logger.exception("Strategy lab cycle %d/%d errored", cn, total_cycles)
-                            errored += 1
-                            if len(errored_details) < _ERRORED_DETAILS_MAX:
-                                errored_details.append(
-                                    {
-                                        "cycle_index": cn,
-                                        "batch_index": batch_num,
-                                        "error": str(exc),
-                                        "exception_type": type(exc).__name__,
-                                    }
-                                )
-                            _update_run(
-                                {
-                                    "errored_cycles": errored,
-                                    "errored_details": errored_details,
-                                    "current_cycle": None,
-                                }
-                            )
-                            _publish(
-                                "cycle_errored",
-                                {
-                                    "cycle_index": cn,
-                                    "batch_index": batch_num,
-                                    "reason": type(exc).__name__,
-                                    "error": str(exc),
-                                },
-                            )
-
-                # A deep failure in this wave already published the run's one
-                # terminal 'error' event (run_failed). There is nothing left to
-                # merge, and — critically — no merge failure here must publish a
-                # second, post-terminal cycle_errored event or bump counters
-                # after the run has already ended. Drop the wave's results so the
-                # merge loop below is a no-op. (The primary tracker's final state
-                # is irrelevant once the run fails: no further waves run.)
-                if run_failed:
-                    wave_results = []
-
-                # Merge wave results into the primary convergence tracker in
-                # deterministic cycle-index order so that stall/diversity
-                # directives are reproducible across runs with identical inputs.
-                wave_results.sort(key=lambda pair: pair[0])
-                for _idx, record in wave_results:
-                    gate_results = [
-                        QualityGateResult(**g) if isinstance(g, dict) else g
-                        for g in record.quality_gate_results
-                    ]
-                    primary_tracker.record(record.strategy, gate_results)
-                    # Issue #269 — fold the cycle-local trial-count delta
-                    # back into the primary. Diversity state was already
-                    # merged via ``record()`` above, so ``merge_from`` only
-                    # touches ``_trial_count``.
-                    cycle_orch = wave_orchestrators.get(_idx)
-                    if cycle_orch is not None:
-                        try:
-                            primary_tracker.merge_from(cycle_orch.convergence_tracker)
-                        except Exception as exc:
-                            logger.exception(
-                                "Strategy lab tracker merge failed for cycle %d/%d",
-                                _idx + 1,
-                                total_cycles,
-                            )
-                            errored += 1
-                            tracker_merge_errors += 1
-                            if len(errored_details) < _ERRORED_DETAILS_MAX:
-                                errored_details.append(
-                                    {
-                                        "cycle_index": _idx + 1,
-                                        "batch_index": batch_num,
-                                        "error": str(exc),
-                                        "exception_type": type(exc).__name__,
-                                        "reason": "tracker_merge_failed",
-                                    }
-                                )
-                            _update_run(
-                                {
-                                    "errored_cycles": errored,
-                                    "errored_details": errored_details,
-                                    "tracker_merge_error_count": tracker_merge_errors,
-                                }
-                            )
-                            _publish(
-                                "cycle_errored",
-                                {
-                                    "cycle_index": _idx + 1,
-                                    "batch_index": batch_num,
-                                    "reason": "tracker_merge_failed",
-                                    # Carried so a live-streamed tracker-merge detail is
-                                    # shaped identically to the persisted/polled one
-                                    # (which stores both keys above): the marker under
-                                    # `reason`, the raising class under `exception_type`.
-                                    "exception_type": type(exc).__name__,
-                                    "error": str(exc),
-                                },
-                            )
-
-                # Check for external cancellation between waves
-                if not run_failed:
-                    external_terminal_status = _strategy_lab_external_terminal_status(run_id)
-                    if external_terminal_status is not None:
-                        logger.info(
-                            "Strategy lab run %s stopped externally (status=%s) — stopping after wave",
-                            run_id,
-                            external_terminal_status,
-                        )
-                        run_cancelled = True
-
-            if run_failed or run_cancelled:
-                break
-
-            completed_batches = batch_num
-            _update_run({"completed_batches": completed_batches, "current_batch": None})
-            _publish(
-                "batch_complete",
-                {
-                    "batch_index": batch_num,
-                    "total_batches": batch_count,
-                    "completed_batches": completed_batches,
-                },
-            )
-
-        if run_failed:
-            return
-
-        if run_cancelled:
-            # _STRATEGY_LAB_CANCEL_STATUSES covers "cancelled", "failed", and
-            # "interrupted": an external process (a service-wide "mark all
-            # interrupted" reconciliation, or an independent failure-detection
-            # mechanism) can mark a still-running job with any of them while this
-            # worker's thread is still alive. Persist the TRUE external status —
-            # never force "cancelled" — so an interrupt sweep isn't mislabeled a
-            # deliberate user cancellation in the persisted record. The terminal
-            # reset is identical regardless of which status it was; only the
-            # published event differs.
-            status = external_terminal_status or "failed"
-            _update_run({"status": status, "current_cycle": None, "current_batch": None})
-            if status == "cancelled":
-                # A distinct terminal event type — not folded into "error" — so
-                # SSE consumers never have to infer intent from `detail`'s free
-                # text. Mirrors the blogging team's own cancelled-job publish
-                # (agents/blogging/api/background.py: `_publish_terminal_event(
-                # job_id, "cancelled", ...)`), the established pattern for this
-                # exact distinction elsewhere in the codebase.
-                _publish("cancelled", {"detail": "Run cancelled by user"})
-            else:
-                # Carry the true terminal status on the event so live SSE
-                # consumers can announce "interrupted" vs "failed" precisely,
-                # instead of inferring it from `detail`'s free text (which the
-                # poll-fallback path gets right via the persisted status, but
-                # the live 'error' branch otherwise cannot). Absent on genuine
-                # failures elsewhere, where consumers default to "failed".
-                _publish(
-                    "error",
-                    {"detail": f"Run was marked {status} externally.", "terminal_status": status},
-                )
-            return
-
-        msg = (
-            f"Completed {len(completed_ids)} strategy lab cycle(s) across {batch_count} batch(es)."
-        )
-        if skipped:
-            msg += f" ({skipped} skipped due to unavailable market data)"
-        if errored:
-            msg += f" ({errored} cycle(s) errored)"
-
-        terminal_status = "completed_with_errors" if errored else "completed"
-        _update_run(
-            {
-                "status": terminal_status,
-                "current_cycle": None,
-                "current_batch": None,
-            }
-        )
-        _publish(
-            "complete",
-            {
-                "message": msg,
-                "status": terminal_status,
-                "completed_count": len(completed_ids),
-                "skipped_count": skipped,
-                "errored_count": errored,
-                "errored_details": errored_details,
-                "completed_batches": completed_batches,
-                "total_batches": batch_count,
-            },
-        )
-
-    except Exception as exc:
-        logger.exception("Strategy lab worker failed for run %s", run_id)
-        _update_run({"status": "failed", "error": str(exc), "current_cycle": None})
-        _publish("error", {"detail": str(exc)})
-    finally:
-        # Schedule cleanup of _active_runs entry. Catastrophic worker-level
-        # failures ("failed") get a longer window so UI polls that arrive
-        # after SSE disconnect still see the terminal status and error text.
-        with _lock:
-            final_state = _active_runs.get(run_id)
-        final_status = (final_state or {}).get("status")
-        cleanup_delay = 900.0 if final_status == "failed" else 300.0
-
-        def _cleanup() -> None:
-            with _lock:
-                _active_runs.pop(run_id, None)
-            cleanup_job(run_id)
-
-        timer = threading.Timer(cleanup_delay, _cleanup)
-        timer.daemon = True
-        timer.start()
-
-
 @app.get("/strategy-lab/config", response_model=StrategyLabConfigResponse)
 def get_strategy_lab_config() -> StrategyLabConfigResponse:
     """Return operator-tunable Strategy Lab limits for the UI to read on load."""
@@ -2777,29 +2339,39 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
 
     Use ``GET /strategy-lab/runs/{run_id}/stream`` for real-time SSE progress updates,
     or ``GET /strategy-lab/runs/{run_id}/status`` for polling.
+
+    Raises ``HTTPException(409)`` when another run is already active, or
+    (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
+    when another transition for this freshly-minted run_id is already in
+    flight (#4028). The global check runs before minting a run_id/acquiring
+    its transition lock, so a rejected request never allocates a registry
+    entry that would otherwise never be looked up again.
     """
     _ensure_no_active_run()
 
     run_id = f"run-{uuid.uuid4().hex[:8]}"
-    now = _now()
-    total_cycles = request.batch_size * request.batch_count
+    run_lock = _require_run_transition_lock(run_id)
+    try:
+        now = _now()
+        total_cycles = request.batch_size * request.batch_count
 
-    initial_state = _build_run_state(
-        run_id,
-        started_at=now,
-        total_cycles=total_cycles,
-        batch_size=request.batch_size,
-        batch_count=request.batch_count,
-        request_payload=request.model_dump(),
-    )
-    with _lock:
-        _active_runs[run_id] = initial_state
-    _persist_run_state(run_id, initial_state, create=True)
+        initial_state = _build_run_state(
+            run_id,
+            started_at=now,
+            total_cycles=total_cycles,
+            batch_size=request.batch_size,
+            batch_count=request.batch_count,
+            request_payload=request.model_dump(),
+        )
+        with _lock:
+            _active_runs[run_id] = initial_state
+        _persist_run_state(run_id, initial_state, create=True)
 
-    # When Temporal is enabled, dispatch the run as a durable workflow so it
-    # survives a worker/process restart and is visible in the Temporal UI; on
-    # any dispatch failure fall back to the in-process daemon thread.
-    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-{run_id}")
+        # Dispatch the run as a durable Temporal workflow so it survives a
+        # worker/process restart and is visible in the Temporal UI.
+        _dispatch_strategy_lab_run(run_id, request)
+    finally:
+        run_lock.release()
 
     return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
 
@@ -2961,19 +2533,33 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status (via
-          ``_get_run_state``) is in ``RESUMABLE_STATUSES`` (pending/running/
-          failed/interrupted/agent_crash).
+        - ``run_id`` identifies a run whose persisted status — read INSIDE
+          the transition lock below, not beforehand — is in
+          ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/
+          agent_crash). Reading it (or the counters/payload derived from it)
+          before acquiring the lock could observe a stale snapshot: another
+          transition for this same run_id could fully complete — write its
+          own state, dispatch, and even reach a terminal status — before
+          this request obtains the lock, at which point ``_ensure_no_active_run()``
+          no longer sees a ``"running"`` entry to block on, and a resume
+          built from the stale snapshot would rebuild the run from
+          outdated counters/payload and dispatch duplicate work. Only a
+          cheap existence check (``run_id`` resolves to *some* known run)
+          runs before the lock, so a request for a nonexistent run_id never
+          allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict
           (the original ``RunStrategyLabRequest`` payload).
         - No other run currently has status ``"running"``.
+        - No other run/resume/restart transition for this run_id is
+          currently in flight (checked first, before re-reading state or
+          calling ``_ensure_no_active_run()``).
 
     Postconditions:
         - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
           progress — ``completed_record_ids``/``errored_cycles``/
           ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
           — and persists the new state.
-        - Dispatches the worker (Temporal or a daemon thread) from the first
+        - Dispatches the durable Temporal workflow from the first
           not-yet-contiguously-completed cycle, so no already-persisted cycle
           is re-run (and thus never duplicated).
         - Returns the run's start response with the resume offset and total
@@ -2984,59 +2570,67 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - ``HTTPException`` 400: the run's status is not in
           ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
           dict.
-        - ``HTTPException`` 409: another run is already ``"running"``.
+        - ``HTTPException`` 409: another transition for this run_id is
+          already in flight (#4028), or another run is already ``"running"``.
     """
-    state = _get_run_state(run_id)
+    # Cheap existence-only check (no lock): avoids growing the transition-lock
+    # registry for a run_id that was never created (or already purged).
+    if _get_run_state(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
+
+    run_lock = _require_run_transition_lock(run_id)
     try:
-        validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+        # Re-read + derive everything from state INSIDE the lock — see
+        # Preconditions for why reading it beforehand risks a stale-snapshot
+        # duplicate dispatch.
+        state = _get_run_state(run_id)
+        try:
+            validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
+        except ValueError as exc:
+            code = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
 
-    payload = state.get("request_payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available.")
+        payload = state.get("request_payload")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Original request payload not available.")
 
-    completed_cycles = state.get("completed_cycles", 0)
-    # contiguous_cycles tracks the highest unbroken sequence from index 0
-    # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
-    contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
-    request = RunStrategyLabRequest(**payload)
-    total_cycles = request.batch_size * request.batch_count
-    completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+        completed_cycles = state.get("completed_cycles", 0)
+        # contiguous_cycles tracks the highest unbroken sequence from index 0
+        # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
+        contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
+        request = RunStrategyLabRequest(**payload)
+        total_cycles = request.batch_size * request.batch_count
+        completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
 
-    _ensure_no_active_run()
+        _ensure_no_active_run()
 
-    # Re-initialize in-memory state
-    resumed_state = _build_run_state(
-        run_id,
-        started_at=state.get("started_at", _now()),
-        total_cycles=total_cycles,
-        batch_size=request.batch_size,
-        batch_count=request.batch_count,
-        request_payload=payload,
-        completed_cycles=completed_cycles,
-        contiguous_cycles=contiguous_cycles,
-        skipped_cycles=state.get("skipped_cycles", 0),
-        errored_cycles=state.get("errored_cycles", 0),
-        errored_details=state.get("errored_details", []),
-        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
-        completed_record_ids=state.get("completed_record_ids", []),
-        completed_batches=completed_batches,
-    )
-    with _lock:
-        _active_runs[run_id] = resumed_state
-    _persist_run_state(run_id, resumed_state)
+        # Re-initialize in-memory state
+        resumed_state = _build_run_state(
+            run_id,
+            started_at=state.get("started_at", _now()),
+            total_cycles=total_cycles,
+            batch_size=request.batch_size,
+            batch_count=request.batch_count,
+            request_payload=payload,
+            completed_cycles=completed_cycles,
+            contiguous_cycles=contiguous_cycles,
+            skipped_cycles=state.get("skipped_cycles", 0),
+            errored_cycles=state.get("errored_cycles", 0),
+            errored_details=state.get("errored_details", []),
+            tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
+            completed_record_ids=state.get("completed_record_ids", []),
+            completed_batches=completed_batches,
+        )
+        with _lock:
+            _active_runs[run_id] = resumed_state
+        _persist_run_state(run_id, resumed_state)
 
-    # The Temporal activity derives its resume offset from the persisted
-    # contiguous-cycle count (set above), so a durable resume picks up where the
-    # run left off. Fall back to the daemon thread with an explicit offset.
-    _dispatch_or_thread(
-        run_id,
-        request,
-        thread_name=f"strategy-lab-resume-{run_id}",
-        start_cycle_offset=contiguous_cycles,
-    )
+        # The Temporal activity derives its resume offset from the persisted
+        # contiguous-cycle count (set above), so a durable resume picks up where the
+        # run left off.
+        _dispatch_strategy_lab_run(run_id, request)
+    finally:
+        run_lock.release()
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
@@ -3055,66 +2649,169 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Restart a strategy lab run from the beginning.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status (via
-          ``_get_run_state``) is in ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
+        - ``run_id`` identifies a run whose persisted status — read INSIDE
+          the transition lock below, not beforehand — is in
+          ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
           (completed/failed/cancelled/interrupted/agent_crash/completed_with_errors).
+          Reading it before acquiring the lock could observe another
+          transition's transiently-written "running" reset and misreport a
+          genuine in-flight-elsewhere race as a permanent 400 instead of a
+          retryable 409 ("running" is deliberately excluded from
+          ``RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
+          resolves to *some* known run) runs before the lock, so a request
+          for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
         - No other run currently has status ``"running"``.
+        - No other run/resume/restart transition for this run_id is
+          currently in flight (checked first, before re-reading state or
+          calling ``_ensure_no_active_run()``).
 
     Postconditions:
+        - Any prior Temporal execution still running under this run_id's
+          deterministic workflow id is terminated and confirmed closed
+          *before* any state is written — closing the window where that
+          execution could observe (and act on) a transiently-optimistic
+          "running" reset before a collision would otherwise be detected.
         - Rebuilds ``_active_runs[run_id]`` as a full reset — ``contiguous_cycles``
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
           carried forward — and persists the new state.
-        - Dispatches the worker (Temporal or a daemon thread) starting at
-          cycle 0.
+        - Dispatches the durable Temporal workflow starting at cycle 0. If
+          that dispatch still 409s (a residual collision — e.g. a second
+          restart/resume racing in after the termination check above), the
+          reset is rolled back — both ``_active_runs[run_id]`` and the
+          persisted state are restored to their pre-restart snapshot — so
+          the run isn't left wedged showing ``"running"`` and blocking every
+          future run/resume/restart call.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
         - ``HTTPException`` 400: the run's status is not restartable, or its
           ``request_payload`` is missing/not a dict.
-        - ``HTTPException`` 409: another run is already ``"running"``.
+        - ``HTTPException`` 409: another transition for this run_id is
+          already in flight (#4028), another run is already ``"running"``,
+          the prior execution couldn't be confirmed terminated within budget
+          (retry shortly), or a residual dispatch collision occurred despite
+          that confirmation (a collision the dispatch layer refuses to
+          silently resume — see ``_dispatch_strategy_lab_run``'s
+          ``allow_already_started`` parameter; the optimistic reset is rolled
+          back in this case, see Postconditions).
+        - ``HTTPException`` 503: Temporal is disabled/unavailable, or the
+          prior execution couldn't be resolved due to a Temporal-side error.
+
+    Two concurrent restart/resume calls for the same run_id can no longer
+    both pass the check-then-write window (#4028, closed by
+    ``_require_run_transition_lock``, which reserves this run_id for the
+    whole check→terminate→write→dispatch sequence below).
+
+    Known, accepted residual race (requires multiple unlikely events to
+    align; closing it is a real feature, not a quick patch — tracked as a
+    follow-up rather than fixed here):
+        - Confirming the old *workflow* terminated does not guarantee an
+          already in-flight, non-heartbeating *activity* has stopped —
+          Strategy Lab's activities aren't cooperatively cancellable, so one
+          can still commit a cycle record or paper trade after the new
+          cycle-0 workflow has started (tracked as #4029).
     """
-    state = _get_run_state(run_id)
-    # "completed_with_errors" is a terminal outcome of the same workflow as
-    # "completed" and must be restartable. Extend the shared set locally
-    # rather than leaking a lab-specific status into job_service_client.
-    _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
+    # Cheap existence-only check (no lock): avoids growing the transition-lock
+    # registry for a run_id that was never created (or already purged),
+    # mirroring run_strategy_lab's own check-before-lock ordering.
+    if _get_run_state(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
+
+    run_lock = _require_run_transition_lock(run_id)
     try:
-        validate_job_for_action(state, run_id, _lab_restartable, "restarted")
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+        # Re-read + validate state INSIDE the lock: reading it beforehand
+        # could observe a concurrent restart's transiently-written "running"
+        # reset (written while that request still holds this same lock) and
+        # incorrectly reject with 400 "not restartable" instead of the
+        # promised retryable 409 — "running" is deliberately excluded from
+        # RESTARTABLE_STATUSES, so status is only trustworthy once no other
+        # transition for this run_id can be concurrently rewriting it.
+        state = _get_run_state(run_id)
+        # "completed_with_errors" is a terminal outcome of the same workflow as
+        # "completed" and must be restartable. Extend the shared set locally
+        # rather than leaking a lab-specific status into job_service_client.
+        _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
+        try:
+            validate_job_for_action(state, run_id, _lab_restartable, "restarted")
+        except ValueError as exc:
+            code = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
 
-    payload = state.get("request_payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available.")
+        payload = state.get("request_payload")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Original request payload not available.")
 
-    _ensure_no_active_run()
+        _ensure_no_active_run()
 
-    request = RunStrategyLabRequest(**payload)
-    total_cycles = request.batch_size * request.batch_count
+        request = RunStrategyLabRequest(**payload)
+        total_cycles = request.batch_size * request.batch_count
 
-    restarted_state = _build_run_state(
-        run_id,
-        started_at=_now(),
-        total_cycles=total_cycles,
-        batch_size=request.batch_size,
-        batch_count=request.batch_count,
-        request_payload=payload,
-        # Reset the resume offset the Temporal activity reads, so a durable
-        # restart re-runs from cycle 0 instead of resuming a prior run's
-        # contiguous-cycle count persisted on this run_id.
-        contiguous_cycles=0,
-    )
-    with _lock:
-        _active_runs[run_id] = restarted_state
-    _persist_run_state(run_id, restarted_state)
+        # Resolve any prior execution BEFORE writing anything: a still-running
+        # workflow polls persisted status between waves (strategy_lab_external_
+        # terminal_status), so writing the optimistic "running" reset first would
+        # let it observe that transient state and run an extra wave before a
+        # dispatch collision is even detected.
+        _require_temporal()
+        from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
+        from shared.temporal import terminate_and_await_workflow_sync
 
-    # Restart from scratch through Temporal when enabled (offset 0, per the
-    # reset persisted state above); else fall back to the daemon thread.
-    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-restart-{run_id}")
+        try:
+            terminate_and_await_workflow_sync(
+                f"{WORKFLOW_ID_PREFIX}{run_id}",
+                reason=f"Restarted via /strategy-lab/runs/{run_id}/restart",
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="A prior execution for this run is still winding down; retry shortly.",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to resolve the prior strategy-lab execution before "
+                    "restarting; Temporal worker unavailable."
+                ),
+            ) from exc
+
+        restarted_state = _build_run_state(
+            run_id,
+            started_at=_now(),
+            total_cycles=total_cycles,
+            batch_size=request.batch_size,
+            batch_count=request.batch_count,
+            request_payload=payload,
+            # Reset the resume offset the Temporal activity reads, so a durable
+            # restart re-runs from cycle 0 instead of resuming a prior run's
+            # contiguous-cycle count persisted on this run_id.
+            contiguous_cycles=0,
+        )
+        with _lock:
+            _active_runs[run_id] = restarted_state
+        _persist_run_state(run_id, restarted_state)
+
+        # Restart from scratch through Temporal (offset 0, per the reset
+        # persisted state above). allow_already_started=False: unlike resume, a
+        # collision here means an old, un-reset execution is still running, not
+        # that the intended restart is already in flight.
+        try:
+            _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                # The reset above never actually took effect (an old execution
+                # is still running under this run_id) — restore the pre-restart
+                # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
+                # "running" entry, blocking every future run/resume/restart call
+                # until the stale execution happens to overwrite it on its own.
+                with _lock:
+                    _active_runs[run_id] = state
+                _persist_run_state(run_id, state)
+            raise
+    finally:
+        run_lock.release()
 
     return StrategyLabRunStartResponse(
         run_id=run_id,

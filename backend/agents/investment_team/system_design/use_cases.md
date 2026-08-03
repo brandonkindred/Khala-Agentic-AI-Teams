@@ -150,11 +150,11 @@ flowchart LR
 
 | Use case | Endpoint | Agent(s) | Persists to |
 |---|---|---|---|
-| Run strategy lab batch | `POST /strategy-lab/run` | `_strategy_lab_worker` → `SignalIntelligenceExpert` → `StrategyIdeationAgent` → `BacktestingAgent` | `investment_strategy_lab_records` |
+| Run strategy lab batch | `POST /strategy-lab/run` | `StrategyLabBatchWorkflow` → `SignalIntelligenceExpert` → `StrategyIdeationAgent` → `BacktestingAgent` | `investment_strategy_lab_records` |
 | Stream run progress | `GET /strategy-lab/runs/{id}/stream` | `job_event_bus` subscription | — |
 | Poll run status | `GET /strategy-lab/runs/{id}/status` | `_active_runs` + `_load_run_from_job_service` | — |
-| Resume paused run | `POST /strategy-lab/runs/{id}/resume` | `_strategy_lab_worker` | `investment_strategy_lab_records` |
-| Restart failed run | `POST /strategy-lab/runs/{id}/restart` | `_strategy_lab_worker` | `investment_strategy_lab_records` |
+| Resume paused run | `POST /strategy-lab/runs/{id}/resume` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |
+| Restart failed run | `POST /strategy-lab/runs/{id}/restart` | `StrategyLabBatchWorkflow` | `investment_strategy_lab_records` |
 | List active runs | `GET /strategy-lab/runs` | `_active_runs` | — |
 | List winners / losers | `GET /strategy-lab/results` | — (read-only) | `investment_strategy_lab_records` |
 | List lab jobs | `GET /strategy-lab/jobs` | — (read-only) | `investment_strategy_lab_records` |

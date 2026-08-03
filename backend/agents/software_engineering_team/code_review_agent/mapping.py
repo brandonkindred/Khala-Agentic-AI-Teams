@@ -52,7 +52,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from llm_service import (
     LLMClient,
@@ -65,6 +65,7 @@ from llm_service import (
     LLMUnreachableAfterRetriesError,
 )
 from shared.concurrency import parallel_map
+from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -93,6 +94,7 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
+from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +140,14 @@ def clear_chunk_outcome_cache() -> None:
     """Drop every cached map-phase outcome and any in-flight registration.
 
     Postconditions:
-        - The process-global cache is empty; the next review of any chunk is a
-          guaranteed miss. Intended for tests (the cache persists across
+        - The process-global cache is empty when this function returns. The next
+          review of a chunk is a guaranteed miss only when no review of that
+          chunk is currently in flight; a leader already in flight when this is
+          called holds no lock across its LLM call (see ``_CHUNK_INFLIGHT``
+          above) and can still write its outcome to the cache after this
+          returns. Callers that must force a cold review should ensure no
+          review is in flight (or await in-flight completion) before relying on
+          a miss. Intended for tests (the cache persists across
           ``run_coordinator`` calls by design) and for callers that must force a
           cold review.
         - The in-flight registry is cleared too. In production it is empty
@@ -148,6 +156,9 @@ def clear_chunk_outcome_cache() -> None:
     """
     with _CHUNK_OUTCOME_CACHE_LOCK:
         _CHUNK_OUTCOME_CACHE.clear()
+        # A leader already in flight (see _CHUNK_INFLIGHT) holds no lock across
+        # its LLM call, so it can still write its outcome to the cache below
+        # after this clear returns — see the postcondition above.
         _CHUNK_INFLIGHT.clear()
 
 
@@ -345,21 +356,19 @@ def _thinking_off_retry_enabled() -> bool:
 def _chain_has(exc: BaseException, types: Tuple[type, ...]) -> bool:
     """Whether ``exc`` or its cause/context chain contains one of ``types``.
 
+    Preconditions:
+        - ``types`` may be empty; an empty tuple means no type can match.
+
     Postconditions:
-        - Walks the ``__cause__``/``__context__`` chain up to a bounded depth
-          (strands may wrap the client error) and returns True on the first match.
+        - Walks the ``__cause__``/``__context__`` chain via ``_exception_chain``
+          and returns True on the first match. Empty ``types`` returns False.
           Never raises. Mirrors the traversal in ``_is_content_failure`` for a
           narrower type check (used to gate the thinking-off retry to the failures
           it can actually fix).
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
-        if isinstance(current, types):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    if not types:
+        return False
+    return any(isinstance(c, types) for c in _exception_chain(exc))
 
 
 def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _ChunkOutcome:
@@ -469,6 +478,66 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
     return _ChunkOutcome(not_reviewed_issues=issues)
 
 
+def _bisect_halves_run_sequentially(llm: LLMClient) -> bool:
+    """True when a bisected chunk's two halves must be reviewed one at a time.
+
+    Mirrors ``coordinator._tail_passes_run_sequentially``: scripted
+    ``DummyLLMClient`` doubles use a shared non-thread-safe response index, so
+    fanning the halves out concurrently would corrupt scripted call order/count.
+    Duplicated locally rather than imported — ``coordinator`` imports from this
+    module, so the reverse import would be circular.
+
+    Postconditions: returns ``True`` iff ``llm`` is (or wraps) a
+    ``DummyLLMClient``. Pure.
+    """
+    from llm_service.clients.dummy import DummyLLMClient
+
+    if isinstance(llm, DummyLLMClient):
+        return True
+    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+
+
+def _run_reviewer_call(
+    reviewer: ChunkReviewAgent,
+    chunk_input: ChunkReviewInput,
+    run_limiter: Optional[threading.Semaphore],
+    **kwargs: Any,
+) -> ChunkReviewOutput:
+    """Invoke ``reviewer.run``, honoring the run-wide concurrency ceiling.
+
+    The single choke point every actual chunk-review LLM call passes through —
+    the top-level review, a same-input retry, the thinking-off retry, and each
+    bisection half all route through here — so a semaphore threaded down from
+    ``run_coordinator`` can cap the *total* number of concurrent
+    ``reviewer.run`` calls for one review run, not just the outer map-phase
+    fan-out width (see ``_map_chunks``'s ``run_limiter`` parameter).
+
+    Preconditions:
+        - ``run_limiter`` is ``None`` (no run-wide ceiling — a direct caller,
+          a test, or the Temporal per-activity call path, none of which share
+          a limiter object across chunk reviews) or a ``threading.Semaphore``
+          sized to the run's ``_map_parallelism()`` budget.
+
+    Postconditions:
+        - Returns ``reviewer.run(chunk_input, **kwargs)``'s result or lets its
+          exception propagate unchanged.
+        - When ``run_limiter`` is given, the permit is acquired immediately
+          before the call and released immediately after (success or
+          exception) — held only for this one call's duration, never across a
+          caller's recursion — so a chunk that goes on to bisect after this
+          call returns never blocks its own children on a permit it is still
+          holding, and the semaphore's capacity always equals the true
+          run-wide ceiling on in-flight ``reviewer.run`` calls.
+    """
+    if run_limiter is None:
+        return reviewer.run(chunk_input, **kwargs)
+    run_limiter.acquire()
+    try:
+        return reviewer.run(chunk_input, **kwargs)
+    finally:
+        run_limiter.release()
+
+
 def _review_chunk_with_recovery(
     reviewer: ChunkReviewAgent,
     chunk: ReviewChunk,
@@ -477,6 +546,7 @@ def _review_chunk_with_recovery(
     surface_by_path: Optional[Dict[str, List[str]]] = None,
     depth: int = 0,
     retried: bool = False,
+    run_limiter: Optional[threading.Semaphore] = None,
 ) -> _ChunkOutcome:
     """Review one chunk, recovering from content failures by retry or bisection.
 
@@ -490,6 +560,11 @@ def _review_chunk_with_recovery(
           surface from it (the half no longer contains the other half's files, so
           those files are now genuine siblings and their surface must be shown).
           A same-input retry keeps the surface unchanged.
+        - ``run_limiter`` is ``None`` or a ``threading.Semaphore`` sized to
+          ``_map_parallelism()`` for this run (see ``_run_reviewer_call``).
+          Threaded unchanged through every recursive call this function makes
+          (same-input retry, each bisection half) so the ceiling it enforces
+          covers the whole recovery tree, not just this call.
 
     Postconditions:
         - Returns an outcome covering every line of the chunk — every line is
@@ -501,8 +576,14 @@ def _review_chunk_with_recovery(
           — e.g. a ``KeyError``/``TypeError`` from a reviewer bug) propagate
           unchanged: they fail closed so the defect surfaces, rather than being
           masked as a not-reviewed finding.
-        - Known content failures bisect up to the depth cap; any chunk that
-          cannot bisect further — the original or a bisected child — gets
+        - Known content failures bisect up to the depth cap; the two halves are
+          reviewed concurrently (via ``parallel_map``) unless ``reviewer.llm`` is
+          a scripted ``DummyLLMClient`` double or ``_map_parallelism() <= 1``, in
+          which case they run sequentially exactly as before — see
+          ``_bisect_halves_run_sequentially``. Either way, results merge via
+          ``_ChunkOutcome.absorb()`` in a fixed halves[0]-then-halves[1] order,
+          independent of which half's call actually finishes first. Any chunk
+          that cannot bisect further — the original or a bisected child — gets
           exactly one same-input retry, EXCEPT a ladder-spent reasoning-loop
           semantic exhaustion (``finish_reason != "length"`` with
           ``retry_thinking_level`` set): that skips both the line-split and the
@@ -529,6 +610,13 @@ def _review_chunk_with_recovery(
           at the merged level other chunks' findings would mask the empty-issues
           condition and the minor-only auto-approve net would silently discard
           the rejection.
+        - Every actual ``reviewer.run`` call this function (or a recursive call
+          of it) makes goes through ``_run_reviewer_call``, so when
+          ``run_limiter`` is given, the total number of concurrent
+          ``reviewer.run`` calls across the top-level review, any same-input
+          retry, the thinking-off retry, and both bisection halves never
+          exceeds the semaphore's capacity — a true run-wide ceiling, not just
+          a cap on the two-worker bisection pool below.
     """
     chunk_input = ChunkReviewInput(
         code_chunk=chunk.content,
@@ -539,7 +627,7 @@ def _review_chunk_with_recovery(
     )
     failure: Optional[BaseException] = None
     try:
-        output = reviewer.run(chunk_input)
+        output = _run_reviewer_call(reviewer, chunk_input, run_limiter)
     except Exception as exc:
         if _is_infra_failure(exc):
             raise CodeReviewUnavailableError(
@@ -602,24 +690,39 @@ def _review_chunk_with_recovery(
         # the other half's files, so those files become genuine siblings whose
         # surface it should see (when surface_by_path is unavailable — a direct
         # caller passed None — the parent's surface rides along unchanged).
-        outcome = _review_chunk_with_recovery(
-            reviewer,
-            halves[0],
-            base_input,
-            _half_sibling_surface(halves[0], surface_by_path, sibling_surface),
-            surface_by_path,
-            depth + 1,
-        )
-        outcome.absorb(
-            _review_chunk_with_recovery(
+        branches: List[Callable[[], _ChunkOutcome]] = [
+            lambda half=halves[0]: _review_chunk_with_recovery(
                 reviewer,
-                halves[1],
+                half,
                 base_input,
-                _half_sibling_surface(halves[1], surface_by_path, sibling_surface),
+                _half_sibling_surface(half, surface_by_path, sibling_surface),
                 surface_by_path,
                 depth + 1,
-            )
-        )
+                run_limiter=run_limiter,
+            ),
+            lambda half=halves[1]: _review_chunk_with_recovery(
+                reviewer,
+                half,
+                base_input,
+                _half_sibling_surface(half, surface_by_path, sibling_surface),
+                surface_by_path,
+                depth + 1,
+                run_limiter=run_limiter,
+            ),
+        ]
+        # Each half is a fully independent recursive call (no shared mutable
+        # state), so they fan out concurrently — unless the LLM double can't
+        # tolerate it or the operator has capped parallelism to 1. Either way,
+        # ``results[0]``/``results[1]`` preserve halves[0]/halves[1] order (see
+        # ``parallel_map``'s ``preserve_order`` default), so the merge below is
+        # identical to the sequential path regardless of completion order.
+        if _bisect_halves_run_sequentially(reviewer.llm) or _map_parallelism() <= 1:
+            outcome = branches[0]()
+            outcome.absorb(branches[1]())
+        else:
+            results = parallel_map(branches, lambda fn: fn(), max_workers=2, skip_none=False)
+            outcome = results[0]
+            outcome.absorb(results[1])
         return outcome
     # A same-input retry is worthwhile unless it is futile: a ladder-spent
     # reasoning-loop exhaustion (``skip_retry``) would only re-run the model's
@@ -633,7 +736,14 @@ def _review_chunk_with_recovery(
             chunk.paths_label,
         )
         return _review_chunk_with_recovery(
-            reviewer, chunk, base_input, sibling_surface, surface_by_path, depth, retried=True
+            reviewer,
+            chunk,
+            base_input,
+            sibling_surface,
+            surface_by_path,
+            depth,
+            retried=True,
+            run_limiter=run_limiter,
         )
     # Last resort before degrading: for the content failures a non-thinking pass can
     # fix — a reasoning-only response (``LLMSemanticExhaustionError``) or an
@@ -656,7 +766,7 @@ def _review_chunk_with_recovery(
             chunk.paths_label,
         )
         try:
-            recovered = reviewer.run(chunk_input, think=False)
+            recovered = _run_reviewer_call(reviewer, chunk_input, run_limiter, think=False)
         except Exception as exc2:
             # This best-effort retry runs after the original content failure has been
             # handled; an infra failure still surfaces as unavailable, anything else
@@ -860,8 +970,11 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     Preconditions:
         - ``base_input`` is the shared ``ChunkReviewInput`` field dict built in
           ``run_coordinator``. Every value must be natively JSON-serializable
-          (str/number/bool/list/dict/None) except ``profile``, which is a
-          ``ReviewProfile`` normalized to its ``.value`` here.
+          (str/number/bool/list/dict/None) or an object exposing a ``.value``
+          attribute whose value is JSON-serializable — every value (not just
+          ``profile``) is normalized via ``getattr(value, "value", value)``
+          before hashing; ``profile`` is typically a ``ReviewProfile`` handled
+          the same way as any other enum-like field.
 
     Postconditions:
         - Returns a hex digest that changes whenever any shared review input
@@ -900,20 +1013,23 @@ def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str)
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
-          resolved model) changes. It is derived from ``input_data.model_dump()``,
-          so it keys on the whole input, not a hand-picked subset: a new
-          ``CodeReviewInput`` field is hashed automatically and can never be
+          resolved model) changes, and also whenever the output-affecting
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` toggle flips. It is derived
+          from ``input_data.model_dump()`` plus that toggle, so it keys on the
+          whole input (not a hand-picked subset) plus consolidation identity: a
+          new ``CodeReviewInput`` field is hashed automatically and can never be
           silently dropped. Two submissions collide only when their full inputs
-          are identical, so a hit means the review would be the same work.
-          (Every current field is verdict-affecting, so this is exactly the
-          submission identity; a future non-verdict field would only cause extra
-          misses — full re-reviews — never a stale hit.)
+          and consolidation setting are identical, so a hit means the review
+          would be the same work. (Every current field is verdict-affecting, so
+          this is exactly the submission identity; a future non-verdict field
+          would only cause extra misses — full re-reviews — never a stale hit.)
         - Computed from raw fields only (no compaction/LLM), so the short-circuit
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
     payload = input_data.model_dump(mode="json")
     payload["__model__"] = model_fingerprint
+    payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
     return _stable_json_digest(payload)
 
 
@@ -941,11 +1057,13 @@ def _cached_review_chunk(
     context_fp: str,
     sibling_surface: str = "",
     surface_by_path: Optional[Dict[str, List[str]]] = None,
+    run_limiter: Optional[threading.Semaphore] = None,
 ) -> _ChunkOutcome:
     """Review one chunk, reusing a cached or in-flight map-phase outcome.
 
     Preconditions:
-        - Same as ``_review_chunk_with_recovery`` for ``base_input``.
+        - Same as ``_review_chunk_with_recovery`` for ``base_input`` and
+          ``run_limiter``.
         - ``context_fp`` is the run's ``_context_fingerprint`` (folds in the
           shared context and the resolved model).
         - ``sibling_surface`` is this chunk's view of the other changed files'
@@ -955,9 +1073,10 @@ def _cached_review_chunk(
           recomputes its own sibling surface.
 
     Postconditions:
-        - When caching is disabled (``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` ==
-          0) this is a pure passthrough to ``_review_chunk_with_recovery`` — no
-          caching and no single-flight, identical to no cache at all.
+        - When caching is disabled (non-positive
+          ``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE``) this is a pure passthrough to
+          ``_review_chunk_with_recovery`` — no caching and no single-flight,
+          identical to no cache at all.
         - On a hit, returns a deep clone of the stored outcome (never the shared
           instance), so the caller may mutate it freely; findings/verdicts are
           reproduced identically.
@@ -983,11 +1102,14 @@ def _cached_review_chunk(
           unchanged and hands the same exception to its waiters, so they fail the
           same way rather than re-running. The failed key is left uncached and
           its in-flight slot cleared, so the next cycle retries for real.
+        - ``run_limiter`` is passed through unchanged to the leader's
+          ``_review_chunk_with_recovery`` call (never consulted by a cache
+          hit or a waiter, since neither fires an LLM call of its own).
     """
     capacity = _chunk_outcome_cache_size()
     if capacity <= 0:
         return _review_chunk_with_recovery(
-            reviewer, chunk, base_input, sibling_surface, surface_by_path
+            reviewer, chunk, base_input, sibling_surface, surface_by_path, run_limiter=run_limiter
         )
 
     key = _chunk_cache_key(chunk, context_fp, sibling_surface)
@@ -1023,7 +1145,7 @@ def _cached_review_chunk(
     # ``result()`` above and poison the key for the life of the process.
     try:
         outcome = _review_chunk_with_recovery(
-            reviewer, chunk, base_input, sibling_surface, surface_by_path
+            reviewer, chunk, base_input, sibling_surface, surface_by_path, run_limiter=run_limiter
         )
         # Cache only an outcome produced from the *exact full-chunk* LLM input: no
         # degraded ("not reviewed") coverage findings, and exactly one sub-review.
@@ -1085,6 +1207,7 @@ def _map_chunks(
     context_fp: str,
     surface_by_path: Dict[str, List[str]],
     progress_callback: Optional[ReviewProgressCallback] = None,
+    run_limiter: Optional[threading.Semaphore] = None,
 ) -> List[_ChunkOutcome]:
     """Review all chunks, fanning out independent map calls.
 
@@ -1101,6 +1224,12 @@ def _map_chunks(
         - ``surface_by_path`` is the whole submission's ``_surface_by_path``;
           each chunk's ``_sibling_surface`` (the other changed files' top-level
           symbols) is fed to its reviewer and folded into its cache key.
+        - ``run_limiter`` is ``None`` (no run-wide ceiling — e.g. a direct
+          caller or a test) or a ``threading.Semaphore`` sized to this run's
+          ``_map_parallelism()``, created once by the caller (``run_coordinator``)
+          and shared across every chunk in the run — never one created per call
+          to this function, or concurrently-bisecting chunks would each get
+          their own independent budget instead of sharing one.
 
     Postconditions:
         - Returns one outcome per chunk in input order. A content failure that
@@ -1120,6 +1249,11 @@ def _map_chunks(
           abandoned in-flight workers finish in the background with their
           callback suppressed, so stale "reviewing" reports can never
           overwrite the caller's failure state.
+        - ``run_limiter``, when given, is passed unchanged to every chunk's
+          ``_cached_review_chunk`` call, so it gates every actual
+          ``reviewer.run`` call this fan-out (and any bisection recovery it
+          triggers) makes — not just the outer worker-pool width computed
+          below, which only bounds how many chunks are dequeued at once.
     """
     total = len(chunks)
     progress_lock = threading.Lock()
@@ -1129,7 +1263,13 @@ def _map_chunks(
     def _run_one(chunk: ReviewChunk) -> _ChunkOutcome:
         sibling_surface = _sibling_surface(chunk, surface_by_path)
         outcome = _cached_review_chunk(
-            chunk_reviewer, chunk, base_input, context_fp, sibling_surface, surface_by_path
+            chunk_reviewer,
+            chunk,
+            base_input,
+            context_fp,
+            sibling_surface,
+            surface_by_path,
+            run_limiter=run_limiter,
         )
         with progress_lock:
             if not abandoned.is_set():

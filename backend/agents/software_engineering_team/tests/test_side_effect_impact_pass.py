@@ -3,11 +3,17 @@
 This pass is purely additive (it can only ADD findings on top of what the map
 phase, false-positive filter, and architecture-consistency pass already
 produced) and fail-safe (any setup or LLM failure yields no additional
-findings, never an exception). Style mirrors
-``test_architecture_consistency_pass.py``: the LLM seam is exercised with
-``DummyLLMClient`` subclasses that pattern-match on the user prompt (never the
-system prompt) so one scripted client can serve both the chunk-review call and
-this pass's call in an end-to-end ``run_coordinator`` run.
+findings, never an exception). The standalone module remains the Temporal
+activity path; the in-process coordinator routes architecture + side-effect
+through ``merged_architecture_side_effect_pass`` instead.
+
+Style mirrors ``test_architecture_consistency_pass.py``: the LLM seam is
+exercised with ``DummyLLMClient`` subclasses that pattern-match on the user
+prompt (never the system prompt). Direct unit tests of
+``find_side_effect_impact_issues`` match this pass's prompt anchor; end-to-end
+``run_coordinator`` tests match the merged-pass prompt anchor so one scripted
+client can serve the chunk-review call and the merged pass's side-effect
+findings in a single run.
 """
 
 from __future__ import annotations
@@ -32,12 +38,15 @@ from code_review_agent.side_effect_impact_pass import (
     find_side_effect_impact_issues,
 )
 
+from llm_service import LLMJsonParseError
 from llm_service.clients.dummy import DummyLLMClient
 
 # Unique anchor in this pass's user prompt (never the system prompt), distinct
 # from architecture_consistency_pass's own anchor so a DummyLLMClient subclass
 # can route between the two passes' calls without collision.
 _SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
+_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_ARCH_PASS_ANCHOR = '"findings" array as instructed'
 
 
 def _input(files: Optional[Dict[str, str]] = None) -> CodeReviewInput:
@@ -63,7 +72,20 @@ class _FakeReader:
 # --------------------------------------------------------------------------- helpers
 
 
+def _tool_by_name(tools, name: str):
+    """Return the tool whose ``tool_name`` matches ``name``.
+
+    Raises:
+        ValueError: when no tool with that name is present.
+    """
+    for tool in tools:
+        if getattr(tool, "tool_name", None) == name:
+            return tool
+    raise ValueError(f"Tool {name!r} not found")
+
+
 def test_build_prompt_includes_changed_files() -> None:
+    """User prompt inlines submission file paths and bodies."""
     index = CodebaseIndex.from_input(_input())
     prompt = _build_prompt(index, max_inline_chars=100_000)
     assert "app/main.py" in prompt
@@ -97,6 +119,7 @@ def test_build_prompt_mentions_search_repository_tool() -> None:
 
 
 def test_search_repository_returns_empty_with_no_reader() -> None:
+    """Without a repo reader, search returns no matches and is not truncated."""
     index = CodebaseIndex(files={"app/main.py": "code"})
     assert _search_repository(index, "bar") == ([], False)
 
@@ -110,6 +133,7 @@ def test_search_repository_returns_empty_for_blank_query() -> None:
 
 
 def test_search_repository_finds_matches_in_repo_reader_files() -> None:
+    """_search_repository returns line-numbered matches from repo_reader files outside the submission."""
     index = CodebaseIndex(
         files={"app/main.py": "def bar():\n    return 1\n"},
         repo_reader=_FakeReader({"app/caller.py": "from app.main import bar\n\nresult = bar()\n"}),
@@ -214,6 +238,9 @@ def test_search_repository_reports_truncated_when_disk_reader_listing_itself_is_
 
 
 def test_search_repository_fails_safe_on_reader_error() -> None:
+    """A list_files failure must report truncated=True so callers do not treat
+    an empty result as proof the substring is absent from the repository."""
+
     class _RaisingReader:
         def list_files(self):
             raise RuntimeError("boom")
@@ -222,7 +249,26 @@ def test_search_repository_fails_safe_on_reader_error() -> None:
             raise RuntimeError("boom")
 
     index = CodebaseIndex(files={}, repo_reader=_RaisingReader())
-    assert _search_repository(index, "bar") == ([], False)
+    assert _search_repository(index, "bar") == ([], True)
+
+
+def test_search_repository_tool_flags_truncated_when_list_files_fails() -> None:
+    """When list_files raises, the tool must warn that the scan was truncated
+    rather than claiming an exhaustive 'no matches in the rest of the repository'."""
+
+    class _RaisingReader:
+        def list_files(self):
+            raise RuntimeError("boom")
+
+        def read_file(self, path: str):
+            raise RuntimeError("boom")
+
+    index = CodebaseIndex(files={"app/main.py": "code"}, repo_reader=_RaisingReader())
+    search_repository = _build_side_effect_tools(index)[-1]
+    result = search_repository("bar(")
+    assert "No matches for" in result
+    assert "truncated" in result.lower()
+    assert "in the rest of the repository" not in result
 
 
 def test_search_repository_skips_a_single_unreadable_file() -> None:
@@ -245,15 +291,35 @@ def test_search_repository_skips_a_single_unreadable_file() -> None:
     assert truncated is True
 
 
+class _PartlyUnreadableReader:
+    """Lists every path but returns None for a configured unreadable subset."""
+
+    def __init__(self, files: Dict[str, str], unreadable: set[str]):
+        self._files = files
+        self._unreadable = unreadable
+
+    def list_files(self):
+        return list(self._files)
+
+    def read_file(self, path: str):
+        if path in self._unreadable:
+            return None
+        return self._files.get((path or "").strip())
+
+
 def test_search_repository_skips_files_the_reader_cannot_read() -> None:
     """A path the reader lists but returns None for (fail-safe RepoReader
     contract) is skipped rather than crashing the scan, but -- same as the
     raising case -- must mark the scan truncated since that file's content
     was never actually inspected (e.g. a shared GitHubRepoReader fetch budget
     already exhausted by an earlier pass would surface exactly this way)."""
-    index = CodebaseIndex(files={}, repo_reader=_FakeReader({"present.py": "needle here"}))
-    # "missing.py" is not in the reader's map, so read_file returns None for it.
-    index.repo_reader._files["missing.py"] = None
+    index = CodebaseIndex(
+        files={},
+        repo_reader=_PartlyUnreadableReader(
+            {"present.py": "needle here", "missing.py": ""},
+            unreadable={"missing.py"},
+        ),
+    )
     matches, truncated = _search_repository(index, "needle")
     assert matches == [("present.py", 1, "needle here")]
     assert truncated is True
@@ -276,25 +342,30 @@ def test_build_side_effect_tools_includes_search_repository() -> None:
 
 
 def test_search_repository_tool_reports_no_reader() -> None:
+    """search_repository tool reports that no repository access is available."""
     index = CodebaseIndex(files={"app/main.py": "code"})
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     assert "No repository access" in search_repository("bar")
+    doc = " ".join((search_repository.__doc__ or "").split()).lower()
+    assert "fall back" not in doc
+    assert "no repository access is available beyond the submission" in doc
 
 
 def test_search_repository_tool_reports_no_matches() -> None:
     index = CodebaseIndex(
         files={"app/main.py": "code"}, repo_reader=_FakeReader({"app/caller.py": "unrelated"})
     )
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     assert "No matches" in search_repository("bar(")
 
 
 def test_search_repository_tool_finds_matches() -> None:
+    """search_repository tool returns path:line matches from the rest of the repository."""
     index = CodebaseIndex(
         files={"app/main.py": "def bar(): pass\n"},
         repo_reader=_FakeReader({"app/caller.py": "result = bar()\n"}),
     )
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     assert "app/caller.py:1: result = bar()" in search_repository("bar(")
 
 
@@ -303,7 +374,7 @@ def test_search_repository_tool_flags_truncated_scan_with_no_matches() -> None:
     the model needs to know the repository was larger than what got scanned."""
     files = {f"f{i}.py": "no match" for i in range(45)}
     index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     result = search_repository("needle")
     assert "No matches for" in result
     assert "truncated" in result.lower()
@@ -313,7 +384,7 @@ def test_search_repository_tool_flags_truncated_scan_with_matches() -> None:
     """A truncated scan that DID find matches still warns there may be more."""
     files = {f"f{i}.py": "needle\n" for i in range(45)}
     index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
-    search_repository = _build_side_effect_tools(index)[-1]
+    search_repository = _tool_by_name(_build_side_effect_tools(index), "search_repository")
     result = search_repository("needle")
     assert "f0.py:1: needle" in result
     assert "truncated" in result.lower()
@@ -323,6 +394,7 @@ def test_search_repository_tool_flags_truncated_scan_with_matches() -> None:
 
 
 def test_validate_finding_line_keeps_in_range_line() -> None:
+    """In-range line citations survive validation unchanged."""
     index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
     assert _validate_finding_line(index, "a.py", 2) == 2
 
@@ -533,7 +605,7 @@ def test_fails_safe_on_llm_error() -> None:
 def test_fails_safe_on_unparsable_reply() -> None:
     class _Gibberish(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            return "not even a dict-shaped reply"  # type: ignore[return-value]
+            raise LLMJsonParseError("not even a dict-shaped reply")
 
     result = find_side_effect_impact_issues(_Gibberish(), _input())
     assert result == []
@@ -545,6 +617,7 @@ def test_returns_empty_for_non_code_review_profile() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
@@ -680,10 +753,17 @@ def test_finds_caller_impact_across_the_repository() -> None:
 
 
 def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
-    calls = {"side_effect_pass": 0, "chunk_review": 0}
+    """Merged pass runs once per submission; standalone arch/side-effect passes do not."""
+    calls = {"merged_pass": 0, "arch_pass": 0, "side_effect_pass": 0, "chunk_review": 0}
 
     class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                calls["merged_pass"] += 1
+                return {"architecture_findings": [], "side_effect_findings": []}
+            if _ARCH_PASS_ANCHOR in prompt:
+                calls["arch_pass"] += 1
+                return {"findings": []}
             if _SIDE_EFFECT_PASS_ANCHOR in prompt:
                 calls["side_effect_pass"] += 1
                 return {"findings": []}
@@ -693,7 +773,9 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
     files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
     run_coordinator(_CountingClient(), CodeReviewInput(files=files))
 
-    assert calls["side_effect_pass"] == 1
+    assert calls["merged_pass"] == 1
+    assert calls["arch_pass"] == 0
+    assert calls["side_effect_pass"] == 0
 
 
 def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
@@ -703,9 +785,16 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
 
     class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, (
+                "standalone side-effect pass should not run when merged pass is enabled"
+            )
+            assert _ARCH_PASS_ANCHOR not in prompt, (
+                "standalone architecture pass should not run when merged pass is enabled"
+            )
+            if _MERGED_PASS_ANCHOR in prompt:
                 return {
-                    "findings": [
+                    "architecture_findings": [],
+                    "side_effect_findings": [
                         {
                             "severity": "medium",
                             "category": "side-effects",
@@ -715,6 +804,7 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
                                 "app/caller.py line 4 does `bar() + 1` and will raise TypeError"
                             ),
                             "suggestion": "update app/caller.py to handle bar()'s new return value",
+                            "pre_existing": False,
                         },
                         {
                             "severity": "low",
@@ -723,8 +813,9 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
                             "description": "bar()'s docstring claims it returns an int, but it "
                             "returns None",
                             "suggestion": "correct bar()'s docstring to match its implementation",
+                            "pre_existing": False,
                         },
-                    ]
+                    ],
                 }
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -745,6 +836,7 @@ def test_coordinator_skips_pass_for_non_default_profile() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
             return {
                 "index": 0,
                 "is_real_issue": True,

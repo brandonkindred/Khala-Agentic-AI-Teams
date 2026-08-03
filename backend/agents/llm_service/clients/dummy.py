@@ -2,8 +2,14 @@
 Dummy LLM client for tests and environments without an LLM.
 
 Returns heuristic stub responses matching SE team prompts so existing tests keep passing.
-Also implements the ``strands.models.model.Model`` ABC so it can be passed directly to
-``strands.Agent(model=DummyLLMClient())`` in tests without requiring a live Ollama server.
+
+Strands ``Model`` compatibility is opt-in and lazy: importing / using this module as a
+plain :class:`~llm_service.interface.LLMClient` does not import ``strands``. Concrete
+``Model`` members that ``strands.Agent`` reads at construction time (``stateful``,
+``context_window_limit``, ``count_tokens``) are provided here without loading Strands.
+Call :func:`ensure_strands_model_registration` (or any Strands Model ABC method, or
+construct ``DummyLLMClient`` after ``strands`` is already imported) when callers need
+real ``isinstance(..., Model)`` / MRO inheritance.
 """
 
 from __future__ import annotations
@@ -11,102 +17,201 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterable
-from typing import Any, Dict, Optional
-
-from strands.models.model import Model
-from strands.types.content import Message as StrandsMessage
-from strands.types.content import SystemContentBlock
-from strands.types.streaming import StreamEvent
-from strands.types.tools import ToolChoice, ToolSpec
+import sys
+from collections.abc import AsyncGenerator, AsyncIterable
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
 
-_STRIP_VERBS = {
-    "implement",
-    "create",
-    "build",
-    "add",
-    "setup",
-    "set",
-    "up",
-    "configure",
-    "make",
-    "define",
-    "develop",
-    "write",
-    "design",
-    "establish",
-    "generate",
-    "fetches",
-    "displays",
-    "handles",
-    "manages",
-    "processes",
-    "returns",
-    "provides",
-    "supports",
-    "includes",
-    "enables",
-    "renders",
-}
-_STRIP_FILLERS = {
-    "the",
-    "that",
-    "with",
-    "using",
-    "which",
-    "for",
-    "and",
-    "a",
-    "an",
-    "to",
-    "of",
-    "in",
-    "on",
-    "by",
-    "from",
-    "into",
-    "as",
-    "via",
-    "its",
-    "all",
-    "application",
-    "system",
-    "project",
-    "based",
-    "proper",
-    "production",
-    "quality",
-    "complete",
-    "full",
-    "new",
-    "existing",
-    "angular",
-    "react",
-    "vue",
-    "spring",
-    "fastapi",
-    "flask",
-    "django",
-}
-_STRIP_SUFFIXES = {
-    "component",
-    "service",
-    "module",
-    "endpoint",
-    "endpoints",
-    "middleware",
-    "guard",
-    "pipe",
-    "directive",
-    "interceptor",
-    "controller",
-    "repository",
-}
+if TYPE_CHECKING:  # pragma: no cover - typing only; runtime uses lazy strands imports
+    from strands.types.content import Message as StrandsMessage
+    from strands.types.content import SystemContentBlock
+    from strands.types.streaming import StreamEvent
+    from strands.types.tools import ToolChoice, ToolSpec
+
+_STRANDS_MODEL_REGISTERED = False
+
+
+def _strands_already_imported() -> bool:
+    """Return True when any ``strands`` package module is already in ``sys.modules``.
+
+    Preconditions: none.
+    Postconditions: returns True iff ``strands`` or a ``strands.*`` module is loaded.
+    """
+    # Snapshot keys: concurrent imports can mutate ``sys.modules`` mid-iteration.
+    return "strands" in sys.modules or any(
+        name.startswith("strands.") for name in tuple(sys.modules)
+    )
+
+
+def ensure_strands_model_registration() -> None:
+    """Attach Strands ``Model`` as a real base of :class:`DummyLLMClient`.
+
+    Virtual ``Model.register()`` is intentionally *not* used: ``Agent(model=...)``
+    reads concrete ``Model`` members (``stateful``, ``count_tokens``, …) before any
+    model method runs, and virtual subclasses do not inherit those members.
+
+    Preconditions:
+        The ``strands`` package is installed and importable.
+    Postconditions:
+        ``isinstance(DummyLLMClient(), strands.models.model.Model)`` is True and
+        ``Model`` appears in ``DummyLLMClient.__mro__``, including for instances
+        constructed before Strands was imported (ABC negative caches are cleared).
+        Idempotent: subsequent calls are no-ops once inheritance is attached.
+    """
+    global _STRANDS_MODEL_REGISTERED
+    if _STRANDS_MODEL_REGISTERED:
+        return
+    from strands.models.model import Model  # noqa: PLC0415 - intentional lazy import
+
+    # Real inheritance (not ABC.register) so instances expose Model's concrete
+    # properties/methods, matching the pre-lazy ``(LLMClient, Model)`` bases.
+    if Model not in DummyLLMClient.__mro__:
+        DummyLLMClient.__bases__ = (*DummyLLMClient.__bases__, Model)
+        # Mutating ``__bases__`` does not bump ABCMeta's invalidation counter, so a
+        # prior negative ``isinstance(client, Model)`` / ``issubclass(...)`` result
+        # stays cached forever. Clear Model's ABC caches so the postcondition holds
+        # for instances constructed before Strands was imported.
+        Model._abc_caches_clear()
+    _STRANDS_MODEL_REGISTERED = True
+
+
+# Prompts this long that still mention "approved" are treated as code-review
+# chunks (full review context) rather than short approval-only stubs.
+CODE_REVIEW_MIN_PROMPT_LENGTH = 200
+
+_STRIP_VERBS: frozenset[str] = frozenset(
+    {
+        "implement",
+        "create",
+        "build",
+        "add",
+        "setup",
+        "set",
+        "up",
+        "configure",
+        "make",
+        "define",
+        "develop",
+        "write",
+        "design",
+        "establish",
+        "generate",
+        "fetches",
+        "displays",
+        "handles",
+        "manages",
+        "processes",
+        "returns",
+        "provides",
+        "supports",
+        "includes",
+        "enables",
+        "renders",
+    }
+)
+_STRIP_FILLERS: frozenset[str] = frozenset(
+    {
+        "the",
+        "that",
+        "with",
+        "using",
+        "which",
+        "for",
+        "and",
+        "a",
+        "an",
+        "to",
+        "of",
+        "in",
+        "on",
+        "by",
+        "from",
+        "into",
+        "as",
+        "via",
+        "its",
+        "all",
+        "application",
+        "system",
+        "project",
+        "based",
+        "proper",
+        "production",
+        "quality",
+        "complete",
+        "full",
+        "new",
+        "existing",
+        "angular",
+        "react",
+        "vue",
+        "spring",
+        "fastapi",
+        "flask",
+        "django",
+    }
+)
+_STRIP_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "component",
+        "service",
+        "module",
+        "endpoint",
+        "endpoints",
+        "middleware",
+        "guard",
+        "pipe",
+        "directive",
+        "interceptor",
+        "controller",
+        "repository",
+    }
+)
+
+
+def _placeholder_slug(hint: str, separator: str, max_length: int) -> str:
+    """Build a unique fallback slug when filtering leaves no usable words.
+
+    Preconditions:
+        - ``hint`` / ``separator`` are strings; ``separator`` is non-empty.
+        - ``max_length`` is a positive integer.
+
+    Postconditions:
+        - Returns a non-empty identifier of at most ``max_length`` characters
+          whose digest portion is derived from ``hint``, so distinct hints
+          produce distinct placeholders.
+    """
+    digest = hashlib.md5(hint.encode()).hexdigest()[:8]
+    result = f"item{separator}{digest}"
+    if len(result) > max_length:
+        result = result[:max_length].rstrip(separator)
+    return result or f"item{separator}0"
 
 
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
+    """Derive a short, identifier-friendly name from a free-form hint.
+
+    Strips common verbs, filler words, and type suffixes, then joins the
+    remaining words with ``separator`` and truncates to ``max_length``.
+
+    Preconditions:
+        - ``hint`` is a string (may be empty; empty / all-stripped yields a
+          hint-derived placeholder).
+        - ``separator`` is a non-empty string safe for identifiers.
+        - ``max_length`` is a positive integer.
+
+    Postconditions:
+        - Returns a non-empty string of at most ``max_length`` characters.
+        - The result contains only lowercase alphanumerics and ``separator``.
+        - When filtering leaves no usable words, the placeholder is derived
+          from a digest of ``hint`` so distinct all-stripped hints do not
+          collapse onto one path.
+    """
+    assert isinstance(hint, str)
+    assert isinstance(separator, str) and separator
+    assert isinstance(max_length, int) and max_length > 0
+
     expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", hint)
     words = re.sub(r"[^a-z0-9\s]+", " ", expanded.lower()).split()
     filtered = [
@@ -114,44 +219,258 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
         for w in words
         if w not in _STRIP_VERBS and w not in _STRIP_FILLERS and w not in _STRIP_SUFFIXES
     ]
-    name_words = filtered[:3] if filtered else words[:2]
-    result = separator.join(name_words)
+    if not filtered:
+        # Do not reintroduce verbs/fillers/suffixes; stay unique per hint.
+        return _placeholder_slug(hint, separator, max_length)
+    result = separator.join(filtered[:3])
     if len(result) > max_length:
         result = result[:max_length].rstrip(separator)
-    return result or f"item{separator}1"
+    return result or _placeholder_slug(hint, separator, max_length)
 
 
-class DummyLLMClient(LLMClient, Model):
+def _content_to_text(content: Any) -> str:
+    """Flatten a message ``content`` field into newline-joined text.
+
+    Recognizes ``text``, bare strings, nested ``toolResult``, and ``json``
+    blocks (serialized like ``_tool_result_content_to_text`` in the adapter).
+
+    Preconditions:
+        - ``content`` is a string, a list of Strands content blocks, or other.
+
+    Postconditions:
+        - Returns a string (empty when no text can be extracted).
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and "text" in block:
+            parts.append(str(block["text"]))
+        elif isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and "json" in block:
+            parts.append(json.dumps(block["json"]))
+        elif isinstance(block, dict) and "toolResult" in block:
+            tr = block.get("toolResult") or {}
+            nested = _content_to_text(tr.get("content", []))
+            if nested:
+                parts.append(nested)
+    return "\n".join(parts)
+
+
+def _last_user_text(messages: list) -> str:
+    """Return concatenated text from the most recent user message.
+
+    Used by ``stream()``. Multi-block text within that single turn is
+    newline-joined so routing anchors in later blocks are not dropped.
+
+    Preconditions:
+        - ``messages`` is a list of Strands-style message dicts (role/content).
+
+    Postconditions:
+        - Returns a string (empty when no user text is present).
+        - When the latest user message has multiple text blocks, all of them
+          appear in the returned string (newline-joined).
+    """
+    assert isinstance(messages, list)
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        return _content_to_text(msg.get("content", []))
+    return ""
+
+
+def _aggregated_user_tool_text(messages: list) -> str:
+    """Join all user/tool turn texts for structured-output routing.
+
+    Mirrors ``LLMClientModel.structured_output``, which aggregates converted
+    user and tool message contents so follow-up turns like "return that as
+    structured output" still see routing anchors from earlier requests.
+    ``stream()`` continues to use ``_last_user_text`` (latest turn only).
+
+    Preconditions:
+        - ``messages`` is a list of Strands-style message dicts (role/content).
+
+    Postconditions:
+        - Returns a string (empty when no user/tool text is present).
+        - Non-empty user/tool turns appear in order, separated by blank lines.
+    """
+    assert isinstance(messages, list)
+    parts: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") not in ("user", "tool"):
+            continue
+        text = _content_to_text(msg.get("content", []))
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _flatten_system_prompt_content(
+    system_prompt_content: list[SystemContentBlock] | None,
+) -> str:
+    """Flatten Strands system content blocks into a single prompt string.
+
+    Preconditions:
+        - ``system_prompt_content`` is ``None`` or a list of content blocks.
+
+    Postconditions:
+        - Returns concatenated text from blocks (empty when absent).
+    """
+    if not system_prompt_content:
+        return ""
+    parts: list[str] = []
+    for block in system_prompt_content:
+        if isinstance(block, dict):
+            parts.append(str(block.get("text", "") or ""))
+        else:
+            parts.append(str(block))
+    return "".join(parts)
+
+
+class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM.
 
-    Also implements the Strands ``Model`` ABC so tests can pass this directly
-    to ``strands.Agent(model=DummyLLMClient())``.
+    Also provides the Strands ``Model`` method surface. Importing or using this
+    class as a plain :class:`~llm_service.interface.LLMClient` never loads
+    ``strands``. Concrete Agent-facing Model members (``stateful``, etc.) are
+    defined here so ``strands.Agent(model=DummyLLMClient())`` works without
+    relying on virtual ABC registration. Call
+    :func:`ensure_strands_model_registration` (or construct after ``strands`` is
+    already imported) when ``isinstance(..., Model)`` / MRO inheritance is needed.
     """
 
     _call_counter: int = 0
 
     def __init__(self) -> None:
+        """Construct a dummy client.
+
+        Preconditions: none.
+        Postconditions: request counters/config are initialized; if ``strands`` is
+            already present in ``sys.modules``, Strands ``Model`` is attached to
+            the class MRO (see :func:`ensure_strands_model_registration`).
+        """
         self._request_count = 0
         self._model_config: dict[str, Any] = {}
+        # When Strands is already loaded (typical in agent/test processes),
+        # attach real Model inheritance immediately so resolve_strands_model's
+        # ``isinstance(..., Model)`` short-circuit matches pre-lazy behaviour.
+        # Cold LLMClient paths leave strands unloaded and skip this.
+        if _strands_already_imported():
+            ensure_strands_model_registration()
 
     # -----------------------------------------------------------------------
-    # strands.models.model.Model ABC implementation
+    # strands.models.model.Model concrete members (no strands import required)
+    # -----------------------------------------------------------------------
+
+    @property
+    def stateful(self) -> bool:
+        """Whether the model manages conversation state server-side.
+
+        Preconditions: none.
+        Postconditions: returns False (matches Strands ``Model`` default). Defined
+            here so ``Agent(model=...)`` can read ``model.stateful`` at construction
+            without requiring Strands inheritance yet.
+        """
+        return False
+
+    @property
+    def context_window_limit(self) -> int | None:
+        """Maximum context window size in tokens from local model config.
+
+        Preconditions: none.
+        Postconditions: returns ``context_window_limit`` from ``_model_config`` when
+            set, else None (matches Strands ``Model.context_window_limit`` semantics).
+        """
+        config = self._model_config
+        return config.get("context_window_limit") if isinstance(config, dict) else None
+
+    async def count_tokens(
+        self,
+        messages: list[StrandsMessage],
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+        system_prompt_content: list[SystemContentBlock] | None = None,
+    ) -> int:
+        """Estimate input tokens via Strands ``Model.count_tokens`` once Model is attached.
+
+        Preconditions: ``strands`` is importable.
+        Postconditions: returns the Model default estimate; attaches Model to the
+            DummyLLMClient MRO if not already attached.
+        """
+        ensure_strands_model_registration()
+        from strands.models.model import Model  # noqa: PLC0415 - intentional lazy import
+
+        return await Model.count_tokens(
+            self,
+            messages,
+            tool_specs=tool_specs,
+            system_prompt=system_prompt,
+            system_prompt_content=system_prompt_content,
+        )
+
+    # -----------------------------------------------------------------------
+    # strands.models.model.Model ABC surface (lazy real inheritance)
     # -----------------------------------------------------------------------
 
     def update_config(self, **model_config: Any) -> None:
+        """Update Strands model config.
+
+        Preconditions: none.
+        Postconditions: ``model_config`` keys are merged into the local config dict;
+            Strands ``Model`` is attached to the class MRO when importable.
+        """
+        ensure_strands_model_registration()
         self._model_config.update(model_config)
 
     def get_config(self) -> dict[str, Any]:
+        """Return a copy of the Strands model config.
+
+        Preconditions: none.
+        Postconditions: returned dict is a shallow copy of the local config;
+            Strands ``Model`` is attached to the class MRO when importable.
+        """
+        ensure_strands_model_registration()
         return dict(self._model_config)
 
-    def structured_output(
+    async def structured_output(
         self,
         output_model: type,
         prompt: list,
         system_prompt: str | None = None,
         **kwargs: Any,
-    ) -> Any:
-        raise NotImplementedError("DummyLLMClient.structured_output is not implemented for tests")
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Yield Strands structured-output events from the dummy pattern matcher.
+
+        Aggregates all user/tool turns (not just the latest) so a follow-up
+        like "return that as structured output" still routes on anchors from
+        the original request — matching ``LLMClientModel.structured_output``.
+
+        Preconditions:
+            - ``output_model`` is a Pydantic model type with ``model_validate``.
+            - ``prompt`` is a Strands-style message list.
+
+        Postconditions:
+            - Yields a single event ``{"output": validated}`` on success.
+            - Raises ``ValueError`` when the stub dict cannot validate.
+            - Attaches Strands ``Model`` to the class MRO when importable.
+        """
+        ensure_strands_model_registration()
+        assert hasattr(output_model, "model_validate")
+        prompt_text = _aggregated_user_tool_text(prompt)
+        data = self.complete_json(prompt_text, system_prompt=system_prompt)
+        try:
+            validated = output_model.model_validate(data)
+        except Exception as exc:
+            raise ValueError(
+                f"DummyLLMClient.structured_output: failed to parse into "
+                f"{getattr(output_model, '__name__', output_model)}: {exc}"
+            ) from exc
+        yield {"output": validated}
 
     async def stream(
         self,
@@ -170,19 +489,22 @@ class DummyLLMClient(LLMClient, Model):
         when ``structured_output_model=...`` is used), yields a tool-use event
         invoking that tool with data from the ``complete_json`` pattern matcher.
         Otherwise yields a plain text response.
+
+        When ``system_prompt_content`` is supplied (including an empty list), it
+        is treated as authoritative over the legacy ``system_prompt`` string so
+        branding Phase 1 branches that anchor on system text still match even
+        if a stale string is also present, and an explicit empty override clears
+        that stale string.
+
+        Preconditions: ``messages`` is a sequence of Strands-shaped message dicts.
+        Postconditions: yields a complete assistant stream; attaches Strands
+            ``Model`` to the class MRO when importable.
         """
-        # Extract user text from the last user message
-        user_text = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                for block in msg.get("content", []):
-                    if isinstance(block, dict) and "text" in block:
-                        user_text = block["text"]
-                        break
-                    elif isinstance(block, str):
-                        user_text = block
-                        break
-                break
+        ensure_strands_model_registration()
+        del tool_choice, invocation_state  # accepted for ABC compatibility
+        user_text = _last_user_text(messages)
+        if system_prompt_content is not None:
+            system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
         # Route through the existing complete_json pattern matcher for rich responses
         response_data = self.complete_json(user_text, system_prompt=system_prompt)
@@ -239,7 +561,7 @@ class DummyLLMClient(LLMClient, Model):
     @property
     def request_count(self) -> int:
         """Total number of LLM requests (for compatibility with blog tests)."""
-        return getattr(self, "_request_count", 0)
+        return self._request_count
 
     @staticmethod
     def _extract_task_hint(prompt: str) -> str:
@@ -289,19 +611,22 @@ class DummyLLMClient(LLMClient, Model):
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the
         # branches below look for in the user prompt they build. Scanning
-        # ``system_prompt`` here was tried and reverted in commit <<CI fix>>
-        # because loose single-word branches (``"pipeline"``, ``"security"``)
-        # cross-contaminated other teams' prompts that happened to mention
-        # those words in their persona text.
+        # ``system_prompt`` was tried and reverted because loose single-word
+        # branches (``"pipeline"``, ``"security"``) cross-contaminated other
+        # teams' prompts that happened to mention those words in their persona
+        # text.
         #
-        # Exception: the branding Phase 1 branches further down DO anchor on
-        # ``system_prompt`` (see ``system_lowered``) — every Phase 1 agent
-        # receives the same serialized ``BrandingMission`` as its user
-        # message, so only each agent's own system_prompt (its required
-        # output field names) can distinguish which one is asking. Those
-        # anchors are multi-token combinations unique to one agent's prompt,
-        # not the loose single words that caused the earlier revert.
+        # Exception: the branding Phase 1 / Phase 2 branches further down DO
+        # anchor on ``system_prompt`` (via ``system_lowered`` later in this
+        # method) — every agent in those phases receives the same serialized
+        # mission/phase context as its user message, so only each agent's own
+        # system_prompt (its required output field names) can distinguish which
+        # one is asking. Those anchors are multi-token combinations unique to
+        # one agent's prompt, not the loose single words that caused the
+        # earlier revert.
         lowered = prompt.lower()
+        # Shared across instances so sequential coding stubs can mint distinct
+        # module/component names when the task hint alone is not enough.
         DummyLLMClient._call_counter += 1
         self._request_count += 1
         counter = DummyLLMClient._call_counter
@@ -573,8 +898,10 @@ class DummyLLMClient(LLMClient, Model):
             }
         elif (
             "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
-        ) and ("approved" not in lowered or len(lowered) > 200):
-            # Catch-all for code review / chunk review prompts routed through Strands
+        ) and ("approved" not in lowered or len(lowered) > CODE_REVIEW_MIN_PROMPT_LENGTH):
+            # Catch-all for code review / chunk review prompts routed through Strands.
+            # Long prompts that mention "approved" still match: they carry full review
+            # context, unlike short approval-only stubs below the length threshold.
             return {
                 "approved": True,
                 "issues": [],
@@ -590,7 +917,6 @@ class DummyLLMClient(LLMClient, Model):
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)
                 or f"module_{counter}"
             )
-            slug.title().replace("_", "")
             return {
                 "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
@@ -866,17 +1192,386 @@ class DummyLLMClient(LLMClient, Model):
                 ),
                 "brand_promise": "Every customer touchpoint will feel cohesive and intentional (dummy).",
             }
+        # Branding team — Phase 2 "Narrative & Messaging" Graph agents
+        # (built with structured_output=, see agents.py). Cumulative
+        # carry-forward stubs: each specialist repeats upstream fields so a
+        # linear Graph predecessor exposes the full prior narrative.
+        elif (
+            "brand_story" in system_lowered
+            and "boilerplate_variants" in system_lowered
+            and (
+                "tagline_rationale" not in system_lowered
+                and "personality_traits" not in system_lowered
+                and "messaging_framework" not in system_lowered
+                and "jobs_to_be_done" not in system_lowered
+                and "writing_guidelines" not in system_lowered
+            )
+        ):
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+            }
+        elif (
+            "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered
+        ):
+            return {
+                **{
+                    "brand_story": (
+                        "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                        "We built a system that keeps every touchpoint intentional (dummy)."
+                    ),
+                    "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                    "boilerplate_variants": [
+                        "Dummy Co. helps teams ship on-brand (short).",
+                        "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                        (
+                            "Dummy Co. partners with product organizations to make every customer "
+                            "touchpoint feel cohesive and intentional (long)."
+                        ),
+                    ],
+                },
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+            }
+        elif "tagline_rationale" in system_lowered and "elevator_pitches" in system_lowered:
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+            }
+        elif "messaging_framework" in system_lowered and "audience_message_maps" in system_lowered:
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+                "messaging_framework": [
+                    {
+                        "pillar": "Cohesion",
+                        "key_message": "Every touchpoint feels intentional (dummy).",
+                        "proof_points": ["Shared tokens", "Review gates"],
+                    },
+                    {
+                        "pillar": "Speed",
+                        "key_message": "Brand work ships with the product (dummy).",
+                        "proof_points": ["Weekly cadence", "Embedded strategists"],
+                    },
+                    {
+                        "pillar": "Clarity",
+                        "key_message": "Plain language over jargon (dummy).",
+                        "proof_points": ["Short docs", "Approved phrases"],
+                    },
+                ],
+                "audience_message_maps": [
+                    {
+                        "audience_segment": "Enterprise product leaders",
+                        "primary_message": "Ship cohesive experiences faster (dummy).",
+                        "supporting_messages": ["Reduce rework", "Align teams"],
+                        "tone_adjustments": "Confident and concrete",
+                    }
+                ],
+            }
+        elif "jobs_to_be_done" in system_lowered and "media_habits" in system_lowered:
+            return {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+                "messaging_framework": [
+                    {
+                        "pillar": "Cohesion",
+                        "key_message": "Every touchpoint feels intentional (dummy).",
+                        "proof_points": ["Shared tokens", "Review gates"],
+                    },
+                    {
+                        "pillar": "Speed",
+                        "key_message": "Brand work ships with the product (dummy).",
+                        "proof_points": ["Weekly cadence", "Embedded strategists"],
+                    },
+                    {
+                        "pillar": "Clarity",
+                        "key_message": "Plain language over jargon (dummy).",
+                        "proof_points": ["Short docs", "Approved phrases"],
+                    },
+                ],
+                "audience_message_maps": [
+                    {
+                        "audience_segment": "Enterprise product leaders",
+                        "primary_message": "Ship cohesive experiences faster (dummy).",
+                        "supporting_messages": ["Reduce rework", "Align teams"],
+                        "tone_adjustments": "Confident and concrete",
+                    }
+                ],
+                "persona_profiles": [
+                    {
+                        "name": "Alex Rivera",
+                        "role": "VP Product",
+                        "demographics": "Enterprise B2B, 10+ years experience (dummy).",
+                        "psychographics": "Values clarity and speed (dummy).",
+                        "goals": ["Ship cohesive UX", "Cut brand rework"],
+                        "frustrations": ["Inconsistent messaging", "Slow agencies"],
+                        "media_habits": ["Product communities", "LinkedIn"],
+                        "jobs_to_be_done": ["Align brand and product delivery"],
+                    },
+                    {
+                        "name": "Jordan Lee",
+                        "role": "Brand Lead",
+                        "demographics": "Mid-market org, design-background (dummy).",
+                        "psychographics": "Protects voice without blocking shipping (dummy).",
+                        "goals": ["Keep voice consistent", "Enable product teams"],
+                        "frustrations": ["Ad-hoc copy", "No system of record"],
+                        "media_habits": ["Design newsletters", "Team wikis"],
+                        "jobs_to_be_done": ["Codify writing guidelines"],
+                    },
+                ],
+            }
+        elif "writing_guidelines" in system_lowered and "editorial_quality_bar" in system_lowered:
+            persona_blob = {
+                "brand_story": (
+                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
+                    "We built a system that keeps every touchpoint intentional (dummy)."
+                ),
+                "hero_narrative": "Brand experiences that ship with the product (dummy).",
+                "boilerplate_variants": [
+                    "Dummy Co. helps teams ship on-brand (short).",
+                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+                    (
+                        "Dummy Co. partners with product organizations to make every customer "
+                        "touchpoint feel cohesive and intentional (long)."
+                    ),
+                ],
+                "brand_archetypes": [
+                    {
+                        "archetype": "The Creator",
+                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
+                    }
+                ],
+                "tagline": "Ship brand with the product",
+                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+                "elevator_pitches": [
+                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+                    {
+                        "tier": "30-second",
+                        "pitch": (
+                            "Dummy Co. helps product teams keep every touchpoint intentional "
+                            "without slowing delivery (dummy)."
+                        ),
+                    },
+                    {
+                        "tier": "2-minute",
+                        "pitch": (
+                            "We turn brand strategy into a workable system so marketing, product, "
+                            "and design stay aligned as you ship (dummy)."
+                        ),
+                    },
+                ],
+                "messaging_framework": [
+                    {
+                        "pillar": "Cohesion",
+                        "key_message": "Every touchpoint feels intentional (dummy).",
+                        "proof_points": ["Shared tokens", "Review gates"],
+                    },
+                    {
+                        "pillar": "Speed",
+                        "key_message": "Brand work ships with the product (dummy).",
+                        "proof_points": ["Weekly cadence", "Embedded strategists"],
+                    },
+                    {
+                        "pillar": "Clarity",
+                        "key_message": "Plain language over jargon (dummy).",
+                        "proof_points": ["Short docs", "Approved phrases"],
+                    },
+                ],
+                "audience_message_maps": [
+                    {
+                        "audience_segment": "Enterprise product leaders",
+                        "primary_message": "Ship cohesive experiences faster (dummy).",
+                        "supporting_messages": ["Reduce rework", "Align teams"],
+                        "tone_adjustments": "Confident and concrete",
+                    }
+                ],
+                "persona_profiles": [
+                    {
+                        "name": "Alex Rivera",
+                        "role": "VP Product",
+                        "demographics": "Enterprise B2B, 10+ years experience (dummy).",
+                        "psychographics": "Values clarity and speed (dummy).",
+                        "goals": ["Ship cohesive UX", "Cut brand rework"],
+                        "frustrations": ["Inconsistent messaging", "Slow agencies"],
+                        "media_habits": ["Product communities", "LinkedIn"],
+                        "jobs_to_be_done": ["Align brand and product delivery"],
+                    },
+                    {
+                        "name": "Jordan Lee",
+                        "role": "Brand Lead",
+                        "demographics": "Mid-market org, design-background (dummy).",
+                        "psychographics": "Protects voice without blocking shipping (dummy).",
+                        "goals": ["Keep voice consistent", "Enable product teams"],
+                        "frustrations": ["Ad-hoc copy", "No system of record"],
+                        "media_habits": ["Design newsletters", "Team wikis"],
+                        "jobs_to_be_done": ["Codify writing guidelines"],
+                    },
+                ],
+            }
+            return {
+                **persona_blob,
+                "writing_guidelines": {
+                    "voice_principles": [
+                        "Use a confident, human voice (dummy).",
+                        "Prefer concrete proof over slogans (dummy).",
+                        "Keep sentences short enough to scan (dummy).",
+                    ],
+                    "style_dos": [
+                        "Lead with the customer outcome (dummy).",
+                        "Use active voice (dummy).",
+                        "Name the audience when it clarifies (dummy).",
+                    ],
+                    "style_donts": [
+                        "Avoid empty superlatives (dummy).",
+                        "Don't bury the offer (dummy).",
+                        "Don't mix casual slang with legal claims (dummy).",
+                    ],
+                    "editorial_quality_bar": [
+                        "Every piece states who it is for (dummy).",
+                        "Claims cite a proof point (dummy).",
+                        "Copy matches the approved tone spectrum (dummy).",
+                    ],
+                },
+            }
         return {"output": "Dummy response", "status": "ok"}
 
     def chat(
         self,
-        messages: list,
+        messages: list[dict[str, Any]],
         *,
         objective: str = "dummy",
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
-        think: "bool | str | None" = None,
+        think: bool | str | None = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
@@ -900,12 +1595,14 @@ class DummyLLMClient(LLMClient, Model):
         system_prompt = None
         user_prompt = ""
         for m in messages:
+            if not isinstance(m, dict):
+                continue
             if m.get("role") == "system":
                 system_prompt = m.get("content")
             elif m.get("role") == "user":
                 user_prompt = m.get("content") or ""
 
-        has_tool_result = any(m.get("role") == "tool" for m in messages)
+        has_tool_result = any(isinstance(m, dict) and m.get("role") == "tool" for m in messages)
 
         if tools and not has_tool_result:
             structured_tool = None

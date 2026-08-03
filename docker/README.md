@@ -3,6 +3,7 @@
 This directory defines a **Docker Compose stack** that runs:
 
 - **PostgreSQL 18** – shared database with `temporal` and `khala` databases (created at first run). The data volume is `postgres_data_v18`; the name is suffixed with the major version so each bump starts from an empty volume declaratively, without `docker compose down -v`. Orphaned previous-version volumes can be cleaned up with `docker volume prune`.
+- **Neo4j** – required knowledge-graph store for agents (Graphiti). The unified API does **not** open a Graphiti client or run background graph sync unless you set `NEO4J_BOLT_URL=bolt://neo4j:7687` (extra memory/CPU for that process).
 - **Temporal** – workflow engine (Postgres-backed, no Elasticsearch)
 - **Temporal UI** – Web UI for workflows
 - **Ollama** (optional) – local Ollama server if you override LLM to use it
@@ -39,6 +40,7 @@ This directory defines a **Docker Compose stack** that runs:
    | Prometheus     | http://localhost:9090       (scrape targets: `/targets`; metric browser: `/graph`) |
    | Grafana        | http://localhost:3000       (login `admin`/`admin` by default; Khala folder holds the FastAPI overview dashboard) |
    | Postgres       | localhost:5432 (user `postgres` / `temporal` / `khala`) |
+   | Neo4j Browser  | http://localhost:7474   (Bolt `localhost:7687`; agent knowledge graph — not used by the unified API unless `NEO4J_BOLT_URL` is set) |
    | Ollama (local) | http://localhost:11434      |
 
    Use the **Angular UI at 4201** so API requests go through the same origin and nginx proxies them to the backend. If you run only the API container and use the UI with `ng serve`, point the dev API base to `http://localhost:8888` in `user-interface/src/environments/environment.ts`.
@@ -52,6 +54,7 @@ Optional (defaults in compose / `docker/.env.example`; copy to `docker/.env` and
 - **LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
 - **LLM_MODEL** – default `deepseek-v4-pro:cloud`
 - **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `khala` DBs and users.
+- **NEO4J_BOLT_URL** – unset on `khala` by default (no Graphiti sync in the reverse proxy). Set to `bolt://neo4j:7687` to opt that process into graph sync; see `docs/ENV_VARS.md`. **NEO4J_PASSWORD** (and related Neo4j vars) configure the always-on Neo4j container for agents.
 
 Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.
 
@@ -111,14 +114,47 @@ The Unified API (`khala` on 8888) only registers each team’s `/api/...` route 
 
 ## Resource limits (khala)
 
-The **khala** service is configured for 8 vCPUs and 2G memory (`deploy.resources` plus legacy `cpus` / `mem_limit`). After changing these in `docker-compose.yml`, recreate the container so limits apply:
+The **khala** service is configured for 8 vCPUs and 1G memory (`deploy.resources` plus legacy `cpus` / `mem_limit` / `mem_reservation`). 1G/512M reservation reflects a measured single-worker RSS floor of ~140 MiB post the workers=1 / Pattern-A-boot / Strands-import-edge fixes (see the comment above the `khala` service in `docker-compose.yml`); raise it if `docker stats` shows sustained pressure closer to the limit in a real deployment. After changing these in `docker-compose.yml`, recreate the container so limits apply:
 
 ```bash
 docker compose -f docker/docker-compose.yml down khala
 docker compose -f docker/docker-compose.yml --env-file docker/.env up -d khala
 ```
 
-On **macOS** with Docker Desktop, container memory is capped by the VM's memory limit (Docker Desktop → Settings → Resources). If 2G is not applied, raise the VM limit and restart Docker.
+On **macOS** with Docker Desktop, container memory is capped by the VM's memory limit (Docker Desktop → Settings → Resources). If 1G is not applied, raise the VM limit and restart Docker.
+
+## Unified API image (slim dependencies)
+
+The **khala** (Unified API) image is mostly a reverse proxy: of the teams
+configured in `TEAM_CONFIGS` (`backend/unified_api/config.py`), all but a
+handful (`in_process=True` — `user_profile`, `product_delivery`,
+`agent_studio`, plus platform modules `agent_console`, `agent_registry`,
+`agent_cognition`, `team_assistant`) are proxied over HTTP via
+`unified_api/team_proxy.py` to their own per-team container and never
+imported by this process. `backend/Dockerfile` reflects that: it installs
+`backend/requirements-unified-api.txt`, an audited minimal dependency set for
+the proxy process's own cold path, instead of the full
+`backend/agents/requirements.txt` every per-team container installs.
+
+| Image | Requirements file | Scope |
+|---|---|---|
+| `khala` (Unified API) | `backend/requirements-unified-api.txt` | Slim — only what the proxy process itself imports at startup or during an always-mounted in-process route. |
+| `team_service`, `blogging_service`, `job_service`, `agent_sandbox_image` (and per-team Dockerfiles) | `backend/agents/requirements.txt` (or a per-team file) | Full — every team's agent/tool code actually runs here, including heavy per-team packages (e.g. `strands-agents` across most teams, `pandas`/`numpy`/`pyarrow` for `investment_team`). |
+
+See [`docs/UNIFIED_API_DEPENDENCY_AUDIT.md`](../docs/UNIFIED_API_DEPENDENCY_AUDIT.md) for the full package-by-package audit behind this split.
+
+## Team-assistant kill-switch and lazy mount
+
+Team-assistant conversational sub-apps (`<team-prefix>/assistant`) are never
+all mounted eagerly at `khala` startup. Each one is registered as a
+lightweight mount spec and only actually constructed and mounted on that
+team's first matching request — a cold-request cost paid once per team, only
+for teams that receive assistant traffic. Set
+`UNIFIED_API_TEAM_ASSISTANTS_ENABLED=false` (`docker/.env.example`) to skip
+registration entirely: zero assistant sub-apps are ever mounted, regardless
+of traffic, while team proxy routes and health checks stay unaffected. See
+[`docs/ENV_VARS.md`](../docs/ENV_VARS.md#unified_api_team_assistants_enabled)
+for full detail.
 
 ## Agents and Postgres
 
@@ -171,7 +207,7 @@ After starting the stack:
 
 1. **Compose up** – `docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build` should bring up all services without errors.
 2. **Temporal UI** – Open http://localhost:8080 and confirm the Temporal Web UI loads.
-3. **Agents** – `curl http://localhost:8888/health` should return `{"status":"ok"}` (agents use stack Postgres and Ollama Cloud when configured).
+3. **Agents** – `curl http://localhost:8888/health` should return HTTP 200 with a body like `{"status": "healthy", "version": "1.0.0", "teams": [...]}` (agents use stack Postgres and Ollama Cloud when configured). `status` is `"degraded"` rather than `"healthy"` if any enabled proxy team is missing its `*_SERVICE_URL`, or `"unhealthy"` if an in-process team's Postgres schema registration failed — check the per-team `teams[]` entries to see which one.
 4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
 5. **Metrics endpoints** – `curl -sf http://localhost:8888/metrics | head` and the same on `:8585` (job service) and `:8090`–`:8110` (team services) should return Prometheus text-format output (`# HELP ...`).
 6. **Prometheus targets** – Open http://localhost:9090/targets; all rows should be green (`UP`). Or run `curl -s 'http://localhost:9090/api/v1/query?query=up' | jq '.data.result[] | {service:.metric.service, up:.value[1]}'`.

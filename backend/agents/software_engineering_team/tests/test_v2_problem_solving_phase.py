@@ -461,7 +461,11 @@ def test_run_problem_solving_tool_agent_raises(monkeypatch):
     tool_agent = MagicMock()
     tool_agent.problem_solve.side_effect = RuntimeError("crash")
 
-    # Should not raise
+    # Should not raise -- the exception is caught inside
+    # _apply_tool_agents_problem_solve and logged, so the tool agent's
+    # (nonexistent) file updates never reach the merge and the single-issue
+    # fix result -- already resolved via RESOLVED=yes with no FILE section --
+    # stands unchanged.
     out = run_problem_solving(
         llm=MagicMock(),
         task=_task(),
@@ -469,7 +473,9 @@ def test_run_problem_solving_tool_agent_raises(monkeypatch):
         current_files={"a.py": "old"},
         tool_agents={ToolAgentKind.DOCUMENTATION: tool_agent},
     )
-    assert out is not None
+    tool_agent.problem_solve.assert_called_once()
+    assert out.resolved is True
+    assert out.files == {"a.py": "old"}
 
 
 def test_run_problem_solving_for_microtask_no_actionable():
@@ -484,6 +490,8 @@ def test_run_problem_solving_for_microtask_no_actionable():
         current_files={"a.py": "code"},
     )
     assert out.resolved is True
+    assert out.files == {"a.py": "code"}
+    assert out.summary == "No actionable issues."
 
 
 def test_run_problem_solving_for_microtask_success(monkeypatch):
@@ -508,7 +516,12 @@ def test_run_problem_solving_for_microtask_success(monkeypatch):
         current_files={"a.py": "old"},
         detail_callback=msgs.append,
     )
-    assert out is not None
+    assert out.resolved is True
+    assert out.files["a.py"] == "fixed"
+    assert out.unresolved_issues == []
+    assert "applied 1 fix" in out.summary
+    assert msgs  # callback was invoked
+    assert any("issue" in m.lower() for m in msgs)
 
 
 def _phase_result(issues, phase_name="code_review"):
@@ -518,7 +531,11 @@ def _phase_result(issues, phase_name="code_review"):
 
 
 def test_run_phase_fixes_via_code_review():
-    """run_code_review_fixes routes through internal _run_phase_fixes."""
+    """run_code_review_fixes routes through internal _run_phase_fixes, which
+    short-circuits on its no-actionable-issue path here: the supplied
+    severity='info' issue is filtered out before the per-issue fix loop runs.
+    See test_run_code_review_fixes_with_actionable for the actionable path.
+    """
     from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
         run_code_review_fixes,
     )
@@ -530,6 +547,8 @@ def test_run_phase_fixes_via_code_review():
         current_files={"a.py": "code"},
     )
     assert out.resolved is True
+    assert out.files == {"a.py": "code"}
+    assert out.summary == "No actionable code_review issues."
 
 
 def test_run_qa_fixes():

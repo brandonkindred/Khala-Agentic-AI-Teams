@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..models import ExecutionResult, ProblemSolvingResult, ReviewResult
+from .review import ARTIFACT_GATE_DESCRIPTION_PREFIX
 
 
 def run_problem_solving(
@@ -12,8 +13,10 @@ def run_problem_solving(
 
     Preconditions: ``review_result.issues`` may be empty. This is a purely
       deterministic, non-LLM fix — it only ever addresses ``artifact_gate``-
-      sourced issues (missing required artifact categories); it cannot
-      resolve ``execution``-sourced issues (failed microtasks).
+      sourced issues whose description starts with
+      ``ARTIFACT_GATE_DESCRIPTION_PREFIX`` and yields a non-empty hint token; it
+      cannot resolve ``execution``-sourced issues (failed microtasks) or
+      malformed artifact-gate descriptions.
     Postconditions: returns a ``ProblemSolvingResult`` where ``resolved`` is
       True iff at least one placeholder file was synthesized; ``files`` is a
       new dict — ``execution_result.files`` merged with the placeholder
@@ -24,13 +27,18 @@ def run_problem_solving(
     patched_files = {}
 
     for issue in review_result.issues:
-        if issue.source == "artifact_gate":
-            token = issue.description.split(":")[-1].strip()
-            path = f"ai_system/{token}_placeholder.md"
-            patched_files[path] = (
-                f"# Placeholder {token}\n\nAuto-generated during problem-solving to satisfy artifact gate."
-            )
-            fixes_applied.append(f"Added placeholder artifact for missing category '{token}'.")
+        if issue.source != "artifact_gate":
+            continue
+        if not issue.description.startswith(ARTIFACT_GATE_DESCRIPTION_PREFIX):
+            continue
+        token = issue.description[len(ARTIFACT_GATE_DESCRIPTION_PREFIX) :].strip()
+        if not token:
+            continue
+        path = f"ai_system/{token}_placeholder.md"
+        patched_files[path] = (
+            f"# Placeholder {token}\n\nAuto-generated during problem-solving to satisfy artifact gate."
+        )
+        fixes_applied.append(f"Added placeholder artifact for missing category '{token}'.")
 
     resolved = len(patched_files) > 0
     summary = (

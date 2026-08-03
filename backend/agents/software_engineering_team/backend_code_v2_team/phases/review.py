@@ -269,7 +269,14 @@ def run_microtask_review(
 
     Thin wrapper over
     :func:`software_engineering_team.shared.v2_review.run_microtask_review`; see
-    :func:`run_review` for the injection rationale.
+    :func:`run_review` for the injection rationale. Unlike that shared function
+    (and unlike ``frontend_code_v2_team.phases.review.run_microtask_review``),
+    this wrapper does not accept or forward a ``tool_agent_cache`` parameter:
+    the backend team's gate callables never read ``deps.tool_agent_cache``
+    (only the frontend team's do -- see ``ReviewDependencies`` in
+    ``shared.phases.execution`` and the "residual 2x" caching design note in
+    ``docs/GATE_DEPENDENCY_GRAPH.md``), so there is nothing for it to do here.
+    Passing ``tool_agent_cache`` to this wrapper raises ``TypeError``.
 
     Preconditions:
         - ``microtask`` exposes ``.id``/``.title``/``.description``.

@@ -18,14 +18,20 @@ from strands import Agent
 from .graphs.shared import build_agent
 from .models import (
     AudienceSegmentsOutput,
+    BrandArchetypesOutput,
     BrandCheckRequest,
     BrandCheckResult,
     BrandDiscoveryAuditOutput,
     BrandingMission,
+    BrandStoryOutput,
     CoreValuesOutput,
     DifferentiationPillarsOutput,
+    MessagingFrameworkOutput,
+    PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
+    TaglineOutput,
+    WritingGuidelinesOutput,
 )
 
 # ===================================================================
@@ -124,7 +130,7 @@ def make_positioning_synthesizer() -> Agent:
 
 
 # ===================================================================
-# Phase 2 — Narrative & Messaging  (Swarm)
+# Phase 2 — Narrative & Messaging  (Graph: sequential specialists)
 # ===================================================================
 
 
@@ -137,11 +143,9 @@ def make_storyteller() -> Agent:
             "craft:\n"
             "1. brand_story — a compelling 2-3 paragraph origin/purpose story\n"
             "2. hero_narrative — a shorter, punchy version for hero sections\n"
-            "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios\n\n"
-            "After completing your work, hand off to the ArchetypeAnalyst to define brand "
-            "archetypes that align with the story. If the ArchetypeAnalyst suggests revisions, "
-            "incorporate them."
+            "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios"
         ),
+        structured_output=BrandStoryOutput,
     )
 
 
@@ -150,14 +154,15 @@ def make_archetype_analyst() -> Agent:
         name="ArchetypeAnalyst",
         description="Selects brand archetypes with rationale and personality traits.",
         system_prompt=(
-            "You are a Brand Archetype Analyst. Review the brand story and strategic core, then "
-            "select 1-2 brand archetypes (e.g. The Sage, The Creator, The Explorer). For each:\n"
+            "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
+            "nodes and the strategic core, then select 1-2 brand archetypes "
+            "(e.g. The Sage, The Creator, The Explorer). Carry forward brand_story, hero_narrative, "
+            "and boilerplate_variants unchanged, and add for each archetype:\n"
             "- archetype: name\n"
             "- rationale: why this fits\n"
-            "- personality_traits: 3-5 traits\n\n"
-            "If the brand story doesn't align with the archetype, hand off back to the Storyteller "
-            "with specific revision suggestions. Otherwise, hand off to the TaglineWriter."
+            "- personality_traits: 3-5 traits"
         ),
+        structured_output=BrandArchetypesOutput,
     )
 
 
@@ -166,16 +171,16 @@ def make_tagline_writer() -> Agent:
         name="TaglineWriter",
         description="Creates tagline, tagline rationale, and elevator pitches.",
         system_prompt=(
-            "You are a Tagline Writer. Using the brand story, archetypes, and strategic core, "
-            "produce:\n"
+            "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
+            "and the strategic core, carry forward every prior narrative field unchanged and add:\n"
             "1. tagline — a memorable brand tagline (max 8 words)\n"
             "2. tagline_rationale — why this tagline works\n"
             "3. elevator_pitches — three variants:\n"
             "   - tier: '5-second', pitch: ...\n"
             "   - tier: '30-second', pitch: ...\n"
-            "   - tier: '2-minute', pitch: ...\n\n"
-            "After completing, hand off to the MessageMapper."
+            "   - tier: '2-minute', pitch: ..."
         ),
+        structured_output=TaglineOutput,
     )
 
 
@@ -184,13 +189,14 @@ def make_message_mapper() -> Agent:
         name="MessageMapper",
         description="Builds messaging framework pillars and audience message maps.",
         system_prompt=(
-            "You are a Message Mapper. Using all narrative context so far, produce:\n"
+            "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
+            "nodes, carry them forward unchanged and add:\n"
             "1. messaging_framework — 3-4 messaging pillars, each with:\n"
             "   - pillar, key_message, proof_points\n"
             "2. audience_message_maps — one per audience segment, each with:\n"
-            "   - audience_segment, primary_message, supporting_messages, tone_adjustments\n\n"
-            "After completing, hand off to the PersonaBuilder."
+            "   - audience_segment, primary_message, supporting_messages, tone_adjustments"
         ),
+        structured_output=MessagingFrameworkOutput,
     )
 
 
@@ -199,11 +205,12 @@ def make_persona_builder() -> Agent:
         name="PersonaBuilder",
         description="Creates rich persona profiles with psychographic depth.",
         system_prompt=(
-            "You are a Persona Builder. Using audience segments and brand narrative, create 2-3 "
-            "persona profiles. Each persona has: name, role, demographics, psychographics, goals, "
-            "frustrations, media_habits, jobs_to_be_done.\n\n"
-            "After completing, hand off to the VoicePrinciplesDrafter."
+            "You are a Persona Builder. Using audience segments and all prior narrative fields "
+            "from Inputs from previous nodes, carry those fields forward unchanged and create "
+            "2-3 persona profiles. Each persona has: name, role, demographics, psychographics, "
+            "goals, frustrations, media_habits, jobs_to_be_done."
         ),
+        structured_output=PersonaProfilesOutput,
     )
 
 
@@ -212,14 +219,16 @@ def make_voice_principles_drafter() -> Agent:
         name="VoicePrinciplesDrafter",
         description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
         system_prompt=(
-            "You are a Voice Principles Drafter. Using the brand story, archetypes, and mission's "
-            "desired_voice, produce writing guidelines:\n"
+            "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
+            "previous nodes and the mission's desired_voice, carry the prior fields forward "
+            "unchanged and produce writing_guidelines:\n"
             "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
             "2. style_dos — 3-4 writing best practices\n"
             "3. style_donts — 3-4 things to avoid\n"
             "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
             "This is the final step in narrative development."
         ),
+        structured_output=WritingGuidelinesOutput,
     )
 
 
@@ -632,12 +641,17 @@ class BrandComplianceAgent:
             mission.company_name,
             mission.target_audience,
         ]
+        # Deduplicate (preserving order) so a keyword listed under more than one
+        # mission field — e.g. also present as a differentiator — contributes at
+        # most one match; otherwise a single distinct keyword could satisfy the
+        # "at least two distinct keywords" on-brand threshold below.
+        unique_keywords = list(dict.fromkeys(k for k in keywords if k))
         # Word-boundary patterns, compiled once per call. Substring matching
         # ("k in text") falsely fires on incidental overlaps — e.g. the value
         # "tech" matching "fintech" or "logistics" — inflating the on-brand
         # score. ``\b`` anchors each keyword (and multi-word phrase) to whole
         # words.
-        patterns = [(k, re.compile(rf"\b{re.escape(k.lower())}\b")) for k in keywords if k]
+        patterns = [(k, re.compile(rf"\b{re.escape(k.lower())}\b")) for k in unique_keywords]
         results: List[BrandCheckResult] = []
 
         for check in checks:

@@ -181,3 +181,58 @@ async def test_start_sandbox_reaper_task_uses_in_process_reaper_when_temporal_di
 
     assert worker_started == []
     assert reaper_started == [True]
+
+
+@pytest.mark.asyncio
+async def test_maybe_start_sandbox_reaper_skipped_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Acceptance criterion: UNIFIED_API_SANDBOX_TEMPORAL_WORKER=false must skip
+    starting the sandbox reaper (and therefore the sandbox Temporal worker
+    thread it would otherwise boot) entirely."""
+    monkeypatch.setattr(main, "UNIFIED_API_SANDBOX_TEMPORAL_WORKER", False)
+    called: list[bool] = []
+
+    async def fake_start() -> asyncio.Task:
+        called.append(True)
+        return asyncio.create_task(asyncio.sleep(0))
+
+    monkeypatch.setattr(main, "_start_sandbox_reaper_task", fake_start)
+
+    result = await main._maybe_start_sandbox_reaper()
+
+    assert called == []
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_maybe_start_sandbox_reaper_starts_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default (flag true, or unset) must preserve today's always-on behavior."""
+    monkeypatch.setattr(main, "UNIFIED_API_SANDBOX_TEMPORAL_WORKER", True)
+    called: list[bool] = []
+
+    async def fake_start() -> asyncio.Task:
+        called.append(True)
+        return asyncio.create_task(asyncio.sleep(0))
+
+    monkeypatch.setattr(main, "_start_sandbox_reaper_task", fake_start)
+
+    result = await main._maybe_start_sandbox_reaper()
+
+    assert called == [True]
+    assert isinstance(result, asyncio.Task)
+    await result
+
+
+@pytest.mark.asyncio
+async def test_maybe_start_sandbox_reaper_swallows_startup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure inside _start_sandbox_reaper_task must be logged and swallowed,
+    not propagated — startup of the rest of the app must not be aborted."""
+    monkeypatch.setattr(main, "UNIFIED_API_SANDBOX_TEMPORAL_WORKER", True)
+
+    async def fake_start() -> asyncio.Task:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(main, "_start_sandbox_reaper_task", fake_start)
+
+    result = await main._maybe_start_sandbox_reaper()
+
+    assert result is None

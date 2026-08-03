@@ -27,7 +27,7 @@ _FAILURE_HEADER = re.compile(r"^##\s+Failure:\s*(?P<ts>.+?)\s+-\s+(?P<agent>.+?)
 _FINAL_ERROR = re.compile(r"\*\*Final error\*\*:\s*`?(?P<err>.+?)`?\s*$", re.MULTILINE)
 
 _DEFAULT_COUNTER_MEASURE = (
-    "Simplify or split the task/prompt; review LLM_MAX_TOKENS and model context size; "
+    "Simplify or split the task/prompt; review LLM_MAX_OUTPUT_TOKENS and model context size; "
     "check for non-terminating/repetitive generation."
 )
 

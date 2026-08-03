@@ -24,6 +24,7 @@ from investment_team.models import (
     StrategySpec,
     TradeRecord,
 )
+from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
 from investment_team.strategy_lab.agents.alignment import (
     AlignmentAuditError,
     AlignmentIssue,
@@ -772,9 +773,9 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
         def __call__(self, _prompt: str) -> str:
             return "not json at all"
 
-    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubStrandsAgent)
     monkeypatch.setattr(
-        alignment_module,
+        agent_runner_module,
         "get_strands_model",
         lambda *_a, **_k: None,
     )
@@ -819,8 +820,8 @@ def test_propose_code_fix_propagates_budget_exhaustion(monkeypatch) -> None:
         def __call__(self, _prompt: str) -> str:  # pragma: no cover - must not be reached
             raise AssertionError("the LLM must not be called once the budget is exhausted")
 
-    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
-    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda *_a, **_k: None)
 
     agent = alignment_module.TradeAlignmentAgent()
     spent_budget = LLMCallBudget(1)
@@ -862,8 +863,8 @@ def test_adjudicate_near_miss_propagates_budget_exhaustion(monkeypatch) -> None:
         def __call__(self, _prompt: str) -> str:  # pragma: no cover - must not be reached
             raise AssertionError("the LLM must not be called once the budget is exhausted")
 
-    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
-    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda *_a, **_k: None)
 
     agent = alignment_module.TradeAlignmentAgent()
     spent_budget = LLMCallBudget(1)
@@ -896,9 +897,9 @@ def test_agent_key_is_strategy_alignment_not_ideation(monkeypatch) -> None:
             return '{"legitimate": true, "rationale": "r"}'
 
     model_keys: List[str] = []
-    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubStrandsAgent)
     monkeypatch.setattr(
-        alignment_module,
+        agent_runner_module,
         "get_strands_model",
         lambda key, *_a, **_k: model_keys.append(key) or None,
     )
@@ -932,8 +933,8 @@ def test_propose_code_fix_fails_open_preserving_patch_on_coercion_error(monkeypa
                 '"proposed_code": "def fixed(): pass", "changes_made": "c"}'
             )
 
-    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
-    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda *_a, **_k: None)
 
     def _boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("synthetic coercion failure")
@@ -966,8 +967,8 @@ def test_propose_code_fix_prompt_embeds_response_schema(monkeypatch) -> None:
             return '{"aligned": false, "rationale": "r", "issues": [], "changes_made": "c"}'
 
     capture = _CapturingStrandsAgent()
-    monkeypatch.setattr(alignment_module, "Agent", lambda *_a, **_k: capture)
-    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", lambda *_a, **_k: capture)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda *_a, **_k: None)
 
     agent = alignment_module.TradeAlignmentAgent()
     agent.propose_code_fix(

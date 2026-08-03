@@ -7,9 +7,11 @@ Graphiti LLM/embedder wiring are resolved from environment variables at call tim
 Env vars:
 
     NEO4J_BOLT_URL       Bolt URL of the Neo4j server, e.g. ``bolt://neo4j:7687``.
-                         This is the **enablement gate** — when it is unset the
-                         knowledge-graph layer is inert (the only tolerated unset
-                         case is the unit-test harness, which fakes Graphiti).
+                         This is the **per-process enablement gate** — when it is
+                         unset the knowledge-graph layer is inert in this process
+                         (compose leaves it unset on the unified API by default;
+                         the unit-test harness also leaves it unset and fakes
+                         Graphiti).
     NEO4J_USER           Neo4j username (default ``neo4j``).
     NEO4J_PASSWORD       Neo4j password (default empty).
     NEO4J_DATABASE       Neo4j database name (default ``neo4j``).
@@ -27,8 +29,9 @@ shared ``LLM_BASE_URL`` / ``OLLAMA_API_KEY`` settings.
 
 Invariants:
     * ``is_neo4j_enabled()`` is the single source of truth for whether the layer
-      is active. It is a *test-harness seam*, not a product feature flag — a real
-      deployment always sets ``NEO4J_BOLT_URL`` and runs Neo4j as required infra.
+      is active in this process. Neo4j remains required stack infrastructure for
+      agents; leaving ``NEO4J_BOLT_URL`` unset on a process (e.g. the unified API
+      reverse proxy) is the supported way to skip Graphiti client/sync overhead.
 """
 
 from __future__ import annotations
@@ -50,10 +53,10 @@ def is_neo4j_enabled() -> bool:
     """True when ``NEO4J_BOLT_URL`` is set.
 
     Postconditions:
-        * Returns ``True`` iff a non-blank ``NEO4J_BOLT_URL`` is present. A real
-          deployment always sets it (Neo4j is required infra); an unset value is
-          tolerated only so the unit-test suite can run against a faked Graphiti
-          without standing up a database.
+        * Returns ``True`` iff a non-blank ``NEO4J_BOLT_URL`` is present. Unset is
+          the supported way to leave Graphiti inert in a process (compose defaults
+          the unified API that way; the unit-test suite also leaves it unset and
+          fakes Graphiti).
     """
     return bool(os.getenv("NEO4J_BOLT_URL", "").strip())
 

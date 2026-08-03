@@ -35,6 +35,12 @@ from .interface import (
     LLMNotConfiguredError,
     LLMRateLimitError,
 )
+from .limit_classification import (
+    LIMIT_KIND_RATE,
+    LIMIT_KIND_SESSION,
+    LIMIT_KIND_WEEKLY,
+    resolve_limit_kind,
+)
 from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -379,23 +385,19 @@ def _build_entry_client(
 def _mark_entry_exhausted(entry: "provider_store.ProviderEntry", err: LLMRateLimitError) -> None:
     """Mark ``entry`` usage-limited from a 429, computing its ``reset_at``.
 
-    The reset window is the provider ``Retry-After`` (``err.retry_after_seconds``)
-    when present; otherwise a configurable fallback — a long ``weekly`` window when
-    the error matches :data:`OLLAMA_WEEKLY_LIMIT_MESSAGE`, else a short ``rate``
-    window. ``limit_type`` is the lightweight label stored alongside.
+    Classification prefers ``err.limit_kind`` (set by the Ollama client from the
+    429 body), then falls back to legacy message phrases
+    (:data:`OLLAMA_WEEKLY_LIMIT_MESSAGE` / Ollama Cloud body text). Windows:
 
-    By design (the "track the reset time; keep the type label lightweight" decision),
-    the only weekly signal recognized today is Ollama's weekly-limit message — Claude
-    and other providers fall through to the ``rate`` window, driven by their
-    ``Retry-After`` when present. ``reset_at`` (not ``limit_type``) is the load-bearing
-    field for selection, so a misclassified type at worst uses the shorter fallback
-    window when no ``Retry-After`` is given; add a provider's weekly signal here if a
-    longer default is ever needed.
+    - ``session`` — fixed :func:`llm_config.failover_session_window_seconds`
+      (default 5h); **ignores** ``Retry-After``.
+    - ``weekly`` — fixed :func:`llm_config.failover_weekly_window_seconds`
+      (default 24h); **ignores** ``Retry-After``.
+    - ``rate`` — honors ``Retry-After`` when present (including ``0`` = retry
+      immediately); otherwise :func:`llm_config.failover_rate_window_seconds`
+      (default 5m).
 
-    A ``Retry-After`` of exactly ``0`` ("retry immediately") is honored as a 0-second
-    window — the entry's ``reset_at`` is "now", so it is reconsidered on the very next
-    selection rather than being parked for the full fallback window. Only a missing
-    (``None``) or negative ``Retry-After`` falls through to the configured fallback.
+    ``reset_at`` (not ``limit_type``) is the load-bearing field for selection.
 
     Preconditions: ``err.retry_after_seconds`` is a non-negative number or ``None``.
     Postconditions: persists the mark via :func:`provider_store.mark_exhausted`
@@ -403,12 +405,18 @@ def _mark_entry_exhausted(entry: "provider_store.ProviderEntry", err: LLMRateLim
     """
     secs = err.retry_after_seconds
     message = str(err) or getattr(err, "message", "") or ""
-    has_retry_after = secs is not None and secs >= 0
-    if OLLAMA_WEEKLY_LIMIT_MESSAGE in message:
-        limit_type = "weekly"
-        window = secs if has_retry_after else llm_config.failover_weekly_window_seconds()
+    limit_type = resolve_limit_kind(
+        limit_kind=getattr(err, "limit_kind", None),
+        message=message,
+        weekly_legacy_message=OLLAMA_WEEKLY_LIMIT_MESSAGE,
+    )
+    if limit_type == LIMIT_KIND_SESSION:
+        window = llm_config.failover_session_window_seconds()
+    elif limit_type == LIMIT_KIND_WEEKLY:
+        window = llm_config.failover_weekly_window_seconds()
     else:
-        limit_type = "rate"
+        limit_type = LIMIT_KIND_RATE
+        has_retry_after = secs is not None and secs >= 0
         window = secs if has_retry_after else llm_config.failover_rate_window_seconds()
     reset_at = datetime.now(timezone.utc) + timedelta(seconds=float(window))
     provider_store.mark_exhausted(entry.id, limit_type=limit_type, reset_at=reset_at)

@@ -1,18 +1,15 @@
 """Tests for production review-agent wiring into code-v2 callers.
 
 Coverage:
-1. ``build_production_review_kwargs`` returns the three expected keys with non-None values.
-2. ``build_production_review_kwargs_in_process`` returns the three keys and constructs
+1. ``build_production_review_kwargs_in_process`` returns the three keys and constructs
    ``CodeReviewAgent(..., force_in_process=True)`` without mutating ``TEMPORAL_ADDRESS``.
-3. Both helpers degrade gracefully to ``{}`` when construction raises.
-4. ``_run_frontend_code_v2_impl`` passes non-None code_review_agent / build_verifier /
+2. The helper degrades gracefully to ``{}`` when construction raises.
+3. ``_run_frontend_code_v2_impl`` passes non-None code_review_agent / build_verifier /
    linting_tool_agent to ``run_workflow`` (Temporal activity caller).
-5. ``_run_backend_code_v2_impl`` same.
-6. ``_run_frontend_code_v2_background`` same (background thread caller).
-7. ``_run_backend_code_v2_background`` same.
-8. Degrade-to-``{}`` path in each of the four call sites: when the helper returns ``{}``,
+4. ``_run_backend_code_v2_impl`` same.
+5. Degrade-to-``{}`` path in each of the two call sites: when the helper returns ``{}``,
    ``run_workflow`` still executes (no KeyError / crash).
-9. ``_validate_findings`` actually executes in the backend-code-v2 path — an
+6. ``_validate_findings`` actually executes in the backend-code-v2 path — an
    out-of-range line number is nulled rather than kept.
 """
 
@@ -57,7 +54,7 @@ def _make_fake_workflow_result(success: bool = True):
 
 
 # ---------------------------------------------------------------------------
-# 1–3. Unit tests for the shared helper
+# 1–2. Unit tests for the shared helper
 #
 # ``CodeReviewAgent``, ``LintingToolAgent``, and ``_run_build_verification``
 # are imported *inside* the helper function bodies (deferred, to avoid heavy
@@ -86,38 +83,6 @@ class TestBuildProductionReviewKwargs:
     _CRA_TARGET = "software_engineering_team.code_review_agent.CodeReviewAgent"
     _LTA_TARGET = "software_engineering_team.linting_tool_agent.LintingToolAgent"
     _BV_TARGET  = "software_engineering_team.build_fix._run_build_verification"
-
-    def test_happy_path_returns_expected_keys(self) -> None:
-        """All three keys are present and non-None when construction succeeds."""
-        import software_engineering_team.shared.production_review_agents as pra
-
-        fake_cra = MagicMock(name="CodeReviewAgent")
-        fake_lta = MagicMock(name="LintingToolAgent")
-        fake_bv = MagicMock(name="_run_build_verification")
-
-        with (
-            patch("llm_service.get_client", return_value=MagicMock()),
-            patch(self._CRA_TARGET, return_value=fake_cra),
-            patch(self._LTA_TARGET, return_value=fake_lta),
-            patch(self._BV_TARGET, fake_bv),
-        ):
-            result = pra.build_production_review_kwargs()
-
-        assert result.get("code_review_agent") is fake_cra
-        assert result.get("linting_tool_agent") is fake_lta
-        assert result.get("build_verifier") is fake_bv
-
-    def test_degrade_to_empty_dict_on_construction_failure(self) -> None:
-        """Any exception during construction must return {} (never re-raise)."""
-        import software_engineering_team.shared.production_review_agents as pra
-
-        with (
-            patch("llm_service.get_client", return_value=MagicMock()),
-            patch(self._CRA_TARGET, side_effect=RuntimeError("LLM not configured")),
-        ):
-            result = pra.build_production_review_kwargs()
-
-        assert result == {}
 
     def test_in_process_happy_path_returns_expected_keys(self, monkeypatch) -> None:
         """All three keys are present; CodeReviewAgent gets force_in_process=True."""
@@ -209,15 +174,13 @@ class TestBuildProductionReviewKwargs:
 # ---------------------------------------------------------------------------
 # Call-site test helpers
 #
-# For the call-site tests (4–8) we need to intercept:
+# For the call-site tests (3–4) we need to intercept:
 #   a) The team-lead class (deferred import inside the function body).
 #   b) The review-kwargs helper.
 #
 # (a) is patched at its canonical module, e.g. ``frontend_code_v2_team.FrontendCodeV2TeamLead``.
 # (b) For temporal/activities.py: ``build_production_review_kwargs_in_process`` is
 #     imported inside the function body, so we patch it on the shared module object.
-#     For api/background.py: ``_build_production_review_kwargs`` is a *module-level*
-#     alias (bound at import time), so we patch it directly on the background module.
 # ---------------------------------------------------------------------------
 
 _REAL_REVIEW_KWARGS = {
@@ -228,7 +191,7 @@ _REAL_REVIEW_KWARGS = {
 
 
 # ---------------------------------------------------------------------------
-# 4. _run_frontend_code_v2_impl (Temporal) passes review agents
+# 3. _run_frontend_code_v2_impl (Temporal) passes review agents
 # ---------------------------------------------------------------------------
 
 
@@ -289,7 +252,7 @@ class TestFrontendImplPassesReviewAgents:
 
 
 # ---------------------------------------------------------------------------
-# 5. _run_backend_code_v2_impl (Temporal) passes review agents
+# 4. _run_backend_code_v2_impl (Temporal) passes review agents
 # ---------------------------------------------------------------------------
 
 
@@ -348,111 +311,7 @@ class TestBackendImplPassesReviewAgents:
 
 
 # ---------------------------------------------------------------------------
-# 6. _run_frontend_code_v2_background passes review agents
-# ---------------------------------------------------------------------------
-
-
-class TestFrontendBackgroundPassesReviewAgents:
-    """``_run_frontend_code_v2_background`` must splat non-None review agents into ``run_workflow``."""
-
-    def _run(self, monkeypatch, tmp_path, kwargs_override=None):
-        import software_engineering_team.api.background as bg
-
-        captured: Dict[str, Any] = {}
-        fake_result = _make_fake_workflow_result()
-
-        def fake_run_workflow(**kw):
-            captured.update(kw)
-            return fake_result
-
-        fake_team_lead = MagicMock()
-        fake_team_lead.run_workflow = fake_run_workflow
-
-        review_kwargs = dict(_REAL_REVIEW_KWARGS) if kwargs_override is None else kwargs_override
-
-        monkeypatch.setenv("LLM_PROVIDER", "dummy")
-        # ``_build_production_review_kwargs`` is bound at module-level in background.py
-        # as an alias for ``build_production_review_kwargs`` — patch the bound name directly.
-        with (
-            patch("software_engineering_team.frontend_code_v2_team.FrontendCodeV2TeamLead", return_value=fake_team_lead),
-            patch.object(bg, "_build_production_review_kwargs", return_value=review_kwargs),
-        ):
-            bg._run_frontend_code_v2_background(
-                "fv2-bg", str(tmp_path), {"id": "t1", "title": "T"}, ""
-            )
-
-        return captured
-
-    def test_code_review_agent_is_non_none(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path)
-        assert captured.get("code_review_agent") is not None
-
-    def test_build_verifier_is_non_none(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path)
-        assert captured.get("build_verifier") is not None
-
-    def test_linting_tool_agent_is_non_none(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path)
-        assert captured.get("linting_tool_agent") is not None
-
-    def test_degrade_path_still_executes(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path, kwargs_override={})
-        assert "task" in captured
-
-
-# ---------------------------------------------------------------------------
-# 7. _run_backend_code_v2_background passes review agents
-# ---------------------------------------------------------------------------
-
-
-class TestBackendBackgroundPassesReviewAgents:
-    """``_run_backend_code_v2_background`` must splat non-None review agents into ``run_workflow``."""
-
-    def _run(self, monkeypatch, tmp_path, kwargs_override=None):
-        import software_engineering_team.api.background as bg
-
-        captured: Dict[str, Any] = {}
-        fake_result = _make_fake_workflow_result()
-
-        def fake_run_workflow(**kw):
-            captured.update(kw)
-            return fake_result
-
-        fake_team_lead = MagicMock()
-        fake_team_lead.run_workflow = fake_run_workflow
-
-        review_kwargs = dict(_REAL_REVIEW_KWARGS) if kwargs_override is None else kwargs_override
-
-        monkeypatch.setenv("LLM_PROVIDER", "dummy")
-        with (
-            patch("software_engineering_team.backend_code_v2_team.BackendCodeV2TeamLead", return_value=fake_team_lead),
-            patch.object(bg, "_build_production_review_kwargs", return_value=review_kwargs),
-        ):
-            bg._run_backend_code_v2_background(
-                "bv2-bg", str(tmp_path), {"id": "t1", "title": "T"}, ""
-            )
-
-        return captured
-
-    def test_code_review_agent_is_non_none(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path)
-        assert captured.get("code_review_agent") is not None
-
-    def test_build_verifier_is_non_none(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path)
-        assert captured.get("build_verifier") is not None
-
-    def test_linting_tool_agent_is_non_none(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path)
-        assert captured.get("linting_tool_agent") is not None
-
-    def test_degrade_path_still_executes(self, monkeypatch, tmp_path) -> None:
-        captured = self._run(monkeypatch, tmp_path, kwargs_override={})
-        assert "task" in captured
-
-
-# ---------------------------------------------------------------------------
-# 9. _validate_findings executes in the backend-code-v2 review path
+# 6. _validate_findings executes in the backend-code-v2 review path
 #
 # Tests the bounds-checking contract directly through the
 # architecture_consistency_pass module (the layer that owns _validate_findings).

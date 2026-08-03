@@ -138,6 +138,7 @@ def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> 
     )
     out = a.identify_uncertainty_questions("d", "p")
     assert len(out) == 1
+    assert out[0].question_id == "q-0"
 
 
 def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
@@ -659,6 +660,7 @@ def test_generate_escalation_summary_reraises_non_llm_error(monkeypatch) -> None
 
 
 def test_generate_escalation_summary_rate_limit_reraises(monkeypatch) -> None:
+    """LLM rate-limit errors during escalation summary generation must propagate."""
     import pytest
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
@@ -924,8 +926,11 @@ def test_revise_wrapped_temporary_retries_then_fallback(monkeypatch) -> None:
         lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
     )
     wrapped = LLMTemporaryError("temporary")
+    call_count = 0
 
     def boom(self, *a, **kw):
+        nonlocal call_count
+        call_count += 1
         raise EventLoopException(wrapped)
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
@@ -949,6 +954,7 @@ def test_revise_wrapped_temporary_retries_then_fallback(monkeypatch) -> None:
         ),
     )
     assert "Batch Recovered Wrapped" in out.draft
+    assert call_count == wa_mod.BATCH_EXECUTE_MAX_RETRIES
 
 
 def test_revise_wrapped_json_parse_error_retries_then_fallback(monkeypatch) -> None:
