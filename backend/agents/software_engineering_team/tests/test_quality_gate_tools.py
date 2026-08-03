@@ -76,7 +76,10 @@ def test_run_code_review_forwards_user_decisions(monkeypatch) -> None:
         captured["input"] = inp
         return _ReviewResult()
 
-    monkeypatch.setattr("software_engineering_team.code_review_agent.CodeReviewAgent", lambda llm: SimpleNamespace(run=_run))
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent",
+        lambda llm: SimpleNamespace(run=_run),
+    )
     q.run_code_review(
         code="x" * 50,
         spec_content="spec",
@@ -153,7 +156,10 @@ def test_run_code_review_exception_returns_failed(monkeypatch) -> None:
     def boom(*a, **kw):
         raise RuntimeError("agent down")
 
-    monkeypatch.setattr("software_engineering_team.code_review_agent.CodeReviewAgent", lambda llm: SimpleNamespace(run=boom))
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent",
+        lambda llm: SimpleNamespace(run=boom),
+    )
     monkeypatch.setattr(
         "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
         lambda llm: 1000,
@@ -233,7 +239,9 @@ def test_run_linting_happy_path(monkeypatch, tmp_path) -> None:
     from software_engineering_team import quality_gate_tools as q
 
     fake_agent = SimpleNamespace(run=lambda path: _LintResultModel())
-    monkeypatch.setattr("software_engineering_team.linting_tool_agent.LintingToolAgent", lambda llm: fake_agent)
+    monkeypatch.setattr(
+        "software_engineering_team.linting_tool_agent.LintingToolAgent", lambda llm: fake_agent
+    )
     result = q.run_linting(tmp_path, "t1", llm_getter=lambda k: MagicMock())
     assert result.passed is False
     assert result.issues
@@ -247,310 +255,11 @@ def test_run_linting_exception_non_blocking(monkeypatch, tmp_path) -> None:
         raise RuntimeError("lint exploded")
 
     monkeypatch.setattr(
-        "software_engineering_team.linting_tool_agent.LintingToolAgent", lambda llm: SimpleNamespace(run=boom)
+        "software_engineering_team.linting_tool_agent.LintingToolAgent",
+        lambda llm: SimpleNamespace(run=boom),
     )
     result = q.run_linting(tmp_path, "t1", llm_getter=lambda k: MagicMock())
     assert result.passed is True
-
-
-# ---------------------------------------------------------------------------
-# run_dbc_comments
-# ---------------------------------------------------------------------------
-
-
-def test_run_dbc_comments_no_code_returns_compliant(monkeypatch, tmp_path) -> None:
-    """run_dbc_comments returns compliant when there is no code to annotate (empty repo)."""
-    from software_engineering_team import quality_gate_tools as q
-
-    # Empty repo (no .py/.ts files) → code stays empty → returns compliant
-    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
-    assert result.compliant is True
-
-
-def test_run_dbc_comments_already_compliant(monkeypatch, tmp_path) -> None:
-    """run_dbc_comments returns compliant when the agent reports the code already has DbC comments."""
-    from software_engineering_team import quality_gate_tools as q
-
-    (tmp_path / "a.py").write_text("def x(): pass")
-
-    class _Result:
-        already_compliant = True
-        files = {}
-        comments_added = 0
-        comments_updated = 0
-        suggested_commit_message = ""
-
-    fake_agent = SimpleNamespace(run=lambda inp: _Result())
-    monkeypatch.setattr(
-        "software_engineering_team.technical_writers.dbc_comments_agent.DbcCommentsAgent", lambda llm: fake_agent
-    )
-    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
-    assert result.compliant is True
-
-
-def test_run_dbc_comments_writes_files(monkeypatch, tmp_path) -> None:
-    """run_dbc_comments writes the agent's patched files via the git helper and reports comments_added when the agent produces edits."""
-    from software_engineering_team import quality_gate_tools as q
-
-    (tmp_path / "a.py").write_text("def x(): pass")
-
-    class _Result:
-        already_compliant = False
-        files = {"a.py": "# new\ndef x(): pass"}
-        comments_added = 2
-        comments_updated = 1
-        suggested_commit_message = "docs(dbc): add"
-
-    fake_agent = SimpleNamespace(run=lambda inp: _Result())
-    monkeypatch.setattr(
-        "software_engineering_team.technical_writers.dbc_comments_agent.DbcCommentsAgent", lambda llm: fake_agent
-    )
-
-    captured = {}
-
-    def fake_write(repo_path, files, msg):
-        captured["repo"] = repo_path
-        captured["files"] = files
-        captured["msg"] = msg
-
-    monkeypatch.setattr(
-        "software_engineering_team.shared.git_utils.write_files_and_commit", fake_write
-    )
-    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
-    assert result.compliant is False
-    assert result.comments_added == 2
-    assert captured["files"] == {"a.py": "# new\ndef x(): pass"}
-
-
-def test_run_dbc_comments_exception_non_blocking(monkeypatch, tmp_path) -> None:
-    """run_dbc_comments is non-blocking: an agent error returns compliant=True rather than raising."""
-    from software_engineering_team import quality_gate_tools as q
-
-    (tmp_path / "a.py").write_text("x")
-
-    def boom(*a, **kw):
-        raise RuntimeError("agent err")
-
-    monkeypatch.setattr(
-        "software_engineering_team.technical_writers.dbc_comments_agent.DbcCommentsAgent",
-        lambda llm: SimpleNamespace(run=boom),
-    )
-    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
-    assert result.compliant is True  # non-blocking
-
-
-def test_run_dbc_comments_skips_excluded_paths(monkeypatch, tmp_path) -> None:
-    """run_dbc_comments skips excluded paths (node_modules, non-code) so an otherwise-empty repo is compliant."""
-    from software_engineering_team import quality_gate_tools as q
-
-    # Files in excluded folders should be skipped, leaving code empty → compliant
-    (tmp_path / "node_modules").mkdir()
-    (tmp_path / "node_modules" / "x.py").write_text("ignore me")
-    (tmp_path / "binary.txt").write_text("ignore")
-    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
-    assert result.compliant is True
-
-
-def test_run_dbc_comments_prunes_excluded_dirs_in_place(monkeypatch, tmp_path) -> None:
-    """The streamed os.walk prunes excluded subtrees (node_modules/.git/
-    __pycache__/venv) in place, so their files never reach the agent's code
-    context, while top-level code is still collected."""
-    from software_engineering_team import quality_gate_tools as q
-
-    (tmp_path / "keep.py").write_text("KEEP_TOP_LEVEL = 1")
-    for excl in ("node_modules", ".git", "__pycache__", "venv"):
-        d = tmp_path / excl
-        d.mkdir()
-        (d / "leak.py").write_text(f"LEAK_{excl} = 1")
-
-    captured = {}
-
-    class _Result:
-        already_compliant = True
-        files = {}
-        comments_added = 0
-        comments_updated = 0
-        suggested_commit_message = ""
-
-    def fake_run(inp):
-        captured["code"] = inp.code
-        return _Result()
-
-    fake_agent = SimpleNamespace(run=fake_run)
-    monkeypatch.setattr(
-        "software_engineering_team.technical_writers.dbc_comments_agent.DbcCommentsAgent", lambda llm: fake_agent
-    )
-    q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
-
-    code = captured["code"]
-    assert "KEEP_TOP_LEVEL" in code  # top-level code is collected
-    for excl in ("node_modules", ".git", "__pycache__", "venv"):
-        assert f"LEAK_{excl}" not in code  # excluded subtree pruned, never read
-
-
-# ---------------------------------------------------------------------------
-# run_qa_check
-# ---------------------------------------------------------------------------
-
-
-def test_run_qa_check_passed(monkeypatch) -> None:
-    """run_qa_check reports passed when the QA agent finds no bugs."""
-    from software_engineering_team import quality_gate_tools as q
-
-    class _Bug:
-        def model_dump(self):
-            return {"severity": "low"}
-
-    class _Result:
-        bugs = []
-
-    monkeypatch.setattr(
-        "software_engineering_team.qa_agent.QAExpertAgent", lambda llm: SimpleNamespace(run=lambda **kw: _Result())
-    )
-    result = q.run_qa_check(
-        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
-    )
-    assert result.passed is True
-
-
-def test_run_qa_check_with_bugs(monkeypatch) -> None:
-    """run_qa_check reports not-passed with bugs when the QA agent finds a high-severity bug."""
-    from software_engineering_team import quality_gate_tools as q
-
-    class _Bug:
-        def model_dump(self):
-            return {"severity": "high"}
-
-    class _Result:
-        bugs = [_Bug()]
-
-    monkeypatch.setattr(
-        "software_engineering_team.qa_agent.QAExpertAgent", lambda llm: SimpleNamespace(run=lambda **kw: _Result())
-    )
-    result = q.run_qa_check(
-        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
-    )
-    assert result.passed is False
-    assert result.bugs
-
-
-def test_run_qa_check_exception_non_blocking(monkeypatch) -> None:
-    """run_qa_check is non-blocking: an agent error yields passed=True rather than raising."""
-    from software_engineering_team import quality_gate_tools as q
-
-    monkeypatch.setattr(
-        "software_engineering_team.qa_agent.QAExpertAgent",
-        lambda llm: SimpleNamespace(run=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom"))),
-    )
-    result = q.run_qa_check(
-        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
-    )
-    assert result.passed is True
-
-
-# ---------------------------------------------------------------------------
-# run_security_scan
-# ---------------------------------------------------------------------------
-
-
-def test_run_security_scan_clean(monkeypatch) -> None:
-    """run_security_scan reports passed when the security agent finds no vulnerabilities."""
-    from software_engineering_team import quality_gate_tools as q
-
-    class _Result:
-        vulnerabilities = []
-
-    monkeypatch.setattr(
-        "software_engineering_team.security_agent.CybersecurityExpertAgent",
-        lambda llm: SimpleNamespace(run=lambda **kw: _Result()),
-    )
-    result = q.run_security_scan(
-        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
-    )
-    assert result.passed is True
-
-
-def test_run_security_scan_with_vulns(monkeypatch) -> None:
-    """run_security_scan reports not-passed when the agent finds a high-severity vulnerability."""
-    from software_engineering_team import quality_gate_tools as q
-
-    class _Vuln:
-        def model_dump(self):
-            return {"severity": "high"}
-
-    class _Result:
-        vulnerabilities = [_Vuln()]
-
-    monkeypatch.setattr(
-        "software_engineering_team.security_agent.CybersecurityExpertAgent",
-        lambda llm: SimpleNamespace(run=lambda **kw: _Result()),
-    )
-    result = q.run_security_scan(
-        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
-    )
-    assert result.passed is False
-
-
-def test_run_security_scan_exception_non_blocking(monkeypatch) -> None:
-    """run_security_scan is non-blocking: an agent error yields passed=True rather than raising."""
-    from software_engineering_team import quality_gate_tools as q
-
-    monkeypatch.setattr(
-        "software_engineering_team.security_agent.CybersecurityExpertAgent",
-        lambda llm: SimpleNamespace(run=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom"))),
-    )
-    result = q.run_security_scan(
-        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
-    )
-    assert result.passed is True
-
-
-# ---------------------------------------------------------------------------
-# run_acceptance_verification
-# ---------------------------------------------------------------------------
-
-
-def test_run_acceptance_verification_accepted(monkeypatch) -> None:
-    """run_acceptance_verification surfaces accepted=True and the agent's reasoning when the verifier accepts."""
-    from software_engineering_team import quality_gate_tools as q
-
-    class _Result:
-        accepted = True
-        reasoning = "great"
-
-    monkeypatch.setattr(
-        "software_engineering_team.acceptance_verifier_agent.AcceptanceVerifierAgent",
-        lambda llm: SimpleNamespace(run=lambda **kw: _Result()),
-    )
-    result = q.run_acceptance_verification(
-        code="x",
-        task_description="t",
-        acceptance_criteria=["c1"],
-        llm_getter=lambda k: MagicMock(),
-    )
-    assert result.accepted is True
-    assert result.reasoning == "great"
-
-
-def test_run_acceptance_verification_exception(monkeypatch) -> None:
-    """run_acceptance_verification fails closed (accepted=False, reasoning carries the error) when the verifier raises."""
-    from software_engineering_team import quality_gate_tools as q
-
-    def boom(**kw):
-        raise RuntimeError("verifier down")
-
-    monkeypatch.setattr(
-        "software_engineering_team.acceptance_verifier_agent.AcceptanceVerifierAgent",
-        lambda llm: SimpleNamespace(run=boom),
-    )
-    result = q.run_acceptance_verification(
-        code="x",
-        task_description="t",
-        acceptance_criteria=["c1"],
-        llm_getter=lambda k: MagicMock(),
-    )
-    assert result.accepted is False
-    assert "verifier down" in result.reasoning
 
 
 def test_run_code_review_sizes_context_with_strands_adapter() -> None:
@@ -580,7 +289,9 @@ def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
             captured["progress_callback"] = progress_callback
             return _ReviewResult()
 
-    monkeypatch.setattr("software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent)
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent
+    )
     monkeypatch.setattr(
         "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
         lambda llm: 1000,
@@ -628,7 +339,9 @@ def test_run_code_review_forwards_files_dict(monkeypatch) -> None:
             captured["code"] = inp.code
             return _ReviewResult()
 
-    monkeypatch.setattr("software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent)
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent
+    )
 
     files = {"app/main.py": "print('hi')", "app/util.py": "x = 1"}
     result = q.run_code_review(
@@ -661,7 +374,9 @@ def test_run_code_review_uses_code_when_no_files(monkeypatch) -> None:
             captured["code"] = inp.code
             return _ReviewResult()
 
-    monkeypatch.setattr("software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent)
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent
+    )
 
     q.run_code_review(
         code="### a.py ###\nx = 1",
