@@ -1,9 +1,10 @@
 """Tests for the branding team orchestrator.
 
 Since all agents are now LLM-backed strands.Agent instances running inside
-Strands SDK Graph/Swarm orchestration, we mock ``graph.invoke_async`` to
-return a canned result and verify the orchestrator correctly assembles
-``TeamOutput`` from it.
+Strands SDK Graph/Swarm orchestration, we patch
+``branding_team.orchestrator.build_branding_graph`` so the returned graph's
+``invoke_async`` yields a canned result, and verify the orchestrator
+correctly assembles ``TeamOutput`` from it.
 """
 
 import asyncio
