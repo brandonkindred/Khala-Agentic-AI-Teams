@@ -362,8 +362,8 @@ class TestFrontendRunExecutionWithReviewGates:
             if _call_count[0] == 1:
                 # First call: execution (file generation)
                 return (
-                    "\n## FILES ##\n--- src/app.ts ---\n"
-                    "export const app = () => console.log('Hello');\n---\n\n## SUMMARY ##\nCreated app module.\n"
+                    "\n## FILE src/app.ts ##\n"
+                    "export const app = () => console.log('Hello');\n\n## SUMMARY ##\nCreated app module.\n"
                 )
             # All subsequent calls: reviews and documentation self-review
             return "\n## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
@@ -382,9 +382,10 @@ class TestFrontendRunExecutionWithReviewGates:
             review_deps=deps,
         )
 
-        assert len(result.files) >= 0
+        assert result.files == {"src/app.ts": "export const app = () => console.log('Hello');"}
         completed = [m for m in result.microtasks if m.status == MicrotaskStatus.COMPLETED]
-        assert len(completed) <= 1
+        assert len(completed) == 1
+        assert completed[0].id == "mt-1"
 
     def test_execution_with_stop_on_failure_raises_error(self, tmp_path):
         from frontend_code_v2_team.models import (
@@ -697,6 +698,7 @@ class TestBackendReviewDependencies:
         assert deps.build_verifier is None
         assert deps.qa_agent is None
         assert deps.tool_agents == {}
+        assert deps.tool_agent_cache is None
 
 
 class TestBackendRunMicrotaskReview:
@@ -854,22 +856,23 @@ class TestBackendRunExecutionWithReviewGates:
             call_count += 1
             if "mt-1" in str(planning_result.microtasks[0].id) and call_count <= 2:
                 if call_count == 1:
-                    return (
-                        "## FILES ##\n--- bad.py ---\neval('bad')\n---\n\n"
-                        "## SUMMARY ##\nBad code.\n"
-                    )
+                    return "## FILE bad.py ##\neval('bad')\n\n## SUMMARY ##\nBad code.\n"
                 else:
                     return (
                         "## REVIEW_STATUS ##\nfailed\n\n"
                         "## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval\n---\n## END ISSUES ##\n\n"
                         "## SUMMARY ##\nFailed.\n## END SUMMARY ##"
                     )
-            return "## FILES ##\n--- good.py ---\nprint('good')\n---\n\n## SUMMARY ##\nGood code.\n"
+            return "## FILE good.py ##\nprint('good')\n\n## SUMMARY ##\nGood code.\n"
 
         mock_llm = _CallableTextClient(mock_complete_text)
 
-        config = MicrotaskReviewConfig(max_retries=0, on_failure="skip_continue")
-        deps = ReviewDependencies()
+        config = MicrotaskReviewConfig(code_review_max_retries=0, on_failure="skip_continue")
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        mock_sec = MagicMock()
+        mock_sec.run.return_value = MagicMock(vulnerabilities=[], issues=[])
+        deps = ReviewDependencies(qa_agent=mock_qa, security_agent=mock_sec)
 
         result = run_execution_with_review_gates(
             llm=mock_llm,
@@ -880,8 +883,10 @@ class TestBackendRunExecutionWithReviewGates:
             review_deps=deps,
         )
 
-        failed = [m for m in result.microtasks if m.status == MicrotaskStatus.REVIEW_FAILED]
-        assert len(failed) <= len(planning_result.microtasks)
+        failed_ids = {m.id for m in result.microtasks if m.status == MicrotaskStatus.REVIEW_FAILED}
+        assert failed_ids == {"mt-1"}
+        mt2_result = next(m for m in result.microtasks if m.id == "mt-2")
+        assert mt2_result.status == MicrotaskStatus.COMPLETED
 
     def test_code_review_gate_forwards_enable_llm_review_grounding(self, tmp_path, monkeypatch):
         """Kill switch on MicrotaskReviewConfig must reach run_code_review_phase."""
