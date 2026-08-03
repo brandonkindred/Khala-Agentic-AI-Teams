@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from product_requirements_analysis_agent.models import AnsweredQuestion, OpenQuestion
 from product_requirements_analysis_agent.qa_history import (
     extract_answer_from_qa_history,
@@ -576,6 +577,32 @@ def test_format_answered_questions_for_prompt_escapes_multiline_answer_and_ratio
     assert "\\## Not a real iteration" in prompt_block
 
 
+def test_format_answered_questions_for_prompt_raises_for_non_numeric_confidence() -> None:
+    """A caller-constructed AnsweredQuestion with a non-numeric confidence raises.
+
+    Normal ``AnsweredQuestion(...)`` construction runs Pydantic validation and
+    can't produce this; ``model_construct`` bypasses it, simulating a caller
+    that skips validation. Confirms the corrected docstring's contract
+    (previously it wrongly claimed the function "never raises") — this is a
+    precondition violation, not normal operation.
+    """
+    malformed = AnsweredQuestion.model_construct(
+        question_id="q1",
+        question_text="Which cache should we use?",
+        selected_option_id="",
+        selected_option_ids=[],
+        selected_answer="Redis",
+        was_auto_answered=True,
+        was_default=False,
+        rationale="",
+        confidence="not-a-number",
+        other_text="",
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        format_answered_questions_for_prompt([malformed])
+
+
 # ---------------------------------------------------------------------------
 # Match-threshold consistency (extract_answer_from_qa_history vs is_same_decision)
 # ---------------------------------------------------------------------------
@@ -616,6 +643,79 @@ def test_extract_answer_prefers_later_block_on_equal_match_ratio() -> None:
 
     assert result is not None
     assert result.selected_answer == "Later answer."
+
+
+# ---------------------------------------------------------------------------
+# Keyword filter (content-word based, not length-based) short-question matching
+# ---------------------------------------------------------------------------
+
+
+def test_extract_answer_matches_short_content_word_keywords() -> None:
+    """A question made up entirely of short (<=4 char) content words still matches.
+
+    Previously key_words filtered to len(w) > 4, so a question with no word
+    over 4 characters (e.g. an all-short-acronym question) produced an empty
+    key_words list and always returned None, even when an equivalent prior
+    question existed in qa_history.md.
+    """
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### Should we use IAM or ACL policies on S3 buckets?\n"
+        "**Answer:** Use IAM policies exclusively.\n\n"
+    )
+    question = _open_question("Do we use IAM or ACL on S3?")
+
+    result = extract_answer_from_qa_history(question, qa_history)
+
+    assert result is not None
+    assert result.selected_answer == "Use IAM policies exclusively."
+
+
+def test_extract_answer_returns_none_for_stopword_only_question() -> None:
+    """A question with no content-bearing word (only stopwords) returns None,
+    even when an identical question is recorded in history.
+
+    Preserves the prior "no usable keyword" guard behavior, now expressed via
+    the stopword-based _content_words filter shared with is_same_decision
+    instead of a raw word-length cutoff.
+    """
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### Should we use it?\n"
+        "**Answer:** Yes.\n\n"
+    )
+    question = _open_question("Should we use it?")
+
+    assert extract_answer_from_qa_history(question, qa_history) is None
+
+
+def test_extract_answer_short_keyword_does_not_match_as_a_substring() -> None:
+    """A short key word must match a whole word in the recorded question, not
+    merely appear as a substring inside an unrelated longer word.
+
+    Once short (<=4 char) words became eligible key words, comparing them via
+    ``w in recorded_question_lower`` risked a false match: the key word "api"
+    is a substring of "capitalizing", so an unrelated later block could tie
+    (or beat) the genuine earlier match and win the later-block tie-break,
+    silently returning the wrong answer.
+    """
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### Do we use an API for external calls?\n"
+        "**Answer:** REST API answer.\n\n"
+        "## Iteration 2\n\n"
+        "### Are we capitalizing gains this quarter?\n"
+        "**Answer:** Unrelated wrong answer.\n\n"
+    )
+    question = _open_question("Do we use an API?")
+
+    result = extract_answer_from_qa_history(question, qa_history)
+
+    assert result is not None
+    assert result.selected_answer == "REST API answer."
 
 
 # ---------------------------------------------------------------------------

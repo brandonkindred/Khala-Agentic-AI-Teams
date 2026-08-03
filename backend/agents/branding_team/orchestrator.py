@@ -396,7 +396,9 @@ class BrandingTeamOrchestrator:
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
     ) -> TeamOutput:
-        """Run the branding pipeline up to *target_phase* (default: all phases).
+        """Run the branding pipeline up to and including *target_phase*
+        (default: all phases). When *target_phase* is None, every phase is
+        executed.
 
         The pipeline is built as a Strands SDK ``Graph`` whose nodes are
         per-phase sub-graphs and swarms.  Brand-compliance checks run outside
@@ -405,7 +407,8 @@ class BrandingTeamOrchestrator:
         Preconditions:
             - ``target_phase`` is ``None`` or one of the runnable ``BrandPhase``
               values (``COMPLETE`` is allowed as the upper bound but is not a
-              runnable graph node).
+              runnable graph node, and is treated the same as ``None`` --
+              every phase runs).
             - When ``store`` and ``brand_id`` are supplied, ``store`` implements
               ``get_brand``/``get_brand_by_id``/``append_brand_version``.
 
@@ -470,7 +473,6 @@ class BrandingTeamOrchestrator:
             checks=checks,
             competitive_snapshot=competitive_snapshot,
             design_asset_result=design_asset_result,
-            stop_idx=stop_idx,
             degraded_phases=degraded_phases,
         )
 
@@ -581,7 +583,6 @@ class BrandingTeamOrchestrator:
         checks: List[Any],
         competitive_snapshot: Any,
         design_asset_result: Any,
-        stop_idx: int,
         degraded_phases: Optional[List[BrandPhase]] = None,
     ) -> TeamOutput:
         """Assemble the final ``TeamOutput`` from computed phase artifacts.
@@ -604,6 +605,15 @@ class BrandingTeamOrchestrator:
             - Returns a fully-populated ``TeamOutput`` whose ``degraded_phases``
               reflects the caller-supplied list; performs no I/O and no
               persistence (the caller owns ``store.append_brand_version``).
+            - ``human_feedback`` falls back to a status-appropriate default
+              message ("Approved for rollout." / "Awaiting approval from
+              brand leadership.") whenever ``human_review.feedback`` is
+              falsy -- including an explicitly-passed ``feedback=""`` --
+              because ``HumanReview.feedback`` (``backend/shared/hitl/
+              models.py``) is typed ``str = ""``, not ``Optional[str]``, so
+              "omitted" and "explicitly empty" cannot be distinguished at
+              this boundary without widening ``HumanReview``'s public shape,
+              which is out of scope here.
         """
         current_phase = self._determine_current_phase(
             narrative, visual_identity, channel_activation, governance, human_review.approved
@@ -612,7 +622,7 @@ class BrandingTeamOrchestrator:
             strategic_core, narrative, visual_identity, channel_activation, governance
         )
         phase_gates = _build_phase_gates(current_phase, human_review.approved)
-        status, mission_summary = self._build_status_summary(human_review, current_phase, stop_idx)
+        status, mission_summary = self._build_status_summary(human_review, current_phase)
 
         return TeamOutput(
             status=status,
@@ -704,9 +714,27 @@ class BrandingTeamOrchestrator:
     ) -> BrandPhase:
         """Return the furthest phase reached, promoting to COMPLETE when approved.
 
+        ``strategic_core`` is deliberately not a parameter here: STRATEGIC_CORE
+        is the pipeline's first phase and always the floor, so this function
+        never needs to observe whether it parsed cleanly.
+
+        Preconditions:
+            Each of ``narrative``/``visual_identity``/``channel_activation``/
+            ``governance`` is either that phase's output model or ``None`` when
+            the phase was not reached this run (stopped before it via
+            ``stop_idx``/``target_phase``). A non-``None`` value may be a
+            default-constructed instance -- ``_extract_phase_output`` never
+            returns ``None`` on a parse failure, only a degraded default -- so
+            a degraded phase is indistinguishable from a cleanly-parsed one at
+            this call site.
         Postconditions:
-            Returns the phase of the last non-None output; when governance is
-            present and ``approved`` is True, returns ``BrandPhase.COMPLETE``.
+            Returns the phase of the last non-None output (STRATEGIC_CORE if
+            all four are None); when ``governance`` is present and
+            ``approved`` is True, returns ``BrandPhase.COMPLETE`` instead.
+            Invariant: a degraded (default-constructed) phase output still
+            counts as "reached" for this promotion -- callers that need to
+            distinguish degraded from clean must consult
+            ``TeamOutput.degraded_phases`` separately.
         """
         current_phase = BrandPhase.STRATEGIC_CORE
         if narrative is not None:
@@ -725,19 +753,23 @@ class BrandingTeamOrchestrator:
     def _build_status_summary(
         human_review: HumanReview,
         current_phase: BrandPhase,
-        stop_idx: int,
     ) -> tuple[WorkflowStatus, str]:
         """Derive the workflow status and human-facing summary line.
 
+        Preconditions:
+            ``current_phase`` is the value ``_determine_current_phase`` just
+            returned for this same run (the furthest phase actually reached).
         Postconditions:
             Returns ``(status, mission_summary)``: NEEDS_HUMAN_DECISION with a
             review prompt when unapproved, READY_FOR_ROLLOUT when the run is
             complete, else NEEDS_HUMAN_DECISION with a phase-approved summary.
+            Both the unapproved branch and the approved-but-incomplete branch
+            derive their embedded phase name from ``current_phase`` -- never
+            from a separately-computed stop index -- so the two can never
+            disagree about which phase they describe.
         """
         if not human_review.approved:
-            phase_label = (
-                PHASE_ORDER[min(stop_idx, len(PHASE_ORDER) - 1)].value.replace("_", " ").title()
-            )
+            phase_label = current_phase.value.replace("_", " ").title()
             return (
                 WorkflowStatus.NEEDS_HUMAN_DECISION,
                 f"Phase '{phase_label}' artifacts are ready for stakeholder review. "

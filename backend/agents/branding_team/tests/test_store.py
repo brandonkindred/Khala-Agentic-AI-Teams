@@ -115,6 +115,61 @@ def test_update_brand() -> None:
     assert updated.status == BrandStatus.active
 
 
+def test_update_brand_mission_clears_latest_output_and_resets_phase() -> None:
+    """A mission edit invalidates prior output, per update_brand's documented contract."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    mission = make_mission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(client.id, mission)
+    assert brand is not None
+    output = TeamOutput(
+        status=WorkflowStatus.READY_FOR_ROLLOUT,
+        mission_summary="Done",
+        current_phase=BrandPhase.COMPLETE,
+    )
+    with_output = store.append_brand_version(client.id, brand.id, output)
+    assert with_output is not None
+    assert with_output.latest_output is not None
+    assert with_output.current_phase == BrandPhase.COMPLETE
+
+    new_mission = mission.model_copy(update={"company_description": "Updated description"})
+    updated = store.update_brand(client.id, brand.id, mission=new_mission)
+
+    assert updated is not None
+    assert updated.latest_output is None
+    assert updated.current_phase == BrandPhase.STRATEGIC_CORE
+
+
+def test_update_brand_without_mission_preserves_latest_output() -> None:
+    """Patching unrelated fields must not trigger the mission-edit invalidation."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    mission = make_mission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(client.id, mission)
+    assert brand is not None
+    output = TeamOutput(
+        status=WorkflowStatus.READY_FOR_ROLLOUT,
+        mission_summary="Done",
+        current_phase=BrandPhase.COMPLETE,
+    )
+    store.append_brand_version(client.id, brand.id, output)
+
+    updated = store.update_brand(client.id, brand.id, status=BrandStatus.active)
+
+    assert updated is not None
+    assert updated.status == BrandStatus.active
+    assert updated.latest_output is not None
+    assert updated.current_phase == BrandPhase.COMPLETE
+
+
 def test_append_brand_version() -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
