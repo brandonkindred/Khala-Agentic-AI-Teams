@@ -48,7 +48,7 @@ def _job(**over: Any) -> Dict[str, Any]:
         "phase": "paused",
         "repo_path": "/tmp/repo",
         "waiting_for_answers": True,
-        "pending_questions": _PENDING,
+        "pending_questions": list(_PENDING),
         "task_graph_snapshot": [],
     }
     base.update(over)
@@ -251,11 +251,13 @@ def test_answers_success_stores_and_returns_status(monkeypatch):
 class _SyncThread:
     """Stand-in for threading.Thread that runs the target inline, so spawned work is observable."""
 
-    def __init__(self, target, daemon=None):
+    def __init__(self, target, args=(), kwargs=None, daemon=None):
         self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
 
     def start(self):
-        self._target()
+        self._target(*self._args, **self._kwargs)
 
 
 class _FakeClient:

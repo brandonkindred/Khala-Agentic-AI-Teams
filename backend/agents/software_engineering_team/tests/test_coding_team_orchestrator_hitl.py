@@ -1094,7 +1094,16 @@ def test_tech_lead_clarify_returns_paused_without_blocking(tmp_path, monkeypatch
     )
 
     assert result["outcome"] == "paused"
+    assert result["job_id"] == "j1"
     assert result["pause_kind"] == "tech_lead_clarify"
+    assert result["pause_context"] is None
+    assert len(result["pending_questions"]) == 1
+    assert result["resume_token"].startswith("j1:")
+    # The pause envelope is durably persisted before returning -- a notification, not the
+    # source of truth (contract doc §1's precondition), mirroring the entry-gate test.
+    assert job.get("resume_token") == result["resume_token"]
+    assert job.get("pause_kind") == "tech_lead_clarify"
+    assert job.get("waiting_for_answers") is True
     assert plan_calls["count"] == 1  # exactly one LLM call before the pause, no retry-loop re-entry
 
 

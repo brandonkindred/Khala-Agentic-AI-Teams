@@ -145,9 +145,13 @@ class CodingTeamWorkflow:
             - Deliberately NOT implemented here: buffering a signal that
               arrives before ``self._active_resume_token`` is set (the
               contract's §2 rule 1, ``self._buffered_signals``) — such a
-              signal is simply dropped by this skeleton. Today the pause
-              loop in ``run`` is dead code (no activity ever returns
-              ``"outcome": "paused"``), so this gap cannot manifest yet; it
+              signal is simply dropped by this skeleton. Since
+              ``run_pipeline_activity`` now returns
+              ``{"outcome": "paused", ...}`` under ``pause_strategy="return"``,
+              this gap IS reachable in production (a client that reads the
+              persisted ``resume_token`` from the job record and signals
+              before this workflow has processed the paused activity result
+              and set ``self._active_resume_token`` loses that signal). It
               is deferred to the sibling reconciliation-loop issue (#3988),
               which has the real activity-side pause payload to buffer
               against.
@@ -171,12 +175,13 @@ class CodingTeamWorkflow:
 
         Postconditions:
             - Returns the activity's result dict. ``run_pipeline_activity``
-              does not emit ``{"outcome": "paused", ...}`` today (activity-side
-              pause detection is separate, not-yet-implemented work), so in
-              current production behavior this executes the activity exactly
-              once and returns its result immediately — identical to before
-              this change.
-            - When a future activity result's ``"outcome"`` key IS
+              now always requests ``pause_strategy="return"`` and emits
+              ``{"outcome": "paused", ...}`` whenever a HITL gate pauses, or
+              a pre-work activity retry re-emits an already-persisted pause,
+              so this method loops (executing the activity more than once)
+              until a non-``"paused"`` outcome is returned — production
+              behavior is no longer "call the activity once."
+            - When an activity result's ``"outcome"`` key IS
               ``"paused"``, this instead records the pause's
               ``resume_token`` as ``self._active_resume_token``, resets
               ``self._submitted_answers`` to ``None``, and waits on
@@ -184,23 +189,28 @@ class CodingTeamWorkflow:
               ``submit_answers`` signal to set it (see ``submit_answers``'s
               contract). Once resolved, it sets
               ``request["acknowledged_resume_token"]`` to that same token —
-              telling a future activity-side consumer which persisted pause
-              this invocation resolves (contract doc §1/§3) — clears both
+              telling ``run_coding_team_orchestrator``'s re-entry check
+              (``_check_pending_pause_reentry``) which persisted pause this
+              invocation resolves (contract doc §1/§3) — clears both
               signal-tracking fields, re-invokes the SAME activity with the
               mutated ``request``, and pops
               ``request["acknowledged_resume_token"]`` once that call
               returns (its job is done whether or not that call consumed
               it). Repeats until a non-``"paused"`` outcome.
             - Deliberately NOT implemented here (deferred to #3988, the
-              sibling reconciliation-loop issue, where the real
-              activity-side pause payload — ``pending_questions``, a
-              ``pause_kind``, etc. — will exist to apply them against):
-              applying resolved answers into
+              sibling reconciliation-loop issue): although the activity-side
+              pause payload (``pending_questions``, ``pause_kind``,
+              ``pause_context``) now exists on every paused result, this
+              method does not yet APPLY resolved answers into
               ``request["plan_input"]["resolved_questions"]`` /
-              ``task_decision_overrides``, and reconciling against the job
-              record's terminal status while waiting (so a job cancelled
-              out-of-band while paused doesn't strand this workflow in
-              ``wait_condition`` forever).
+              ``task_decision_overrides`` — resume for the entry/tech-lead
+              gates instead round-trips through the job record (the
+              orchestrator's ``_hydrate_resolved_from_record`` picks up
+              ``submitted_answers`` on its own re-entry). Also not
+              implemented: reconciling against the job record's terminal
+              status while waiting (so a job cancelled out-of-band while
+              paused doesn't strand this workflow in ``wait_condition``
+              forever).
         """
         result = await workflow.execute_activity(
             run_pipeline_activity,

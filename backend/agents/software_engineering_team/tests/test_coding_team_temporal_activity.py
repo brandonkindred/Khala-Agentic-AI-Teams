@@ -13,6 +13,12 @@ from software_engineering_team.temporal.coding_team_workflow import run_pipeline
 
 
 def test_activity_raises_without_provider(monkeypatch) -> None:
+    """The activity must fail fast when no CodeEngineProvider is available.
+
+    Preconditions: ``get_engine_provider`` returns ``None``.
+    Postconditions: ``run_pipeline_activity`` raises ``RuntimeError`` matching
+    "no CodeEngineProvider" without attempting any orchestration work.
+    """
     import software_engineering_team.engine_provider as ep
 
     monkeypatch.setattr(ep, "get_engine_provider", lambda: None)
@@ -21,6 +27,12 @@ def test_activity_raises_without_provider(monkeypatch) -> None:
 
 
 def test_activity_raises_without_plan(monkeypatch) -> None:
+    """The activity must reject a missing ``plan_input`` before orchestration.
+
+    Preconditions: a provider is available but ``plan_input`` is ``None``.
+    Postconditions: ``run_pipeline_activity`` raises ``ValueError`` matching
+    "requires a plan_input".
+    """
     import software_engineering_team.engine_provider as ep
 
     monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
