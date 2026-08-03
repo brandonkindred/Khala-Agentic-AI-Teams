@@ -1188,6 +1188,34 @@ def test_parse_spec_review_response_skips_non_dict_open_questions() -> None:
     assert result.summary == "ok"
 
 
+def test_parse_spec_review_response_rejects_non_string_summary() -> None:
+    """Non-string summary values fall back to the default instead of str()-coercion."""
+    result = parse_spec_review_response(
+        {
+            "summary": {"nested": True},
+            "issues": [],
+            "gaps": [],
+            "open_questions": [],
+        }
+    )
+    assert result.summary == "Spec review complete"
+
+
+def test_parse_spec_review_response_drops_non_string_issues_and_gaps() -> None:
+    """Non-string issues/gaps elements are dropped before dedupe and return."""
+    result = parse_spec_review_response(
+        {
+            "summary": "ok",
+            "issues": ["real issue", {"bad": 1}, 42, None],
+            "gaps": [7, "real gap", ["nested"]],
+            "open_questions": [],
+        }
+    )
+    assert result.issues == ["real issue"]
+    assert result.gaps == ["real gap"]
+    assert result.summary == "ok"
+
+
 def test_parse_question_option_rejects_non_string_non_dict() -> None:
     """Unsupported option scalars must raise instead of becoming blank defaults."""
     with pytest.raises(ValueError, match="unsupported option type"):
@@ -3896,12 +3924,23 @@ def test_filter_duplicate_questions_preserves_complete_anch_bases() -> None:
 
 
 def test_filter_duplicate_questions_preserves_complete_s_ses_bases() -> None:
-    """bias exact-matches biases; cases/promises still need silent-e restoration."""
-    questions = [OpenQuestion(id="q1", question_text="Which bias case promise applies?")]
+    """Complete -s singulars (bias/lens/corps) exact-match -es plurals; cases/promises still silent-e."""
+    questions = [OpenQuestion(id="q1", question_text="Which bias lens corps case promise applies?")]
     qa_history = (
-        "Q: Which biases cases promises apply to this model?\n"
-        "A: Documented biases cases promises apply to this model."
+        "Q: Which biases lenses corps cases promises apply to this model?\n"
+        "A: Documented biases lenses corps cases promises apply to this model."
     )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_lenses_to_lens() -> None:
+    """lenses must exact-match lens, not over-stem to silent-e stub len."""
+    questions = [OpenQuestion(id="q1", question_text="Which lens should we use?")]
+    qa_history = "Q: Which lenses are available?\nA: The primary lens is required."
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
 

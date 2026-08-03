@@ -1,11 +1,16 @@
 """
 Project context and constraints discovery for the Product Requirements Analysis Agent.
 
-A standalone pair of helpers, independent of the SOP Phase 1/Phase 2 engine: one
-formulates open-ended context/constraint questions (project context, deployment,
-tenets, mandates) with an LLM call and a fixed fallback list on failure; the other
-folds answered questions back into the spec as a prepended "Project context and
-constraints" section.
+Two helpers live here:
+
+- :func:`inject_context_answers_into_spec` — used by the SOP Phase 1 engine to
+  prepend answered context/constraint Q&A into the live spec.
+- :func:`run_context_constraints_discovery` — optional lighter-weight question
+  generation (LLM + fixed fallback), exposed on
+  :class:`ProductRequirementsAnalysisAgent` for alternate/manual flows. The
+  default ``run_workflow`` path uses SOP Phase 1/2 instead of this helper, so
+  the overlapping question topics in ``SOP_PHASE1_QUESTIONS`` are intentional:
+  this remains a standalone entry point rather than a second workflow stage.
 """
 
 from __future__ import annotations

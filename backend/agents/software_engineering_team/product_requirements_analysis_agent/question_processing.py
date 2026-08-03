@@ -153,7 +153,9 @@ _LEXICAL_TT = frozenset(
         "watt",
     }
 )
-_COMPLETE_SES_BASES = frozenset({"bus", "gas", "bias"})
+_COMPLETE_SES_BASES = frozenset({"bus", "gas", "bias", "lens", "corps"})
+# Complete singulars ending in -s that take -es plurals (lenses→lens, buses→bus).
+# Latinate -us/-os bases are handled separately in _stem_info.
 _INSERT_K_STEMS = frozenset(
     {
         "frolick",
@@ -398,10 +400,13 @@ def filter_duplicate_questions(
         preserved within each). Never raises for well-typed inputs
         (``List[OpenQuestion]``, ``str``); ``_stem_info`` / ``_clean_token`` are
         total over cleaned lowercase tokens. Precondition violations raise
-        ``AssertionError``.
+        ``AssertionError`` (raised explicitly so the guard still holds under
+        ``python -O``).
     """
-    assert isinstance(new_questions, list), "new_questions must be a list"
-    assert isinstance(qa_history, str), "qa_history must be a string"
+    if not isinstance(new_questions, list):
+        raise AssertionError("new_questions must be a list")
+    if not isinstance(qa_history, str):
+        raise AssertionError("qa_history must be a string")
     qa_history_lower = qa_history.lower()
     filtered = []
     duplicates = []
@@ -411,13 +416,9 @@ def filter_duplicate_questions(
     ]
     # Exact set excludes restoration-only stubs so species/cases cannot hit spec/cas.
     qa_exact_stems = {stem for stem, _, _, exact_ok in qa_stem_infos if exact_ok}
-    qa_silent_e_stubs = {
-        stem for stem, silent_e, _, exact_ok in qa_stem_infos if silent_e and not exact_ok
-    }
-    # Also keep ed/ing silent-e stubs (moved→mov) for store↔stored matching.
-    qa_silent_e_stubs |= {
-        stem for stem, silent_e, _, exact_ok in qa_stem_infos if silent_e and exact_ok
-    }
+    # Silent-e stubs include both restoration-only and exact-eligible forms
+    # (e.g. moved→mov) so store↔stored matching still works.
+    qa_silent_e_stubs = {stem for stem, silent_e, _, _ in qa_stem_infos if silent_e}
     qa_y_or_ie_stubs = {stem for stem, _, y_or_ie, _ in qa_stem_infos if y_or_ie}
 
     for q in new_questions:
@@ -481,9 +482,11 @@ def filter_organizational_questions(questions: List[OpenQuestion]) -> List[OpenQ
 
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`.
     Postconditions: returns the sublist that is not organizational, order preserved.
-        Precondition violations raise ``AssertionError``.
+        Precondition violations raise ``AssertionError`` (raised explicitly so the
+        guard still holds under ``python -O``).
     """
-    assert isinstance(questions, list), "questions must be a list"
+    if not isinstance(questions, list):
+        raise AssertionError("questions must be a list")
     kept: List[OpenQuestion] = []
     for q in questions:
         text_norm = (q.question_text or "").lower().strip()
@@ -516,9 +519,8 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         parsed but not capped here (the agent workflow applies
         ``MAX_OPEN_QUESTIONS`` after semantic consolidation and
         answer-similarity deduplication so near-duplicates do not crowd out
-        distinct topics). Malformed open-question items are skipped and logged
-        (``ValueError``/``TypeError``/``KeyError``); this function never raises
-        to callers.
+        distinct topics). Malformed open-question items are skipped and logged;
+        this function never raises to callers.
     """
     if not isinstance(raw, dict):
         return SpecReviewResult(summary="Spec review completed (no structured output)")
@@ -527,9 +529,9 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     raw_gaps = raw.get("gaps", [])
     raw_questions = raw.get("open_questions", [])
 
-    # Deduplicate and limit issues/gaps to prevent repetitive LLM output
-    issues = list(raw_issues) if isinstance(raw_issues, list) else []
-    gaps = list(raw_gaps) if isinstance(raw_gaps, list) else []
+    # Keep only string issues/gaps; non-string LLM elements are dropped.
+    issues = [i for i in (raw_issues if isinstance(raw_issues, list) else []) if isinstance(i, str)]
+    gaps = [g for g in (raw_gaps if isinstance(raw_gaps, list) else []) if isinstance(g, str)]
 
     original_issue_count = len(issues)
     original_gap_count = len(gaps)
@@ -559,7 +561,7 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         for i, q in enumerate(raw_questions):
             try:
                 open_questions.append(parse_open_question(q, i))
-            except (ValueError, TypeError, KeyError) as exc:
+            except Exception as exc:
                 logger.warning(
                     "Skipping malformed open question at index %d (%s): %s; raw=%r",
                     i,
@@ -572,11 +574,7 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         issues=issues,
         gaps=gaps,
         open_questions=open_questions,
-        summary=(
-            str(raw["summary"])
-            if "summary" in raw and raw["summary"] is not None
-            else "Spec review complete"
-        ),
+        summary=_str_or_default(raw.get("summary"), "Spec review complete"),
     )
 
 
@@ -614,7 +612,9 @@ def _safe_constraint_layer(value: Any) -> int:
     Preconditions: none; ``value`` may be any decoded JSON type.
     Postconditions: returns a non-negative int. ``None``, non-numeric input, and
         bools (treated as malformed, not as 0/1) yield 0, matching the
-        "not a constraint question" default in :class:`OpenQuestion`.
+        "not a constraint question" default in :class:`OpenQuestion`. Float
+        values (including numeric strings like ``"2.9"``) are truncated toward
+        zero via ``int(...)``.
     """
     try:
         if value is None:
