@@ -18,6 +18,7 @@ from shared.job_event_bus.bus import (
     unsubscribe,
 )
 from shared.job_event_bus.reaper import ReaperHandle
+from shared.job_event_bus.scheduler import schedule_periodic_reap, stop_periodic_reap
 
 __all__ = [
     "Subscription",
@@ -28,4 +29,6 @@ __all__ = [
     "cleanup_job",
     "reap_once",
     "ReaperHandle",
+    "schedule_periodic_reap",
+    "stop_periodic_reap",
 ]

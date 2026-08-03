@@ -39,7 +39,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 __all__ = [
     "Subscription",
@@ -49,7 +49,26 @@ __all__ = [
     "publish",
     "cleanup_job",
     "reap_once",
+    "FloatSource",
+    "IntSource",
+    "resolve_float",
+    "resolve_int",
 ]
+
+# Shared by every reap_once scheduler (ReaperHandle, schedule_periodic_reap):
+# a plain value, or a zero-arg callable evaluated on each pass so a caller can
+# retune TTL/cap live (e.g. a lambda closing over a module global a test
+# monkeypatches, honoured by the very next reap).
+FloatSource = Union[float, Callable[[], float]]
+IntSource = Union[int, Callable[[], int]]
+
+
+def resolve_float(src: FloatSource) -> float:
+    return float(src() if callable(src) else src)
+
+
+def resolve_int(src: IntSource) -> int:
+    return int(src() if callable(src) else src)
 
 
 @dataclass

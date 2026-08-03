@@ -23,28 +23,14 @@ terminal event, so the contract is: if you're still reading, touch.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Optional, Tuple
 
 from shared.concurrency import BackgroundHeartbeat
-from shared.job_event_bus.bus import BusState, reap_once
+from shared.job_event_bus.bus import BusState, FloatSource, IntSource, reap_once, resolve_float, resolve_int
 
 _DEFAULT_LOGGER = logging.getLogger(__name__)
 
 __all__ = ["ReaperHandle"]
-
-# The TTL and cap are read live on every pass so a caller can retune them — a
-# plain value, or a zero-arg callable evaluated each reap (e.g. ``lambda: _TTL``
-# over a module global a test monkeypatches, honoured by the very next pass).
-_FloatSource = Union[float, Callable[[], float]]
-_IntSource = Union[int, Callable[[], int]]
-
-
-def _resolve_float(src: _FloatSource) -> float:
-    return float(src() if callable(src) else src)
-
-
-def _resolve_int(src: _IntSource) -> int:
-    return int(src() if callable(src) else src)
 
 
 class ReaperHandle:
@@ -72,8 +58,8 @@ class ReaperHandle:
         self,
         state: BusState,
         *,
-        ttl_seconds: _FloatSource,
-        max_jobs: _IntSource,
+        ttl_seconds: FloatSource,
+        max_jobs: IntSource,
         interval_seconds: float,
         name: str,
         label: str = "event-bus",
@@ -124,8 +110,8 @@ class ReaperHandle:
         """
         return reap_once(
             self._state,
-            ttl_seconds=_resolve_float(self._ttl_seconds),
-            max_jobs=_resolve_int(self._max_jobs),
+            ttl_seconds=resolve_float(self._ttl_seconds),
+            max_jobs=resolve_int(self._max_jobs),
             logger=self._logger,
             label=self._label,
         )
