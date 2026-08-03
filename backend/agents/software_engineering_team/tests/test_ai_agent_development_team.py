@@ -5,8 +5,15 @@ from unittest.mock import patch
 
 import pytest
 
+import software_engineering_team.ai_agent_development_team.phases.review as review_mod
 from llm_service import DummyLLMClient
+from software_engineering_team.ai_agent_development_team import constants as team_constants
 from software_engineering_team.ai_agent_development_team import orchestrator
+from software_engineering_team.ai_agent_development_team.constants import (
+    ARTIFACT_GATE_DESCRIPTION_PREFIX,
+    PLACEHOLDER_ARTIFACT_DIR,
+    REQUIRED_ARTIFACT_HINTS,
+)
 from software_engineering_team.ai_agent_development_team.models import (
     ExecutionResult,
     IntakeResult,
@@ -25,9 +32,10 @@ from software_engineering_team.ai_agent_development_team.phases.planning import 
 from software_engineering_team.ai_agent_development_team.phases.problem_solving import (
     run_problem_solving,
 )
-from software_engineering_team.ai_agent_development_team.phases.review import (
-    ARTIFACT_GATE_DESCRIPTION_PREFIX,
-    run_review,
+from software_engineering_team.ai_agent_development_team.phases.review import run_review
+from software_engineering_team.ai_agent_development_team.prompts import (
+    intake_system_prompt,
+    planning_system_prompt,
 )
 from software_engineering_team.shared.models import Task, TaskType
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
@@ -104,6 +112,32 @@ def _build_task() -> Task:
     )
 
 
+def test_required_artifact_hints_tuple() -> None:
+    """Team-level constant is the sole definition of artifact-category hints."""
+    assert REQUIRED_ARTIFACT_HINTS == (
+        "blueprint",
+        "evaluation",
+        "safety",
+        "runbook",
+        "mcp",
+    )
+
+
+def test_review_uses_shared_required_artifact_hints() -> None:
+    """Review must import the team constant, not redefine the five-string tuple."""
+    assert review_mod.REQUIRED_ARTIFACT_HINTS is team_constants.REQUIRED_ARTIFACT_HINTS
+
+
+def test_intake_and_planning_prompts_include_required_artifact_hints() -> None:
+    """Intake/planning system prompts list every shared artifact-category hint."""
+    for prompt_fn in (intake_system_prompt, planning_system_prompt):
+        prompt = prompt_fn()
+        for hint in REQUIRED_ARTIFACT_HINTS:
+            assert hint in prompt, f"{hint!r} missing from {prompt_fn.__name__}"
+    assert "spec intake specialist" in intake_system_prompt()
+    assert "AI systems planner" in planning_system_prompt()
+
+
 def test_ai_agent_development_workflow_success(tmp_path: Path):
     lead = AIAgentDevelopmentTeamLead(FakeLLM())
     result = lead.run_workflow(repo_path=tmp_path, task=_build_task(), spec_content="Spec text")
@@ -155,7 +189,7 @@ def test_ai_agent_development_workflow_problem_solving(tmp_path: Path):
     assert any("_placeholder.md" in path for path in result.final_files)
     # final_files must alias the execution result's own (post-rebind) files
     # rather than a dict captured before problem-solving rebinds them.
-    assert result.final_files == result.execution_result.files
+    assert result.final_files is result.execution_result.files
 
 
 def test_ai_agent_development_workflow_aborts_when_fix_unavailable(
@@ -456,7 +490,7 @@ def test_artifact_gate_description_prefix_stable() -> None:
 
 
 def test_run_review_artifact_gate_uses_shared_prefix() -> None:
-    """Missing categories produce descriptions that start with the shared prefix."""
+    """Missing categories produce descriptions tied to REQUIRED_ARTIFACT_HINTS."""
     result = run_review(execution_result=ExecutionResult(files={}, microtasks=[], notes=[]))
     gate_issues = [i for i in result.issues if i.source == "artifact_gate"]
     assert gate_issues
@@ -464,12 +498,16 @@ def test_run_review_artifact_gate_uses_shared_prefix() -> None:
         assert issue.description.startswith(ARTIFACT_GATE_DESCRIPTION_PREFIX)
         hint = issue.description[len(ARTIFACT_GATE_DESCRIPTION_PREFIX) :].strip()
         assert hint
+        assert hint in REQUIRED_ARTIFACT_HINTS
         assert hint in issue.recommendation
+    assert {
+        i.description[len(ARTIFACT_GATE_DESCRIPTION_PREFIX) :].strip() for i in gate_issues
+    } == set(REQUIRED_ARTIFACT_HINTS)
 
 
 def test_run_problem_solving_synthesizes_placeholder_from_prefix() -> None:
     """A well-formed artifact-gate issue yields ai_system/{hint}_placeholder.md."""
-    hint = "blueprint"
+    hint = REQUIRED_ARTIFACT_HINTS[0]
     review = ReviewResult(
         passed=False,
         issues=[
@@ -488,9 +526,36 @@ def test_run_problem_solving_synthesizes_placeholder_from_prefix() -> None:
         review_result=review,
     )
     assert result.resolved is True
-    assert f"ai_system/{hint}_placeholder.md" in result.files
+    assert f"{PLACEHOLDER_ARTIFACT_DIR}/{hint}_placeholder.md" in result.files
     assert "existing.md" in result.files
     assert any(hint in fix for fix in result.fixes_applied)
+
+
+def test_run_problem_solving_skips_unknown_artifact_hint_category() -> None:
+    """Shared-prefix descriptions with an unregistered hint create no placeholder."""
+    unknown_hint = "not_a_registered_hint"
+    assert unknown_hint not in REQUIRED_ARTIFACT_HINTS
+    review = ReviewResult(
+        passed=False,
+        issues=[
+            ReviewIssue(
+                source="artifact_gate",
+                severity="high",
+                description=f"{ARTIFACT_GATE_DESCRIPTION_PREFIX}{unknown_hint}",
+                recommendation=f"Add at least one artifact path containing '{unknown_hint}'.",
+            )
+        ],
+        required_artifacts_ok=False,
+        summary="Review failed.",
+    )
+    result = run_problem_solving(
+        execution_result=ExecutionResult(files={}, microtasks=[]),
+        review_result=review,
+    )
+    assert result.resolved is False
+    assert result.files == {}
+    assert result.fixes_applied == []
+    assert not any("_placeholder.md" in path for path in result.files)
 
 
 def test_run_problem_solving_skips_malformed_artifact_gate_description() -> None:
@@ -539,4 +604,4 @@ def test_run_problem_solving_skips_empty_artifact_gate_token() -> None:
     )
     assert result.resolved is False
     assert result.files == {}
-    assert "ai_system/_placeholder.md" not in result.files
+    assert f"{PLACEHOLDER_ARTIFACT_DIR}/_placeholder.md" not in result.files
