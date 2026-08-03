@@ -67,13 +67,79 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
 
 @workflow.defn(name="CodingTeamWorkflow")
 class CodingTeamWorkflow:
+    """Durable driver for a coding-team pipeline run.
+
+    Invariants:
+        - ``self._submitted_answers`` is non-None only in the narrow window
+          between a ``submit_answers`` signal being delivered and the top of
+          the next loop iteration in ``run``, which resets it to ``None``
+          before re-arming ``wait_condition`` — so a stale answer batch from
+          one pause round can never be mistaken for a fresh one in the next.
+    """
+
+    def __init__(self) -> None:
+        self._submitted_answers: dict[str, Any] | None = None
+
+    @workflow.signal(name="submit_answers")
+    def submit_answers(self, payload: dict[str, Any]) -> None:
+        """Deliver a human answer batch for the current pause (wakes ``wait_condition``).
+
+        Preconditions:
+            - ``payload`` is a dict shaped ``{"resume_token": str, "answers":
+              list}`` — the wire shape fixed by
+              ``system_design/hitl_pause_resume_contract.md`` §2/§3. This
+              skeleton does not yet validate ``resume_token`` against an
+              active pause — no pause state exists on this class yet to
+              validate against — so any dict is accepted as-is; the shape is
+              fixed now so the wire format will not need to change once
+              token matching is added.
+        Postconditions:
+            - ``self._submitted_answers`` is set to ``payload``, satisfying a
+              ``wait_condition`` predicate of ``self._submitted_answers is
+              not None``. Repeated signals simply overwrite the field — there
+              is no first-submission-wins buffering yet; that is future work.
+        """
+        self._submitted_answers = payload
+
     @workflow.run
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:
-        return await workflow.execute_activity(
+        """Run the coding-team pipeline, looping while the activity reports a pause.
+
+        Preconditions:
+            - ``request`` is a serialized ``RunRequest`` (see
+              ``run_pipeline_activity``'s contract).
+
+        Postconditions:
+            - Returns the activity's result dict. ``run_pipeline_activity``
+              does not emit ``{"outcome": "paused", ...}`` today (activity-side
+              pause detection is separate, not-yet-implemented work), so in
+              current production behavior this executes the activity exactly
+              once and returns its result immediately — identical to before
+              this change.
+            - When a future activity result's ``"outcome"`` key IS
+              ``"paused"``, this instead resets ``self._submitted_answers`` to
+              ``None`` and waits on ``workflow.wait_condition`` for a
+              ``submit_answers`` signal to set it, then re-invokes the SAME
+              activity with the SAME ``request`` dict, unmodified, and
+              repeats. No token matching, no answer application into
+              ``request``, and no staleness/timeout handling — a
+              durable-wait shape only, ready to be driven by real
+              pause/resume semantics in a later change.
+        """
+        result = await workflow.execute_activity(
             run_pipeline_activity,
             request,
             start_to_close_timeout=timedelta(hours=4),
         )
+        while result.get("outcome") == "paused":
+            self._submitted_answers = None
+            await workflow.wait_condition(lambda: self._submitted_answers is not None)
+            result = await workflow.execute_activity(
+                run_pipeline_activity,
+                request,
+                start_to_close_timeout=timedelta(hours=4),
+            )
+        return result
 
 
 WORKFLOWS = [CodingTeamWorkflow]
