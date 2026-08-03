@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Dict, List, Optional
 
 from llm_service import DummyLLMClient, LLMClient
@@ -285,10 +286,14 @@ def _is_post_token_exclusion(tokens: List[str], prod_index: int) -> bool:
         return False
     if any(t in _PROD_NEGATIVE_PROHIBITION_TOKENS for t in after):
         return True
-    if any(t in _PROD_POSITIVE_PERMISSION_TOKENS for t in after) and any(
-        t in _NEGATION_TOKENS for t in after
-    ):
-        return True
+    if any(t in _PROD_POSITIVE_PERMISSION_TOKENS for t in after):
+        first_perm_idx = next(
+            i for i, t in enumerate(after) if t in _PROD_POSITIVE_PERMISSION_TOKENS
+        )
+        # Negation must govern the permission word ("is not allowed"), not
+        # appear after it ("is allowed, not required").
+        if any(t in _NEGATION_TOKENS for t in after[:first_perm_idx]):
+            return True
     return False
 
 
@@ -336,6 +341,29 @@ def _legacy_environment_from_text(combined_text: str) -> str:
     return "staging"
 
 
+_APPROVAL_WORD = re.compile(r"\bapproval\b")
+_APPROVAL_NEGATION_PREFIX = re.compile(r"(?:\b(?:no|not|non)\b|non-)\s*$")
+
+
+def _scope_item_mentions_approval(item: str) -> bool:
+    """Return True when ``item`` positively mentions an approval gate.
+
+    Preconditions: ``item`` is a str.
+    Postconditions:
+        - True when ``approval`` appears as a word and is not governed by a
+          preceding ``no`` / ``not`` / ``non`` / ``non-`` (e.g. ``prod approval``).
+        - False for negated forms (``no approval``, ``non-approval``) or when
+          the word is absent.
+    """
+    assert isinstance(item, str), "item must be a str"
+    text = item.lower()
+    for match in _APPROVAL_WORD.finditer(text):
+        if _APPROVAL_NEGATION_PREFIX.search(text[: match.start()]):
+            continue
+        return True
+    return False
+
+
 def _git_ops() -> DeliverGitOps:
     """Bundle this module's git/write callables for the shared deliver helper.
 
@@ -361,7 +389,7 @@ def _git_ops() -> DeliverGitOps:
     )
 
 
-DEVOPS_REQUIRED_GATE_NAMES = [
+DEVOPS_REQUIRED_GATE_NAMES = (
     "iac_validate",
     "iac_validate_fmt",
     "policy_checks",
@@ -370,28 +398,36 @@ DEVOPS_REQUIRED_GATE_NAMES = [
     "deployment_dry_run",
     "security_review",
     "change_review",
-]
+)
 
-ENV_POLICY = {
-    "dev": {
-        "auto_deploy_allowed": True,
-        "approval_required": False,
-        "rollback_test_required": False,
-        "policy_strictness": "low",
-    },
-    "staging": {
-        "auto_deploy_allowed": True,
-        "approval_required": False,
-        "rollback_test_required": True,
-        "policy_strictness": "medium",
-    },
-    "production": {
-        "auto_deploy_allowed": False,
-        "approval_required": True,
-        "rollback_test_required": True,
-        "policy_strictness": "high",
-    },
-}
+ENV_POLICY = MappingProxyType(
+    {
+        "dev": MappingProxyType(
+            {
+                "auto_deploy_allowed": True,
+                "approval_required": False,
+                "rollback_test_required": False,
+                "policy_strictness": "low",
+            }
+        ),
+        "staging": MappingProxyType(
+            {
+                "auto_deploy_allowed": True,
+                "approval_required": False,
+                "rollback_test_required": True,
+                "policy_strictness": "medium",
+            }
+        ),
+        "production": MappingProxyType(
+            {
+                "auto_deploy_allowed": False,
+                "approval_required": True,
+                "rollback_test_required": True,
+                "policy_strictness": "high",
+            }
+        ),
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -443,6 +479,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             exclude_dirs=frozenset(),
             max_chars=0,
         )
+        assert self._status_callback is None, "_status_callback must start as None"
         self.task_clarifier = DevOpsTaskClarifierAgent(llm_client)
         self.iac_agent = InfrastructureAsCodeAgent(llm_client)
         self.cicd_agent = CICDPipelineAgent(llm_client)
@@ -528,8 +565,9 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Postconditions:
             - Returns a valid ``DevOpsTaskSpec`` using module-level defaults for
               all fields not derivable from the arguments.
-            - ``title`` is the stripped ``task_description[:MAX_LEGACY_TITLE_LENGTH]``
-              or ``task_id`` when that slice is empty/whitespace-only.
+            - ``title`` is the stripped ``task_description[:MAX_LEGACY_TITLE_LENGTH]``,
+              or the stripped ``task_id[:MAX_LEGACY_TITLE_LENGTH]`` when that
+              description slice is empty/whitespace-only.
             - ``environment`` is inferred from the combined text of
               ``task_description`` and ``requirements`` via
               ``_legacy_environment_from_text``; defaults to ``\"staging\"``.
@@ -550,7 +588,10 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         env = _legacy_environment_from_text(combined_text)
         return DevOpsTaskSpec(
             task_id=task_id,
-            title=(task_description[:MAX_LEGACY_TITLE_LENGTH]).strip() or task_id,
+            title=(
+                (task_description[:MAX_LEGACY_TITLE_LENGTH]).strip()
+                or (task_id[:MAX_LEGACY_TITLE_LENGTH]).strip()
+            ),
             platform_scope={"cloud": _DEFAULT_LEGACY_CLOUD, "environments": ["dev", env]},
             repo_context={
                 "app_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
@@ -574,7 +615,15 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         commits. Phase 4.5 execution tools (e.g. ``terraform init``, ``cdk synth``,
         ``helm lint``, ``docker-compose config``) may still write under the working
         directory as validation side effects.
+
+        Preconditions:
+            - ``input_data`` is a non-None ``DevOpsTaskSpec``.
+        Postconditions:
+            - Returns a non-None ``DevOpsCompletionPackage`` on success.
+        Raises:
+            ValueError: if the pipeline completes without a completion package.
         """
+        assert input_data is not None, "input_data is required"
         result = self._run_pipeline(
             repo_path=Path("."),
             task_spec=input_data,
@@ -711,7 +760,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             if policy is None:
                 continue
             if policy["approval_required"] and not any(
-                "approval" in item.lower() for item in task_spec.scope.included
+                _scope_item_mentions_approval(item) for item in task_spec.scope.included
             ):
                 return (
                     f"Environment '{env}' requires explicit approval gate but none found in scope"
@@ -757,6 +806,11 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Invariants:
             - ``task_spec`` is not mutated by this method or its phase closures.
         """
+        assert isinstance(repo_path, Path), "repo_path must be a pathlib.Path"
+        assert isinstance(task_spec, DevOpsTaskSpec), "task_spec must be a DevOpsTaskSpec"
+        assert isinstance(task_spec.task_id, str) and task_spec.task_id, (
+            "task_spec.task_id must be a non-empty string"
+        )
         self._report_status(
             "start",
             detail=f"DevOps team pipeline: starting task {task_spec.task_id}",

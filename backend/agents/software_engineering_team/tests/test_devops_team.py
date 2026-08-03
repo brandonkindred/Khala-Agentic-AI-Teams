@@ -1999,6 +1999,16 @@ class TestBackwardCompatibility:
         )
         assert spec.environment == "production"
 
+    def test_build_legacy_spec_production_is_allowed_not_required_still_production(
+        self,
+    ) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-post-3b",
+            task_description="Production is allowed, not required",
+            requirements="Approval gate required",
+        )
+        assert spec.environment == "production"
+
     def test_build_legacy_spec_production_is_permitted_still_production(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-post-4",
@@ -2114,6 +2124,16 @@ class TestBackwardCompatibility:
         )
         with pytest.raises(AssertionError, match="not a single string"):
             DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
+
+    def test_enforce_env_policy_rejects_negated_approval_mention(self) -> None:
+        spec = _base_task_spec(
+            platform_scope={"environments": ["production"]},
+            scope={"included": ["no approval required"], "excluded": []},
+            rollback_requirements=["Rollback"],
+        )
+        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
+        assert reason is not None
+        assert "approval" in reason.lower()
 
     def test_enforce_env_policy_rejects_non_string_included(self) -> None:
         from types import SimpleNamespace
