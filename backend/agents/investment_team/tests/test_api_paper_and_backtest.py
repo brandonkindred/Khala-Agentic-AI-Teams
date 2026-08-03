@@ -907,6 +907,71 @@ def test_run_paper_trading_live_mode_kicks_off_thread(
     assert started == [True]
 
 
+def test_run_paper_trading_concurrent_starts_same_strategy_only_one_wins(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression test for a race in the live-mode concurrency guard: the
+    scan, session construction, and dict insertion must be atomic under
+    ``_lock`` so two concurrent starts for the same strategy can't both
+    pass the guard.
+
+    The vulnerable gap in the pre-fix code sat between the scan's ``with
+    _lock:`` block and the later ``with _lock:`` that inserted the built
+    session — ``PaperTradingSession(...)`` construction ran unlocked in
+    between. This test widens exactly that gap by delaying the *first*
+    ``PaperTradingSession(...)`` construction: on the buggy code the delayed
+    thread has already released the scan lock by the time it starts
+    constructing, so the second racer's scan runs concurrently and also
+    finds no conflict (both succeed, two active sessions). On the fixed
+    code the lock is held continuously across scan + construction + insert,
+    so the second racer blocks until the first has already inserted and
+    correctly gets 409.
+    """
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    record = _winning_record()
+    api_main._strategy_lab_records["lab-w"] = record
+    monkeypatch.setattr(api_main, "_run_live_paper_trading_background", lambda *a, **k: None)
+
+    real_session_cls = api_main.PaperTradingSession
+    call_count = {"n": 0}
+    count_lock = threading.Lock()
+
+    class _SlowPaperTradingSession(real_session_cls):
+        def __init__(self, *args, **kwargs):
+            with count_lock:
+                call_count["n"] += 1
+                is_first = call_count["n"] == 1
+            if is_first:
+                time.sleep(0.2)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(api_main, "PaperTradingSession", _SlowPaperTradingSession)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                api_client.post, "/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"}
+            )
+            for _ in range(2)
+        ]
+        results = [f.result(timeout=5) for f in futures]
+
+    assert sorted(r.status_code for r in results) == [200, 409]
+    active = [
+        s
+        for s in api_main._paper_trading_sessions.values()
+        if PaperTradingSession.parse_persisted(s).status in api_main._ACTIVE_PT_STATES
+    ]
+    assert len(active) == 1
+
+
 # ---------------------------------------------------------------------------
 # _run_paper_trading_step (pure helper — strategy lab cycle path)
 # ---------------------------------------------------------------------------
