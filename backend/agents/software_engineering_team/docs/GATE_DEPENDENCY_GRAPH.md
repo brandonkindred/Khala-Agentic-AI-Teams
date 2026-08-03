@@ -4,8 +4,8 @@
 
 Parent effort: parallelize independent gates within per-task execution. Before any
 gate can safely run concurrently, this document maps the data and control-flow
-dependencies between the per-task gates (coding, code review, QA, security,
-documentation, and DbC) driven by `run_gated_execution_impl` in
+dependencies between the per-task gates (coding, code review, QA, security, and
+documentation) driven by `run_gated_execution_impl` in
 [`shared/phases/execution.py`](../shared/phases/execution.py). It defines the safe
 parallelization boundary for a follow-up implementation change — it makes no code
 changes itself. ("Build" is not a standalone gate here — it's a sub-step inside
@@ -72,12 +72,6 @@ runs five phases in strict order:
    (`shared/phases/execution.py:1224-1347`). Only runs `if not phase_failed`, i.e.
    only after Code Review + QA + Security all passed together.
 
-**DbC** (`run_dbc_comments`, `backend/agents/software_engineering_team/quality_gate_tools.py`)
-is not wired into this pipeline at all — no caller in `orchestrator.py` or
-`shared/phases/execution.py` invokes it; it is currently only exercised from
-`tests/test_quality_gate_tools.py`. It is included below as a dormant gate because
-the parent effort names it, but it has no live position in the sequence today.
-
 ## Per-gate inputs / outputs
 
 | Gate | Implementation | Reads | Writes |
@@ -90,7 +84,6 @@ the parent effort names it, but it has no live position in the sequence today.
 | Security (backend) | `run_security_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:439-475`, same shared body) | `microtask_files`, `deps.security_agent`, `agent_review_cache`, and **only** `deps.tool_agents["security"]`, filtered the same way | `GateOutcome` with `source="security"` issues |
 | QA / Security (frontend) | `_qa_gate` (`frontend_code_v2_team/phases/execution.py:213-244`) / `_security_gate` (`247-278`) → `run_microtask_review` (`shared/v2_review.py:750-938`, invoked via `from .review import run_microtask_review` inside each gate) | `microtask_files`, `deps.qa_agent` or `deps.security_agent`, `deps.tool_agent_cache` (a content-addressed `AgentReviewCache`, reset per microtask cycle in `_run_review_cycles`, forwarded so a tool agent already run by the CR gate this cycle is reused instead of re-invoked — see the caching design below), and `_scoped_tool_agents(deps.tool_agents, kind)` — **only their own kind** (`testing_qa` / `security`), not the full mapping (see note below) | `GateOutcome`, filtered post hoc to `source="qa"` or `source="security"` |
 | Documentation | `_run_documentation_phase` (`execution.py:1224-1347`) | `microtask_files` (last review-accepted write), `deps.tool_agents[DOCUMENTATION]`, `task.description` | Refined `doc_files` merged into `microtask_files`/`all_files`/`mt.output_files`; sets `mt.status = COMPLETED` |
-| DbC (dormant) | `run_dbc_comments` (`quality_gate_tools.py:232-303`) | Whole repo directory tree on disk (not `microtask_files`) | Pre/postcondition comments written to disk **and committed**; the actual commit call is `write_files_and_commit(...)` at `quality_gate_tools.py:294` (lines 261-293 are the file-scan/prompt-building that precedes it); not currently invoked by the pipeline |
 
 ## Dependency graph
 
@@ -105,9 +98,6 @@ flowchart TD
     QA -->|still failing when max_total_cycles reached| Fail
     Sec -->|still failing when max_total_cycles reached| Fail
     Sec -->|pass, same cycle as CR+QA| Doc[Documentation]
-    DbC[DbC — unwired; writes+commits files,\nneeds a serialized position if added]:::dormant
-
-    classDef dormant stroke-dasharray: 5 5
 ```
 
 Edge classification:
@@ -236,18 +226,6 @@ Edge classification:
 - **Hard data dependency**: {Code Review, QA, Security} → Documentation.
   Documentation only runs once `phase_failed` is `False`, i.e. after all three
   gates passed together in one cycle, and reads the resulting accepted file state.
-- **Currently disconnected, but not safe to run independently if wired in**: DbC.
-  It re-scans the repo on disk rather than consuming any `GateOutcome`, and is not
-  invoked by `run_gated_execution_impl` at all today — but `run_dbc_comments`
-  itself writes and commits files back to the worktree
-  (`quality_gate_tools.py:294`, `write_files_and_commit`). That write makes it
-  unsafe to run concurrently with the other gates (a concurrent build/review could
-  observe a changing worktree mid-scan), and unsafe to run *after* the loop as an
-  independent pass, since its generated edits would then bypass Code Review, QA,
-  and Security entirely. If wired in, DbC needs an explicit serialized position —
-  either before the review cycle (so its edits get reviewed like any other code
-  change) or as an additional review pass after it — not a "no dependency,
-  run-whenever" classification.
 - **Build verification is not a read-only check**: on failure, the production
   verifier calls `_try_build_fix_one_at_a_time` (`build_fix.py`), which writes
   LLM-generated patches directly to the worktree (`out_path.write_text`,
@@ -274,10 +252,6 @@ Edge classification:
   rather than "go re-run only QA".
 - Documentation: hard-gated on all three review gates passing in the same cycle;
   cannot start earlier without weakening that invariant.
-- DbC, if wired in: it writes and commits files directly
-  (`quality_gate_tools.py:294`), so it cannot run concurrently with the other
-  gates (worktree race) nor as an independent pass after them (its edits would
-  bypass review) — see the dependency-graph note above.
 - The frontend's post-loop max-cycles check: because
   `max_cycles_requires_failing_gate=False`
   (`frontend_code_v2_team/phases/execution.py:278`), a redesign that changes when
@@ -327,8 +301,5 @@ The follow-up implementation issue closed the residual CR-vs-QA/Security
 tool-agent duplication via the caching design above. What remains is, only
 after isolating build verification's repair path from its read-only checks,
 the Code-Review sub-steps item — rather than attempting to parallelize the
-full sequential chain. DbC is out of scope for parallelization — if it is
-wired in, it needs an explicit serialized position in the sequence, not a
-concurrent or independent one. Any redesign must also preserve (or
-deliberately revisit) the frontend-only terminal edge at the cycle cap noted
-above.
+full sequential chain. Any redesign must also preserve (or deliberately
+revisit) the frontend-only terminal edge at the cycle cap noted above.
