@@ -4144,7 +4144,7 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
         - ``HTTPException(500)`` if the advisory workflow returns a result
           missing ``advisor_message`` or ``session``.
     """
-    session_id = f"adv-{uuid.uuid4().hex[:8]}"
+    session_id = f"adv-{uuid.uuid4().hex}"
     result = _execute_advisory(
         "advisor_start",
         {"session_id": session_id, "user_id": request.user_id},
@@ -4221,8 +4221,8 @@ def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
 def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
     """Finalize the advisor session and create an IPS from collected data.
 
-    Can be called once the session status is 'completed', or called early
-    if all required fields have been collected.
+    Can be called at any point once all required fields have been collected
+    from the session — the endpoint does not itself check ``session.status``.
 
     Preconditions:
         - ``session_id`` identifies a previously started advisor session.
