@@ -473,7 +473,9 @@ def test_attach_conversation_already_attached() -> None:
 
 def test_attach_conversation_reattaching_same_brand_is_ok() -> None:
     """Re-attaching a conversation to the brand it's already on is allowed
-    (not a conflict) and refreshes the mission."""
+    (not a conflict). The conversation's own mission is updated to the new
+    value, but the brand's ``mission`` field is left unchanged — only
+    ``patch_brand`` refreshes a brand's mission."""
     store = BrandingStore()
     conv_store = BrandingConversationStore()
     client = store.create_client("Acme")
@@ -487,6 +489,7 @@ def test_attach_conversation_reattaching_same_brand_is_ok() -> None:
     assert result is AttachConversationResult.OK
     assert updated_brand is not None
     assert updated_brand.conversation_id == cid
+    assert updated_brand.mission.company_name == "Acme Inc"
 
 
 def test_attach_conversation_unknown_brand() -> None:
