@@ -13,13 +13,14 @@ Covers:
 from __future__ import annotations
 
 import json
-from typing import Any, List
+from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pytest
 
 
 def _content_plan():
+    """Build a minimal 2-section ContentPlan fixture shared by tests in this file."""
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from ._content_plan_test_utils import make_content_plan
@@ -36,6 +37,7 @@ def _content_plan():
 
 
 def _gap():
+    """Build a single StoryGap fixture shared by tests in this file."""
     from agents.blogging.ghost_writer_agent.models import StoryGap
 
     return StoryGap(
@@ -66,6 +68,7 @@ def test_json_retry_suffix_is_shape_agnostic() -> None:
 
 
 def test_ghost_plan_to_text_renders_sections() -> None:
+    """_plan_to_text renders the topic and each section's title/coverage."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     plan = _content_plan()
@@ -80,8 +83,16 @@ def test_ghost_plan_to_text_renders_sections() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _patch_agent(monkeypatch, responses: List[Any]) -> None:
-    """Stub the strands Agent class inside ghost_writer_agent.agent."""
+def _patch_agent(monkeypatch, responses: List[Any]) -> Dict[str, int]:
+    """Stub the strands Agent class inside ghost_writer_agent.agent.
+
+    Returns the shared call-count state dict (key ``"i"``) so callers can assert
+    exactly how many of the configured ``responses`` were consumed. Calling the
+    stub more times than ``len(responses)`` raises ``AssertionError`` rather than
+    silently repeating the last response, so an implementation that calls the
+    agent more times than a test expects fails loudly instead of masking the
+    extra call behind a reused response.
+    """
     import agents.blogging.ghost_writer_agent.agent as gw_agent
 
     state = {"i": 0}
@@ -91,16 +102,22 @@ def _patch_agent(monkeypatch, responses: List[Any]) -> None:
             pass
 
         def __call__(self, prompt: str) -> str:
-            r = responses[min(state["i"], len(responses) - 1)]
+            if state["i"] >= len(responses):
+                raise AssertionError(
+                    f"Agent called {state['i'] + 1} times, but only {len(responses)} responses configured"
+                )
+            r = responses[state["i"]]
             state["i"] += 1
             if isinstance(r, Exception):
                 raise r
             return r
 
     monkeypatch.setattr(gw_agent, "Agent", _StubAgent)
+    return state
 
 
 def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
+    """A single valid JSON response is parsed and returned as-is."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -125,11 +142,12 @@ def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
+    """An unparseable first response is retried once; the second, valid response is used."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
-    _patch_agent(
+    state = _patch_agent(
         monkeypatch,
         [
             "not-json",
@@ -141,14 +159,16 @@ def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out["sufficient"] is True
+    assert state["i"] == 2
 
 
 def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
+    """Two unparseable responses exhaust the retry budget; the default sufficiency dict is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
-    _patch_agent(monkeypatch, ["not-json-1", "not-json-2"])
+    state = _patch_agent(monkeypatch, ["not-json-1", "not-json-2"])
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out == {
@@ -157,9 +177,11 @@ def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
         "story_context": None,
         "missing": None,
     }
+    assert state["i"] == 2
 
 
 def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
+    """A non-transient exception from the agent falls back to the default sufficiency dict."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -175,7 +197,12 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
     monkeypatch.setattr(gw_agent, "Agent", _Boom)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
-    assert out["sufficient"] is False
+    assert out == {
+        "sufficient": False,
+        "no_experience": False,
+        "story_context": None,
+        "missing": None,
+    }
 
 
 def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -> None:
@@ -209,6 +236,7 @@ def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -
 
 
 def test_ghost_generate_follow_up_happy(monkeypatch) -> None:
+    """A single well-formed response is returned verbatim as the follow-up question."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -224,6 +252,7 @@ def test_ghost_generate_follow_up_happy(monkeypatch) -> None:
 
 
 def test_ghost_generate_follow_up_error_returns_none(monkeypatch) -> None:
+    """An agent exception is swallowed; _generate_follow_up returns None instead of raising."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -235,6 +264,7 @@ def test_ghost_generate_follow_up_error_returns_none(monkeypatch) -> None:
 
 
 def test_ghost_generate_follow_up_empty_response(monkeypatch) -> None:
+    """A whitespace-only response is treated as no follow-up question (returns None)."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -250,6 +280,7 @@ def test_ghost_generate_follow_up_empty_response(monkeypatch) -> None:
 
 
 def test_ghost_compile_narrative_empty_user_content() -> None:
+    """No non-empty user turns in the conversation short-circuits to None (no LLM call)."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -260,6 +291,7 @@ def test_ghost_compile_narrative_empty_user_content() -> None:
 
 
 def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
+    """A successful narrator call returns the compiled narrative text unchanged."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -278,6 +310,7 @@ def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
 
 
 def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
+    """The narrator failing on every retry attempt returns None instead of raising."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -307,6 +340,7 @@ def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
+    """A valid JSON array of gap objects is parsed; a blank seed_question gets a generated fallback."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -341,6 +375,7 @@ def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
+    """A response with no JSON array parses to a non-list value, so an empty gap list is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -352,13 +387,15 @@ def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> None:
+    """Two unparseable array responses exhaust the retry budget; an empty gap list is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
-    _patch_agent(monkeypatch, ["[not-json", "[also-not-json"])
+    state = _patch_agent(monkeypatch, ["[not-json", "[also-not-json"])
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     assert agent._find_gaps_via_llm(_content_plan()) == []
+    assert state["i"] == 2
 
 
 def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None:
@@ -505,7 +542,7 @@ def test_ghost_find_story_gaps_falls_back_to_llm(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _generate_friendly_seeds — dict response forms
+# _generate_friendly_seeds — dict and list response forms
 # ---------------------------------------------------------------------------
 
 
@@ -566,7 +603,7 @@ def test_ghost_generate_friendly_seeds_non_string_items_fallback(monkeypatch) ->
 
 
 # ---------------------------------------------------------------------------
-# conduct_interview — fast-path skipped via cancellation
+# conduct_interview — fast-path skip cases (cancellation, index-advance, no-experience)
 # ---------------------------------------------------------------------------
 
 

@@ -271,7 +271,7 @@ def test_writer_agent_format_feedback_item_rejects_non_positive_index() -> None:
         a._format_feedback_item_line(item, 0)
 
 
-def test_write_draft_to_path_rejects_parent_traversal(tmp_path) -> None:
+def test_write_draft_to_path_rejects_parent_traversal(tmp_path: Path) -> None:
     from agents.blogging.blog_writer_agent.agent import _write_draft_to_path
 
     with pytest.raises(ValueError, match="must not contain '\\.\\.'"):
