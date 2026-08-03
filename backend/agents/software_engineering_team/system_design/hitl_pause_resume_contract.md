@@ -88,10 +88,10 @@ strategy unchanged, `on_pause` included.
 }
 
 # Finished normally:
-{"outcome": "completed", "job_id": str, ...final job record fields...}
+{"outcome": "completed", "job_id": str, "status": str, "summary": str | None}
 
 # Unrecoverable failure:
-{"outcome": "failed", "job_id": str, "error": str, ...}
+{"outcome": "failed", "job_id": str, "error": str}
 ```
 
 **Precondition:** the orchestrator has already durably persisted
@@ -111,6 +111,19 @@ that would fail the *completion* of the very activity call that is supposed
 to report the pause, and a retry would hit the same oversized payload again,
 so the workflow could never observe `"paused"` at all. Return only the pause
 metadata the workflow actually needs.
+
+The same bound applies to `"completed"`, and more severely: §2's main loop
+returns this result directly as the workflow's own return value
+(`if result["outcome"] in ("completed", "failed"): return result`), so an
+unbounded "final job record fields" payload risks the same activity-result
+size failure the paused case was just narrowed to avoid — except here the
+work (planning, codegen, merges) is already done and the repo already
+mutated by the time completion is attempted, so a retry-on-oversized-payload
+doesn't just fail to report progress, it re-runs completion logic against
+state the first attempt already changed. The job record — the authoritative
+snapshot — already holds everything a caller needs; `"completed"` and
+`"failed"` should carry only a small, fixed-shape summary (job id, terminal
+status, an optional short message), never the full record.
 
 **Idempotency across activity retries:** Temporal can retry
 `run_pipeline_activity` (worker crash, timeout, etc.) after the pause has
