@@ -8,7 +8,6 @@ from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
-from llm_service.clients.dummy import DummyLLMClient
 from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
 from product_requirements_analysis_agent.agent import (
     MAX_GAP_ROUNDS,
@@ -41,6 +40,8 @@ from product_requirements_analysis_agent.question_processing import (
 from product_requirements_analysis_agent.question_processing import (
     parse_open_question as _real_parse_open_question,
 )
+
+from llm_service.clients.dummy import DummyLLMClient
 
 
 class _StubClient(DummyLLMClient):
