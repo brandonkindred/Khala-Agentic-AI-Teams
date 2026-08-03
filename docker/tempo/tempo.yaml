@@ -36,6 +36,12 @@ storage:
     wal:
       path: /var/tempo/wal
 
+# Cap concurrently-executing query jobs (default is 20). Each concurrent query
+# holds decoded trace blocks in memory; on a single-tenant, 1G-capped local
+# stack that default is too high, so bound it to keep query-path memory small.
+querier:
+  max_concurrent_queries: 5
+
 # Bound on-disk growth explicitly: the compactor deletes trace blocks older than
 # block_retention so the local /var/tempo volume can't fill unbounded on a
 # long-running stack. (Retention in Tempo lives under compactor.compaction, not
