@@ -44,15 +44,33 @@ class _InMemoryDict:
         return k in self._d
 
     def __delitem__(self, k):
-        self._d.pop(k, None)
+        del self._d[k]
+
+    def __iter__(self):
+        return iter(self._d)
+
+    def __len__(self):
+        return len(self._d)
 
     def pop(self, k, *args):
         if args:
             return self._d.pop(k, args[0])
         return self._d.pop(k)
 
+    def keys(self):
+        return self._d.keys()
+
+    def items(self):
+        return self._d.items()
+
     def values(self):
         return list(self._d.values())
+
+    def update(self, *args, **kwargs):
+        self._d.update(*args, **kwargs)
+
+    def setdefault(self, k, default=None):
+        return self._d.setdefault(k, default)
 
 
 @pytest.fixture
@@ -125,7 +143,11 @@ class _StubLabClient:
 
     def delete_job(self, jid: str) -> bool:
         self.deleted.append(jid)
-        return jid in self.by_id
+        if jid not in self.by_id:
+            return False
+        self.by_id.pop(jid)
+        self.jobs = [j for j in self.jobs if j.get("job_id") != jid]
+        return True
 
 
 # ---------------------------------------------------------------------------
