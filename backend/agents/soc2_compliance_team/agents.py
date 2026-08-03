@@ -143,9 +143,13 @@ def _run_tsc_agent(
           built only from entries in the parsed response's ``findings`` list
           that are dicts with a non-empty ``title`` or ``description``
           (malformed/empty entries are silently dropped, never raised on).
-        * ``compliant`` is the model's own ``compliant`` value when present;
-          otherwise it defaults to ``True`` unless at least one parsed
-          finding is CRITICAL or HIGH severity.
+        * ``compliant`` is always computed deterministically from
+          ``findings``: ``True`` unless at least one parsed finding is
+          CRITICAL or HIGH severity. The LLM's own ``compliant`` value is
+          never used for the result — only compared against the computed
+          value to log a warning on mismatch — so a null, non-boolean, or
+          findings-contradicting LLM verdict can never affect or crash this
+          function.
         * Propagates whatever :func:`complete_json_via_reasoning` raises
           (e.g. on LLM/transport failure) — this function does not catch or
           degrade those failures itself.
@@ -197,11 +201,18 @@ Identify any gaps, missing controls, or risks relative to this criterion. If the
     for f in findings_raw:
         if isinstance(f, dict) and (f.get("title") or f.get("description")):
             findings.append(_parse_finding(f, category))
-    compliant = data.get(
-        "compliant",
-        len([f for f in findings if f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)])
-        == 0,
+    has_critical_or_high = any(
+        f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH) for f in findings
     )
+    computed_compliant = not has_critical_or_high
+    llm_compliant = data.get("compliant")
+    if isinstance(llm_compliant, bool) and llm_compliant != computed_compliant:
+        logger.warning(
+            "LLM compliance verdict %s inconsistent with findings; using computed value %s",
+            llm_compliant,
+            computed_compliant,
+        )
+    compliant = computed_compliant
     return TSCAuditResult(
         category=category,
         summary=summary,

@@ -106,7 +106,7 @@ def test_performance_ingest_auto_promotes_high_engagement(_mock_brand, fake_bank
         json={
             "client_id": "client_1",
             "brand_id": "brand_1",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
             "human_approved_for_testing": True,
         },
     )
@@ -147,7 +147,7 @@ def test_performance_ingest_skips_low_engagement(_mock_brand, fake_bank):
         json={
             "client_id": "client_1",
             "brand_id": "brand_1",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
             "human_approved_for_testing": True,
         },
     )
@@ -183,7 +183,7 @@ def test_performance_ingest_computes_composite_score(_mock_brand, fake_bank, mon
         json={
             "client_id": "client_1",
             "brand_id": "brand_1",
-            "llm_model_name": "qwen3.5:9b-mlx",
+            "llm_model_name": "glm-5.2:cloud",
             "human_approved_for_testing": True,
         },
     )

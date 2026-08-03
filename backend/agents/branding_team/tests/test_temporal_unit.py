@@ -441,6 +441,50 @@ def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
     assert kwargs["result"]["degraded_phases"] == []
 
 
+def test_finalize_activity_unapproved_partial_run_labels_current_phase(monkeypatch) -> None:
+    """The Temporal finalize path must label an unapproved partial run using
+    the furthest phase actually reached (current_phase) — proving it got the
+    same #3438 fix as the thread path (orchestrator.run) and that
+    finalize_branding_activity's public signature is unaffected by the
+    internal stop_idx removal."""
+    import shared.temporal
+    from branding_team.shared import job_store
+    from branding_team.temporal import activities
+
+    monkeypatch.setattr(shared.temporal, "load_checkpoint", lambda team, jid, phase: None)
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
+
+    # _model() treats a falsy (empty) dict as "phase not reached" (-> None), so
+    # each present phase needs at least one field set to stay non-empty/truthy.
+    phase_outputs = {
+        "strategic_core": {"brand_purpose": "BP"},
+        "narrative_messaging": {"tagline": "T"},
+    }
+
+    with (
+        patch(
+            "branding_team.shared.job_store.update_job_if_not_cancelled", return_value=True
+        ) as mock_update,
+        patch("branding_team.store.get_default_store"),
+    ):
+        activities.finalize_branding_activity(
+            _phase_payload(
+                target_phase="narrative_messaging",
+                human_review={"approved": False, "feedback": ""},
+                client_id=None,
+                brand_id=None,
+            ),
+            phase_outputs,
+            None,
+            None,
+        )
+
+    _, kwargs = mock_update.call_args
+    assert kwargs["status"] == job_store.JOB_STATUS_COMPLETED
+    assert "Narrative Messaging" in kwargs["result"]["mission_summary"]
+    assert kwargs["result"]["status"] == "needs_human_decision"
+
+
 def test_finalize_activity_raises_when_append_brand_version_returns_none(monkeypatch) -> None:
     """If the brand vanished between resolve and append, finalize must fail."""
     import shared.temporal
