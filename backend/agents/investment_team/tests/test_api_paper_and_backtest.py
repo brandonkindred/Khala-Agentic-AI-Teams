@@ -875,6 +875,44 @@ def test_run_paper_trading_409_when_live_session_already_active(
     assert "already has an" in resp.json()["detail"]
 
 
+def test_run_paper_trading_skips_unparseable_session_in_guard(
+    monkeypatch: pytest.MonkeyPatch, api_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A corrupt/unparseable record in ``_paper_trading_sessions`` must not
+    turn the concurrency guard into a 500 for unrelated strategies — it
+    should be logged and skipped, same as
+    ``_recover_orphaned_paper_trading_sessions``."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    record = _winning_record()
+    api_main._strategy_lab_records["lab-w"] = record
+    monkeypatch.setattr(api_main, "_run_live_paper_trading_background", lambda *a, **k: None)
+
+    # Corrupt record: fails PaperTradingSession.parse_persisted, unrelated to
+    # this request's strategy_id either way.
+    api_main._paper_trading_sessions["pt-bad"] = {"not": "a-paper-trading-session"}
+
+    with caplog.at_level(logging.WARNING, logger="investment_team.api.main"):
+        resp = api_client.post(
+            "/strategy-lab/paper-trade",
+            json={"lab_record_id": "lab-w"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["session"]["status"] == "opening"
+
+    warnings = [
+        r for r in caplog.records if "Skipping unparseable paper-trading session" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
+    # The corrupt row is left untouched, not overwritten/removed.
+    assert api_main._paper_trading_sessions["pt-bad"] == {"not": "a-paper-trading-session"}
+
+
 def test_run_paper_trading_live_mode_kicks_off_thread(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
