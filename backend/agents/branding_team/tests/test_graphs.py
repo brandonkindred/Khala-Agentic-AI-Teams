@@ -259,9 +259,10 @@ def test_phase_order_text_driven_by_phase_order(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_serialize_mission_roundtrips_company_name() -> None:
-    text = serialize_mission(
-        make_mission(
-            company_description="A strategic studio for enterprise product teams",
-        )
+    mission = make_mission(
+        company_name="Acme Rebrand Co",
+        company_description="A strategic studio for enterprise product teams",
     )
-    assert "Northstar Labs" in text
+    text = serialize_mission(mission)
+    assert mission.company_name in text
+    assert mission.company_description in text
