@@ -1647,6 +1647,46 @@ def test_dedupe_questions_by_answer_similarity_keeps_questions_with_no_options()
     assert result[0].id == "n"
 
 
+def test_dedupe_questions_by_answer_similarity_dedupes_repeated_existing_answers() -> None:
+    """Repeated identical selected_answer/other_text values across answered_questions
+    should not change the outcome (existing_answers is a set, so duplicates collapse
+    instead of being stored/compared repeatedly)."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    answered = [
+        AnsweredQuestion(question_id="x1", question_text="Where?", selected_answer="PaaS"),
+        AnsweredQuestion(question_id="x2", question_text="Where else?", selected_answer="PaaS"),
+        AnsweredQuestion(
+            question_id="x3",
+            question_text="Anything custom?",
+            selected_answer="Other",
+            other_text="Managed hosting",
+        ),
+        AnsweredQuestion(
+            question_id="x4",
+            question_text="Anything else custom?",
+            selected_answer="Other",
+            other_text="Managed hosting",
+        ),
+    ]
+    q_paas = OpenQuestion(
+        id="a",
+        question_text="Which deployment target?",
+        options=[QuestionOption(id="o1", label="PaaS", is_default=True, rationale="", confidence=0.9)],
+    )
+    q_hosting = OpenQuestion(
+        id="b",
+        question_text="Which hosting approach?",
+        options=[
+            QuestionOption(
+                id="o2", label="Managed hosting", is_default=True, rationale="", confidence=0.9
+            )
+        ],
+    )
+    result = agent._dedupe_questions_by_answer_similarity([q_paas, q_hosting], answered)
+    assert result == []
+
+
 def test_filter_organizational_questions_removes_org_keeps_technical() -> None:
     """_filter_organizational_questions removes organizational/process questions and keeps technical ones."""
     llm = MagicMock()
