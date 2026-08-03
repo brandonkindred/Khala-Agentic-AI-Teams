@@ -685,6 +685,55 @@ def test_list_strategy_lab_runs_reconciles_terminal_job_service_status(
     assert "user request" in (runs[0]["error"] or "")
 
 
+def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Mid-run progress must reach the client even while the job service still
+    reports a non-terminal status (#4096) -- not just status/error at completion."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-prog2"] = {
+        "run_id": "run-prog2",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 0,
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "current_batch": None,
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-prog2",
+                "status": "running",
+                "data": {
+                    "completed_cycles": 5,
+                    "skipped_cycles": 2,
+                    "errored_cycles": 1,
+                    "current_batch": 2,
+                    "contiguous_cycles": 5,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs")
+    assert resp.status_code == 200
+    run = next(r for r in resp.json()["runs"] if r["run_id"] == "run-prog2")
+    # Status stays "running" -- the persisted status is itself non-terminal --
+    # but progress counters are still reconciled from the job service.
+    assert run["status"] == "running"
+    assert run["completed_cycles"] == 5
+    assert run["skipped_cycles"] == 2
+    assert run["errored_cycles"] == 1
+    assert run["current_batch"] == 2
+    # contiguous_cycles is intentionally absent from the response schema
+    # (internal resume-offset math only); assert it landed in _active_runs.
+    assert api_main._active_runs["run-prog2"]["contiguous_cycles"] == 5
+
+
 def test_list_strategy_lab_runs_merges_persisted_only_runs(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -992,6 +1041,55 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
     assert body["error"] == "boom"
 
 
+def test_get_strategy_lab_run_status_reconciles_progress_while_non_terminal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Mid-run progress must reach the client even while the job service still
+    reports a non-terminal status (#4096) -- not just status/error at completion."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-prog"] = {
+        "run_id": "run-prog",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 0,
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "current_batch": None,
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-prog",
+                "status": "running",
+                "data": {
+                    "completed_cycles": 4,
+                    "skipped_cycles": 1,
+                    "errored_cycles": 2,
+                    "current_batch": 3,
+                    "contiguous_cycles": 4,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs/run-prog/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    # Status stays "running" -- the persisted status is itself non-terminal --
+    # but progress counters are still reconciled from the job service.
+    assert body["status"] == "running"
+    assert body["completed_cycles"] == 4
+    assert body["skipped_cycles"] == 1
+    assert body["errored_cycles"] == 2
+    assert body["current_batch"] == 3
+    # contiguous_cycles is intentionally absent from the response schema
+    # (internal resume-offset math only); assert it landed in _active_runs.
+    assert api_main._active_runs["run-prog"]["contiguous_cycles"] == 4
+
+
 def test_get_strategy_lab_run_status_logs_reconciliation_failure(
     monkeypatch: pytest.MonkeyPatch, api_client, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1204,6 +1302,9 @@ def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
 
     monkeypatch.setattr(job_event_bus, "subscribe", _fake_subscribe)
     monkeypatch.setattr(job_event_bus, "unsubscribe", _fake_unsubscribe)
+    # Stub the job-service client so the endpoint's connect-time progress
+    # reconciliation doesn't hit the real (unreachable) JOB_SERVICE_URL.
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     with api_client.stream("GET", "/strategy-lab/runs/active/stream", timeout=2.0) as resp:
         assert resp.status_code == 200
@@ -1248,6 +1349,9 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
 
     monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
+    # Stub the job-service client so the endpoint's connect-time progress
+    # reconciliation doesn't hit the real (unreachable) JOB_SERVICE_URL.
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     with api_client.stream("GET", "/strategy-lab/runs/boom/stream", timeout=2.0) as resp:
         assert resp.status_code == 200
@@ -1256,3 +1360,65 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
     assert '"type": "snapshot"' in body
     assert '"type": "error"' in body
     assert '"type": "done"' in body
+
+
+def test_stream_strategy_lab_run_snapshot_reconciles_progress(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The initial SSE snapshot must reflect job-service-reconciled progress,
+    not the stale in-memory values that were current at connect time (#4096)."""
+    import json
+    from collections import deque
+
+    from investment_team.api import job_event_bus
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["stream-prog"] = {
+        "run_id": "stream-prog",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 0,
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "current_batch": None,
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "stream-prog",
+                "status": "running",
+                "data": {
+                    "completed_cycles": 6,
+                    "skipped_cycles": 1,
+                    "errored_cycles": 1,
+                    "current_batch": 4,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    pre_events = deque([{"type": "complete", "summary": "ok"}])
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = pre_events
+
+        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
+            pass
+
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
+
+    with api_client.stream("GET", "/strategy-lab/runs/stream-prog/stream", timeout=2.0) as resp:
+        assert resp.status_code == 200
+        body = _wait_for_terminal_sse(resp.iter_text())
+
+    segments = [s for s in body.split("\n\n") if s.strip()]
+    snapshot_seg = next(s for s in segments if '"type": "snapshot"' in s)
+    snapshot = json.loads(snapshot_seg[len("data: ") :])
+    assert snapshot["completed_cycles"] == 6
+    assert snapshot["skipped_cycles"] == 1
+    assert snapshot["errored_cycles"] == 1
+    assert snapshot["current_batch"] == 4

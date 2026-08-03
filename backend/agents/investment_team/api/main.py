@@ -1843,6 +1843,96 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
         logger.warning("Failed to persist run state for %s: %s", run_id, exc)
 
 
+# Fields the Temporal workflow's persist-state activity writes as partial
+# deltas over a run's lifetime (see strategy_lab/temporal/workflows.py
+# _persist_state call sites): per-batch-start (current_batch), per-wave
+# (completed_cycles, contiguous_cycles, completed_record_ids, errored_cycles,
+# skipped_cycles, errored_details, tracker_merge_error_count),
+# per-batch-complete (completed_batches). current_cycle is included
+# defensively even though no persist point currently sets it -- the ``if
+# field in data`` guard in ``_reconcile_run_progress`` makes it inert until,
+# and unless, that changes.
+_STRATEGY_LAB_PROGRESS_FIELDS: tuple[str, ...] = (
+    "completed_cycles",
+    "skipped_cycles",
+    "errored_cycles",
+    "errored_details",
+    "tracker_merge_error_count",
+    "completed_record_ids",
+    "current_batch",
+    "completed_batches",
+    "contiguous_cycles",
+    "current_cycle",
+)
+
+
+def _reconcile_run_progress(run_id: str) -> None:
+    """Sync run_id's in-memory progress counters + terminal status from the job service.
+
+    Shared by ``list_strategy_lab_runs``, ``get_strategy_lab_run_status``, and
+    ``stream_strategy_lab_run``'s connect-time snapshot so all three read
+    surfaces see live progress instead of stale dispatch-time/last-resume
+    values. Re-reads ``_active_runs`` itself (rather than accepting a
+    caller-supplied snapshot) so it always mutates whatever dict object is
+    currently installed for ``run_id`` -- a resume/restart that installs a new
+    dict between a caller's initial read and this call can't have its state
+    clobbered by a stale reference.
+
+    Preconditions:
+        - ``run_id`` may or may not be present in ``_active_runs``.
+
+    Postconditions:
+        - No-op (no job-service call) when ``run_id`` is absent from
+          ``_active_runs``, or its in-memory ``status`` is already in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``.
+        - Otherwise calls ``client.get_job(run_id)`` at most once. When a
+          persisted record is returned, every key in
+          ``_STRATEGY_LAB_PROGRESS_FIELDS`` present in the record's data (via
+          the ``job.get("data", job)`` fallback used elsewhere in this file)
+          is copied onto ``_active_runs[run_id]``; a key absent from the
+          persisted record is left untouched (a sparse/early persisted record
+          can never erase a more-complete in-memory value). ``status``/
+          ``error`` are copied onto ``_active_runs[run_id]`` only when the
+          persisted status is itself in ``STRATEGY_LAB_TERMINAL_STATUSES``
+          (unchanged from prior behavior).
+        - All mutation happens under ``_lock`` and is guarded by re-checking
+          ``run_id in _active_runs`` immediately before writing (the run may
+          have been deleted, or replaced by a resume/restart, between the
+          initial check and the job-service round trip); the network call
+          itself is never made while holding ``_lock``.
+
+    Raises:
+        - None. Job-service construction/lookup failures are caught and
+          logged via ``logger.debug("Job service reconciliation failed for
+          run %s", run_id, exc_info=True)``; the run's in-memory state is
+          left unchanged in that case.
+    """
+    with _lock:
+        state = _active_runs.get(run_id)
+    if not state or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+        return
+    try:
+        client = _get_lab_run_job_client()
+        persisted = client.get_job(run_id)
+    except Exception:
+        logger.debug("Job service reconciliation failed for run %s", run_id, exc_info=True)
+        return
+    if not persisted:
+        return
+    data = persisted.get("data", persisted)
+    with _lock:
+        current = _active_runs.get(run_id)
+        if current is None:
+            return
+        for field in _STRATEGY_LAB_PROGRESS_FIELDS:
+            if field in data:
+                current[field] = data[field]
+        js_status = persisted.get("status", "")
+        if js_status in STRATEGY_LAB_TERMINAL_STATUSES:
+            current["status"] = js_status
+            current["error"] = persisted.get("error") or data.get("error")
+
+
 def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
     """Dispatch a job through Temporal when it is enabled, else report failure.
 
@@ -2872,10 +2962,12 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
     running jobs are always visible — even after a page refresh that
     races with server startup or after the in-memory entry is evicted.
 
-    Also reconciles: if an in-memory run says "running" but the job service
-    has it as terminal (cancelled/failed/completed), the in-memory state is
-    updated to match — this handles external cancellation via the generic
-    job proxy or the Jobs Dashboard.
+    Also reconciles: for each in-memory run whose status is not terminal,
+    every progress field (and, if the job service reports a terminal status,
+    ``status``/``error`` too) is refreshed from the durable job-service
+    record — this handles both external cancellation (via the generic job
+    proxy or the Jobs Dashboard) and ordinary mid-run progress that would
+    otherwise stay frozen at dispatch-time values.
 
     Preconditions:
         - None.
@@ -2886,40 +2978,28 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
           already tracked in-memory (those are added to the response only,
           not written back to ``_active_runs``).
         - Side effect: for each in-memory run whose status is not in
-          ``STRATEGY_LAB_TERMINAL_STATUSES``, if the job service reports a
-          terminal status for it, ``_active_runs[rid]["status"]`` and
-          ``["error"]`` are mutated in place to match.
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, ``_reconcile_run_progress`` is
+          called, refreshing progress fields (and ``status``/``error`` on a
+          terminal transition) in place. See its docstring for details.
 
     Raises:
         - None. Job-service lookup/reconciliation failures are caught and
           logged (``logger.debug``), and the endpoint falls back to the
           in-memory-only snapshot; this endpoint always returns 200.
     """
-    _TERMINAL = STRATEGY_LAB_TERMINAL_STATUSES
-
     try:
         client = _get_lab_run_job_client()
 
-        # Reconcile: if job service has a terminal status for a run we think
-        # is still active, update _active_runs so the UI sees the real state.
+        # Reconcile: refresh progress (and, on a terminal transition,
+        # status/error) for every run we think is still active.
         with _lock:
             running_ids = [
-                rid for rid, r in _active_runs.items() if r.get("status") not in _TERMINAL
+                rid
+                for rid, r in _active_runs.items()
+                if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
             ]
         for rid in running_ids:
-            try:
-                persisted = client.get_job(rid)
-                if persisted:
-                    js_status = persisted.get("status", "")
-                    if js_status in _TERMINAL:
-                        with _lock:
-                            if rid in _active_runs:
-                                _active_runs[rid]["status"] = js_status
-                                _active_runs[rid]["error"] = persisted.get(
-                                    "error"
-                                ) or persisted.get("data", {}).get("error")
-            except Exception:
-                pass
+            _reconcile_run_progress(rid)
 
         with _lock:
             in_memory = {r["run_id"]: r for r in _active_runs.values()}
@@ -2956,11 +3036,12 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
           job-service fallback (``_load_run_from_job_service``).
 
     Postconditions:
-        - Side effect: if the in-memory state's status is not in
-          ``STRATEGY_LAB_TERMINAL_STATUSES`` and the job service reports a
-          terminal status for it, ``_active_runs[run_id]["status"]`` and
-          ``["error"]`` are mutated in place to match (same reconciliation
-          as ``list_strategy_lab_runs``, scoped to this one run).
+        - Side effect: delegates to ``_reconcile_run_progress(run_id)``,
+          which — when the in-memory state's status is not in
+          ``STRATEGY_LAB_TERMINAL_STATUSES`` — refreshes every progress field
+          from the job service, and additionally mutates ``_active_runs[run_id]
+          ["status"]``/``["error"]`` in place when the persisted status is
+          itself terminal.
         - Returns a ``StrategyLabRunStatusResponse`` via
           ``_run_state_to_response(state)``.
 
@@ -2970,29 +3051,10 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
           caught and logged (``logger.debug``), falling back to the
           in-memory state rather than propagating.
     """
-    _TERMINAL = STRATEGY_LAB_TERMINAL_STATUSES
+    _reconcile_run_progress(run_id)
 
     with _lock:
         state = _active_runs.get(run_id)
-
-    # Reconcile with job service if in-memory state looks active
-    if state and state.get("status") not in _TERMINAL:
-        try:
-            client = _get_lab_run_job_client()
-            persisted = client.get_job(run_id)
-            if persisted:
-                js_status = persisted.get("status", "")
-                if js_status in _TERMINAL:
-                    with _lock:
-                        if run_id in _active_runs:
-                            _active_runs[run_id]["status"] = js_status
-                            _active_runs[run_id]["error"] = persisted.get("error") or persisted.get(
-                                "data", {}
-                            ).get("error")
-                            state = _active_runs[run_id]
-        except Exception:
-            logger.debug("Job service reconciliation failed for run %s", run_id, exc_info=True)
-
     if not state:
         state = _load_run_from_job_service(run_id)
     if not state:
@@ -3016,7 +3078,17 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     with _lock:
         state = _active_runs.get(run_id)
-    if not state:
+    if state:
+        # Reconcile before the terminal check so an externally-completed run
+        # (job-service status advanced past what this process's in-memory
+        # entry still shows) is caught by the short-circuit below with
+        # up-to-date data, and the live path's _snapshot_event() -- which
+        # reads _active_runs.get(run_id, {}) fresh -- picks up these same
+        # values automatically.
+        _reconcile_run_progress(run_id)
+        with _lock:
+            state = _active_runs.get(run_id, state)
+    else:
         state = _load_run_from_job_service(run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
