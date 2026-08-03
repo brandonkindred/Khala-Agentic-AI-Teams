@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import threading
 import uuid
-from typing import Any, Dict, List
+from collections.abc import MutableMapping
+from typing import Any, Dict, Iterator, List
 
 import pytest
 
@@ -83,7 +84,14 @@ def test_run_strategy_lab_request_total_cycles_is_batch_size_times_batch_count()
         api_main.RunStrategyLabRequest(batch_count=api_main._MAX_BATCH_COUNT + 1)
 
 
-class _InMemoryDict:
+class _InMemoryDict(MutableMapping):
+    """Plain-dict stand-in for monkeypatching api.main's module-level record
+    stores. Subclasses MutableMapping (rather than hand-rolling the dict
+    protocol) so it gets correct semantics -- including __iter__/__len__/
+    keys/items/update/setdefault and a real KeyError on deleting a missing
+    key -- for free, matching what production code calling these stores
+    would see from an actual dict."""
+
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
 
@@ -93,22 +101,33 @@ class _InMemoryDict:
     def __getitem__(self, k):
         return self._d[k]
 
-    def get(self, k, default=None):
-        return self._d.get(k, default)
-
-    def __contains__(self, k):
-        return k in self._d
-
     def __delitem__(self, k):
-        self._d.pop(k, None)
+        del self._d[k]
 
-    def pop(self, k, *args):
-        if args:
-            return self._d.pop(k, args[0])
-        return self._d.pop(k)
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._d)
 
-    def values(self):
-        return list(self._d.values())
+    def __len__(self) -> int:
+        return len(self._d)
+
+
+def test_in_memory_dict_matches_real_dict_protocol() -> None:
+    """Regression: the hand-rolled predecessor of this MutableMapping-based
+    test double was missing __iter__/__len__/keys/items/update/setdefault,
+    and its __delitem__ silently no-op'd on a missing key instead of
+    raising KeyError like a real dict -- gaps that could mask a bug in
+    production code exercising the full mapping protocol against these
+    monkeypatched stores."""
+    d = _InMemoryDict()
+    d["a"] = 1
+    d.setdefault("b", 2)
+    d.update({"c": 3})
+    assert len(d) == 3
+    assert set(iter(d)) == {"a", "b", "c"}
+    assert dict(d.items()) == {"a": 1, "b": 2, "c": 3}
+    assert set(d.keys()) == {"a", "b", "c"}
+    with pytest.raises(KeyError):
+        del d["missing"]
 
 
 @pytest.fixture
@@ -1006,6 +1025,82 @@ def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch)
     assert out["foo"] == 1
     assert out["run_id"] == "run-y"
     assert out["status"] == "completed"
+
+
+def test_get_run_state_strict_propagates_durable_read_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: unlike the lenient get_run_state (whose durable fallback
+    swallows ANY job-service read failure via load_run_from_job_service),
+    get_run_state_strict must propagate a transport failure rather than
+    returning None -- a caller relying on this to distinguish "no prior
+    state" from "the read failed" needs the raise."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_run_state_strict("run-strict-fail")
+
+
+def test_get_run_state_strict_prefers_active_runs_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setitem(run_state.active_runs, "run-cached", {"status": "running"})
+    try:
+        assert run_state.get_run_state_strict("run-cached") == {"status": "running"}
+    finally:
+        del run_state.active_runs["run-cached"]
+
+
+def test_get_run_state_strict_returns_none_for_genuinely_unknown_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NotFound:
+        def get_job(self, jid):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NotFound())
+    assert run_state.get_run_state_strict("run-nonexistent") is None
+
+
+def test_rehydrate_active_run_offset_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a transient job-service outage during dispatch must raise
+    (letting _dispatch_strategy_lab_run's exception boundary turn it into a
+    503 + failed run), not silently return offset 0 -- which would be
+    indistinguishable from "fresh run" and cause a resumed run to replay
+    already-completed cycles with no error for Temporal to retry on."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.rehydrate_active_run_offset("run-offset-fail")
+
+
+def test_get_resume_seed_counters_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression as rehydrate_active_run_offset's: a transient
+    job-service outage must raise rather than silently reset these counters
+    to zero."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_resume_seed_counters("run-counters-fail")
 
 
 # ---------------------------------------------------------------------------

@@ -395,6 +395,12 @@ STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
 )
 
+# restart_strategy_lab_run's restartable-status gate: "completed_with_errors"
+# is a terminal outcome of the same workflow as "completed" and must be
+# restartable too, but it's lab-specific and doesn't belong in the shared
+# job_service_client.RESTARTABLE_STATUSES constant.
+STRATEGY_LAB_RESTARTABLE_STATUSES: frozenset[str] = RESTARTABLE_STATUSES | {"completed_with_errors"}
+
 # restart_strategy_lab_run's fencing-generation mint amount: a run created
 # before generation fencing shipped has no persisted "generation" field, and
 # the job service's atomic increment treats an absent field as 0 -- a plain
@@ -405,6 +411,13 @@ STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
 # reasoning.
 GENERATION_INCREMENT_NORMAL = 1
 GENERATION_INCREMENT_LEGACY_BOOTSTRAP = 2
+
+# Passed as `_persist_run_state`'s `exclude_fields` by every write that must
+# never regress the durable fencing high-water mark from a possibly-stale
+# in-memory snapshot (run/resume/restart/rollback state writes) -- the
+# generation field is only ever advanced via `apply_and_get`'s atomic
+# increment, never via one of these ordinary state persists.
+_GENERATION_EXCLUDE_FIELDS = frozenset({"generation"})
 
 
 class StrategyLabRunStartResponse(BaseModel):
@@ -1488,14 +1501,41 @@ class StrategyLabResultsResponse(BaseModel):
 
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
-    """Map LLM output to canonical labels used by the simulated ledger."""
+    """Map LLM output to canonical labels used by the simulated ledger.
+
+    Preconditions:
+        ``raw`` is the ideation LLM's raw ``asset_class`` value — may be
+        ``None``, a recognized alias, or an arbitrary/malformed string.
+    Postconditions:
+        Returns one of the canonical asset-class labels
+        (``strategy_lab_context._CANONICAL_ASSET_CLASSES``). Never raises:
+        delegates to the lenient ``normalize_asset_class``, which falls
+        back to ``"stocks"`` for ``None`` or an unrecognized value rather
+        than erroring — this is a defense-in-depth runtime path, not a
+        fail-closed validation gate (see ``normalize_asset_class_strict``
+        for the raising variant used elsewhere).
+    """
     from investment_team.strategy_lab_context import normalize_asset_class
 
     return normalize_asset_class(raw)
 
 
 def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[StrategySpec, str]:
-    """Build a StrategySpec + strategy_id from raw ideation output."""
+    """Build a StrategySpec + strategy_id from raw ideation output.
+
+    Preconditions:
+        ``strategy_data`` is a dict of the ideation LLM's raw output (field
+        values may be missing, ``None``, or malformed).
+    Postconditions:
+        Returns ``(strategy, strategy_id)``: ``strategy_id`` is a freshly
+        generated unique id, and ``strategy`` is a fully constructed
+        ``StrategySpec``. Missing/malformed fields are defaulted or
+        filtered (asset class via ``_normalize_strategy_lab_asset_class``,
+        timeframe defaults to ``"1d"``, non-dict entry/exit rules are
+        dropped, non-dict sizing falls back to ``DEFAULT_SIZING_PAYLOAD``)
+        rather than raising, so a partially malformed LLM response doesn't
+        crash the cycle.
+    """
     strategy_id = f"strat-lab-{uuid.uuid4().hex[:8]}"
     sizing = strategy_data.get("sizing")
     strategy = StrategySpec(
@@ -2011,7 +2051,7 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
             state["status"] = "failed"
             state["error"] = error
             state["current_cycle"] = None
-            _persist_run_state(run_id, state, exclude_fields=frozenset({"generation"}))
+            _persist_run_state(run_id, state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
 
         from investment_team.api.job_event_bus import cleanup_job
 
@@ -2658,8 +2698,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status — read INSIDE
-          the transition lock below, not beforehand — is in
+        - ``run_id`` identifies a run whose status — read via ``_get_run_state``
+          (the in-memory ``active_runs`` entry when present, else a durable
+          fallback read; see its own docstring) INSIDE the transition lock
+          below, not beforehand — is in
           ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/
           agent_crash). Reading it (or the counters/payload derived from it)
           before acquiring the lock could observe a stale snapshot: another
@@ -2799,7 +2841,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # fields into the durable record rather than replacing it wholesale,
         # so omitting the key here means this write can never regress the
         # durable generation back down to a stale snapshot.
-        _persist_run_state(run_id, resumed_state, exclude_fields=frozenset({"generation"}))
+        _persist_run_state(run_id, resumed_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
 
         # Revalidate the generation immediately before dispatch: `current_generation`
         # above is a snapshot from before this request's own state write, and a
@@ -2874,15 +2916,16 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Restart a strategy lab run from the beginning.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status — read INSIDE
-          the transition lock below, not beforehand — is in
-          ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
+        - ``run_id`` identifies a run whose status — read via ``_get_run_state``
+          (the in-memory ``active_runs`` entry when present, else a durable
+          fallback read; see its own docstring) INSIDE the transition lock
+          below, not beforehand — is in ``STRATEGY_LAB_RESTARTABLE_STATUSES``
           (completed/failed/cancelled/interrupted/agent_crash/completed_with_errors).
           Reading it before acquiring the lock could observe another
           transition's transiently-written "running" reset and misreport a
           genuine in-flight-elsewhere race as a permanent 400 instead of a
           retryable 409 ("running" is deliberately excluded from
-          ``RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
+          ``STRATEGY_LAB_RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
           resolves to *some* known run) runs before the lock, so a request
           for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
@@ -3009,12 +3052,8 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # RESTARTABLE_STATUSES, so status is only trustworthy once no other
         # transition for this run_id can be concurrently rewriting it.
         state = _get_run_state(run_id)
-        # "completed_with_errors" is a terminal outcome of the same workflow as
-        # "completed" and must be restartable. Extend the shared set locally
-        # rather than leaking a lab-specific status into job_service_client.
-        _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
         try:
-            validate_job_for_action(state, run_id, _lab_restartable, "restarted")
+            validate_job_for_action(state, run_id, STRATEGY_LAB_RESTARTABLE_STATUSES, "restarted")
         except ValueError as exc:
             code = 404 if "not found" in str(exc) else 400
             raise HTTPException(status_code=code, detail=str(exc)) from exc
@@ -3181,7 +3220,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # legitimately newer, already-running incarnation -- the exact
         # regression the rollback path below already guards against for its
         # own write; this is the same guard for the non-collision path.
-        _persist_run_state(run_id, restarted_state, exclude_fields=frozenset({"generation"}))
+        _persist_run_state(run_id, restarted_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
 
         # Revalidate the generation immediately before dispatch: `new_generation`
         # above is a snapshot from this restart's own mint, and a DIFFERENT
@@ -3284,7 +3323,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 rolled_back_state["generation"] = current_generation
                 with _lock:
                     _active_runs[run_id] = rolled_back_state
-                _persist_run_state(run_id, rolled_back_state, exclude_fields=frozenset({"generation"}))
+                _persist_run_state(run_id, rolled_back_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
                 # Known, accepted residual limitation (matches #4028's own
                 # documented multi-process scope boundary — not new here):
                 # this rollback can still overwrite a concurrently-dispatched

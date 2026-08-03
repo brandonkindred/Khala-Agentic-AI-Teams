@@ -739,9 +739,12 @@ def test_rehydrate_active_run_offset_repopulates_from_job_store(monkeypatch) -> 
     from investment_team.strategy_lab import run_state
 
     monkeypatch.setattr(run_state, "active_runs", {})
+    # rehydrate_active_run_offset reads via get_run_state_strict (not the
+    # lenient get_run_state/load_run_from_job_service) -- see its own
+    # docstring for why a durable-read failure must propagate here.
     monkeypatch.setattr(
         run_state,
-        "load_run_from_job_service",
+        "get_run_state_strict",
         lambda rid: {"run_id": rid, "status": "running", "contiguous_cycles": 4},
     )
 
@@ -756,7 +759,7 @@ def test_rehydrate_active_run_offset_defaults_to_zero(monkeypatch) -> None:
     from investment_team.strategy_lab import run_state
 
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
     assert run_state.rehydrate_active_run_offset("missing") == 0
 
@@ -765,7 +768,7 @@ def test_get_resume_seed_counters_defaults_for_unknown_run(monkeypatch) -> None:
     from investment_team.strategy_lab import run_state
 
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
     assert run_state.get_resume_seed_counters("missing") == {
         "skipped_cycles": 0,

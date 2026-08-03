@@ -1236,6 +1236,16 @@ def test_compute_signal_brief_activity_maps_unexpected_error(monkeypatch):
         act.compute_signal_brief_activity("SPY")
 
 
+def test_finalize_cycle_record_activity_maps_malformed_record_parse_error():
+    """A malformed `record` payload (missing required fields) raises inside
+    `StrategyLabRecord.parse_persisted`, which now runs inside the same
+    try/except as the finalize delegate call -- it must map to
+    ApplicationError like any other failure in this activity's body, not
+    propagate as a raw, unmapped pydantic ValidationError."""
+    with pytest.raises(ApplicationError):
+        act.finalize_cycle_record_activity({"record": {"lab_record_id": "incomplete"}})
+
+
 def test_finalize_cycle_record_activity_maps_unexpected_error(monkeypatch):
     from investment_team.api import main as api_main
 

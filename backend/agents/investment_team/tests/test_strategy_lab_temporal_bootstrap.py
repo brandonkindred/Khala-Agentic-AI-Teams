@@ -180,7 +180,10 @@ def test_build_batch_input_defaults_seed_counters_for_fresh_run(monkeypatch):
     monkeypatch.setattr(config, "clamp_max_parallel", lambda n: n)
     monkeypatch.setattr(run_state, "rehydrate_active_run_offset", lambda run_id: 0)
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    # get_resume_seed_counters reads via get_run_state_strict (not the
+    # lenient get_run_state/load_run_from_job_service) -- see its own
+    # docstring for why a durable-read failure must propagate here.
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
     bi = build_strategy_lab_batch_input("run-fresh", _FakeRequest(), 1)
 
@@ -200,6 +203,10 @@ def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
 
     monkeypatch.setattr(config, "clamp_max_parallel", lambda n: n)
     monkeypatch.setattr(run_state, "rehydrate_active_run_offset", lambda run_id: 0)
+    # get_resume_seed_counters reads via get_run_state_strict; stub it so this
+    # test's unrelated durable read can't hit a real job-service call now
+    # that a lookup failure propagates instead of being swallowed.
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
     # ``excluded_for_allowed`` is imported from its home module, not laundered
     # through api.main, so patch it at the source.
     monkeypatch.setattr(

@@ -797,14 +797,15 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             run_id, params.get("generation", 1), retry_on_lookup_failure=retry_on_lookup_failure
         )
 
-    record = StrategyLabRecord.parse_persisted(params["record"])
     run_id = params.get("run_id") or _infer_run_id_from_activity_context()
     if run_id is not None:
-        # Cheap early exit for an already-known-stale call. Safe to retry the
-        # whole activity if THIS lookup itself transiently fails: nothing has
-        # been written yet.
+        # Cheap early exit for an already-known-stale call -- checked before
+        # parsing so a stale call doesn't pay for Pydantic reconstruction of
+        # a potentially large record. Safe to retry the whole activity if
+        # THIS lookup itself transiently fails: nothing has been written yet.
         _check_generation(run_id, retry_on_lookup_failure=True)
     try:
+        record = StrategyLabRecord.parse_persisted(params["record"])
         finalized = _finalize_strategy_lab_cycle_record(
             record,
             signal_brief_storage=params.get("signal_brief_storage"),
