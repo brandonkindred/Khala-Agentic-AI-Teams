@@ -441,6 +441,23 @@ while True:
             # starting state, rather than looping in place indefinitely --
             # resetting history growth without losing the pause it's mid-way
             # through waiting on.
+            #
+            # `self._submitted_answers` must be rechecked immediately before
+            # continuing as new, not assumed still None just because the loop
+            # condition held at iteration start: a signal can be processed
+            # (setting it) while this branch's own `check_job_terminal_activity`
+            # await is in flight, and the native-signal route (§3) reports
+            # delivery success to its caller as soon as the signal is
+            # delivered -- the client believes the answer landed. If
+            # `continue_as_new` fires without checking this and without
+            # carrying it forward, the new run starts back at `None` and the
+            # already-accepted answer is silently lost, leaving the pause
+            # waiting on a submission the client thinks it already made.
+            # Either recheck `self._submitted_answers is None` right before
+            # the `continue_as_new` call and skip it (falling through to
+            # resolve normally) if an answer arrived in that window, or
+            # include `self._submitted_answers` itself in the carried-forward
+            # starting state alongside the other three fields.
 
     # hitl.answers_to_resolved(submitted_answers, pending_questions) needs BOTH
     # args -- it recovers question_text/answer labels from pending_questions;
