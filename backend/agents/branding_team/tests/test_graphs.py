@@ -118,6 +118,31 @@ def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
 
 
+def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
+    """Documented channel/description preconditions are enforced before construction."""
+    from branding_team.agents import _make_channel_guide
+
+    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+        _make_channel_guide("", "some description")
+    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+        _make_channel_guide("   ", "some description")
+    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+        _make_channel_guide("website", "")
+    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+        _make_channel_guide("website", "   ")
+
+
+def test_channel_guide_and_brand_experience_prompts_drop_redundant_json_reminder() -> None:
+    """The prompt's field list is the contract; ``output_mode="json"`` already forces the wire format."""
+    from branding_team.agents import _make_channel_guide, make_brand_experience_principler
+
+    channel_agent = _make_channel_guide("website", "a marketing site")
+    assert "Output valid JSON" not in channel_agent.system_prompt
+
+    principler_agent = make_brand_experience_principler()
+    assert "Output valid JSON" not in principler_agent.system_prompt
+
+
 def test_build_phase5_graph_is_a_graph() -> None:
     assert isinstance(build_phase5_graph(), Graph)
 

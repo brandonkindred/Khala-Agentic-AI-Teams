@@ -595,8 +595,7 @@ def make_brand_experience_principler() -> Agent:
             "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
             "2. signature_moments — 3-5 key moments in the customer journey that should feel "
             "distinctly on-brand\n"
-            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable\n"
-            "Output valid JSON with these three keys."
+            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
         ),
     )
 
@@ -615,6 +614,10 @@ def _make_channel_guide(channel: str, description: str) -> Agent:
         that channel's strategy, dos/don'ts, content types, and
         cadence.
     """
+    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
+    assert isinstance(description, str) and description.strip(), (
+        "description must be a non-empty string"
+    )
     return build_agent(
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",
@@ -627,8 +630,7 @@ def _make_channel_guide(channel: str, description: str) -> Agent:
             f"- donts: 3-4 things to avoid\n"
             f"- content_types: 3-5 recommended content formats\n"
             f"- frequency_guidance: recommended cadence\n"
-            f"Context: {description}\n"
-            f"Output valid JSON matching the ChannelGuideline schema."
+            f"Context: {description}"
         ),
     )
 
