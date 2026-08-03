@@ -448,22 +448,30 @@ class AgentRegistry:
                 if require_persist:
                     # Undo the in-memory install so fail-closed callers do not leave
                     # a half-registered local entry when their transaction rolls back.
+                    # Only roll back state this call still owns: the lock was released
+                    # during the store upsert, so a concurrent register/unregister of
+                    # the same id must not be clobbered by restoring our snapshots.
                     with self._lock:
-                        if prior_manifest is None:
-                            self._by_id.pop(manifest.id, None)
-                            self._source_paths.pop(manifest.id, None)
-                            self._unconfirmed.discard(manifest.id)
-                        else:
-                            self._by_id[manifest.id] = prior_manifest
-                            if prior_source is not None:
-                                self._source_paths[manifest.id] = prior_source
-                            elif source_path is not None:
+                        if self._by_id.get(manifest.id) is manifest:
+                            if prior_manifest is None:
+                                self._by_id.pop(manifest.id, None)
                                 self._source_paths.pop(manifest.id, None)
-                            if was_unconfirmed:
-                                self._unconfirmed.add(manifest.id)
-                            else:
                                 self._unconfirmed.discard(manifest.id)
-                        if prior_tombstone is not None:
+                            else:
+                                self._by_id[manifest.id] = prior_manifest
+                                if prior_source is not None:
+                                    self._source_paths[manifest.id] = prior_source
+                                elif source_path is not None:
+                                    self._source_paths.pop(manifest.id, None)
+                                if was_unconfirmed:
+                                    self._unconfirmed.add(manifest.id)
+                                else:
+                                    self._unconfirmed.discard(manifest.id)
+                        if (
+                            prior_tombstone is not None
+                            and manifest.id not in self._tombstones
+                            and manifest.id not in self._by_id
+                        ):
                             self._tombstones[manifest.id] = prior_tombstone
                             self._tombstones.move_to_end(manifest.id)
                     raise
@@ -570,6 +578,13 @@ class AgentRegistry:
                 raise ValueError(
                     f"replace_dynamic_manifests: refusing to delete static id {agent_id!r}"
                 )
+        upsert_ids = {m.id for m in upsert_list}
+        overlap = upsert_ids & set(delete_list)
+        if overlap:
+            raise ValueError(
+                "replace_dynamic_manifests: upserts and delete_ids must be disjoint; "
+                f"overlap={sorted(overlap)!r}"
+            )
 
         store = self._dynamic_store()
         if store is not None:

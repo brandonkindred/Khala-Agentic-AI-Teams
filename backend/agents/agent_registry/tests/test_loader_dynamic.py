@@ -210,6 +210,41 @@ def test_register_require_persist_succeeds_when_store_inactive(
     assert "agent_studio.strict-local" in reg._unconfirmed
 
 
+def test_register_require_persist_rollback_preserves_concurrent_install(
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed require_persist must not clobber a concurrent re-register of the same id."""
+    reg = AgentRegistry([], {})
+    failing = _manifest("agent_studio.race-1", name="Failing")
+    concurrent = _manifest("agent_studio.race-1", name="Concurrent")
+
+    def _upsert_then_race(manifest):
+        # Simulate another thread installing a newer entry while our store call runs
+        # (lock is released around the upsert).
+        with reg._lock:
+            reg._by_id[manifest.id] = concurrent
+            reg._tombstones.pop(manifest.id, None)
+            reg._unconfirmed.discard(manifest.id)
+        raise RuntimeError("boom:upsert")
+
+    monkeypatch.setattr(ds_mod, "upsert", _upsert_then_race)
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        reg.register(failing, require_persist=True)
+
+    assert reg._by_id["agent_studio.race-1"] is concurrent
+    assert reg._by_id["agent_studio.race-1"].name == "Concurrent"
+
+
+def test_replace_dynamic_manifests_rejects_overlap(fake_store: _FakeStore) -> None:
+    reg = AgentRegistry([], {})
+    m = _manifest("agentic.team-1.both", team="agentic_team_provisioning")
+    with pytest.raises(ValueError, match="disjoint"):
+        reg.replace_dynamic_manifests([m], [m.id])
+    assert m.id not in reg._by_id
+    assert m.id not in fake_store.rows
+
+
 def test_replace_dynamic_manifests_writes_atomically(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
     prior = _manifest("agentic.team-1.old", team="agentic_team_provisioning")
