@@ -753,7 +753,7 @@ def run_sop_phase1(
 
     # Step 3: Inject all decisions into spec
     if all_answered:
-        spec_content = inject_context_answers_into_spec(spec_content, all_answered, repo_path)
+        spec_content = inject_context_answers_into_spec(spec_content, all_answered)
 
     return all_decisions, spec_content, all_answered
 
