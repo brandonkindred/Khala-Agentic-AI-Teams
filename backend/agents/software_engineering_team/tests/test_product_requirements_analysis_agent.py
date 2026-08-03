@@ -1779,6 +1779,75 @@ def test_consolidate_open_questions_skips_malformed_item_keeps_valid_ones() -> N
     assert result[0].id == "good"
 
 
+def test_consolidate_open_questions_skips_duplicate_ids() -> None:
+    """Duplicate ids in the LLM consolidation batch keep the first and skip the rest."""
+    llm = _StubClient(
+        {
+            "consolidated_questions": [
+                {"id": "q1", "question_text": "First wording?"},
+                {"id": "q1", "question_text": "Duplicate wording?"},
+                {"id": "q2", "question_text": "Other question?"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original q1?")
+    q2 = OpenQuestion(id="q2", question_text="Original q2?")
+
+    result = agent._consolidate_open_questions([q1, q2])
+
+    assert [q.id for q in result] == ["q1", "q2"]
+    assert result[0].question_text == "First wording?"
+
+
+def test_consolidate_open_questions_preserves_omitted_metadata() -> None:
+    """When the LLM echoes an id without metadata fields, original values are kept."""
+    llm = _StubClient(
+        {
+            "consolidated_questions": [
+                {
+                    "id": "q1",
+                    "question_text": "Which region should we deploy to?",
+                    "options": [{"id": "o1", "label": "us-east"}],
+                }
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(
+        id="q1",
+        question_text="Which region?",
+        source="sop_phase1",
+        recommendation="Prefer us-east for latency.",
+        owner="stakeholder",
+        due_date="2026-04-01",
+        status="asked",
+        asked_via=["slack"],
+        section_impact=["Technical Approach"],
+        constraint_domain="infrastructure",
+        constraint_layer=2,
+        options=[
+            QuestionOption(id="o1", label="us-east", is_default=True, rationale="", confidence=0.5)
+        ],
+    )
+    q2 = OpenQuestion(id="q2", question_text="Which zone?")
+
+    result = agent._consolidate_open_questions([q1, q2])
+
+    assert len(result) == 1
+    assert result[0].id == "q1"
+    assert result[0].question_text == "Which region should we deploy to?"
+    assert result[0].source == "sop_phase1"
+    assert result[0].recommendation == "Prefer us-east for latency."
+    assert result[0].owner == "stakeholder"
+    assert result[0].due_date == "2026-04-01"
+    assert result[0].status == "asked"
+    assert result[0].asked_via == ["slack"]
+    assert result[0].section_impact == ["Technical Approach"]
+    assert result[0].constraint_domain == "infrastructure"
+    assert result[0].constraint_layer == 2
+
+
 def test_consolidate_open_questions_falls_back_when_all_items_fail() -> None:
     """If every item fails to parse, return the original questions (same instances)."""
     llm = _StubClient(
@@ -3353,6 +3422,14 @@ def test_filter_duplicate_questions_strips_punctuation_before_stemming() -> None
     assert duplicates == questions
 
 
+def test_clean_token_lowercases_before_stripping_punctuation() -> None:
+    """Uppercase letters must normalize, not be stripped by the alphanumeric filter."""
+    from product_requirements_analysis_agent.question_processing import _clean_token
+
+    assert _clean_token("Store?") == "store"
+    assert _clean_token("FOCUS!") == "focus"
+
+
 def test_filter_duplicate_questions_matches_past_tense_silent_e() -> None:
     """Past-tense stems that drop a silent e (stored->stor) must still match the
     base form (store) so already-answered questions are not re-asked."""
@@ -4058,6 +4135,19 @@ def test_filter_duplicate_questions_matches_lenses_to_lens() -> None:
     """lenses must exact-match lens, not over-stem to silent-e stub len."""
     questions = [OpenQuestion(id="q1", question_text="Which lens should we use?")]
     qa_history = "Q: Which lenses are available?\nA: The primary lens is required."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_focuses_and_cactuses() -> None:
+    """Latinate -us plurals (focuses/cactuses) exact-match their singulars under len>=5."""
+    questions = [OpenQuestion(id="q1", question_text="Which focus cactus applies?")]
+    qa_history = (
+        "Q: Which focuses cactuses apply here?\nA: The documented focuses and cactuses apply."
+    )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
 

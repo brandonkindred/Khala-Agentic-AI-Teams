@@ -80,9 +80,11 @@ def _clean_token(w: str) -> str:
     """Strip punctuation so tokens like 'store?' match their bare form.
 
     Preconditions: ``w`` is a string.
-    Postconditions: returns the lowercase-ready alphanumeric core; never raises.
+    Postconditions: returns the alphanumeric core of ``w``, lowercased; never
+        raises. Lowercasing happens before the alphanumeric filter so uppercase
+        letters are normalized rather than stripped (``Store?`` → ``store``).
     """
-    return re.sub(r"[^a-z0-9]", "", w.strip())
+    return re.sub(r"[^a-z0-9]", "", w.strip().lower())
 
 
 _LEXICAL_LL = frozenset(
@@ -310,8 +312,11 @@ def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
         return w[:-2], False, False, True
     if w.endswith("ses") and len(w) > 4:
         base = w[:-2]
-        # Exact for Latinate -us/-os (status/focus); -is stubs like promis/advis
-        # need silent-e (promise/advise). Short bus/gas stay exact.
+        # Exact for Latinate -us/-os singulars long enough that the base is the
+        # complete word (status/focus/cactus: len >= 5). Shorter -us bases like
+        # hous/abus from houses/abuses must stay silent-e so they restore to
+        # house/abuse; do not drop the length guard. Short complete -s singulars
+        # (bus/gas/bias/lens/corps) are handled via _COMPLETE_SES_BASES.
         if (base.endswith(("us", "os")) and len(base) >= 5) or base in _COMPLETE_SES_BASES:
             return base, False, False, True
         return base, True, False, False
@@ -996,8 +1001,12 @@ def consolidate_open_questions(
     Postconditions: returns the consolidated list, or the unmodified list on <=1
         input or any failure (payload serialization, prompt formatting, LLM call,
         or a full-batch parse failure). Items that individually fail to parse are
-        skipped and logged rather than discarding the whole batch. Never raises to
-        callers; precondition violations raise ``AssertionError``.
+        skipped and logged rather than discarding the whole batch. Duplicate ids
+        within the LLM batch are skipped (first wins). When the LLM echoes a known
+        id, metadata is merged by starting from the original question and overlaying
+        only fields the LLM actually supplied (so omitted owner/due_date/status/
+        asked_via/section_impact/etc. are preserved). Never raises to callers;
+        precondition violations raise ``AssertionError``.
     """
     assert isinstance(model, Model), "model must be a Strands Model"
     assert isinstance(open_questions, list), "open_questions must be a list"
@@ -1050,20 +1059,36 @@ def consolidate_open_questions(
             return list(open_questions)
         original_by_id = {q.id: q for q in open_questions}
         result = []
+        seen_ids: set[str] = set()
         for i, q_data in enumerate(consolidated):
             try:
                 parsed = parse_open_question(q_data, i)
-                orig = original_by_id.get(parsed.id)
-                if orig is not None:
-                    # Preserve metadata the LLM may omit when echoing a known id.
-                    parsed = parsed.model_copy(
-                        update={
-                            "source": orig.source
-                            if parsed.source in ("", "spec_review") and orig.source
-                            else parsed.source,
-                            "recommendation": parsed.recommendation or orig.recommendation,
-                        }
+                if parsed.id in seen_ids:
+                    logger.warning(
+                        "Duplicate consolidated question id %r at index %d; skipping",
+                        parsed.id,
+                        i,
                     )
+                    continue
+                seen_ids.add(parsed.id)
+                orig = original_by_id.get(parsed.id)
+                if orig is not None and isinstance(q_data, dict):
+                    # Start from the original; overlay only keys the LLM supplied
+                    # so omitted metadata (owner, due_date, status, …) is kept.
+                    updates = {
+                        field: getattr(parsed, field)
+                        for field in q_data
+                        if field in OpenQuestion.model_fields and field != "id"
+                    }
+                    if (
+                        "source" in updates
+                        and updates["source"] in ("", "spec_review")
+                        and orig.source
+                    ):
+                        updates["source"] = orig.source
+                    if "recommendation" in updates and not updates["recommendation"]:
+                        updates["recommendation"] = orig.recommendation
+                    parsed = orig.model_copy(update=updates)
                 result.append(parsed)
             except Exception as e:
                 logger.warning("Failed to parse consolidated question %d: %s", i, e)
@@ -1183,6 +1208,7 @@ def review_question_answer_alignment(
         logger.warning(
             "Question-answer alignment review failed, using original list: %s",
             str(e),
+            exc_info=True,
         )
         return list(open_questions)
 
@@ -1255,5 +1281,6 @@ def add_recommendations(
         logger.warning(
             "Recommendation generation failed, returning original questions unchanged: %s",
             str(e),
+            exc_info=True,
         )
         return list(open_questions)
