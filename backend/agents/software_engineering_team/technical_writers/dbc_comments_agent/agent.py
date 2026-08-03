@@ -7,10 +7,9 @@ from typing import Callable, Optional
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
-from .models import DbcCommentsInput, DbcCommentsOutput, DbcCommentsStatus
+from .models import DbcCommentInsertion, DbcCommentsInput, DbcCommentsOutput, DbcCommentsStatus
 from .prompts import DBC_COMMENTS_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -49,7 +48,7 @@ class DbcCommentsAgent:
         on_status: Optional[Callable[[DbcCommentsStatus, str], None]] = None,
     ) -> DbcCommentsOutput:
         """
-        Review code for Design by Contract compliance and return annotated files.
+        Review code for Design by Contract compliance and return anchored comment insertions.
 
         Preconditions:
             - input_data.code is a non-empty string containing code to review
@@ -57,13 +56,13 @@ class DbcCommentsAgent:
 
         Postconditions:
             - Returns DbcCommentsOutput with either:
-              (a) files dict containing updated code and already_compliant=False, or
-              (b) empty files dict and already_compliant=True
+              (a) a non-empty insertions list (anchored file/symbol/comment
+                  entries) and already_compliant=False, or
+              (b) an empty insertions list and already_compliant=True
             - summary field always contains a message for the coding agent
-            - Any re-emitted ``.py`` file that fails to parse (an incomplete
-              rewrite) is rejected and excluded from the returned files dict,
-              so the caller keeps that file's pre-DbC version instead of
-              merging a broken rewrite
+            - Applying the returned insertions to source (anchoring/merge) is
+              not performed here -- this method only produces the raw,
+              unmerged insertion list the model returned
 
         Raises:
             Exception: If LLM call fails (caught internally, returns fail-open response)
@@ -147,34 +146,24 @@ class DbcCommentsAgent:
         _update(DbcCommentsStatus.ADDING_COMMENTS)
 
         # Parse response
-        files = data.get("files") or {}
-        if not isinstance(files, dict):
+        raw_insertions = data.get("insertions") or []
+        if not isinstance(raw_insertions, list):
             logger.warning(
-                "DbcComments: LLM returned non-dict files field (%s), treating as compliant",
-                type(files).__name__,
+                "DbcComments: LLM returned non-list insertions field (%s), treating as compliant",
+                type(raw_insertions).__name__,
             )
-            files = {}
+            raw_insertions = []
 
-        # Filter out empty file entries
-        files = {
-            path: content
-            for path, content in files.items()
-            if isinstance(path, str) and isinstance(content, str) and content.strip()
-        }
-
-        # Reject any re-emitted file that isn't syntactically complete: the DbC
-        # pass re-emits the whole file, and a model that abandons mid-rewrite
-        # can still return a "complete" (non-truncated) response, so this
-        # can't be caught by stop_reason checks alone. Keep the pre-DbC
-        # version of that file rather than merging a broken rewrite.
-        files, rejected_files = reject_invalid_python(files)
-        if rejected_files:
-            logger.warning(
-                "DbcComments: LLM returned unparsable Python for %d file(s); "
-                "discarding and keeping the pre-DbC version: %s",
-                len(rejected_files),
-                sorted(rejected_files),
-            )
+        # Build typed insertions, skipping any malformed entry rather than
+        # failing the whole review over one bad item.
+        insertions: list[DbcCommentInsertion] = []
+        for entry in raw_insertions:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                insertions.append(DbcCommentInsertion(**entry))
+            except Exception as e:
+                logger.warning("DbcComments: skipping malformed insertion (%s): %s", entry, e)
 
         comments_added = int(data.get("comments_added", 0))
         comments_updated = int(data.get("comments_updated", 0))
@@ -185,10 +174,10 @@ class DbcCommentsAgent:
             "docs(dbc): add Design by Contract comments",
         )
 
-        # Safety: if LLM says not compliant but returned no files, treat as compliant
-        if not already_compliant and not files:
+        # Safety: if LLM says not compliant but returned no insertions, treat as compliant
+        if not already_compliant and not insertions:
             logger.warning(
-                "DbcComments: LLM returned already_compliant=False but no files -- "
+                "DbcComments: LLM returned already_compliant=False but no insertions -- "
                 "overriding to compliant (no actionable changes)"
             )
             already_compliant = True
@@ -203,9 +192,9 @@ class DbcCommentsAgent:
             )
 
         logger.info(
-            "DbcComments: done, compliant=%s, files_changed=%s, added=%s, updated=%s",
+            "DbcComments: done, compliant=%s, insertions=%s, added=%s, updated=%s",
             already_compliant,
-            len(files),
+            len(insertions),
             comments_added,
             comments_updated,
         )
@@ -213,7 +202,7 @@ class DbcCommentsAgent:
         _update(DbcCommentsStatus.COMPLETE)
 
         return DbcCommentsOutput(
-            files=files,
+            insertions=insertions,
             comments_added=comments_added,
             comments_updated=comments_updated,
             already_compliant=already_compliant,
