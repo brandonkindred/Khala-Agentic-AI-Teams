@@ -321,6 +321,9 @@ def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
 
 
 def test_build_short_circuit_record_activity_reuses_orchestrator_method(monkeypatch):
+    """build_short_circuit_record_activity delegates record construction to
+    StrategyLabOrchestrator._build_short_circuit_record and returns the
+    serialized record together with the updated convergence tracker state."""
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 
@@ -374,6 +377,11 @@ def test_build_short_circuit_record_activity_reuses_orchestrator_method(monkeypa
 
 
 def _run_design_attempt_params(**overrides: Any) -> Dict[str, Any]:
+    """Return a baseline parameter dict for run_design_attempt_activity tests.
+
+    The base dict contains the minimal inputs the activity expects; callers
+    override or extend fields via ``**overrides``.
+    """
     base = {
         "prior_records": [],
         "config": _backtest_config_dict(),
@@ -595,6 +603,8 @@ def test_run_design_attempt_activity_maps_non_502_http_exception_as_fatal(monkey
 
 
 def test_compute_signal_brief_activity_serializes_brief_and_storage(monkeypatch):
+    """compute_signal_brief_activity returns the signal brief as a serialized
+    dict and passes the storage metadata through unchanged."""
     from investment_team.api import main as api_main
 
     class _FakeBrief:
@@ -612,6 +622,8 @@ def test_compute_signal_brief_activity_serializes_brief_and_storage(monkeypatch)
 
 
 def test_compute_signal_brief_activity_handles_none_brief(monkeypatch):
+    """compute_signal_brief_activity correctly surfaces a None brief without
+    failing and still returns the storage metadata."""
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(
@@ -625,6 +637,8 @@ def test_compute_signal_brief_activity_handles_none_brief(monkeypatch):
 
 
 def test_is_run_cancelled_activity_delegates(monkeypatch):
+    """is_run_cancelled_activity delegates to the api_main helper and returns
+    the helper's boolean result unchanged."""
     from investment_team.api import main as api_main
 
     seen = {}

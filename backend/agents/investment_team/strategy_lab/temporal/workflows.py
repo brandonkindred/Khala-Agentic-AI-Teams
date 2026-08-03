@@ -67,6 +67,15 @@ from investment_team.strategy_lab.temporal.dto import (
 # fallback is used only if the config activity somehow omits the value.
 _MAX_DESIGN_REENTRIES_FALLBACK = 2
 
+# Mirrors ``strategy_lab.run_state.DEFAULT_FENCING_GENERATION`` -- duplicated
+# rather than imported for the same reason as ``_MAX_DESIGN_REENTRIES_FALLBACK``
+# above: ``run_state`` isn't imported anywhere else in this module (even
+# ``activities.py``, which runs unsandboxed, only imports it locally inside
+# function bodies), and this module's own top-level code runs inside the
+# temporalio workflow sandbox, where a module-level import's side effects
+# (e.g. ``run_state``'s ``threading.Lock()``) are best avoided.
+_DEFAULT_FENCING_GENERATION = 1
+
 # Bounded retry backstop. The design-attempt activity's in-body LLM envelope
 # already owns its own retry/backoff for LLM transients, so a Temporal-level
 # retry only recovers a genuine worker crash mid-activity; keep it small since
@@ -443,7 +452,7 @@ class StrategyLabBatchWorkflow:
         # fresh run) — threaded into every persist/finalize activity call below so a
         # stale activity from a since-superseded incarnation is rejected instead of
         # silently committing (shared.fencing.check_fencing_token).
-        generation = int(batch_input.get("generation", 1))
+        generation = int(batch_input.get("generation", _DEFAULT_FENCING_GENERATION))
 
         wf_config = batch_input.get("workflow_config")
         if wf_config is None:

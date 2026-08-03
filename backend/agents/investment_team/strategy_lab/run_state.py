@@ -24,6 +24,13 @@ if TYPE_CHECKING:
 
 lock = threading.Lock()
 
+# The fencing generation a fresh/never-restarted run presents, and the value
+# every "generation" read/default falls back to when the field is absent,
+# None, or empty. Shared by this module, `api.main`, and
+# `strategy_lab.temporal.workflows` so a future change to the default (e.g.
+# to 0 or a sentinel) only needs updating in one place.
+DEFAULT_FENCING_GENERATION = 1
+
 # In-memory state for active strategy lab runs (keyed by run_id).
 active_runs: Dict[str, Dict[str, Any]] = {}
 
@@ -126,13 +133,13 @@ def get_run_generation_strict(run_id: str, *, client: Any = None) -> int:
     client = client or get_lab_run_job_client()
     job = client.get_job(run_id)
     if not job:
-        return 1
+        return DEFAULT_FENCING_GENERATION
     data = job.get("data", job)
-    raw_generation = data.get("generation", 1)
+    raw_generation = data.get("generation", DEFAULT_FENCING_GENERATION)
     if raw_generation is None or raw_generation == "":
-        return 1
+        return DEFAULT_FENCING_GENERATION
     try:
-        return max(1, int(raw_generation))
+        return max(DEFAULT_FENCING_GENERATION, int(raw_generation))
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Invalid persisted generation for run {run_id}: {raw_generation!r}"

@@ -103,6 +103,9 @@ from investment_team.strategy_lab.config import (
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.run_state import (
+    DEFAULT_FENCING_GENERATION,
+)
+from investment_team.strategy_lab.run_state import (
     acquire_run_transition_lock as _acquire_run_transition_lock,
 )
 from investment_team.strategy_lab.run_state import (
@@ -2064,12 +2067,14 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
             state = _active_runs.get(run_id)
             if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
                 return
-            request_generation = state.get("generation", 1)
+            request_generation = state.get("generation", DEFAULT_FENCING_GENERATION)
         try:
             durable_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
         except Exception:
             durable_generation = None
-        if durable_generation is not None and durable_generation > int(request_generation or 1):
+        if durable_generation is not None and durable_generation > int(
+            request_generation or DEFAULT_FENCING_GENERATION
+        ):
             logger.warning(
                 "Skipping fail write for strategy-lab run %s: durable generation %s "
                 "is newer than this request's generation %s.",
@@ -2082,7 +2087,7 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
             state = _active_runs.get(run_id)
             if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
                 return
-            if state.get("generation", 1) != request_generation:
+            if state.get("generation", DEFAULT_FENCING_GENERATION) != request_generation:
                 # A resume/restart replaced this run's in-memory entry with a
                 # newer incarnation while this call was between its two lock
                 # acquisitions (e.g. during the durable-generation read
@@ -2094,7 +2099,7 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
                     "no longer matches this request's generation %s (run was resumed/restarted "
                     "concurrently).",
                     run_id,
-                    state.get("generation", 1),
+                    state.get("generation", DEFAULT_FENCING_GENERATION),
                     request_generation,
                 )
                 return
@@ -2283,7 +2288,7 @@ def _build_run_state(
     tracker_merge_error_count: int = 0,
     completed_record_ids: Optional[List[Any]] = None,
     completed_batches: int = 0,
-    generation: int = 1,
+    generation: int = DEFAULT_FENCING_GENERATION,
 ) -> Dict[str, Any]:
     """Build a strategy-lab run-state dict, shared by run/resume/restart.
 
