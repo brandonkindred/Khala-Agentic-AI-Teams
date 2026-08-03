@@ -92,6 +92,67 @@ def test_run_code_review_forwards_user_decisions(monkeypatch) -> None:
     assert captured["input"].user_decisions == ["Which DB? → Postgres"]
 
 
+def test_run_code_review_forwards_repo_root_and_repo_reader(monkeypatch, tmp_path) -> None:
+    """A ``repo_path`` is forwarded on both channels: as ``repo_root`` on the
+    built ``CodeReviewInput`` (the field the Temporal path reconstructs a
+    ``DiskRepoReader`` from worker-side) and as a live ``DiskRepoReader`` passed
+    directly to ``agent.run`` (used on the in-process path)."""
+    from software_engineering_team import quality_gate_tools as q
+    from software_engineering_team.code_review_agent.repo_reader import DiskRepoReader
+
+    captured = {}
+
+    def _run(inp, progress_callback=None, repo_reader=None):
+        captured["input"] = inp
+        captured["repo_reader"] = repo_reader
+        return _ReviewResult()
+
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent",
+        lambda llm: SimpleNamespace(run=_run),
+    )
+    repo_path = str(tmp_path)
+    q.run_code_review(
+        code="x" * 50,
+        spec_content="spec",
+        task_description="task",
+        language="python",
+        task_requirements="reqs",
+        repo_path=repo_path,
+        llm_getter=lambda k: MagicMock(),
+    )
+    assert captured["input"].repo_root == repo_path
+    assert isinstance(captured["repo_reader"], DiskRepoReader)
+
+
+def test_run_code_review_without_repo_path_passes_no_reader(monkeypatch) -> None:
+    """Without ``repo_path``, ``repo_root`` stays unset and no ``repo_reader`` kwarg
+    is forwarded to ``agent.run`` at all."""
+    from software_engineering_team import quality_gate_tools as q
+
+    captured = {}
+
+    def _run(inp, progress_callback=None, **kwargs):
+        captured["input"] = inp
+        captured["kwargs"] = kwargs
+        return _ReviewResult()
+
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent",
+        lambda llm: SimpleNamespace(run=_run),
+    )
+    q.run_code_review(
+        code="x" * 50,
+        spec_content="spec",
+        task_description="task",
+        language="python",
+        task_requirements="reqs",
+        llm_getter=lambda k: MagicMock(),
+    )
+    assert captured["input"].repo_root is None
+    assert "repo_reader" not in captured["kwargs"]
+
+
 def test_run_code_review_default_task_requirements_empty(monkeypatch) -> None:
     """Omitting ``task_requirements`` normalizes to ``""`` so CodeReviewInput
     validates and the agent actually runs (approved=True), instead of the

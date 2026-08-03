@@ -987,6 +987,44 @@ def test_run_dispatches_to_temporal_when_enabled(monkeypatch: pytest.MonkeyPatch
     assert out.approved is True
 
 
+def test_run_via_temporal_forwards_repo_root_in_dispatch_payload(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run()``'s Temporal dispatch must carry ``input_data.repo_root`` in the
+    serialized payload it sends to ``execute_code_review_workflow_sync`` -- that
+    field is the only channel the tail-pass activities have to reconstruct a
+    ``DiskRepoReader`` worker-side (``_repo_reader_from_input``), since a live
+    ``repo_reader`` object cannot cross the Temporal boundary. This is
+    distinct from (and a prerequisite for) the activity-side reconstruction
+    tests above, which start from a payload dict that already has
+    ``repo_root`` set.
+    """
+    monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
+    monkeypatch.setattr(
+        "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
+        lambda: True,
+    )
+    captured: Dict[str, Any] = {}
+
+    def _capture(payload, **kw):  # noqa: ANN001
+        captured["payload"] = payload
+        return {
+            "approved": True,
+            "issues": [],
+            "summary": "durable",
+            "spec_compliance_notes": "",
+            "suggested_commit_message": "",
+        }
+
+    monkeypatch.setattr(
+        "code_review_agent.temporal.start_workflow.execute_code_review_workflow_sync",
+        _capture,
+    )
+    repo_root = str(tmp_path)
+    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input(repo_root=repo_root))
+    assert captured["payload"]["repo_root"] == repo_root
+
+
 def test_run_force_in_process_skips_temporal_even_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

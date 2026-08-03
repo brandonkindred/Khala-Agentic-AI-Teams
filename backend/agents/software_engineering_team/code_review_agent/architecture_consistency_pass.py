@@ -157,8 +157,8 @@ def _build_prompt(
 
     parts.append(
         "Use list_files()/read_file() to inspect the REST of the repository (files not shown "
-        "above) before flagging a cross-codebase duplicate -- search_codebase only searches the "
-        "files shown in this prompt, not the wider repository. When an architecture document is "
+        "above) before flagging a cross-codebase duplicate -- search_codebase only searches "
+        "this submission's files, not the wider repository. When an architecture document is "
         "present above, use read_file() / the document to confirm contradictions; when none was "
         "provided, confirm contradictions against established repository structure/patterns."
     )

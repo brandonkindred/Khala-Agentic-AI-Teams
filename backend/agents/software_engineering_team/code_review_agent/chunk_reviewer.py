@@ -34,7 +34,7 @@ from typing import List, Optional, Union
 
 from llm_service import LLMClient, complete_validated
 
-from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput
+from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput, ReviewProfile
 from .profiles import build_review_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -340,6 +340,13 @@ def review_chunk(
     spec_excerpt: str,
     architecture_overview: str,
     existing_codebase_excerpt: Optional[str],
+    *,
+    profile: ReviewProfile = ReviewProfile.CODE_REVIEW,
+    language: str = "",
+    segment_note: str = "",
+    user_decisions: Optional[List[str]] = None,
+    sibling_surface: str = "",
+    think: Optional[Union[bool, str]] = None,
 ) -> dict:
     """Legacy function: review one chunk. Prefer ChunkReviewAgent.run(ChunkReviewInput(...))."""
     inp = ChunkReviewInput(
@@ -351,6 +358,11 @@ def review_chunk(
         spec_excerpt=spec_excerpt,
         architecture_overview=architecture_overview,
         existing_codebase_excerpt=existing_codebase_excerpt,
+        profile=profile,
+        language=language,
+        segment_note=segment_note,
+        user_decisions=user_decisions,
+        sibling_surface=sibling_surface,
     )
-    result = _run_chunk_review(llm, inp)
+    result = _run_chunk_review(llm, inp, think=think)
     return result
