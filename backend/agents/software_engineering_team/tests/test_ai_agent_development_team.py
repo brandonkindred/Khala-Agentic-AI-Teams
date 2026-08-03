@@ -141,7 +141,9 @@ def test_intake_and_planning_prompts_include_required_artifact_hints() -> None:
 
 
 def test_problem_solving_ignores_unknown_artifact_gate_token() -> None:
-    """artifact_gate issues whose category is not a shared hint create no placeholder."""
+    """Well-formed artifact-gate descriptions with an unknown hint create no placeholder."""
+    unknown_hint = "not_a_real_hint"
+    assert unknown_hint not in REQUIRED_ARTIFACT_HINTS
     execution = ExecutionResult(files={"ai_system/system_blueprint.md": "# blueprint"})
     review = ReviewResult(
         passed=False,
@@ -149,8 +151,8 @@ def test_problem_solving_ignores_unknown_artifact_gate_token() -> None:
             ReviewIssue(
                 source="artifact_gate",
                 severity="high",
-                description="Missing expected artifact category: not_a_real_hint",
-                recommendation="Add at least one artifact path containing 'not_a_real_hint'.",
+                description=f"{ARTIFACT_GATE_DESCRIPTION_PREFIX}{unknown_hint}",
+                recommendation=f"Add at least one artifact path containing '{unknown_hint}'.",
             )
         ],
         required_artifacts_ok=False,
@@ -160,7 +162,7 @@ def test_problem_solving_ignores_unknown_artifact_gate_token() -> None:
     assert result.resolved is False
     assert result.fixes_applied == []
     assert result.files == execution.files
-    assert "not_a_real_hint_placeholder.md" not in result.files
+    assert not any("_placeholder.md" in path for path in result.files)
 
 
 def test_ai_agent_development_workflow_success(tmp_path: Path):
@@ -528,7 +530,7 @@ def test_run_review_artifact_gate_uses_shared_prefix() -> None:
 
 def test_run_problem_solving_synthesizes_placeholder_from_prefix() -> None:
     """A well-formed artifact-gate issue yields ai_system/{hint}_placeholder.md."""
-    hint = "blueprint"
+    hint = REQUIRED_ARTIFACT_HINTS[0]
     review = ReviewResult(
         passed=False,
         issues=[
