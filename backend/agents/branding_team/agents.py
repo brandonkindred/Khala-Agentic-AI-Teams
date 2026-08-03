@@ -13,17 +13,22 @@ import re
 from dataclasses import dataclass
 from typing import List
 
+from pydantic import BaseModel
 from strands import Agent
 
 from .graphs.shared import build_agent
 from .models import (
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
+    BrandArchitectureOutput,
     BrandCheckRequest,
     BrandCheckResult,
     BrandDiscoveryAuditOutput,
+    BrandExperiencePrinciplesOutput,
+    BrandInActionOutput,
     BrandingMission,
     BrandStoryOutput,
+    ChannelGuideline,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
     CreativeRefinementDecisionOutput,
@@ -596,24 +601,28 @@ def make_brand_experience_principler() -> Agent:
             "2. signature_moments — 3-5 key moments in the customer journey that should feel "
             "distinctly on-brand\n"
             "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable\n"
-            "Output valid JSON with these three keys."
         ),
+        structured_output=BrandExperiencePrinciplesOutput,
     )
 
 
-def _make_channel_guide(channel: str, description: str) -> Agent:
+def _make_channel_guide(
+    channel: str, description: str, structured_output: type[BaseModel]
+) -> Agent:
     """Build a channel-specific brand guidelines agent.
 
     Preconditions:
         ``channel`` and ``description`` are non-empty strings; ``channel``
         is a lowercase identifier suitable for use in an agent name
-        (e.g. ``"website"``).
+        (e.g. ``"website"``). ``structured_output`` is the Pydantic model
+        for this channel's guideline output (currently always
+        ``ChannelGuideline``, passed explicitly by each call site).
 
     Postconditions:
         Returns an ``Agent`` named ``f"{channel}_guide"`` whose prompt
-        embeds ``channel`` and ``description`` and whose output defines
-        that channel's strategy, dos/don'ts, content types, and
-        cadence.
+        embeds ``channel`` and ``description`` and whose structured
+        output defines that channel's strategy, dos/don'ts, content
+        types, and cadence per ``structured_output``.
     """
     return build_agent(
         name=f"{channel}_guide",
@@ -628,8 +637,8 @@ def _make_channel_guide(channel: str, description: str) -> Agent:
             f"- content_types: 3-5 recommended content formats\n"
             f"- frequency_guidance: recommended cadence\n"
             f"Context: {description}\n"
-            f"Output valid JSON matching the ChannelGuideline schema."
         ),
+        structured_output=structured_output,
     )
 
 
@@ -640,7 +649,9 @@ def make_website_guide() -> Agent:
         Returns ``_make_channel_guide("website", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("website", "Company website, landing pages, product pages.")
+    return _make_channel_guide(
+        "website", "Company website, landing pages, product pages.", ChannelGuideline
+    )
 
 
 def make_social_guide() -> Agent:
@@ -650,7 +661,9 @@ def make_social_guide() -> Agent:
         Returns ``_make_channel_guide("social", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("social", "Social media platforms (LinkedIn, Twitter, Instagram).")
+    return _make_channel_guide(
+        "social", "Social media platforms (LinkedIn, Twitter, Instagram).", ChannelGuideline
+    )
 
 
 def make_email_guide() -> Agent:
@@ -660,7 +673,9 @@ def make_email_guide() -> Agent:
         Returns ``_make_channel_guide("email", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("email", "Email marketing, newsletters, transactional emails.")
+    return _make_channel_guide(
+        "email", "Email marketing, newsletters, transactional emails.", ChannelGuideline
+    )
 
 
 def make_events_guide() -> Agent:
@@ -670,7 +685,9 @@ def make_events_guide() -> Agent:
         Returns ``_make_channel_guide("events", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("events", "Conferences, webinars, meetups, trade shows.")
+    return _make_channel_guide(
+        "events", "Conferences, webinars, meetups, trade shows.", ChannelGuideline
+    )
 
 
 def make_partnerships_guide() -> Agent:
@@ -680,7 +697,9 @@ def make_partnerships_guide() -> Agent:
         Returns ``_make_channel_guide("partnerships", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("partnerships", "Co-branding, sponsorships, partner marketing.")
+    return _make_channel_guide(
+        "partnerships", "Co-branding, sponsorships, partner marketing.", ChannelGuideline
+    )
 
 
 def make_internal_guide() -> Agent:
@@ -690,7 +709,9 @@ def make_internal_guide() -> Agent:
         Returns ``_make_channel_guide("internal", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("internal", "Internal comms, employee branding, onboarding.")
+    return _make_channel_guide(
+        "internal", "Internal comms, employee branding, onboarding.", ChannelGuideline
+    )
 
 
 def make_brand_architecture_builder() -> Agent:
@@ -710,8 +731,8 @@ def make_brand_architecture_builder() -> Agent:
             "with: entity, relationship, naming_convention, visual_treatment\n"
             "2. naming_conventions — 3-5 naming rules\n"
             "3. terminology_glossary — 5-10 key terms with definitions (dict)\n"
-            "Output valid JSON with these three keys."
         ),
+        structured_output=BrandArchitectureOutput,
     )
 
 
@@ -732,8 +753,8 @@ def make_brand_in_action_illustrator() -> Agent:
             "- correct_example: the on-brand version\n"
             "- incorrect_example: the off-brand version\n"
             "- rationale: why the correct version is better\n"
-            "Output valid JSON as a list of BrandInActionExample objects."
         ),
+        structured_output=BrandInActionOutput,
     )
 
 

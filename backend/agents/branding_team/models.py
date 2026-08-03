@@ -539,6 +539,43 @@ class ChannelActivationOutput(BaseModel):
     brand_in_action: List[BrandInActionExample] = Field(default_factory=list)
 
 
+class BrandExperiencePrinciplesOutput(BaseModel):
+    """Agent-facing brand_experience_principler schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated cardinalities.
+    """
+
+    brand_experience_principles: List[str] = Field(min_length=3, max_length=5)
+    signature_moments: List[str] = Field(min_length=3, max_length=5)
+    sensory_elements: List[str] = Field(min_length=2, max_length=4)
+
+
+class BrandArchitectureOutput(BaseModel):
+    """Agent-facing brand_architecture_builder schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    Reuses ``BrandArchitectureRule`` directly (its fields default to "" for use
+    as ``ChannelActivationOutput.brand_architecture``'s merge target) — the
+    cardinality constraints here live on the wrapping list/dict fields, matching
+    ``DifferentiationPillarsOutput``'s reuse of ``DifferentiationPillar``.
+    """
+
+    brand_architecture: List[BrandArchitectureRule] = Field(min_length=1)
+    naming_conventions: List[str] = Field(min_length=3, max_length=5)
+    terminology_glossary: Dict[str, str] = Field(min_length=5, max_length=10)
+
+
+class BrandInActionOutput(BaseModel):
+    """Agent-facing brand_in_action_illustrator schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 applied examples".
+    """
+
+    brand_in_action: List[BrandInActionExample] = Field(min_length=3, max_length=5)
+
+
 # ---------------------------------------------------------------------------
 # Phase 5 — Governance & Evolution
 # ---------------------------------------------------------------------------
