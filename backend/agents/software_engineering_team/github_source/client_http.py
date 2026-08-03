@@ -189,11 +189,7 @@ class _GitHubHttpMixin:
                 self._sleep(retry_delay(attempt, 1.0, RATE_LIMIT_CAP_S))
                 continue
 
-            if (
-                response.status_code == 403
-                and response.headers.get("X-RateLimit-Remaining") == "0"
-                and attempt == 0
-            ):
+            if response.status_code == 403 and response.headers.get("X-RateLimit-Remaining") == "0":
                 reset = response.headers.get("X-RateLimit-Reset")
                 wait = 1.0
                 if reset:
