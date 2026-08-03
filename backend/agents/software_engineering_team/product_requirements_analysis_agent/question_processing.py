@@ -71,18 +71,61 @@ ORGANIZATIONAL_PHRASES = [
 ]
 
 
+def _stem_candidates(w: str) -> set[str]:
+    """Return plausible root forms of ``w`` for keyword-coverage matching.
+
+    A single-guess suffix strip is ambiguous for silent-e roots (e.g. "based"
+    is "base" + d, "stored" is "store" + d) versus regular roots (e.g.
+    "documented" is "document" + ed), for "-es" plurals (e.g. "phases" is
+    "phase" + s, "classes" is "class" + es), and for "-y"/"-ied" verbs (e.g.
+    "studied" is "study" with "y" replaced by "ied") — the surface form alone
+    doesn't say which rule applies. Guessing a single stem silently drops the
+    correct one (e.g. stemming "based" to "bas" alone would never match
+    "base"). Instead this returns every plausible root and lets the caller
+    accept a match against any of them. This is a small suffix map covering
+    common regular English plural/past-tense inflections, not a linguistically
+    complete stemmer/lemmatizer: irregular forms (e.g. "geese" -> "goose")
+    are not handled, and it only strips one layer of suffix.
+
+    Preconditions: ``w`` is a lowercase string with no whitespace.
+    Postconditions: returns a non-empty set of candidate stems that always
+        includes ``w`` itself; a word ending in "ss" (e.g. "address",
+        "process") is returned unchanged, since a doubled-s ending is never
+        itself a plural/past-tense suffix here; never raises.
+    """
+    candidates = {w}
+    if w.endswith("ss"):
+        return candidates
+    if w.endswith("ied") and len(w) > 4:
+        candidates.add(w[:-3] + "y")  # studied -> study, tried -> try
+    if w.endswith("ed") and len(w) > 4:
+        candidates.add(w[:-1])  # based -> base, stored -> store
+        candidates.add(w[:-2])  # documented -> document
+    elif w.endswith("ies") and len(w) > 4:
+        candidates.add(w[:-3] + "y")  # policies -> policy
+    elif w.endswith("es") and len(w) > 4:
+        candidates.add(w[:-1])  # phases -> phase
+        candidates.add(w[:-2])  # classes -> class
+    elif w.endswith("s") and len(w) > 4:
+        candidates.add(w[:-1])  # tokens -> token
+    return candidates
+
+
 def filter_duplicate_questions(
     new_questions: List[OpenQuestion],
     qa_history: str,
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Filters out questions whose keyword stems (plus simple plural/past-tense
-    variants) appear as whole words in the Q&A history. A question is considered
-    a duplicate when at least 90% of its keywords have a matching stem found in
-    the history. Below-90% coverage is kept for possible consolidation elsewhere.
-    This is keyword coverage, not a similarity ratio between the question and
-    history.
+    Filters out questions whose keywords share a common stem candidate (see
+    :func:`_stem_candidates`) with a word tokenized out of the Q&A history —
+    both sides are stemmed the same way so a root-form keyword matches an
+    inflected history word and vice versa (e.g. keyword "class" matches
+    history "classes", and keyword "classes" matches history "class"). A
+    question is considered a duplicate when at least 90% of its keywords have
+    such a match. Below-90% coverage is kept for possible consolidation
+    elsewhere. This is keyword coverage, not a similarity ratio between the
+    question and history.
 
     Uses :func:`content_words` (stopword-based, not length-based) for the same
     keyword-admission rule as :func:`qa_history.extract_answer_from_qa_history`,
@@ -105,63 +148,27 @@ def filter_duplicate_questions(
     filtered = []
     duplicates = []
 
-    def _stem_candidates(w: str) -> set[str]:
-        """Return plausible root forms of ``w`` for keyword-coverage matching.
-
-        A single-guess suffix strip is ambiguous for silent-e roots (e.g.
-        "based" is "base" + d, "stored" is "store" + d) versus regular roots
-        (e.g. "documented" is "document" + ed), and likewise for "-es"
-        plurals (e.g. "phases" is "phase" + s, "classes" is "class" + es) —
-        the surface form alone doesn't say which rule applies. Guessing a
-        single stem silently drops the correct one (e.g. stemming "based" to
-        "bas" alone would never match "base"). Instead this returns every
-        plausible root and lets the caller accept a match against any of
-        them. This is a small suffix map, not a linguistically complete
-        stemmer/lemmatizer: irregular forms (e.g. "geese" -> "goose") are not
-        handled, and it only strips one layer of suffix.
-
-        Preconditions: ``w`` is a lowercase string with no whitespace.
-        Postconditions: returns a non-empty set of candidate stems that
-            always includes ``w`` itself; a word ending in "ss" (e.g.
-            "address", "process") is returned unchanged, since a doubled-s
-            ending is never itself a plural/past-tense suffix here; never
-            raises.
-        """
-        candidates = {w}
-        if w.endswith("ss"):
-            return candidates
-        if w.endswith("ed") and len(w) > 4:
-            candidates.add(w[:-1])  # based -> base, stored -> store
-            candidates.add(w[:-2])  # documented -> document
-        elif w.endswith("ies") and len(w) > 4:
-            candidates.add(w[:-3] + "y")  # policies -> policy
-        elif w.endswith("es") and len(w) > 4:
-            candidates.add(w[:-1])  # phases -> phase
-            candidates.add(w[:-2])  # classes -> class
-        elif w.endswith("s") and len(w) > 4:
-            candidates.add(w[:-1])  # tokens -> token
-        return candidates
-
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
         key_words = content_words(q_text_lower)
         if not key_words:
             filtered.append(q)
             continue
-        # Count how many keywords have at least one candidate stem (or that
-        # candidate's own plural/past-tense variant) appear as a whole word in
-        # qa_history. Word-boundary matching (not substring containment) so a
-        # short stem can't false-match inside an unrelated longer word (e.g.
-        # "api" inside "capitalizing") now that short content words are
-        # admitted as keywords.
-        matches = sum(
-            1
-            for w in key_words
-            if any(
-                re.search(rf"\b{re.escape(stem)}(?:s|ed)?\b", qa_history_lower)
-                for stem in _stem_candidates(w)
-            )
-        )
+        # Tokenize qa_history the same way content_words does (so punctuation
+        # can't glue two words together), then expand every history token to
+        # its own stem candidates. A keyword matches history when the two
+        # candidate sets intersect — stemming both sides identically is what
+        # makes the match symmetric: a root-form keyword (e.g. "class")
+        # matches an inflected history word ("classes") exactly as readily as
+        # an inflected keyword ("classes") matches a root-form history word
+        # ("class"). Whole-word only (not substring containment), so a short
+        # stem can't false-match inside an unrelated longer word (e.g. "api"
+        # inside "capitalizing") now that short content words are admitted as
+        # keywords.
+        history_stem_pool: set[str] = set()
+        for history_word in re.sub(r"[^\w\s]", " ", qa_history_lower).split():
+            history_stem_pool |= _stem_candidates(history_word)
+        matches = sum(1 for w in key_words if _stem_candidates(w) & history_stem_pool)
         match_ratio = matches / len(key_words)
         # Only treat as duplicate of an answered question when match >= 90%.
         # Below-90% coverage may be consolidated but should not be filtered out.
