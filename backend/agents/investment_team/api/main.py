@@ -120,6 +120,9 @@ from investment_team.strategy_lab.run_state import (
 from investment_team.strategy_lab.run_state import (
     lock as _lock,
 )
+from investment_team.strategy_lab.run_state import (
+    normalize_persisted_job as _normalize_persisted_job,
+)
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
     EntryRule,
@@ -1900,11 +1903,16 @@ def _reconcile_run_progress(run_id: str) -> None:
           ``error`` are copied onto ``_active_runs[run_id]`` only when the
           persisted status is itself in ``STRATEGY_LAB_TERMINAL_STATUSES``
           (unchanged from prior behavior).
-        - All mutation happens under ``_lock`` and is guarded by re-checking
-          ``run_id in _active_runs`` immediately before writing (the run may
-          have been deleted, or replaced by a resume/restart, between the
-          initial check and the job-service round trip); the network call
-          itself is never made while holding ``_lock``.
+        - All mutation happens under ``_lock`` and is guarded by re-checking,
+          immediately before writing, both that the entry still exists and
+          that its status is still non-terminal (the run may have been
+          deleted, replaced by a resume/restart, or independently completed —
+          e.g. by the worker's own finishing write — between the initial
+          check and the job-service round trip); a terminal transition in
+          that window makes this call a no-op rather than overwriting the
+          fresher authoritative state with the (possibly pre-completion)
+          fetched data. The network call itself is never made while holding
+          ``_lock``.
 
     Raises:
         - None. Job-service construction/lookup failures are caught and
@@ -1927,7 +1935,12 @@ def _reconcile_run_progress(run_id: str) -> None:
     data = persisted.get("data", persisted)
     with _lock:
         current = _active_runs.get(run_id)
-        if current is None:
+        if current is None or current.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+            # Another thread (e.g. the worker's own completion write) may have
+            # removed the entry or advanced it to terminal while the
+            # job-service round trip above was in flight. Either way, this
+            # call's (possibly stale, pre-completion) fetch must not clobber
+            # the fresher authoritative state with older progress counters.
             return
         for field in _STRATEGY_LAB_PROGRESS_FIELDS:
             if field in data:
@@ -3015,10 +3028,7 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         for job in persisted_list:
             rid = job.get("job_id") or job.get("run_id", "")
             if rid and rid not in in_memory:
-                data = job.get("data", job)
-                data["run_id"] = rid
-                data.setdefault("status", job.get("status", "running"))
-                in_memory[rid] = data
+                in_memory[rid] = _normalize_persisted_job(job, fallback_status="running", run_id=rid)
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         with _lock:
@@ -3077,7 +3087,16 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
     ),
 )
 async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
-    """SSE endpoint — async generator so it doesn't block Uvicorn worker threads."""
+    """SSE endpoint. Connect-time reconciliation and job-service loading are
+    synchronous, blocking job-service calls, so both are offloaded to
+    Starlette's threadpool (``run_in_threadpool``) rather than run directly on
+    this coroutine — otherwise they'd stall the asyncio event loop, and with
+    it every other in-flight request on this worker, for the fetch+retry
+    window. The streaming generator itself remains async so it doesn't block
+    Uvicorn worker threads once connected.
+    """
+    from starlette.concurrency import run_in_threadpool
+
     from investment_team.api.job_event_bus import subscribe, unsubscribe
     from shared.sse import sse_job_stream_async, sse_line
 
@@ -3090,11 +3109,11 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         # up-to-date data, and the live path's _snapshot_event() -- which
         # reads _active_runs.get(run_id, {}) fresh -- picks up these same
         # values automatically.
-        _reconcile_run_progress(run_id)
+        await run_in_threadpool(_reconcile_run_progress, run_id)
         with _lock:
             state = _active_runs.get(run_id, state)
     else:
-        state = _load_run_from_job_service(run_id)
+        state = await run_in_threadpool(_load_run_from_job_service, run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
