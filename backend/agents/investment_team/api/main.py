@@ -3559,11 +3559,28 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     # completes in seconds and isn't subject to the "one at a time"
     # invariant. The scan, session construction, and dict insertion below all
     # happen under a single lock acquisition so two concurrent requests for
-    # the same strategy_id can't both pass the scan before either inserts.
+    # the same strategy_id can't both pass the scan before either inserts. A
+    # record that fails to parse is logged and skipped rather than aborting
+    # the whole request — see _fail_paper_trading_session for the same
+    # pattern.
     with _lock:
         if use_live:
             for existing in _paper_trading_sessions.values():
-                existing_session = PaperTradingSession.parse_persisted(existing)
+                try:
+                    existing_session = PaperTradingSession.parse_persisted(existing)
+                except Exception:
+                    bad_id = (
+                        existing.get("session_id")
+                        if isinstance(existing, dict)
+                        else getattr(existing, "session_id", None)
+                    )
+                    logger.warning(
+                        "Skipping unparseable paper-trading session while checking "
+                        "the concurrency guard: %s",
+                        bad_id,
+                        exc_info=True,
+                    )
+                    continue
                 if (
                     existing_session.strategy.strategy_id == strategy.strategy_id
                     and existing_session.status in _ACTIVE_PT_STATES
