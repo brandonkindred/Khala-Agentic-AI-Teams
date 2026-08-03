@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
@@ -39,14 +41,18 @@ from software_engineering_team.devops_team.task_clarifier import (
 )
 from software_engineering_team.devops_team.tool_agents import (
     CDKExecutionOutput,
+    CDKExecutionToolAgent,
     CICDLintOutput,
     DeploymentDryRunOutput,
     DockerComposeExecutionOutput,
+    DockerComposeExecutionToolAgent,
     HelmExecutionOutput,
+    HelmExecutionToolAgent,
     IaCValidationOutput,
     PolicyAsCodeInput,
     PolicyAsCodeOutput,
     TerraformExecutionOutput,
+    TerraformExecutionToolAgent,
 )
 from software_engineering_team.shared.git_utils import initialize_new_repo
 from software_engineering_team.tests.conftest import (
@@ -1391,13 +1397,15 @@ class TestDevOpsTeamLeadAgentIntegration:
                 build_verifier=MagicMock(return_value=(True, "")),
                 task_id="devops-backend",
             )
-            dev_head = subprocess.run(
+            rev = subprocess.run(
                 ["git", "rev-parse", "development"],
                 cwd=path,
                 capture_output=True,
                 text=True,
-                check=False,
-            ).stdout.strip()
+                check=True,
+            )
+            dev_head = rev.stdout.strip()
+            assert dev_head
         assert result.success
         assert result.completion_package is not None
         assert result.completion_package.status == "completed"
@@ -1650,14 +1658,18 @@ class TestDevOpsTeamLeadAgentIntegration:
         spec = _base_task_spec()
         pkg = agent.run(spec)
         assert len(pkg.files_changed) > 0
+        assert any(
+            path.endswith((".tf", ".yml", ".yaml", ".md")) or "/" in path
+            for path in pkg.files_changed
+        )
 
     def test_quality_gates_in_completion(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
-        assert "security_review" in pkg.quality_gates
-        assert "change_review" in pkg.quality_gates
+        assert pkg.quality_gates.get("security_review") == "pass"
+        assert pkg.quality_gates.get("change_review") == "pass"
 
     def test_build_verifier_failure(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
@@ -1694,15 +1706,17 @@ class TestDevOpsTeamLeadAgentIntegration:
                 task_id="devops-real-merge",
             )
             branches = subprocess.run(
-                ["git", "branch"], cwd=path, capture_output=True, text=True, check=False
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
             ).stdout
-            dev_head = subprocess.run(
+            rev = subprocess.run(
                 ["git", "rev-parse", "development"],
                 cwd=path,
                 capture_output=True,
                 text=True,
-                check=False,
-            ).stdout.strip()
+                check=True,
+            )
+            dev_head = rev.stdout.strip()
+            assert dev_head
         assert result.success
         gitops = result.completion_package.git_operations
         assert gitops.branch_created.startswith("feature/")
@@ -1833,8 +1847,6 @@ class TestBackwardCompatibility:
         assert result.success
 
     def test_run_workflow_signature_excludes_unused_kwargs(self) -> None:
-        import inspect
-
         params = inspect.signature(DevOpsTeamLeadAgent.run_workflow).parameters
         for name in (
             "architecture",
@@ -1867,6 +1879,32 @@ class TestBackwardCompatibility:
             task_id="devops-2b",
             task_description="Produce a Dockerfile and CI/CD",
             requirements="Build and deploy to staging",
+        )
+        assert spec.environment == "staging"
+
+    def test_build_legacy_spec_produce_alone_is_not_production(self) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-produce-alone",
+            task_description="Produce a deployment artifact",
+            requirements="Build and package",
+        )
+        assert spec.environment == "staging"
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "Target NON-PRODUCTION only",
+            "Do NOT PROD deploy",
+            "NO PRODUCTION traffic",
+        ],
+    )
+    def test_build_legacy_spec_ignores_case_variants_of_negation(
+        self, description: str
+    ) -> None:
+        spec = DevOpsTeamLeadAgent._build_legacy_spec(
+            task_id="devops-neg-case",
+            task_description=description,
+            requirements="Keep staging",
         )
         assert spec.environment == "staging"
 
@@ -2114,6 +2152,8 @@ class TestBackwardCompatibility:
             requirements="staging",
         )
         assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
+        assert spec.title == long_desc[:MAX_LEGACY_TITLE_LENGTH]
+        assert long_desc.startswith(spec.title)
 
     def test_build_legacy_spec_whitespace_title_falls_back_to_task_id(self) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
@@ -2124,8 +2164,6 @@ class TestBackwardCompatibility:
         assert spec.title == "devops-ws-title"
 
     def test_enforce_env_policy_rejects_plain_string_included(self) -> None:
-        from types import SimpleNamespace
-
         task_spec = SimpleNamespace(
             platform_scope=SimpleNamespace(environments=["production"]),
             scope=SimpleNamespace(included="approval gate"),
@@ -2155,8 +2193,6 @@ class TestBackwardCompatibility:
         assert "approval" in reason.lower()
 
     def test_enforce_env_policy_rejects_string_environments(self) -> None:
-        from types import SimpleNamespace
-
         task_spec = SimpleNamespace(
             platform_scope=SimpleNamespace(environments="production"),
             scope=SimpleNamespace(included=["prod approval"]),
@@ -2176,8 +2212,6 @@ class TestBackwardCompatibility:
         assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
 
     def test_enforce_env_policy_rejects_non_string_included(self) -> None:
-        from types import SimpleNamespace
-
         task_spec = SimpleNamespace(
             platform_scope=SimpleNamespace(environments=["production"]),
             scope=SimpleNamespace(included=[None]),
@@ -2216,10 +2250,10 @@ class TestDevOpsTeamLeadAgentExecutionTools:
         mock_llm = MagicMock()
         mock_llm.complete_json.return_value = {}
         agent = DevOpsTeamLeadAgent(mock_llm)
-        assert hasattr(agent, "terraform_exec_tool")
-        assert hasattr(agent, "cdk_exec_tool")
-        assert hasattr(agent, "compose_exec_tool")
-        assert hasattr(agent, "helm_exec_tool")
+        assert isinstance(agent.terraform_exec_tool, TerraformExecutionToolAgent)
+        assert isinstance(agent.cdk_exec_tool, CDKExecutionToolAgent)
+        assert isinstance(agent.compose_exec_tool, DockerComposeExecutionToolAgent)
+        assert isinstance(agent.helm_exec_tool, HelmExecutionToolAgent)
         assert hasattr(agent, "infra_debug_agent")
         assert hasattr(agent, "infra_patch_agent")
 
