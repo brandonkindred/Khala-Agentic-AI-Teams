@@ -460,7 +460,9 @@ def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch) -> None:
-    """Null and non-string JSON fields are coerced to strings instead of causing failures."""
+    """Null seed_question triggers a generated fallback question that incorporates the
+    stringified section_context; other non-string fields (section_title, section_context)
+    are coerced to strings."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -983,6 +985,8 @@ def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> 
     assert len(out) == 2
     assert out[0].section_title == "A"
     assert "seed-A debug story" == out[0].seed_question
+    assert out[1].section_title == "B"
+    assert out[1].seed_question == "seed-A migration story"
 
 
 def test_ghost_writer_generate_friendly_seeds_fallback(monkeypatch) -> None:
