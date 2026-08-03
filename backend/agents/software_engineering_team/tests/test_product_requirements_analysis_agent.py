@@ -34,6 +34,7 @@ from product_requirements_analysis_agent.question_data import (
     context_discovery_fallback_questions,
 )
 from product_requirements_analysis_agent.question_processing import (
+    _safe_bool,
     _stem_candidates,
     filter_duplicate_questions,
     parse_question_option,
@@ -931,6 +932,63 @@ def test_parse_question_option_preserves_valid_numeric_confidence() -> None:
     parsed = parse_question_option({"id": "opt1", "label": "Yes", "confidence": 0.9}, index=1)
 
     assert parsed.confidence == 0.9
+
+
+@pytest.mark.parametrize(
+    ("value", "default", "expected"),
+    [
+        (True, False, True),
+        (False, True, False),
+        ("true", False, True),
+        ("True", False, True),
+        (" TRUE ", False, True),
+        ("false", True, False),
+        ("False", True, False),
+        (" FALSE ", True, False),
+        (None, False, False),
+        (None, True, True),
+        ("yes", False, False),
+        ("yes", True, True),
+        (1, False, False),
+        (0, True, True),
+    ],
+)
+def test_safe_bool(value: Any, default: bool, expected: bool) -> None:
+    """_safe_bool must not use Python truthiness: bool('false') is True, which
+    would silently invert an LLM-stringified boolean. A real bool passes
+    through; a case-insensitive 'true'/'false' string (whitespace-stripped)
+    resolves accordingly; anything else (including a non-boolean truthy value
+    like 1) falls back to ``default``."""
+    assert _safe_bool(value, default) is expected
+
+
+def test_parse_question_option_treats_stringified_false_as_false() -> None:
+    """A stringified 'false' for is_default must not be treated as truthy
+    (bool('false') is True, which would incorrectly mark this option default)."""
+    parsed = parse_question_option({"id": "opt1", "label": "Yes", "is_default": "false"}, index=0)
+
+    assert parsed.is_default is False
+
+
+def test_parse_open_question_treats_stringified_false_as_false_for_allow_multiple_and_blocking() -> (
+    None
+):
+    """A stringified 'false' for allow_multiple/blocking must not be treated as truthy."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "q1",
+            "question_text": "Which region?",
+            "allow_multiple": "false",
+            "blocking": "false",
+        },
+        index=0,
+    )
+
+    assert parsed.allow_multiple is False
+    assert parsed.blocking is False
 
 
 @pytest.mark.parametrize(
