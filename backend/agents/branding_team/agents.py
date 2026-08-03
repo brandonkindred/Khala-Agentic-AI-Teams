@@ -378,6 +378,7 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         typography direction, image style) for the ``CreativeDirector``
         node in the Phase 3 Graph.
     """
+    assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
     return build_agent(
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",

@@ -81,7 +81,7 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
     """
     from branding_team.graphs.phase3_visual import (
         _PHASE3_CONCEPTUALIST_VARIANTS,
-        _PHASE3_FAN_OUT_SPECIALISTS,
+        _PHASE3_SPECIALIST_FACTORIES,
     )
 
     graph = build_phase3_graph()
@@ -99,9 +99,19 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
         assert (conceptualist, "CreativeDirector") in edges
     assert ("CreativeDirector", "converge_decider") in edges
 
-    for specialist in _PHASE3_FAN_OUT_SPECIALISTS:
+    for specialist in _PHASE3_SPECIALIST_FACTORIES:
         assert ("converge_decider", specialist) in edges
         assert (specialist, "visual_compositor") in edges
+
+
+def test_make_moodboard_conceptualist_rejects_blank_variant() -> None:
+    """Documented variant precondition is enforced before agent construction."""
+    from branding_team.agents import make_moodboard_conceptualist
+
+    with pytest.raises(AssertionError, match="variant must be a non-empty string"):
+        make_moodboard_conceptualist("")
+    with pytest.raises(AssertionError, match="variant must be a non-empty string"):
+        make_moodboard_conceptualist("   ")
 
 
 def test_build_phase4_graph_is_a_graph() -> None:

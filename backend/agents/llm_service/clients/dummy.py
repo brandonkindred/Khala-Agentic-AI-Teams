@@ -340,8 +340,15 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     Postconditions:
         Returns a dict that validates against the matching Phase 3 agent
         ``structured_output`` schema, or ``None`` when no Phase 3 agent matches.
-        CreativeDirector is checked before MoodBoardConceptualist because its
-        prompt also names the moodboard field list.
+
+    Match order (three distinct agents — do not conflate them):
+        1. CreativeDirector — ``mood_board_candidates`` + ``converge_decider``
+           → ``MoodBoardCandidatesOutput`` (must precede MoodBoardConceptualist
+           because its prompt also names the moodboard field list).
+        2. MoodBoardConceptualist — ``moodboard conceptualist`` + ``visual_direction``
+           → ``MoodBoardConceptOutput``.
+        3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
+           → ``CreativeRefinementOutput`` (separate from CreativeDirector).
     """
     if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
         return {

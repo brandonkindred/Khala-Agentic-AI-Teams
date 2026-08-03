@@ -44,15 +44,16 @@ from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
 
 _PHASE3_CONCEPTUALIST_VARIANTS: tuple[str, ...] = ("Editorial", "Minimalist", "Bold")
 
-_PHASE3_FAN_OUT_SPECIALISTS: tuple[str, ...] = (
-    "logo_specifier",
-    "color_system_builder",
-    "typography_builder",
-    "iconography_director",
-    "photography_video_director",
-    "voice_tone_builder",
-    "design_system_codifier",
-)
+# Insertion order is the specialist fan-out sequence (and the test source of truth).
+_PHASE3_SPECIALIST_FACTORIES = {
+    "logo_specifier": make_logo_specifier,
+    "color_system_builder": make_color_system_builder,
+    "typography_builder": make_typography_builder,
+    "iconography_director": make_iconography_director,
+    "photography_video_director": make_photography_video_director,
+    "voice_tone_builder": make_voice_tone_builder,
+    "design_system_codifier": make_design_system_codifier,
+}
 
 
 def build_phase3_graph() -> Graph:
@@ -88,18 +89,9 @@ def build_phase3_graph() -> Graph:
     converge_node = builder.add_node(make_converge_decider(), node_id="converge_decider")
     builder.add_edge(creative_director, converge_node)
 
-    specialist_factories = {
-        "logo_specifier": make_logo_specifier,
-        "color_system_builder": make_color_system_builder,
-        "typography_builder": make_typography_builder,
-        "iconography_director": make_iconography_director,
-        "photography_video_director": make_photography_video_director,
-        "voice_tone_builder": make_voice_tone_builder,
-        "design_system_codifier": make_design_system_codifier,
-    }
     fan_out_nodes = [
-        builder.add_node(specialist_factories[node_id](), node_id=node_id)
-        for node_id in _PHASE3_FAN_OUT_SPECIALISTS
+        builder.add_node(factory(), node_id=node_id)
+        for node_id, factory in _PHASE3_SPECIALIST_FACTORIES.items()
     ]
     for node in fan_out_nodes:
         builder.add_edge(converge_node, node)
@@ -107,6 +99,8 @@ def build_phase3_graph() -> Graph:
     # ------------------------------------------------------------------
     # 3. Visual compositor (join node) -- inline agent
     # ------------------------------------------------------------------
+    # Join node only: not one of the Phase 3 structured_output factories.
+    # Keep the JSON instruction; strip fields no upstream agent produces.
     compositor = build_agent(
         name="visual_compositor",
         description="Assembles all visual identity fragments into a unified VisualIdentityOutput.",
@@ -114,9 +108,8 @@ def build_phase3_graph() -> Graph:
             "You are a Visual Identity Compositor. Assemble all visual identity fragments into a unified "
             "VisualIdentityOutput. Combine the moodboard candidates from the diverge phase, the creative "
             "refinement decision, logo suite, color palette, typography system, iconography style, "
-            "illustration style, photography direction, video direction, motion principles, data "
-            "visualization style, digital adaptations, voice tone spectrum, language dos/donts, and "
-            "design system. Output comprehensive valid JSON."
+            "illustration style, photography direction, video direction, motion principles, voice tone "
+            "spectrum, language dos/donts, and design system. Output comprehensive valid JSON."
         ),
     )
     compositor_node = builder.add_node(compositor, node_id="visual_compositor")
