@@ -14,7 +14,7 @@ correct ``ApplicationError`` / ``non_retryable`` outcome.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -182,7 +182,11 @@ def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
         ),
     )
 
-    act.persist_run_state_activity("run-1", {"status": "running"}, create=True)
+    # Exercises the new threaded-generation contract (an explicit generation
+    # matching the monkeypatched persisted value), not just the
+    # backward-compat omitted-generation default -- that path has its own
+    # dedicated test below.
+    act.persist_run_state_activity("run-1", {"status": "running"}, create=True, generation=1)
     assert captured == {"run_id": "run-1", "state": {"status": "running"}, "create": True}
 
 
@@ -642,7 +646,12 @@ def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
+    seen_run_ids: List[str] = []
+    monkeypatch.setattr(
+        run_state,
+        "get_run_generation_strict",
+        lambda run_id: seen_run_ids.append(run_id) or 1,
+    )
 
     class _FakeRecord:
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
@@ -676,6 +685,13 @@ def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
     assert captured["signal_brief_storage"] == {"s": 1}
     assert captured["paper_trading_enabled"] is False
     assert captured["paper_trading_lookback_days"] == 90
+    # The fencing check ran against the correct run, both before and after
+    # the delegate call (the pre-check's cheap early exit and the
+    # post-check that catches a restart minting a newer generation while
+    # this call was in flight) -- if a regression removed either lookup,
+    # this test would otherwise still pass because the patched function
+    # would simply go unused for that call.
+    assert seen_run_ids == ["run-final-1", "run-final-1"]
 
 
 def test_finalize_cycle_record_activity_rejects_stale_generation(monkeypatch):
@@ -686,7 +702,12 @@ def test_finalize_cycle_record_activity_rejects_stale_generation(monkeypatch):
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
+    seen_run_ids: List[str] = []
+    monkeypatch.setattr(
+        run_state,
+        "get_run_generation_strict",
+        lambda run_id: seen_run_ids.append(run_id) or 2,
+    )
 
     finalize_calls = []
     monkeypatch.setattr(
@@ -707,6 +728,9 @@ def test_finalize_cycle_record_activity_rejects_stale_generation(monkeypatch):
     assert exc_info.value.non_retryable is True
     assert exc_info.value.type == "StaleFencingTokenError"
     assert finalize_calls == []  # the durable record write never happened
+    # Confirms the fencing lookup was performed against the run this call
+    # actually targeted, not a hardcoded or otherwise-wrong run_id.
+    assert seen_run_ids == ["run-final-2"]
 
 
 def test_finalize_cycle_record_activity_accepts_current_generation(monkeypatch):

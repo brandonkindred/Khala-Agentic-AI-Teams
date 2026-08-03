@@ -1497,6 +1497,7 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
 def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[StrategySpec, str]:
     """Build a StrategySpec + strategy_id from raw ideation output."""
     strategy_id = f"strat-lab-{uuid.uuid4().hex[:8]}"
+    sizing = strategy_data.get("sizing")
     strategy = StrategySpec(
         strategy_id=strategy_id,
         authored_by="strategy_ideation_agent",
@@ -1513,9 +1514,7 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         # ideation LLM response doesn't crash the cycle.
         entry_rules=[r for r in (strategy_data.get("entry_rules") or []) if isinstance(r, dict)],
         exit_rules=[r for r in (strategy_data.get("exit_rules") or []) if isinstance(r, dict)],
-        sizing=strategy_data.get("sizing")
-        if isinstance(strategy_data.get("sizing"), dict)
-        else DEFAULT_SIZING_PAYLOAD,
+        sizing=sizing if isinstance(sizing, dict) else DEFAULT_SIZING_PAYLOAD,
         risk_limits=strategy_data.get("risk_limits") or {},
         speculative=bool(strategy_data.get("speculative", False)),
     )
@@ -1594,11 +1593,12 @@ def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
         paper-trading step) with ``record.strategy`` / ``record.backtest``
         populated.
     Postconditions:
-        ``record`` / ``record.strategy`` / ``record.backtest`` are written to
-        the ``JobServiceClient``-backed ``_strategy_lab_records`` /
-        ``_strategies`` / ``_backtests`` stores, keyed by their respective
-        ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
-        activity can reuse the identical write without duplicating it.
+        ``record`` / ``record.strategy`` / ``record.backtest`` are stored in
+        the module-level ``_strategy_lab_records`` / ``_strategies`` /
+        ``_backtests`` dictionaries under ``_lock``, keyed by their
+        respective ids. Extracted from ``_run_one_strategy_lab_cycle`` so a
+        Temporal activity can reuse the identical write without duplicating
+        it.
     """
     with _lock:
         _strategy_lab_records[record.lab_record_id] = record
@@ -1961,6 +1961,13 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
           "can't confirm a newer generation exists" and does not block the
           write (this function is documented never to raise; the write it
           guards is itself best-effort).
+        - Also skips the write (a no-op) if, after re-acquiring the lock to
+          perform the write, the run's in-memory generation no longer
+          matches the generation observed at the start of this call: a
+          concurrent resume/restart replaced ``_active_runs[run_id]`` with a
+          newer incarnation while this call was checking the durable
+          generation, and that newer incarnation must not be marked
+          "failed" out from under it.
     """
     try:
         with _lock:
@@ -1984,6 +1991,22 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
         with _lock:
             state = _active_runs.get(run_id)
             if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            if state.get("generation", 1) != request_generation:
+                # A resume/restart replaced this run's in-memory entry with a
+                # newer incarnation while this call was between its two lock
+                # acquisitions (e.g. during the durable-generation read
+                # above). Writing "failed" here would land on that newer,
+                # already-dispatched incarnation instead of the one this
+                # call was checking against.
+                logger.warning(
+                    "Skipping fail write for strategy-lab run %s: in-memory generation %s "
+                    "no longer matches this request's generation %s (run was resumed/restarted "
+                    "concurrently).",
+                    run_id,
+                    state.get("generation", 1),
+                    request_generation,
+                )
                 return
             state["status"] = "failed"
             state["error"] = error

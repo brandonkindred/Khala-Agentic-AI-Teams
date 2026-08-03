@@ -629,6 +629,45 @@ def test_resume_strategy_lab_run_revalidation_failure_does_not_regress_concurren
     assert stub.by_id["run-revalidate-fail2"]["generation"] == 5
 
 
+def test_fail_strategy_lab_run_does_not_clobber_concurrently_resumed_incarnation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: if a resume/restart replaces `_active_runs[run_id]` with a
+    newer incarnation while `_fail_strategy_lab_run` is between its durable
+    generation read and re-acquiring the lock to write, the stale fail-write
+    must not land on that newer incarnation. The durable read itself can
+    return a generation that still matches this call's stale in-memory
+    snapshot (e.g. the concurrent restart hasn't persisted its mint yet),
+    so the earlier durable-generation guard alone does not catch this --
+    only re-checking the in-memory generation right before the write does."""
+    from investment_team.api import main as api_main
+
+    run_id = "run-fail-race"
+    api_main._active_runs[run_id] = _resumable_state(run_id, generation=1, status="running")
+
+    def _fake_get_run_generation_strict(run_id_arg, client=None):
+        # Simulate a concurrent restart replacing the in-memory entry with a
+        # newer incarnation while this durable read is "in flight", but the
+        # durable read still returns the stale generation this request
+        # already knows about.
+        api_main._active_runs[run_id] = _resumable_state(run_id, generation=2, status="running")
+        return 1
+
+    monkeypatch.setattr(api_main, "_get_run_generation_strict", _fake_get_run_generation_strict)
+    persisted_calls: List[Any] = []
+    monkeypatch.setattr(
+        api_main,
+        "_persist_run_state",
+        lambda rid, state, **kw: persisted_calls.append((rid, dict(state))),
+    )
+
+    api_main._fail_strategy_lab_run(run_id, "boom")
+
+    assert api_main._active_runs[run_id]["status"] == "running"
+    assert api_main._active_runs[run_id]["generation"] == 2
+    assert persisted_calls == []
+
+
 def test_restart_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 

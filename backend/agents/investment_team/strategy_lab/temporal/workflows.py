@@ -653,6 +653,11 @@ class StrategyLabBatchWorkflow:
         four positional args — so it can't go through :func:`_exec` (single-``params``);
         call ``workflow.execute_activity`` directly with the same retry/timeout.
 
+        Preconditions:
+            - ``run_id`` is a non-empty string identifying an existing run.
+            - ``state`` is a JSON-serializable dict of run-state deltas.
+            - ``generation`` is a non-negative int (this workflow's fencing token).
+
         Raises when ``persist_run_state_activity`` rejects ``generation`` as stale
         (a non-retryable ``ApplicationError`` — a fenced write means this incarnation
         has been superseded by a restart and this workflow should stop, so letting the
@@ -664,9 +669,10 @@ class StrategyLabBatchWorkflow:
         unrelated to the activity's own business logic; those are not swallowed
         here and still propagate per Temporal's normal retry/timeout handling.
         """
+        create = False  # this call always updates an existing run's state, never creates one
         await workflow.execute_activity(
             act.persist_run_state_activity,
-            args=[run_id, state, False, generation],
+            args=[run_id, state, create, generation],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_ACTIVITY_RETRY,
         )
