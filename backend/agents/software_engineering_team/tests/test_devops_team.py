@@ -1247,6 +1247,22 @@ class TestChangeReviewAgent:
             assert _normalize_severity("catastrophic") == "low"
         assert "unrecognized severity" in caplog.text.lower()
 
+    def test_severity_map_derives_from_engine_type(self) -> None:
+        """_SEVERITY_MAP's keys are exactly code_review_agent's severity values,
+        and every one maps to a valid ReviewFinding severity -- proving the map
+        is derived from the shared type, not hand-copied."""
+        from typing import get_args
+
+        from software_engineering_team.code_review_agent.models import CodeReviewIssueSeverity
+        from software_engineering_team.devops_team.change_review_agent.agent import (
+            _REVIEW_FINDING_SEVERITIES,
+            _SEVERITY_MAP,
+        )
+
+        engine_severities = set(get_args(CodeReviewIssueSeverity))
+        assert set(_SEVERITY_MAP) == engine_severities
+        assert all(v in _REVIEW_FINDING_SEVERITIES for v in _SEVERITY_MAP.values())
+
     def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
         """An engine 'info' severity maps to ReviewFinding 'low' and does not block."""
         from software_engineering_team.devops_team.change_review_agent import (
@@ -1918,9 +1934,7 @@ class TestBackwardCompatibility:
             "NO PRODUCTION traffic",
         ],
     )
-    def test_build_legacy_spec_ignores_case_variants_of_negation(
-        self, description: str
-    ) -> None:
+    def test_build_legacy_spec_ignores_case_variants_of_negation(self, description: str) -> None:
         spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id="devops-neg-case",
             task_description=description,

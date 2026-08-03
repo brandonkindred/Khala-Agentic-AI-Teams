@@ -12,6 +12,7 @@ public class, ``run`` signature, output model, and blocking semantics.
 from __future__ import annotations
 
 import logging
+from typing import get_args
 
 from llm_service import LLMClient
 from software_engineering_team.code_review_agent import (
@@ -20,7 +21,10 @@ from software_engineering_team.code_review_agent import (
     CodeReviewUnavailableError,
     ReviewProfile,
 )
-from software_engineering_team.code_review_agent.models import CodeReviewIssue
+from software_engineering_team.code_review_agent.models import (
+    CodeReviewIssue,
+    CodeReviewIssueSeverity,
+)
 from software_engineering_team.devops_team.models import ReviewFinding
 from software_engineering_team.shared.security_service import derive_approved, is_blocking
 
@@ -28,11 +32,25 @@ from .models import ChangeReviewInput, ChangeReviewOutput
 
 logger = logging.getLogger(__name__)
 
-# The engine's severity vocabulary includes ``info``; ``ReviewFinding.severity``
-# does not. Everything else (critical/high/medium/low) is shared, so only
-# ``info`` needs remapping — to ``low`` (its nearest non-blocking neighbour).
-_SEVERITY_MAP = {"info": "low"}
-_REVIEW_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "minor", "nit"}
+_ENGINE_SEVERITIES = frozenset(get_args(CodeReviewIssueSeverity))
+_REVIEW_FINDING_SEVERITIES = frozenset(get_args(ReviewFinding.model_fields["severity"].annotation))
+
+# Engine severities with no identically-named ReviewFinding counterpart; every other
+# engine severity maps to itself. ``info`` maps to ``low`` (its nearest non-blocking
+# neighbour). If code_review_agent ever adds a severity that's neither already valid
+# in ReviewFinding nor covered here, the assertion below fails at import time instead
+# of this table silently drifting out of sync in production.
+_EXPLICIT_SEVERITY_REMAP = {"info": "low"}
+
+_unmapped_engine_severities = (
+    _ENGINE_SEVERITIES - _REVIEW_FINDING_SEVERITIES - set(_EXPLICIT_SEVERITY_REMAP)
+)
+assert not _unmapped_engine_severities, (
+    f"code_review_agent severities {sorted(_unmapped_engine_severities)} have no ReviewFinding "
+    "counterpart and no entry in change_review_agent._EXPLICIT_SEVERITY_REMAP"
+)
+
+_SEVERITY_MAP = {s: _EXPLICIT_SEVERITY_REMAP.get(s, s) for s in _ENGINE_SEVERITIES}
 
 
 def _normalize_severity(severity: str) -> str:
