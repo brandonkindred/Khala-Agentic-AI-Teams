@@ -23,6 +23,7 @@ import asyncio
 
 import pytest
 
+from software_engineering_team.api.coding_team_models import RunRequest
 from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
 
 
@@ -162,3 +163,13 @@ def test_submit_answers_sets_state_directly(monkeypatch: pytest.MonkeyPatch) -> 
     workflow_obj.submit_answers({"resume_token": "tok-1", "answers": answers})
 
     assert workflow_obj._submitted_answers == answers
+
+
+def test_run_request_declares_acknowledged_resume_token() -> None:
+    """Regression guard: RunRequest must declare acknowledged_resume_token, or
+    Pydantic's default ignore-extra-keys behavior silently drops the value
+    CodingTeamWorkflow.run sets on request before run_pipeline_activity's
+    RunRequest(**request) call ever sees it."""
+    parsed = RunRequest(repo_path="/repo", acknowledged_resume_token="j1:1")
+
+    assert parsed.acknowledged_resume_token == "j1:1"

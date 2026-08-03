@@ -15,10 +15,11 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     Preconditions:
         - A ``CodeEngineProvider`` is installed in THIS worker process (SE's
           ``_se_startup()`` installs it before starting this worker).
-        - ``request`` is a dict whose ``repo_path``/``plan_input`` keys form a
-          serialized ``RunRequest`` (``coding_team_models.RunRequest`` defines
-          only those two fields); ``plan_input`` must be non-null (the workflow
-          executes a plan; a job-only request with no plan has nothing to run).
+        - ``request`` is a dict whose ``repo_path``/``plan_input``/
+          ``acknowledged_resume_token`` keys form a serialized ``RunRequest``
+          (``coding_team_models.RunRequest`` defines exactly those three
+          fields); ``plan_input`` must be non-null (the workflow executes a
+          plan; a job-only request with no plan has nothing to run).
           ``request`` may also carry a top-level ``job_id`` (the row the API
           already created for the client to poll) — this is read directly via
           ``request.get("job_id")``, not a ``RunRequest`` field, so it passes
@@ -33,6 +34,14 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
           actionable message when the worker is mis-wired (no provider) or
           the request carries no plan — instead of failing later, mid-run,
           with a generic error.
+        - ``req.acknowledged_resume_token`` is NOT yet forwarded into
+          ``run_orchestrator_wired`` or consulted by any re-entry check — the
+          orchestrator does not yet mint or persist a ``resume_token`` per
+          pause for it to match against, so there is nothing to check it
+          against today. Declaring the field on ``RunRequest`` only stops it
+          from being silently dropped by Pydantic before that consumer
+          exists; wiring it through is separate, not-yet-implemented
+          activity-side work (contract §1, sibling issues #3987/#3988).
     """
     import uuid
 
