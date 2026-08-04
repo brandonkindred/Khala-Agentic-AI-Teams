@@ -796,24 +796,9 @@ within-batch index) confirmed a false positive does not change which finding
 gets dropped. Lowering this cap increases the number of verification LLM
 calls (and therefore cost/latency) for files with many findings; raising it
 trades that against a larger prompt per call. This is a cap on how many
-*findings* share one verification call — separate from
-`CODE_REVIEW_VERIFY_MAX_READ_CHARS` (below), which caps how much file content
-a single tool read can return.
-
-### CODE_REVIEW_VERIFY_MAX_READ_CHARS
-Int (default `50000`, floor `500`). Cap on how many characters a single
-`read_file`/`search_codebase` tool call (`_build_tools`) can return to the
-false-positive verifier agent. Does **not** apply to the cited file's own
-full-body inlining in `_build_group_prompt` — that stays uncapped
-deliberately, since it's the verifier's primary evidence — this only bounds
-*supplementary* reads/searches the agent makes on demand (e.g. a huge
-generated file, a lockfile, or a search hit on very long lines). An
-oversized result is truncated to the cap with a trailing "(truncated)"
-marker rather than erroring, so the agent still gets a usable (if partial)
-answer; the verifier's existing fail-safe contract is unaffected — the
-verify prompt already instructs the model to keep a finding unless it can
-*confirm* it's false, so a truncated read that leaves the model unsure
-simply means the finding is kept, not that verification breaks.
+*findings* share one verification call — separate from any cap on how much
+*file content* a single tool read can return (out of scope here; tracked in
+a separate sub-issue).
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see

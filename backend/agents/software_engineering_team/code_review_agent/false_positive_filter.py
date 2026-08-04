@@ -95,14 +95,6 @@ DEFAULT_VERIFY_TIMEOUT_SECONDS = 3600
 # call; see ``_verify_max_findings_per_group`` below.
 DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP = 40
 
-# Cap (chars) on a single read_file/search_codebase tool result returned to
-# the verifier agent; see ``_verify_max_read_chars`` below. Distinct from the
-# cited file's own full-body inlining in ``_build_group_prompt``, which is
-# deliberately kept uncapped (it's the verifier's primary evidence) -- this
-# only bounds supplementary reads/searches the agent makes on demand.
-DEFAULT_VERIFY_MAX_READ_CHARS = 50_000
-_TOOL_RESULT_TRUNCATION_MARKER = "\n... (truncated; use search_codebase for a narrower look)"
-
 
 def _verify_timeout_seconds() -> int:
     """Per-group verification call timeout (seconds).
@@ -138,39 +130,6 @@ def _verify_max_findings_per_group() -> int:
         DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
         1,
     )
-
-
-def _verify_max_read_chars() -> int:
-    """Cap (chars) on a single read_file/search_codebase tool result.
-
-    Bounds how much text a single tool call inside ``_build_tools`` can
-    return to the verifier agent, so an oversized file or a search hit on
-    very long lines cannot feed an unbounded string into the agent's
-    context. Env-overridable via ``CODE_REVIEW_VERIFY_MAX_READ_CHARS`` (see
-    docs/ENV_VARS.md).
-
-    Postconditions:
-        - Returns an int >= 500.
-    """
-    return parse_env_int("CODE_REVIEW_VERIFY_MAX_READ_CHARS", DEFAULT_VERIFY_MAX_READ_CHARS, 500)
-
-
-def _cap_tool_result(text: str) -> str:
-    """Truncate an oversized read_file/search_codebase tool result.
-
-    Preconditions:
-        - ``text`` is a string.
-
-    Postconditions:
-        - Returns ``text`` unchanged when its length is within
-          ``_verify_max_read_chars()``.
-        - Otherwise returns a prefix of that length plus
-          ``_TOOL_RESULT_TRUNCATION_MARKER``. Never raises.
-    """
-    cap = _verify_max_read_chars()
-    if len(text) <= cap:
-        return text
-    return text[:cap] + _TOOL_RESULT_TRUNCATION_MARKER
 
 
 def _verify_parallelism() -> int:
@@ -764,12 +723,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
 
         Returns:
             The file's full text, or an "Error: ..." message if the path is
-            unknown or ambiguous. Truncated with a trailing "(truncated)"
-            marker if it exceeds the tool-result size cap -- use
-            search_codebase for a narrower look at a large file.
+            unknown or ambiguous.
         """
         try:
-            return _cap_tool_result(index.read_file(path))
+            return index.read_file(path)
         except Exception as exc:
             return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
 
@@ -801,16 +758,13 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
             query: The substring to search for (e.g. a function or class name).
 
         Returns:
-            Matching "path:line: text" lines, or a message that nothing
-            matched. Truncated with a trailing "(truncated)" marker if the
-            combined result exceeds the tool-result size cap.
+            Matching "path:line: text" lines, or a message that nothing matched.
         """
         try:
             matches = index.search(query)
             if not matches:
                 return f"No matches for {query!r}."
-            joined = "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
-            return _cap_tool_result(joined)
+            return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
         except Exception as exc:
             return f"Error: could not search for {query!r}: {type(exc).__name__}: {exc}"
 
