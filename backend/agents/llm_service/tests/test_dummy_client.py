@@ -2,9 +2,9 @@
 
 Covers ``complete`` / ``complete_json`` / ``complete_text``, ``get_max_context_tokens``,
 async ``structured_output`` (including multi-turn routing), ``stream`` with
-``system_prompt_content`` (branding Phase 1 anchors and empty-list overrides),
-and helpers (``_extract_name_from_hint``, strip-filter frozensets,
-``_content_to_text`` / ``_last_user_text`` / ``_aggregated_user_tool_text``).
+``system_prompt_content`` (branding Phase 1 anchors, Phase 2 narrative stubs, and
+empty-list overrides), and helpers (``_extract_name_from_hint``, strip-filter
+frozensets, ``_content_to_text`` / ``_last_user_text`` / ``_aggregated_user_tool_text``).
 """
 
 from __future__ import annotations
