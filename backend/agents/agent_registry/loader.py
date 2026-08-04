@@ -760,7 +760,7 @@ class AgentRegistry:
         → ``<team_dir>/agent_console/samples/<agent_id>/``.
 
         Falls back to ``<agents_root>/<manifest.team>/...`` when the source
-        path is unknown (e.g. tests that instantiate ``AgentRegistry`` manually).
+        path is unknown (e.g. in tests that construct the registry manually).
         """
         with self._lock:
             source = self._source_paths.get(agent_id)
