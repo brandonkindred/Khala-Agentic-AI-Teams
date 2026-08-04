@@ -395,6 +395,15 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
     assert len(strategy.exit_rules) == 1
 
 
+def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
+    from investment_team.api.main import _build_strategy_from_ideation
+
+    with pytest.raises(TypeError):
+        _build_strategy_from_ideation(None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        _build_strategy_from_ideation(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # _PersistentDict (in-process FakeJobClient roundtrip)
 # ---------------------------------------------------------------------------

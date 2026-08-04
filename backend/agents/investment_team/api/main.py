@@ -1643,7 +1643,22 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
 
 
 def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[StrategySpec, str]:
-    """Build a StrategySpec + strategy_id from raw ideation output."""
+    """Build a StrategySpec + strategy_id from raw ideation output.
+
+    Preconditions: ``strategy_data`` must be a dict-like mapping (the raw
+    parsed ideation payload) — this function reads it via ``.get()`` and
+    iterates its list-valued fields. Malformed *values* within the mapping
+    (non-dict rule entries, non-dict ``sizing``, etc.) are handled
+    permissively and defaulted/discarded; only a non-mapping
+    ``strategy_data`` itself is a contract violation.
+    Postconditions: returns a valid ``StrategySpec`` plus the same
+    freshly generated ``strat-lab-`` prefixed ``strategy_id``.
+
+    Raises:
+        TypeError: if ``strategy_data`` is not a mapping.
+    """
+    if not isinstance(strategy_data, dict):
+        raise TypeError(f"strategy_data must be a mapping, got {type(strategy_data).__name__}")
     strategy_id = f"strat-lab-{uuid.uuid4().hex[:8]}"
     strategy = StrategySpec(
         strategy_id=strategy_id,
