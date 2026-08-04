@@ -44,6 +44,7 @@ class _RecordingClient(LLMClient):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: bool = False,
+        structured_output_model: Optional[type] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         self.complete_json_calls.append(
@@ -53,6 +54,7 @@ class _RecordingClient(LLMClient):
                 "system_prompt": system_prompt,
                 "tools": tools,
                 "think": think,
+                "structured_output_model": structured_output_model,
             }
         )
         return self.response
@@ -747,6 +749,9 @@ def test_structured_output_validates_into_pydantic_model() -> None:
     assert client.complete_json_calls[0]["system_prompt"] == "You are a code reviewer."
     assert client.complete_json_calls[0]["temperature"] == 0.2
     assert client.complete_json_calls[0]["think"] is True
+    # The output_model class itself is forwarded so a class-identity-routing
+    # client (e.g. the dummy stub) doesn't have to infer it from prompt text.
+    assert client.complete_json_calls[0]["structured_output_model"] is _Review
 
 
 def test_structured_output_raises_on_invalid_response() -> None:

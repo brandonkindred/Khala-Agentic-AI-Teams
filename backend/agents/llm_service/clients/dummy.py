@@ -851,6 +851,43 @@ def _branding_phase2_narrative_with_personas() -> Dict[str, Any]:
     }
 
 
+def _branding_phase2_narrative_with_writing_guidelines() -> Dict[str, Any]:
+    """Return the Phase 2 narrative-with-personas payload plus writing guidelines.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns a fresh dict extending
+        ``_branding_phase2_narrative_with_personas()`` with a nested
+        ``writing_guidelines`` object.
+    """
+    return {
+        **_branding_phase2_narrative_with_personas(),
+        "writing_guidelines": {
+            "voice_principles": [
+                "Use a confident, human voice (dummy).",
+                "Prefer concrete proof over slogans (dummy).",
+                "Keep sentences short enough to scan (dummy).",
+            ],
+            "style_dos": [
+                "Lead with the customer outcome (dummy).",
+                "Use active voice (dummy).",
+                "Name the audience when it clarifies (dummy).",
+            ],
+            "style_donts": [
+                "Avoid empty superlatives (dummy).",
+                "Don't bury the offer (dummy).",
+                "Don't mix casual slang with legal claims (dummy).",
+            ],
+            "editorial_quality_bar": [
+                "Every piece states who it is for (dummy).",
+                "Claims cite a proof point (dummy).",
+                "Copy matches the approved tone spectrum (dummy).",
+            ],
+        },
+    }
+
+
 def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
     """Try Phase 3, then Phase 4, branding structured-output stubs; first match wins.
 
@@ -867,6 +904,81 @@ def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
     if stub is not None:
         return stub
     return _branding_phase4_structured_stub(system_lowered)
+
+
+def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[str, Any]]:
+    """Deterministic Branding Phase 2 "Narrative & Messaging" payload for a known
+    ``structured_output`` model class name.
+
+    This is the routing counterpart to the ``system_lowered`` text anchors the
+    six Phase 2 ``elif`` branches in ``complete_json`` use: those branches
+    delegate to the exact same functions below via a hardcoded class name, so
+    there is one payload per class regardless of which path reaches it.
+
+    Preconditions:
+        ``model_name`` is a string, typically a ``type.__name__``.
+    Postconditions:
+        Returns the fresh stub dict that the named model class should
+        validate against, or ``None`` for any unrecognized name so callers
+        can fall back to prompt-text matching.
+    """
+    if model_name == "BrandStoryOutput":
+        return _branding_phase2_narrative_base()
+    if model_name == "BrandArchetypesOutput":
+        return _branding_phase2_narrative_with_archetype()
+    if model_name == "TaglineOutput":
+        return _branding_phase2_narrative_with_tagline()
+    if model_name == "MessagingFrameworkOutput":
+        return _branding_phase2_narrative_with_messaging()
+    if model_name == "PersonaProfilesOutput":
+        return _branding_phase2_narrative_with_personas()
+    if model_name == "WritingGuidelinesOutput":
+        return _branding_phase2_narrative_with_writing_guidelines()
+    return None
+
+
+def _branding_phase2_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Text-anchor fallback for the Phase 2 "Narrative & Messaging" cluster.
+
+    Used by ``complete_json`` when the caller didn't supply a recognized
+    ``structured_output_model`` (see ``_branding_phase2_structured_output_stub``).
+    Kept as its own helper — like ``_branding_structured_stub`` for Phase 3/4 —
+    so that call site's branching stays flat and under the mccabe complexity
+    ceiling.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns the first matching Phase 2 payload, or ``None`` when no
+        anchor combination matches. Cumulative carry-forward stubs: each
+        specialist repeats upstream fields so a linear Graph predecessor
+        exposes the full prior narrative — anchors are ordered most- to
+        least-specific so a later specialist's prompt (which also contains
+        earlier fields) doesn't get caught by an earlier branch.
+    """
+    if (
+        "brand_story" in system_lowered
+        and "boilerplate_variants" in system_lowered
+        and (
+            "tagline_rationale" not in system_lowered
+            and "personality_traits" not in system_lowered
+            and "messaging_framework" not in system_lowered
+            and "jobs_to_be_done" not in system_lowered
+            and "writing_guidelines" not in system_lowered
+        )
+    ):
+        return _branding_phase2_narrative_base()
+    if "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered:
+        return _branding_phase2_narrative_with_archetype()
+    if "tagline_rationale" in system_lowered and "elevator_pitches" in system_lowered:
+        return _branding_phase2_narrative_with_tagline()
+    if "messaging_framework" in system_lowered and "audience_message_maps" in system_lowered:
+        return _branding_phase2_narrative_with_messaging()
+    if "jobs_to_be_done" in system_lowered and "media_habits" in system_lowered:
+        return _branding_phase2_narrative_with_personas()
+    if "writing_guidelines" in system_lowered and "editorial_quality_bar" in system_lowered:
+        return _branding_phase2_narrative_with_writing_guidelines()
+    return None
 
 
 class DummyLLMClient(LLMClient):
@@ -986,6 +1098,9 @@ class DummyLLMClient(LLMClient):
         Aggregates all user/tool turns (not just the latest) so a follow-up
         like "return that as structured output" still routes on anchors from
         the original request — matching ``LLMClientModel.structured_output``.
+        Also forwards ``output_model`` itself as ``structured_output_model``,
+        so ``complete_json`` can route by class identity instead of relying
+        solely on those text anchors — matching ``LLMClientModel.structured_output``.
 
         Preconditions:
             - ``output_model`` is a Pydantic model type with ``model_validate``.
@@ -999,7 +1114,9 @@ class DummyLLMClient(LLMClient):
         ensure_strands_model_registration()
         assert hasattr(output_model, "model_validate")
         prompt_text = _aggregated_user_tool_text(prompt)
-        data = self.complete_json(prompt_text, system_prompt=system_prompt)
+        data = self.complete_json(
+            prompt_text, system_prompt=system_prompt, structured_output_model=output_model
+        )
         try:
             validated = output_model.model_validate(data)
         except Exception as exc:
@@ -1143,6 +1260,7 @@ class DummyLLMClient(LLMClient):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
+        structured_output_model: Optional[type] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         # ``objective`` keeps a default here (unlike the required LLMClient
@@ -1173,6 +1291,20 @@ class DummyLLMClient(LLMClient):
         self._request_count += 1
         counter = DummyLLMClient._call_counter
         task_hint = self._extract_task_hint(prompt)
+
+        # Deterministic fast path: when the caller hands us the actual
+        # structured_output model class (Strands' bridge does, via
+        # LLMClientModel.structured_output), route on its identity instead of
+        # the text-anchor scan below — sidesteps the exact fragility this
+        # scan is prone to (a prompt reword or an incidentally-mentioned
+        # field name silently returning the wrong shape). Only a known subset
+        # of classes are wired up; anything else falls through unchanged.
+        if structured_output_model is not None:
+            deterministic = _branding_phase2_structured_output_stub(
+                structured_output_model.__name__
+            )
+            if deterministic is not None:
+                return deterministic
 
         if "architecture_document" in lowered and "components" in lowered and "overview" in lowered:
             return {
@@ -1750,58 +1882,13 @@ class DummyLLMClient(LLMClient):
                 ),
                 "brand_promise": "Every customer touchpoint will feel cohesive and intentional (dummy).",
             }
-        # Branding team — Phase 2 "Narrative & Messaging" Graph agents
-        # (built with structured_output=, see agents.py). Cumulative
-        # carry-forward stubs: each specialist repeats upstream fields so a
-        # linear Graph predecessor exposes the full prior narrative.
-        elif (
-            "brand_story" in system_lowered
-            and "boilerplate_variants" in system_lowered
-            and (
-                "tagline_rationale" not in system_lowered
-                and "personality_traits" not in system_lowered
-                and "messaging_framework" not in system_lowered
-                and "jobs_to_be_done" not in system_lowered
-                and "writing_guidelines" not in system_lowered
-            )
-        ):
-            return _branding_phase2_narrative_base()
-        elif (
-            "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered
-        ):
-            return _branding_phase2_narrative_with_archetype()
-        elif "tagline_rationale" in system_lowered and "elevator_pitches" in system_lowered:
-            return _branding_phase2_narrative_with_tagline()
-        elif "messaging_framework" in system_lowered and "audience_message_maps" in system_lowered:
-            return _branding_phase2_narrative_with_messaging()
-        elif "jobs_to_be_done" in system_lowered and "media_habits" in system_lowered:
-            return _branding_phase2_narrative_with_personas()
-        elif "writing_guidelines" in system_lowered and "editorial_quality_bar" in system_lowered:
-            return {
-                **_branding_phase2_narrative_with_personas(),
-                "writing_guidelines": {
-                    "voice_principles": [
-                        "Use a confident, human voice (dummy).",
-                        "Prefer concrete proof over slogans (dummy).",
-                        "Keep sentences short enough to scan (dummy).",
-                    ],
-                    "style_dos": [
-                        "Lead with the customer outcome (dummy).",
-                        "Use active voice (dummy).",
-                        "Name the audience when it clarifies (dummy).",
-                    ],
-                    "style_donts": [
-                        "Avoid empty superlatives (dummy).",
-                        "Don't bury the offer (dummy).",
-                        "Don't mix casual slang with legal claims (dummy).",
-                    ],
-                    "editorial_quality_bar": [
-                        "Every piece states who it is for (dummy).",
-                        "Claims cite a proof point (dummy).",
-                        "Copy matches the approved tone spectrum (dummy).",
-                    ],
-                },
-            }
+        # Branding team — Phase 2 "Narrative & Messaging" Graph agents (built
+        # with structured_output=, see agents.py). Text-anchor fallback lives
+        # in _branding_phase2_text_routed_stub so this call site's branching
+        # stays flat and under the mccabe complexity ceiling (mirrors
+        # _branding_structured_stub for Phase 3/4 just below).
+        elif (phase2_stub := _branding_phase2_text_routed_stub(system_lowered)) is not None:
+            return phase2_stub
         # Branding Phase 3 / Phase 4 stubs live in ``_branding_structured_stub``
         # so ``complete_json`` stays under the mccabe complexity ceiling. Only
         # ``None`` means "unmatched" — an intentional empty dict must not

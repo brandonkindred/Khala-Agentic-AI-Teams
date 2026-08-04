@@ -153,6 +153,36 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
 
 _CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
 
+# Model classes DummyLLMClient.complete_json routes by structured_output_model
+# class identity (see _branding_phase2_structured_output_stub in
+# llm_service.clients.dummy) rather than by scanning system-prompt text.
+# For these six, an unrouted/misleading prompt no longer prevents a valid
+# payload — that is the point of issue #4252's fix, and is asserted
+# separately in test_model_routed_payload_validates_regardless_of_prompt_text
+# below instead of test_generic_prompt_payload_is_rejected_by_every_schema.
+_MODEL_ROUTED_CLASS_NAMES: frozenset[str] = frozenset(
+    {
+        "BrandStoryOutput",
+        "BrandArchetypesOutput",
+        "TaglineOutput",
+        "MessagingFrameworkOutput",
+        "PersonaProfilesOutput",
+        "WritingGuidelinesOutput",
+    }
+)
+_TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case for case in _CASES if case[2].__name__ not in _MODEL_ROUTED_CLASS_NAMES
+)
+_TEXT_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _TEXT_ROUTED_CASES
+)
+_MODEL_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case for case in _CASES if case[2].__name__ in _MODEL_ROUTED_CLASS_NAMES
+)
+_MODEL_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _MODEL_ROUTED_CASES
+)
+
 # Factory names covered by ``_CASES``. Parameterized factories appear once here
 # and expand to several table rows, so this is not derivable from ``_CASE_IDS``.
 _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
@@ -269,18 +299,44 @@ def test_dummy_payload_validates_against_agent_schema(
     assert isinstance(output, output_model)
 
 
-@pytest.mark.parametrize(("_case_id", "_factory", "output_model"), _CASES, ids=_CASE_IDS)
+@pytest.mark.parametrize(
+    ("_case_id", "_factory", "output_model"), _TEXT_ROUTED_CASES, ids=_TEXT_ROUTED_CASE_IDS
+)
 def test_generic_prompt_payload_is_rejected_by_every_schema(
     _case_id: str, _factory: Callable[[], Any], output_model: type
 ) -> None:
-    """The dummy's unrouted fallback satisfies none of the branding schemas.
+    """The dummy's unrouted fallback satisfies none of the still-text-routed schemas.
 
     Without this, ``test_dummy_payload_validates_against_agent_schema`` would
     pass just as happily if an agent's prompt stopped matching its dummy branch
     and fell through — this is what makes that assertion evidence of routing.
+
+    Excludes the six Phase 2 classes in ``_MODEL_ROUTED_CLASS_NAMES``: see
+    ``test_model_routed_payload_validates_regardless_of_prompt_text`` for why
+    an unrouted prompt is no longer the right probe for those.
     """
     with pytest.raises(ValueError, match="failed to parse into"):
         _drive_structured_output(output_model, _UNROUTED_SYSTEM_PROMPT)
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "_factory", "output_model"), _MODEL_ROUTED_CASES, ids=_MODEL_ROUTED_CASE_IDS
+)
+def test_model_routed_payload_validates_regardless_of_prompt_text(
+    _case_id: str, _factory: Callable[[], Any], output_model: type
+) -> None:
+    """Phase 2 dummy routing keys off the structured_output model class, not text.
+
+    Proves issue #4252's fix: ``DummyLLMClient.structured_output`` forwards the
+    real ``output_model`` class into ``complete_json``, which routes these six
+    classes deterministically by class identity (see
+    ``_branding_phase2_structured_output_stub``). So even
+    ``_UNROUTED_SYSTEM_PROMPT`` — carrying none of the legacy text anchors —
+    still yields a schema-valid payload, unlike the remaining classes covered
+    by ``test_generic_prompt_payload_is_rejected_by_every_schema``.
+    """
+    output = _drive_structured_output(output_model, _UNROUTED_SYSTEM_PROMPT)
+    assert isinstance(output, output_model)
 
 
 def test_archetype_stub_matches_the_form_its_prompt_asks_for() -> None:

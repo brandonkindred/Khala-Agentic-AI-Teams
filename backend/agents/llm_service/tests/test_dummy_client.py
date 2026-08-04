@@ -74,6 +74,60 @@ def test_dummy_complete_json_accepts_schema_kwarg_as_noop() -> None:
     assert isinstance(j, dict)
 
 
+def test_structured_output_model_routes_by_class_despite_misleading_prompt() -> None:
+    """structured_output_model must win over text anchors for a known class.
+
+    The system prompt below deliberately carries MessageMapper's anchors
+    (``messaging_framework``/``audience_message_maps``), which would route to
+    a *different* Phase 2 payload under pure text scanning. Passing
+    ``structured_output_model=TaglineOutput`` must still return the
+    TaglineOutput-shaped payload — proving routing no longer depends on
+    prompt wording (issue #4252).
+    """
+    from branding_team.models import TaglineOutput
+
+    c = DummyLLMClient()
+    misleading_system_prompt = (
+        "Carry forward messaging_framework and audience_message_maps from prior nodes."
+    )
+    j = c.complete_json(
+        "go",
+        system_prompt=misleading_system_prompt,
+        temperature=0.0,
+        structured_output_model=TaglineOutput,
+    )
+    assert "tagline_rationale" in j
+    assert "elevator_pitches" in j
+    assert "messaging_framework" not in j
+    TaglineOutput.model_validate(j)
+
+
+def test_structured_output_model_none_preserves_text_routing() -> None:
+    """Omitting structured_output_model must not change any existing behavior."""
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "Generate architecture_document with components and overview for the system.",
+        temperature=0.0,
+    )
+    assert "architecture_document" in j
+
+
+def test_unrecognized_structured_output_model_falls_back_to_text_routing() -> None:
+    """An unrecognized structured_output_model must not interfere with the
+    existing text-anchor scan (e.g. Phase 1 classes, which aren't part of
+    the Phase 2 deterministic routing table).
+    """
+    from branding_team.models import BrandDiscoveryAuditOutput
+
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "Generate architecture_document with components and overview for the system.",
+        temperature=0.0,
+        structured_output_model=BrandDiscoveryAuditOutput,
+    )
+    assert "architecture_document" in j
+
+
 def test_content_to_text_serializes_json_tool_result_blocks() -> None:
     content = [
         {"json": {"request": "architecture_document with components and overview"}},
@@ -270,6 +324,25 @@ async def test_dummy_structured_output_yields_validated_model() -> None:
     assert "output" in events[0]
     assert isinstance(events[0]["output"], _FallbackStub)
     assert events[0]["output"].status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dummy_structured_output_forwards_model_for_deterministic_routing() -> None:
+    """structured_output() must forward output_model so complete_json can route
+    by class identity — the system prompt below carries none of the Phase 2
+    text anchors, so only class-based routing can produce a valid payload.
+    """
+    from branding_team.models import MessagingFrameworkOutput
+
+    c = DummyLLMClient()
+    prompt = [{"role": "user", "content": [{"text": "hello"}]}]
+    events = []
+    async for event in c.structured_output(
+        MessagingFrameworkOutput, prompt, system_prompt="You are a helpful assistant."
+    ):
+        events.append(event)
+    assert len(events) == 1
+    assert isinstance(events[0]["output"], MessagingFrameworkOutput)
 
 
 @pytest.mark.asyncio
