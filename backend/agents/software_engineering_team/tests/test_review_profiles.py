@@ -267,3 +267,39 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
         CodeReviewInput(files={"a.py": "x = 1"}, skip_false_positive_filter=True)
     )
     assert len(calls) == 1  # unchanged — no second call
+
+
+def test_skip_tail_passes_field_default_off() -> None:
+    """The skip_tail_passes input field defaults to False and is settable."""
+    assert CodeReviewInput(code="x").skip_tail_passes is False
+    assert CodeReviewInput(code="x", skip_tail_passes=True).skip_tail_passes
+
+
+def test_skip_tail_passes_bypasses_both_tail_passes(monkeypatch) -> None:
+    """skip_tail_passes=True bypasses both the false-positive filter and the
+    merged architecture/side-effect pass; the default runs both once."""
+    filter_calls: list[tuple] = []
+    merged_calls: list[tuple] = []
+
+    def _filter_spy(llm, input_data, issues, repo_reader=None, index=None):
+        filter_calls.append((llm, input_data, issues))
+        return issues
+
+    def _merged_spy(llm, input_data, repo_reader=None, index=None):
+        merged_calls.append((llm, input_data))
+        return ([], [])
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter_spy)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged_spy)
+
+    # Default: both tail passes run once.
+    CodeReviewAgent(_IssueProbe()).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    assert len(filter_calls) == 1
+    assert len(merged_calls) == 1
+
+    # Skipped: neither tail pass runs.
+    CodeReviewAgent(_IssueProbe()).run(
+        CodeReviewInput(files={"a.py": "x = 1"}, skip_tail_passes=True)
+    )
+    assert len(filter_calls) == 1  # unchanged — no second call
+    assert len(merged_calls) == 1  # unchanged — no second call

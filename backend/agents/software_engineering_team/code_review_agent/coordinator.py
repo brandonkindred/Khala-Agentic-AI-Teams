@@ -502,7 +502,14 @@ def _run_tail_passes(
         - ``shared_index`` was built from the same ``input_data``/``repo_reader``.
 
     Postconditions:
-        - Returns a :class:`_TailPassResult` whose ``issues`` is the
+        - When ``input_data.skip_tail_passes`` is set, neither pass runs (no LLM
+          calls at all): returns a :class:`_TailPassResult` whose ``issues`` is
+          ``genuine_issues`` unchanged and whose ``has_additive_findings`` is
+          always False. This is a strict superset of
+          ``skip_false_positive_filter``'s effect (setting both is redundant,
+          not conflicting) — a lightweight mode for a fallback caller that
+          wants speed over full tail-pass rigor.
+        - Otherwise, returns a :class:`_TailPassResult` whose ``issues`` is the
           false-positive-filtered (or, when ``input_data.skip_false_positive_filter``
           is set, unfiltered) ``genuine_issues``, followed by the architecture
           findings, followed by the side-effect findings — the same order the
@@ -514,6 +521,9 @@ def _run_tail_passes(
           scheduled, or ``_map_parallelism()`` resolves to <= 1, the passes run
           sequentially. Otherwise they run concurrently via ``parallel_map``.
     """
+    if input_data.skip_tail_passes:
+        return _TailPassResult(issues=genuine_issues, has_additive_findings=False)
+
     calls: List[Tuple[str, Callable[[], object]]] = []
     if not input_data.skip_false_positive_filter:
         calls.append(
@@ -614,7 +624,10 @@ def run_coordinator(
           ``_run_tail_passes``). The merged pass's response is partitioned into
           architecture-consistency and side-effect-impact finding lists before
           deduplication and approval, preserving the downstream behavior of the
-          former separate passes.
+          former separate passes. When ``input_data.skip_tail_passes`` is set,
+          neither tail pass runs at all — a lightweight mode for a fallback
+          caller that wants speed over full tail-pass rigor (see
+          ``_run_tail_passes``).
         - After the false-positive filter and the merged additive pass, related
           ``side-effects`` findings may be optionally consolidated (gated by
           ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
@@ -866,6 +879,8 @@ def run_coordinator(
     # same dedupe/severity-gate/merge machinery below. The merged halves are
     # restricted internally to the default CODE_REVIEW profile -- see their own
     # docstrings for why the other profiles must never receive these findings.
+    # ``input_data.skip_tail_passes`` skips both passes entirely (no LLM calls),
+    # a lightweight mode for a fallback caller that wants speed over rigor.
     tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,
