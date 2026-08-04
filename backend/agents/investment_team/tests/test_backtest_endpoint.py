@@ -6,12 +6,17 @@ gone; execution now flows through the unified ``run_backtest`` event loop
 that turns strategy ``submit_order`` calls into ``TradeRecord`` objects via
 ``FillSimulator``. These tests lock in the current public behaviour:
 
-* Missing ``strategy_code`` → HTTP 422 fast-fail.
+* Missing ``strategy_code`` → ``MissingStrategyCodeError`` fast-fail.
+* No market data for the requested symbols/range → ``MarketDataUnavailableError``.
 * A strategy that fails to import (no ``Strategy`` subclass / bad module)
-  surfaces as HTTP 422 from the subprocess harness error.
-* A strategy that reads a non-existent forward field triggers a
-  look-ahead-violation-classified 422.
+  surfaces as ``StrategyExecutionError`` from the subprocess harness error.
+* A strategy that reads a non-existent forward field raises
+  ``LookaheadViolationError``.
 * A well-formed strategy produces metrics + trades.
+
+``_run_real_data_backtest`` raises these domain exceptions (defined in
+``investment_team.exceptions``) rather than ``HTTPException`` so it stays
+usable from non-HTTP callers; HTTP-facing callers translate them.
 """
 
 from __future__ import annotations
@@ -20,8 +25,13 @@ import textwrap
 from typing import Dict, List
 
 import pytest
-from fastapi import HTTPException
 
+from investment_team.exceptions import (
+    LookaheadViolationError,
+    MarketDataUnavailableError,
+    MissingStrategyCodeError,
+    StrategyExecutionError,
+)
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
@@ -165,7 +175,7 @@ _LOOKAHEAD_CODE = textwrap.dedent('''\
 
 
 def test_run_real_data_backtest_returns_422_when_no_strategy_code() -> None:
-    """Strategies without ``strategy_code`` must return HTTP 422.
+    """Strategies without ``strategy_code`` must raise ``MissingStrategyCodeError``.
 
     The LLM-per-bar fallback was removed in PR 1; only Strategy-Lab-generated
     Python scripts may produce trades.
@@ -175,11 +185,25 @@ def test_run_real_data_backtest_returns_422_when_no_strategy_code() -> None:
     strategy = _sample_strategy(code=None)
     config = _sample_config()
 
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(MissingStrategyCodeError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
 
-    assert excinfo.value.status_code == 422
-    assert "strategy_code is required" in excinfo.value.detail
+    assert "strategy_code is required" in str(excinfo.value)
+
+
+def test_run_real_data_backtest_raises_when_no_market_data(monkeypatch) -> None:
+    """An empty market-data fetch must raise ``MarketDataUnavailableError``."""
+    from investment_team.api import main as api_main
+
+    _install_fake_market_service(monkeypatch, {})
+
+    strategy = _sample_strategy(code=_BUY_AND_HOLD_CODE)
+    config = _sample_config()
+
+    with pytest.raises(MarketDataUnavailableError) as excinfo:
+        api_main._run_real_data_backtest(strategy, config)
+
+    assert "Failed to fetch historical market data" in str(excinfo.value)
 
 
 def test_run_real_data_backtest_succeeds_with_well_formed_strategy(monkeypatch) -> None:
@@ -204,7 +228,7 @@ def test_run_real_data_backtest_succeeds_with_well_formed_strategy(monkeypatch) 
 
 
 def test_run_real_data_backtest_422_on_malformed_strategy_module(monkeypatch) -> None:
-    """Code that doesn't define a Strategy subclass surfaces as HTTP 422."""
+    """Code that doesn't define a Strategy subclass raises ``StrategyExecutionError``."""
     from investment_team.api import main as api_main
 
     market_data = {"AAA": _sample_bars()}
@@ -213,14 +237,13 @@ def test_run_real_data_backtest_422_on_malformed_strategy_module(monkeypatch) ->
     strategy = _sample_strategy(code=_NO_STRATEGY_CLASS_CODE)
     config = _sample_config()
 
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(StrategyExecutionError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
-    assert excinfo.value.status_code == 422
-    assert "execution failed" in excinfo.value.detail.lower()
+    assert "execution failed" in str(excinfo.value).lower()
 
 
 def test_run_real_data_backtest_422_on_lookahead_violation(monkeypatch) -> None:
-    """A strategy that touches a non-existent forward field triggers 422."""
+    """A strategy that touches a non-existent forward field raises ``LookaheadViolationError``."""
     from investment_team.api import main as api_main
 
     market_data = {"AAA": _sample_bars()}
@@ -229,7 +252,6 @@ def test_run_real_data_backtest_422_on_lookahead_violation(monkeypatch) -> None:
     strategy = _sample_strategy(code=_LOOKAHEAD_CODE)
     config = _sample_config()
 
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(LookaheadViolationError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
-    assert excinfo.value.status_code == 422
-    assert "look-ahead" in excinfo.value.detail.lower()
+    assert "look-ahead" in str(excinfo.value).lower()

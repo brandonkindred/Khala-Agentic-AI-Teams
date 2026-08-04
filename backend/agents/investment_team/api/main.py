@@ -21,6 +21,13 @@ from investment_team.agents import (
     InvestmentCommitteeAgent,
     PolicyGuardianAgent,
 )
+from investment_team.exceptions import (
+    InvestmentBacktestError,
+    LookaheadViolationError,
+    MarketDataUnavailableError,
+    MissingStrategyCodeError,
+    StrategyExecutionError,
+)
 from investment_team.market_data_cache.postgres import SCHEMA as MD_CACHE_SCHEMA
 from investment_team.market_lab_data import (
     FreeTierMarketDataProvider,
@@ -795,7 +802,12 @@ def get_profile(user_id: str) -> GetProfileResponse:
 
 @app.post("/proposals/create", response_model=CreateProposalResponse)
 def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
-    """Create a new portfolio proposal (runs as a Temporal workflow)."""
+    """Create a new portfolio proposal (runs as a Temporal workflow).
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          missing ``proposal``.
+    """
     with _lock:
         ips = _profiles.get(request.user_id)
 
@@ -808,6 +820,12 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         {"proposal_id": proposal_id, "request": request.model_dump(mode="json")},
         key=proposal_id,
     )
+    if not isinstance(result, dict) or "proposal" not in result:
+        logger.error("Invalid advisory response for proposal %s: %r", proposal_id, result)
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return CreateProposalResponse(
         proposal_id=proposal_id, proposal=PortfolioProposal.model_validate(result["proposal"])
     )
@@ -827,7 +845,12 @@ def get_proposal(proposal_id: str) -> GetProposalResponse:
 def validate_proposal(
     proposal_id: str, request: ValidateProposalRequest
 ) -> ValidateProposalResponse:
-    """Validate a portfolio proposal against the user's IPS."""
+    """Validate a portfolio proposal against the user's IPS.
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          missing ``valid`` or ``violations``.
+    """
     with _lock:
         proposal = _proposals.get(proposal_id)
         ips = _profiles.get(request.user_id)
@@ -842,6 +865,14 @@ def validate_proposal(
         {"proposal_id": proposal_id, "user_id": request.user_id},
         key=proposal_id,
     )
+    if not isinstance(result, dict) or "valid" not in result or "violations" not in result:
+        logger.error(
+            "Invalid advisory response for proposal %s validation: %r", proposal_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return ValidateProposalResponse(
         proposal_id=proposal_id,
         valid=result["valid"],
@@ -894,7 +925,12 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
 def validate_strategy(
     strategy_id: str, request: ValidateStrategyRequest
 ) -> ValidateStrategyResponse:
-    """Run validation checks on a strategy."""
+    """Run validation checks on a strategy.
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          missing ``validation``, ``passed``, or ``failures``.
+    """
     with _lock:
         strategy = _strategies.get(strategy_id)
 
@@ -906,6 +942,15 @@ def validate_strategy(
         {"strategy_id": strategy_id, "request": request.model_dump(mode="json")},
         key=strategy_id,
     )
+    required_keys = ("validation", "passed", "failures")
+    if not isinstance(result, dict) or any(key not in result for key in required_keys):
+        logger.error(
+            "Invalid advisory response for strategy %s validation: %r", strategy_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return ValidateStrategyResponse(
         strategy_id=strategy_id,
         validation=ValidationReport.model_validate(result["validation"]),
@@ -966,8 +1011,8 @@ def _run_backtest_background(
         - On the success path: job status becomes RUNNING then COMPLETED with a
           serialized ``RunBacktestResponse``; a new ``BacktestRecord`` is stored
           under ``_backtests[backtest_id]``
-        - On ``HTTPException`` or other exceptions: job status becomes FAILED with
-          an error string, unless a cancel check already returned
+        - On ``InvestmentBacktestError`` or other exceptions: job status becomes
+          FAILED with an error string, unless a cancel check already returned
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
           without writing COMPLETED or FAILED so the cancelled status visible at
           that check is preserved. Updates use unconditional ``_bt_update_job``,
@@ -1003,10 +1048,10 @@ def _run_backtest_background(
             result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
             backtest_id=backtest_id,
         )
-    except HTTPException as exc:
+    except InvestmentBacktestError as exc:
         if _bt_is_job_cancelled(job_id):
             return
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc.detail))
+        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
         if _bt_is_job_cancelled(job_id):
@@ -1142,6 +1187,12 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         applies the activity's returned audit-log/escalation delta to the local
         ``_workflow_state`` so those reads stay consistent regardless of which
         process ran the activity.
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          missing ``decision``, an ``escalation_enqueued`` payload missing
+          ``queue``/``payload_id``/``priority``, or an ``escalation_enqueued
+          ["queue"]`` that isn't a known ``_workflow_state.queues`` key.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1171,13 +1222,42 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         },
         key=request.strategy_id,
     )
+    if not isinstance(result, dict) or "decision" not in result:
+        logger.error(
+            "Invalid advisory response for strategy %s promotion: %r", request.strategy_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     with _lock:
         _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
         escalation = result.get("escalation_enqueued")
         if escalation:
-            _workflow_state.queues[escalation["queue"]].append(
+            required_escalation_keys = ("queue", "payload_id", "priority")
+            if not isinstance(escalation, dict) or any(
+                key not in escalation for key in required_escalation_keys
+            ):
+                logger.error(
+                    "Invalid escalation payload for strategy %s: %r",
+                    request.strategy_id,
+                    escalation,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="Advisory execution returned unexpected escalation payload",
+                )
+            queue_name = escalation["queue"]
+            if queue_name not in _workflow_state.queues:
+                logger.error(
+                    "Unknown escalation queue %r for strategy %s", queue_name, request.strategy_id
+                )
+                raise HTTPException(
+                    status_code=502, detail=f"Invalid escalation queue: {queue_name}"
+                )
+            _workflow_state.queues[queue_name].append(
                 QueueItem(
-                    queue=escalation["queue"],
+                    queue=queue_name,
                     payload_id=escalation["payload_id"],
                     priority=escalation["priority"],
                 )
@@ -1217,7 +1297,12 @@ def workflow_queues() -> QueuesResponse:
 
 @app.post("/memos", response_model=CreateMemoResponse)
 def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
-    """Generate an investment committee memo (runs as a Temporal workflow)."""
+    """Generate an investment committee memo (runs as a Temporal workflow).
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          missing ``memo``.
+    """
     result = _execute_advisory(
         "committee_memo",
         {
@@ -1228,6 +1313,12 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
+    if not isinstance(result, dict) or "memo" not in result:
+        logger.error("Invalid advisory response for memo (user %s): %r", request.user_id, result)
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(result["memo"]))
 
 
@@ -1250,21 +1341,33 @@ def _run_real_data_backtest(
 
     Only Strategy-Lab-generated scripts may produce trades. The prior
     LLM-per-bar fallback has been removed; strategies without
-    ``strategy_code`` now return 422.
+    ``strategy_code`` raise ``MissingStrategyCodeError``.
+
+    This is a service-layer helper — it raises the domain exceptions in
+    ``investment_team.exceptions`` rather than ``HTTPException``, so it stays
+    usable from non-HTTP callers (Temporal activities, CLI tools, tests).
+    Callers with an HTTP request context are responsible for translating
+    those exceptions into the appropriate ``HTTPException``.
 
     Returns (BacktestResult, trade_ledger).
+
+    Raises:
+        - ``MissingStrategyCodeError`` if ``strategy.strategy_code`` is unset.
+        - ``MarketDataUnavailableError`` if no market data could be fetched
+          for the requested symbols/range.
+        - ``LookaheadViolationError`` if the generated script accessed
+          look-ahead (future) market data.
+        - ``StrategyExecutionError`` if the generated script otherwise fails
+          during execution.
     """
     # Lazy import: yfinance is slow to import; defer until a request arrives.
     from investment_team.market_data_service import MarketDataService
 
     if not strategy.strategy_code:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "strategy_code is required. The legacy LLM-per-bar backtest "
-                "path has been removed; regenerate the strategy via the "
-                "Strategy Lab ideation agent."
-            ),
+        raise MissingStrategyCodeError(
+            "strategy_code is required. The legacy LLM-per-bar backtest "
+            "path has been removed; regenerate the strategy via the "
+            "Strategy Lab ideation agent."
         )
 
     market_service = MarketDataService()
@@ -1284,9 +1387,8 @@ def _run_real_data_backtest(
     )
 
     if not market_data:
-        raise HTTPException(
-            status_code=502,
-            detail="Failed to fetch historical market data. Please check the date range and try again.",
+        raise MarketDataUnavailableError(
+            "Failed to fetch historical market data. Please check the date range and try again."
         )
 
     from investment_team.trading_service.modes.backtest import run_backtest
@@ -1303,21 +1405,15 @@ def _run_real_data_backtest(
     service_result = run.service_result
 
     if service_result.lookahead_violation:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Strategy code attempted to access look-ahead data: {(service_result.error or '')}"
-            ),
+        raise LookaheadViolationError(
+            f"Strategy code attempted to access look-ahead data: {(service_result.error or '')}"
         )
     if service_result.error:
         # Any service-level error must fail the request — mid-run crashes
         # append closed trades *before* raising, so a non-empty ledger here
         # still represents a partial/failed execution and must not be
         # reported as a successful backtest.
-        raise HTTPException(
-            status_code=422,
-            detail=f"Strategy code execution failed: {service_result.error}",
-        )
+        raise StrategyExecutionError(f"Strategy code execution failed: {service_result.error}")
 
     logger.info(
         "Backtest complete for %s: %d trades",
@@ -4260,7 +4356,7 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
           created ``AdvisorSession``.
 
     Raises:
-        - ``HTTPException(500)`` if the advisory workflow returns a result
+        - ``HTTPException(502)`` if the advisory workflow returns a result
           missing ``advisor_message`` or ``session``.
     """
     session_id = f"adv-{uuid.uuid4().hex}"
@@ -4271,7 +4367,7 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
     )
     if "advisor_message" not in result or "session" not in result:
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor execution returned unexpected response structure",
         )
     return StartAdvisorSessionResponse(
@@ -4296,7 +4392,7 @@ def send_advisor_message(
 
     Raises:
         - ``HTTPException(404)`` if ``session_id`` does not match a known session.
-        - ``HTTPException(500)`` if the advisory workflow returns a result
+        - ``HTTPException(502)`` if the advisory workflow returns a result
           missing ``advisor_message``, ``session_status``, ``current_topic``,
           or ``missing_fields``.
     """
@@ -4314,7 +4410,7 @@ def send_advisor_message(
     required_keys = ("advisor_message", "session_status", "current_topic", "missing_fields")
     if any(key not in result for key in required_keys):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor execution returned unexpected response structure",
         )
     return SendAdvisorMessageResponse(
@@ -4353,7 +4449,7 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
     Raises:
         - ``HTTPException(404)`` if ``session_id`` does not match a known session.
         - ``HTTPException(400)`` if required fields are still missing.
-        - ``HTTPException(500)`` if the advisory workflow returns a result
+        - ``HTTPException(502)`` if the advisory workflow returns a result
           missing ``user_id`` or ``ips``.
     """
     with _lock:
@@ -4377,7 +4473,7 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
     result = _execute_advisory("advisor_complete", {"session_id": session_id}, key=session_id)
     if "user_id" not in result or "ips" not in result:
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor completion returned unexpected response structure",
         )
     return CompleteAdvisorSessionResponse(

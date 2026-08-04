@@ -8,7 +8,7 @@ fixtures. Targets:
 * ``_env_positive_int`` env-var parsing.
 * ``_normalize_strategy_lab_asset_class`` + ``_build_strategy_from_ideation``
   builders.
-* ``_run_backtest_background`` happy + HTTPException + generic-exception
+* ``_run_backtest_background`` happy + InvestmentBacktestError + generic-exception
   + early-cancel branches.
 * ``_purge_strategy_lab_job_storage`` + ``_delete_paper_sessions_for_lab_record``.
 * ``_resolve_fee_overrides`` (0.0 sentinel handling).
@@ -584,22 +584,21 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
     assert state.get("backtest_id", "").startswith("bt-")
 
 
-def test_run_backtest_background_handles_http_exception(
+def test_run_backtest_background_handles_investment_backtest_error(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
-    from fastapi import HTTPException
-
     from investment_team.api import main as api_main
+    from investment_team.exceptions import StrategyExecutionError
     from investment_team.models import BacktestConfig, StrategySpec
 
     state: Dict[str, Any] = {}
     monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
     monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
 
-    def _raises_http(strategy, config):
-        raise HTTPException(status_code=422, detail="bad strategy")
+    def _raises_domain_error(strategy, config):
+        raise StrategyExecutionError("bad strategy")
 
-    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_http)
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_domain_error)
 
     strategy = StrategySpec(
         strategy_id="s",

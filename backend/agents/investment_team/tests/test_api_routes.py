@@ -217,6 +217,17 @@ def test_create_proposal_404_when_no_ips(api_client) -> None:
     assert "No IPS found" in resp.json()["detail"]
 
 
+def test_create_proposal_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'proposal' surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
+    resp = api_client.post("/proposals/create", json=_proposal_body())
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_get_proposal_not_found(api_client) -> None:
     resp = api_client.get("/proposals/nope")
     assert resp.status_code == 200
@@ -242,6 +253,19 @@ def test_validate_proposal_404_when_ips_missing(api_client) -> None:
         json={"user_id": "ghost"},
     )
     assert vresp.status_code == 404
+
+
+def test_validate_proposal_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/proposals/create", json=_proposal_body())
+    pid = create.json()["proposal_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"valid": True})
+    resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +368,21 @@ def test_validate_strategy_custom_checks_with_failure(api_client) -> None:
     body = resp.json()
     assert body["passed"] is False
     assert "shoddy Sharpe" in body["failures"]
+
+
+def test_validate_strategy_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"passed": True})
+    resp = api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +497,78 @@ def test_promotion_decision_updates_workflow_status_in_api_process(api_client) -
     assert any(item["payload_id"] == sid for item in queues["queues"]["escalation"])
 
 
+def _setup_promotion_ready_strategy(api_client) -> str:
+    """Create a profile + strategy + validation report so /promotions/decide can run."""
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+    api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    return sid
+
+
+def _promotion_decision_body(sid: str) -> Dict[str, Any]:
+    return {
+        "strategy_id": sid,
+        "user_id": "u1",
+        "proposer_agent_id": "p1",
+        "approver_agent_id": "a1",
+    }
+
+
+def test_promotion_decision_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'decision' surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_malformed_escalation_payload(api_client, monkeypatch) -> None:
+    """An escalation_enqueued payload missing payload_id/priority surfaces as a 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {},
+            "escalation_enqueued": {"queue": "escalation"},
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_unknown_escalation_queue(api_client, monkeypatch) -> None:
+    """An escalation_enqueued['queue'] not in _workflow_state.queues surfaces as a 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {},
+            "escalation_enqueued": {
+                "queue": "not-a-real-queue",
+                "payload_id": sid,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert "not-a-real-queue" in resp.json()["detail"]
+
+
 def test_workflow_status_and_queues(api_client) -> None:
     resp = api_client.get("/workflow/status")
     assert resp.status_code == 200
@@ -485,6 +596,24 @@ def test_create_memo_returns_memo(api_client) -> None:
     body = resp.json()
     assert body["memo"]["recommendation"] == "Buy"
     assert "bear case" in body["memo"]["dissenting_views"]
+
+
+def test_create_memo_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'memo' surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": ["bear case"],
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -870,17 +999,17 @@ def test_get_advisor_session_returns_found_false_for_missing(api_client) -> None
     assert resp.json()["found"] is False
 
 
-def test_start_advisor_session_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
-    """A workflow result missing expected keys surfaces as a clean 500, not a KeyError."""
+def test_start_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing expected keys surfaces as a clean 502, not a KeyError."""
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"session": {}})
     resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
-    assert resp.status_code == 500
+    assert resp.status_code == 502
     assert resp.json()["detail"]
 
 
-def test_send_advisor_message_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+def test_send_advisor_message_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
     from investment_team.api import main as api_main
 
     start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
@@ -890,11 +1019,11 @@ def test_send_advisor_message_500_on_malformed_advisory_result(api_client, monke
         api_main, "_execute_advisory", lambda op, payload, *, key: {"advisor_message": "hi"}
     )
     resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
-    assert resp.status_code == 500
+    assert resp.status_code == 502
     assert resp.json()["detail"]
 
 
-def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+def test_complete_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
     from investment_team.api import main as api_main
 
     start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
@@ -906,5 +1035,5 @@ def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, m
         api_main, "_execute_advisory", lambda op, payload, *, key: {"user_id": "u1"}
     )
     resp = api_client.post(f"/advisor/sessions/{sid}/complete")
-    assert resp.status_code == 500
+    assert resp.status_code == 502
     assert resp.json()["detail"]
