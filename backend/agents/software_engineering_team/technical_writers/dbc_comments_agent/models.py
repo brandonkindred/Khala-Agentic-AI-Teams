@@ -14,6 +14,7 @@ class DbcCommentsStatus(str, Enum):
     STARTING = "starting"
     ANALYZING_CODE = "analyzing_code"
     ADDING_COMMENTS = "adding_comments"
+    NEEDS_RETRY = "needs_retry"
     COMMITTING = "committing"
     COMPLETE = "complete"
     FAILED = "failed"
@@ -68,6 +69,57 @@ class DbcCommentInsertion(BaseModel):
         default="add",
         description="'add' when the symbol has no existing comment, 'update' when this "
         "replaces an existing comment that was missing DbC sections",
+    )
+
+
+class DbcCommentsLLMResponse(BaseModel):
+    """Narrow LLM-authored shape for one DbC review call's response.
+
+    ``DbcCommentsAgent.run`` validates every reply against this model via
+    ``llm_service.complete_validated``, replacing the hand-rolled
+    ``.get()``/manual per-item ``DbcCommentInsertion(**entry)`` parsing the
+    agent used to apply to a raw ``complete_json_with_continuation`` reply.
+
+    ``insertions`` and ``already_compliant`` are required (no default): the
+    DbC prompt's own "Output format" section tells the model to always
+    emit both keys (an empty ``insertions: []`` when compliant), so a reply
+    missing either is a truncated/malformed response, not a legitimately
+    empty field -- it must fail validation and drive ``complete_validated``'s
+    corrective retry, not silently look like a clean, empty, compliant
+    response. This also means a single malformed insertion entry inside an
+    otherwise-valid list fails the WHOLE response, not just that one entry:
+    unlike the prior per-item try/except that logged and skipped a bad
+    entry, a malformed item is now treated the same as any other malformed
+    reply and drives the bounded retry, then the fail-loud path on
+    exhaustion -- see ``agent.run``.
+    """
+
+    insertions: List[DbcCommentInsertion] = Field(
+        description="Anchored comment insertions to add or update, one per symbol needing a "
+        "new or updated DbC comment. Empty when already_compliant is True.",
+    )
+    already_compliant: bool = Field(
+        description="True if ALL code already has proper DbC comments and no changes are needed",
+    )
+    summary: str = Field(
+        default="",
+        description="Summary message for the coding agent describing what was changed or "
+        "praising compliance",
+    )
+    suggested_commit_message: str = Field(
+        default="docs(dbc): add Design by Contract comments",
+        description="Conventional Commits format commit message",
+    )
+    comments_added: int = Field(
+        default=0,
+        description="Model's self-reported count of new comments added -- informational only; "
+        "DbcCommentsAgent.run never trusts this, it recomputes the real count from the "
+        "deterministic merge (see merge.apply_dbc_insertions).",
+    )
+    comments_updated: int = Field(
+        default=0,
+        description="Model's self-reported count of comments updated -- informational only, "
+        "same caveat as comments_added.",
     )
 
 
