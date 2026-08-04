@@ -3903,9 +3903,13 @@ def _run_live_paper_trading_background(
         strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
 
         tx_cost, slip = _resolve_fee_overrides(request)
+        # Captured once: two separate datetime.now() calls could straddle
+        # midnight and produce a start/end date that spans two days for a
+        # config meant to represent a single live trading day.
+        today = datetime.now(tz=timezone.utc).date().isoformat()
         bt_config = _BC(
-            start_date=datetime.now(tz=timezone.utc).date().isoformat(),
-            end_date=datetime.now(tz=timezone.utc).date().isoformat(),
+            start_date=today,
+            end_date=today,
             initial_capital=request.initial_capital,
             transaction_cost_bps=tx_cost,
             slippage_bps=slip,
