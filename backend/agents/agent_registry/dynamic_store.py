@@ -363,7 +363,7 @@ def get(agent_id: str) -> AgentManifest | None:
     return _do()
 
 
-def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
+def all() -> list[AgentManifest]:  # noqa: A001 - intentional: mirrors the public AgentRegistry.all() method name
     """Return every dynamic manifest.
 
     Preconditions:
