@@ -11,7 +11,7 @@ Implements a 5-phase brand development framework:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -672,6 +672,12 @@ class GovernanceOutput(BaseModel):
     wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
 
 
+# Individual list/dict items, not just container length, must be non-empty —
+# a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
+# strings, undermining every "requires non-empty content" docstring below.
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+
+
 class ApprovalWorkflowOutput(BaseModel):
     """Agent-facing approval workflow; requires non-empty fields.
 
@@ -682,7 +688,7 @@ class ApprovalWorkflowOutput(BaseModel):
     """
 
     asset_type: str = Field(min_length=1)
-    approvers: List[str] = Field(min_length=1)
+    approvers: List[NonEmptyStr] = Field(min_length=1)
     sla: str = Field(min_length=1)
     escalation_path: str = Field(min_length=1)
 
@@ -698,7 +704,7 @@ class WikiEntryOutput(BaseModel):
 
     title: str = Field(min_length=1)
     summary: str = Field(min_length=1)
-    owners: List[str] = Field(min_length=1)
+    owners: List[NonEmptyStr] = Field(min_length=1)
     update_cadence: str = Field(min_length=1)
 
 
@@ -723,7 +729,7 @@ class OwnershipOutput(BaseModel):
     """
 
     ownership_model: str = Field(min_length=1)
-    decision_authority: Dict[str, str] = Field(min_length=1)
+    decision_authority: Dict[str, NonEmptyStr] = Field(min_length=1)
 
 
 class ApprovalWorkflowsOutput(BaseModel):
@@ -737,7 +743,7 @@ class ApprovalWorkflowsOutput(BaseModel):
     """
 
     approval_workflows: List[ApprovalWorkflowOutput] = Field(min_length=3, max_length=5)
-    agency_briefing_protocols: List[str] = Field(min_length=3, max_length=5)
+    agency_briefing_protocols: List[NonEmptyStr] = Field(min_length=3, max_length=5)
 
 
 class AssetWikiOutput(BaseModel):
@@ -749,7 +755,7 @@ class AssetWikiOutput(BaseModel):
     ``WikiEntry``) so each entry's fields are individually required.
     """
 
-    asset_management_guidance: List[str] = Field(min_length=3, max_length=5)
+    asset_management_guidance: List[NonEmptyStr] = Field(min_length=3, max_length=5)
     wiki_backlog: List[WikiEntryOutput] = Field(min_length=4, max_length=6)
 
 
@@ -761,7 +767,7 @@ class TrainingOnboardingOutput(BaseModel):
     initiatives".
     """
 
-    training_onboarding_plan: List[str] = Field(min_length=4, max_length=6)
+    training_onboarding_plan: List[NonEmptyStr] = Field(min_length=4, max_length=6)
 
 
 class BrandHealthKPIsOutput(BaseModel):
@@ -775,7 +781,7 @@ class BrandHealthKPIsOutput(BaseModel):
 
     brand_health_kpis: List[BrandHealthKPIOutput] = Field(min_length=4, max_length=6)
     tracking_methodology: str = Field(min_length=1)
-    review_trigger_points: List[str] = Field(min_length=3, max_length=5)
+    review_trigger_points: List[NonEmptyStr] = Field(min_length=3, max_length=5)
 
 
 class EvolutionFrameworkOutput(BaseModel):
@@ -796,7 +802,7 @@ class BrandGuidelinesOutput(BaseModel):
     rules".
     """
 
-    brand_guidelines: List[str] = Field(min_length=5, max_length=8)
+    brand_guidelines: List[NonEmptyStr] = Field(min_length=5, max_length=8)
 
 
 # ---------------------------------------------------------------------------
