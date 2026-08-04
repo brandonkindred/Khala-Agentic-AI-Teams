@@ -55,6 +55,15 @@ class _FakeClient:
     def delete_job(self, job_id: str) -> bool:
         return self.jobs.pop(job_id, None) is not None
 
+    def mark_all_active_jobs_failed(self, reason: str) -> List[str]:
+        marked = []
+        for job_id, job in self.jobs.items():
+            if job.get("status") in ("pending", "running"):
+                job["status"] = "failed"
+                job["error"] = reason
+                marked.append(job_id)
+        return marked
+
 
 @pytest.fixture(autouse=True)
 def _reset_module_client(monkeypatch: pytest.MonkeyPatch):
@@ -164,6 +173,41 @@ def test_delete_job_returns_bool(_reset_module_client) -> None:
     create_job("j1")
     assert delete_job("j1") is True
     assert delete_job("j1") is False
+
+
+def test_mark_all_running_jobs_failed_marks_only_active(_reset_module_client) -> None:
+    from investment_team.shared.job_store import (
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_RUNNING,
+        create_job,
+        get_job,
+        mark_all_running_jobs_failed,
+        update_job,
+    )
+
+    create_job("j1")  # stays pending
+    create_job("j2")
+    update_job("j2", status=JOB_STATUS_RUNNING)
+    create_job("j3")
+    update_job("j3", status=JOB_STATUS_COMPLETED)
+
+    mark_all_running_jobs_failed("server shutdown")
+
+    assert get_job("j1")["status"] == "failed"
+    assert get_job("j2")["status"] == "failed"
+    assert get_job("j3")["status"] == JOB_STATUS_COMPLETED  # untouched
+
+
+def test_mark_all_running_jobs_failed_never_raises_on_client_error(
+    _reset_module_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from investment_team.shared import job_store
+
+    def _boom(self, reason: str) -> None:
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(type(_reset_module_client), "mark_all_active_jobs_failed", _boom)
+    job_store.mark_all_running_jobs_failed("server shutdown")  # must not raise
 
 
 def test_client_factory_lazy_creates_instance(monkeypatch: pytest.MonkeyPatch) -> None:

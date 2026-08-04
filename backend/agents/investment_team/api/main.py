@@ -91,6 +91,9 @@ from investment_team.shared.job_store import (
     list_jobs as _bt_list_jobs,
 )
 from investment_team.shared.job_store import (
+    mark_all_running_jobs_failed as _bt_mark_all_running_jobs_failed,
+)
+from investment_team.shared.job_store import (
     update_job as _bt_update_job,
 )
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
@@ -172,13 +175,22 @@ def _startup() -> None:
 
 def _run_investment_service_shutdown() -> (
     None
-):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; the meaningful exercise needs a live server. The body is a defensive try/except around the event-bus reaper teardown.
-    """Stop the per-job event-bus reaper thread before process exit.
+):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; the meaningful exercise needs a live server. The body is a defensive try/except around the event-bus reaper teardown and the backtest-job failure sweep.
+    """Stop the per-job event-bus reaper and fail any still-running backtest jobs.
+
+    ``run_backtest``'s Temporal-unavailable fallback runs backtests on a
+    ``daemon=True`` thread, which is killed abruptly on process shutdown
+    without updating the job's status — leaving it stuck at RUNNING forever
+    after a restart. This sweep closes that gap: any job the store still
+    considers pending/running when the process exits could not have
+    finished, so it is marked FAILED here instead.
 
     Postconditions:
         - The event-bus reaper thread is stopped (idempotent; a missing or
-          already-stopped reaper is a no-op). Never raises — teardown failures are
-          logged and swallowed so they cannot abort process shutdown.
+          already-stopped reaper is a no-op). All jobs still pending/running
+          in the backtest job store are marked FAILED (best-effort; a store
+          error is logged and swallowed). Never raises — teardown failures
+          are logged and swallowed so they cannot abort process shutdown.
     """
     try:
         from investment_team.api.job_event_bus import shutdown as _shutdown_event_bus
@@ -186,6 +198,11 @@ def _run_investment_service_shutdown() -> (
         _shutdown_event_bus()
     except Exception:
         logger.debug("Investment event-bus reaper shutdown skipped", exc_info=True)
+
+    try:
+        _bt_mark_all_running_jobs_failed("server shutdown")
+    except Exception:
+        logger.debug("Investment backtest job failure sweep skipped", exc_info=True)
 
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.

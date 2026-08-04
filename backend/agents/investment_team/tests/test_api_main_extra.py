@@ -1189,3 +1189,39 @@ def test_complete_advisor_session_builds_ips(api_client) -> None:
     body = done.json()
     assert body["user_id"] == "u-complete"
     assert body["ips"]["profile"]["user_id"] == "u-complete"
+
+
+# ---------------------------------------------------------------------------
+# Shutdown hook: event-bus reaper stop + backtest job failure sweep.
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    calls: List[str] = []
+    monkeypatch.setattr(
+        api_main, "_bt_mark_all_running_jobs_failed", lambda reason: calls.append(reason)
+    )
+    monkeypatch.setattr(
+        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
+    )
+
+    api_main._run_investment_service_shutdown()
+
+    assert calls == ["server shutdown"]
+
+
+def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising failure-sweep must NOT abort shutdown teardown."""
+    from investment_team.api import main as api_main
+
+    def _boom(reason: str) -> None:
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", _boom)
+    monkeypatch.setattr(
+        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
+    )
+
+    api_main._run_investment_service_shutdown()  # must not raise
