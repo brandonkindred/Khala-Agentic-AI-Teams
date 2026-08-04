@@ -4,7 +4,8 @@ Builds on ``test_api_routes`` and ``test_investment_team``'s cycle
 fixtures. Targets:
 
 * ``_PersistentDict`` __setitem__/__getitem__/__contains__/pop/values
-  via an in-process FakeJobClient.
+  via an in-process FakeJobClient, including __setitem__'s atomic-upsert
+  contract (no get_job read-before-write) and concurrent same-key writes.
 * ``_env_positive_int`` env-var parsing.
 * ``_normalize_strategy_lab_asset_class`` + ``_build_strategy_from_ideation``
   builders.
@@ -421,17 +422,23 @@ class _FakeJobClient:
         self.team = team
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self.get_job_calls = 0
+        self.create_job_calls = 0
+        self.update_job_calls = 0
 
     def get_job(self, job_id: str):
         with self._lock:
+            self.get_job_calls += 1
             return dict(self._jobs[job_id]) if job_id in self._jobs else None
 
     def create_job(self, job_id: str, *, status: str = "stored", **fields):
         with self._lock:
+            self.create_job_calls += 1
             self._jobs[job_id] = {"job_id": job_id, "status": status, **fields}
 
     def update_job(self, job_id: str, **fields):
         with self._lock:
+            self.update_job_calls += 1
             if job_id in self._jobs:
                 self._jobs[job_id].update(fields)
 
@@ -490,7 +497,8 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     fetched = pd["u1"]
     assert fetched["profile"]["user_id"] == "u1"
 
-    # Overwrite via __setitem__ — exercises the update_job branch.
+    # Overwrite via __setitem__ — always goes through create_job's atomic
+    # upsert now (see test_persistent_dict_setitem_always_upserts_no_read).
     pd["u1"] = ips
     assert pd.get("u1") is not None
 
@@ -523,6 +531,68 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # get() with default returns the default when key missing.
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
+
+
+def test_persistent_dict_setitem_always_upserts_no_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """__setitem__ must go straight to create_job's atomic upsert, with no
+    get_job read-before-write -- that read was the check-then-act race this
+    fix removes (issue #4213)."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("upsert_test")
+    client: _FakeJobClient = pd._client  # type: ignore[assignment]
+
+    pd["k"] = "first"
+    assert client.get_job_calls == 0
+    assert client.create_job_calls == 1
+    assert client.update_job_calls == 0
+    # Inspect the fake store directly rather than via pd.get(), which itself
+    # calls get_job and would confound the call-count assertions below.
+    assert client._jobs["k"]["data"] == {"value": "first"}
+
+    # Overwriting an existing key still never reads first, and still goes
+    # through create_job (the DB-layer ON CONFLICT DO UPDATE), not update_job.
+    pd["k"] = "second"
+    assert client.get_job_calls == 0
+    assert client.create_job_calls == 2
+    assert client.update_job_calls == 0
+    assert client._jobs["k"]["data"] == {"value": "second"}
+
+
+def test_persistent_dict_setitem_concurrent_writes_same_key_no_corruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many threads writing the same key concurrently must never raise or
+    leave the store split/corrupted -- regression guard for the
+    check-then-act race described in issue #4213 (two writers both
+    observing "no existing job" and both calling create_job)."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("concurrent_test")
+    errors: List[BaseException] = []
+
+    def _write(i: int) -> None:
+        try:
+            pd["shared-key"] = f"value-{i}"
+        except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_write, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert not errors
+    stored = pd.get("shared-key")
+    assert stored is not None
+    assert stored["value"].startswith("value-")
 
 
 def test_persistent_dict_values_return_annotation() -> None:
