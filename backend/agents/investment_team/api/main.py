@@ -2114,6 +2114,30 @@ def _dispatch_strategy_lab_run(
         ) from exc
 
 
+def _no_active_run_locked() -> None:
+    """Raise 409 if any strategy-lab run is currently running.
+
+    Lock-free core of ``_ensure_no_active_run``, factored out so a caller that
+    also needs to write ``_active_runs`` can run the check and the write
+    inside the *same* ``_lock`` acquisition — see ``resume_strategy_lab_run``,
+    which does exactly that so a concurrent transition for a *different*
+    run_id can't interleave between an isolated check and an isolated write
+    and slip past this guard.
+
+    Preconditions:
+        - Caller already holds ``_lock``.
+
+    Postconditions:
+        - Returns ``None`` when no entry in ``_active_runs`` has status
+          ``"running"``; otherwise raises ``HTTPException(409)``. Does not
+          mutate ``_active_runs`` and does not itself acquire or release
+          ``_lock``.
+    """
+    active = [r for r in _active_runs.values() if r["status"] == "running"]
+    if active:
+        raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+
+
 def _ensure_no_active_run() -> None:
     """Raise 409 if any strategy-lab run is currently running.
 
@@ -2121,7 +2145,7 @@ def _ensure_no_active_run() -> None:
     most one concurrent strategy-lab run.
 
     Preconditions:
-        - None.
+        - Caller does not already hold ``_lock`` (this acquires it itself).
 
     Postconditions:
         - Returns ``None`` when no entry in ``_active_runs`` has status
@@ -2129,9 +2153,7 @@ def _ensure_no_active_run() -> None:
           ``_active_runs``.
     """
     with _lock:
-        active = [r for r in _active_runs.values() if r["status"] == "running"]
-    if active:
-        raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+        _no_active_run_locked()
 
 
 def _require_run_transition_lock(run_id: str) -> threading.Lock:
@@ -2657,10 +2679,16 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict
           (the original ``RunStrategyLabRequest`` payload).
-        - No other run currently has status ``"running"``.
+        - No other run currently has status ``"running"``. Checked and
+          enforced atomically with the ``_active_runs[run_id]`` write below —
+          both happen inside the same ``_lock`` acquisition (via
+          ``_no_active_run_locked()``) — so a concurrent run/resume/restart
+          for a DIFFERENT run_id can't interleave between an isolated check
+          and an isolated write and also pass the check before either write
+          lands.
         - No other run/resume/restart transition for this run_id is
           currently in flight (checked first, before re-reading state or
-          calling ``_ensure_no_active_run()``).
+          calling ``_no_active_run_locked()``).
 
     Postconditions:
         - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
@@ -2710,8 +2738,6 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         total_cycles = request.batch_size * request.batch_count
         completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
 
-        _ensure_no_active_run()
-
         # Re-initialize in-memory state
         resumed_state = _build_run_state(
             run_id,
@@ -2729,7 +2755,13 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             completed_record_ids=state.get("completed_record_ids", []),
             completed_batches=completed_batches,
         )
+        # Check-and-write atomically under one `_lock` acquisition: an
+        # isolated `_ensure_no_active_run()` call followed by a separate
+        # `with _lock:` write would let a concurrent run/resume/restart for a
+        # DIFFERENT run_id interleave between the two and also pass its own
+        # check before either write lands, leaving two runs "running" at once.
         with _lock:
+            _no_active_run_locked()
             _active_runs[run_id] = resumed_state
         _persist_run_state(run_id, resumed_state)
 
