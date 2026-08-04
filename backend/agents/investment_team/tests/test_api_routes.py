@@ -678,6 +678,7 @@ def test_list_strategy_lab_jobs_empty(monkeypatch: pytest.MonkeyPatch, api_clien
 
 def test_get_strategy_lab_run_status_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
 
     monkeypatch.setattr(api_main, "_active_runs", {})
 
@@ -688,7 +689,12 @@ def test_get_strategy_lab_run_status_404(monkeypatch: pytest.MonkeyPatch, api_cl
         def get_job(self, job_id: str):
             return None
 
+    # Patch both: the status endpoint's own reconciliation client
+    # (api_main._get_lab_run_job_client) and the job-service fallback
+    # run_state.load_run_from_job_service builds its client from
+    # (run_state.get_lab_run_job_client) -- distinct module-level functions.
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+    monkeypatch.setattr(_run_state, "get_lab_run_job_client", lambda: _Stub())
 
     resp = api_client.get("/strategy-lab/runs/no-such/status")
     assert resp.status_code == 404
