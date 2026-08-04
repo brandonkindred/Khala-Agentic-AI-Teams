@@ -44,6 +44,9 @@ def is_otel_enabled() -> bool:
 # Initialization
 # ---------------------------------------------------------------------------
 
+_DEFAULT_MAX_ATTRIBUTE_LENGTH = 2048
+_DEFAULT_MAX_SPAN_ATTRIBUTES = 64
+
 
 def init_otel(
     *,
@@ -95,16 +98,18 @@ def init_otel(
         # Let users add extra resource attributes via the standard OTel env.
         resource = Resource.create(resource_attrs)
 
+        span_limits = _build_span_limits()
+
         span_exporter = _build_span_exporter()
         if span_exporter is not None:
-            tracer_provider = TracerProvider(resource=resource)
+            tracer_provider = TracerProvider(resource=resource, span_limits=span_limits)
             tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
             trace.set_tracer_provider(tracer_provider)
             _tracer_provider = tracer_provider
         else:
             # Still install a TracerProvider so spans are created correctly
             # even when no exporter is reachable — cheap and useful for tests.
-            tracer_provider = TracerProvider(resource=resource)
+            tracer_provider = TracerProvider(resource=resource, span_limits=span_limits)
             trace.set_tracer_provider(tracer_provider)
             _tracer_provider = tracer_provider
 
@@ -166,6 +171,44 @@ def _otlp_endpoint_configured() -> bool:
             "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
             "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
         )
+    )
+
+
+def _build_span_limits() -> Any:
+    """Resolve SpanLimits for the TracerProvider, matching docker-compose's defaults.
+
+    Non-compose runtime paths (thread-mode / local-dev / pytest) never source
+    docker-compose.yml's env block, so without this helper TracerProvider falls
+    back to the SDK's own unbounded default (max_attribute_length=None) and a
+    single oversized LLM prompt/response attribute can blow past Tempo's
+    max_bytes_per_trace ingest cap. Mirrors docker-compose.yml's defaults
+    (OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT:-2048 / OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT:-64)
+    so behavior is identical under compose or thread-mode/pytest.
+
+    IMPORTANT precedence note: SpanLimits.__init__ only consults the env var
+    itself when the corresponding constructor argument is None — passing an
+    explicit value bypasses its internal env lookup entirely. We resolve the
+    env vars ourselves first (env wins, else our default — same idiom as
+    _service_name above) so the *effective* precedence still favors the env var.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a SpanLimits with max_attribute_length from
+          OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT (default 2048, clamped >= 0) and
+          max_span_attributes from OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT (default 64,
+          clamped >= 0). Never raises: a missing/garbage env value falls back
+          to the documented default.
+    """
+    from opentelemetry.sdk.trace import SpanLimits
+
+    from shared.env import parse_int
+
+    max_attribute_length = parse_int("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", _DEFAULT_MAX_ATTRIBUTE_LENGTH, minimum=0)
+    max_span_attributes = parse_int("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", _DEFAULT_MAX_SPAN_ATTRIBUTES, minimum=0)
+    return SpanLimits(
+        max_attribute_length=max_attribute_length,
+        max_span_attributes=max_span_attributes,
     )
 
 

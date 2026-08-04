@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
+from shared.temporal.runner import signal_workflow_sync
 from software_engineering_team import hitl
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
@@ -14,6 +15,7 @@ from software_engineering_team.api.coding_team_models import (
     SubmitAnswersRequest,
 )
 from software_engineering_team.api.orchestration import ResumeSpawnResult
+from software_engineering_team.temporal.coding_team_constants import WORKFLOW_ID_PREFIX
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -23,10 +25,29 @@ router = APIRouter()
 def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> StatusResponse:
     """Submit answers to a paused coding-team job's pending questions and resume it.
 
-    The orchestrator's blocked wait loop clears on the stored answers (thread alive). If the
-    thread died (e.g. a server restart), the orchestrator is restarted automatically; only when
-    that is impossible (no usable plan/repo_path) are the answers merely stored with a
-    status_text directing the caller to POST /run/{job_id}/resume.
+    Two distinct pause mechanisms, told apart by whether the job record carries a
+    ``resume_token`` (set only by a ``pause_strategy="return"`` pause — see
+    ``pause_cycle._run_pause_cycle``; never set by a block-mode pause):
+
+    - **Temporal-native pause** (``resume_token`` present): the client must echo the same
+      ``resume_token`` it was given in the pause notification/status poll — a mismatch (or a
+      missing one, since a legitimate client can only have learned it from the job record)
+      raises 409, per the contract doc §3: without this check a client holding a stale token
+      would get a 200 while ``CodingTeamWorkflow.submit_answers`` silently drops the mismatched
+      signal, giving false confidence the answer landed. Once validated, there is no live
+      thread to unblock by clearing the job record's pause flag — ``run_pipeline_activity``
+      already returned, and ``CodingTeamWorkflow`` is durably waiting on a signal. Answers are
+      appended to ``submitted_answers`` WITHOUT clearing the pause envelope (the orchestrator's
+      own re-entry check owns that — see ``pause_cycle._check_pending_pause_reentry``, called
+      from ``coding_team_orchestrator.run_coding_team_orchestrator`` — clearing it here would
+      race a worker crash into silently dropping the answer), then ``CodingTeamWorkflow`` is signaled
+      directly so it re-invokes the pipeline activity with ``acknowledged_resume_token`` set to
+      this same token.
+    - **Thread-mode / GitHub-hook pause** (``resume_token`` absent): unchanged from before this
+      branch existed. The orchestrator's blocked wait loop clears on the stored answers (thread
+      alive). If the thread died (e.g. a server restart), the orchestrator is restarted
+      automatically; only when that is impossible (no usable plan/repo_path) are the answers
+      merely stored with a status_text directing the caller to POST /run/{job_id}/resume.
 
     Authentication/authorization is enforced by the unified API security gateway in front of all
     team mounts; like every other coding-team route, this endpoint assumes that perimeter.
@@ -35,6 +56,21 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> Status
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
     answers = _main._validate_answers(data, request)
+    resume_token = data.get("resume_token")
+    if resume_token:
+        if request.resume_token != resume_token:
+            raise HTTPException(
+                status_code=409,
+                detail="resume_token does not match this job's current pause; it is stale or "
+                "answers a pause that already resolved.",
+            )
+        _main.store_append_submitted_answers(job_id, answers)
+        signal_workflow_sync(
+            f"{WORKFLOW_ID_PREFIX}{job_id}",
+            "submit_answers",
+            {"resume_token": resume_token, "answers": answers},
+        )
+        return _main.get_status(job_id)
     _main.store_submit_answers(job_id, answers)
     if not _main._is_run_thread_alive(job_id):
         # Re-read the record after storing answers: the job may have been cancelled between the
