@@ -2,7 +2,7 @@
 
 ## Status
 
-**Decided.** This document states which of the five coexisting
+**Decided.** This document states which of the six coexisting
 "prompt-build → call LLM → parse → fallback" patterns is the default for
 **new** `software_engineering_team` agents, and documents each other
 pattern as a justified exception. It builds on
@@ -75,7 +75,7 @@ is not exhaustive:
 
 ### Pattern 2 — `run_structured_persona`
 
-Justified for the four existing top-level persona agents (security, QA,
+Justified for the three existing top-level persona agents (QA,
 accessibility, integration): Strands' `structured_output_model` forced
 tool-choice mechanism and a caller-authored, safe-by-default typed
 fallback are a good fit for a single top-level agent producing one typed
@@ -84,6 +84,15 @@ reasonably choose this pattern instead of Pattern 1 if its shape — one
 agent, one structured output type, one caller-owned fallback value — fits
 it better. See the audit's Pattern 2 section for the exact
 construction-vs-call exception boundary.
+
+`security_agent` (`CybersecurityExpertAgent`) was originally a fourth
+Pattern 2 caller but has since migrated to Pattern 6 (below) to gain a
+bounded corrective retry on a malformed reply, which Pattern 2 does not
+offer. That migration is a change to an *existing* agent, not a new
+agent's pattern choice, so it falls under this document's own "migrating
+any existing agent between patterns" out-of-scope carve-out rather than
+the "no new hand-rolled call sites" rule below (Pattern 5), which is scoped
+to new agents.
 
 ### Pattern 3 — `DevOpsSingleShotAgent`
 
@@ -119,6 +128,22 @@ them is explicitly out of scope (see below).
 an option going forward — it exists as a record of pre-decision code, not
 as a menu choice for new work.
 
+### Pattern 6 — `complete_validated` (schema-validated corrective retry)
+
+**Module:** `llm_service/structured.py`.
+
+Justified for single-shot review agents where a bounded corrective retry on
+a malformed or schema-invalid LLM reply is worth more than Pattern 2's
+single-try-then-fallback: `complete_validated` re-prompts once (by default)
+with the validation error and the target schema embedded, before falling
+back to a caller-authored failure path. Call sites: `code_review_agent/
+chunk_reviewer.py` (the original adopter) and `security_agent/agent.py`
+(migrated from Pattern 2 to gain this retry for the OWASP review). A new
+top-level persona-style agent may choose this pattern instead of Pattern 2
+when a self-correcting retry on a malformed reply is more valuable than
+Pattern 2's simpler call-then-fallback shape — this is a recorded, sanctioned
+choice, not a hand-rolled Pattern 5 exception.
+
 ## Out of scope
 
 - Migrating any existing agent between patterns.
@@ -128,4 +153,7 @@ as a menu choice for new work.
 ## See also
 
 - [`docs/LLM_CALLING_PATTERNS_AUDIT.md`](LLM_CALLING_PATTERNS_AUDIT.md) —
-  full audit of all five patterns' failure-handling behavior.
+  full audit of the five originally-catalogued patterns' failure-handling
+  behavior. Pattern 6 (`complete_validated`) postdates that audit; see
+  `code_review_agent/chunk_reviewer.py` and `security_agent/agent.py` for
+  its concrete call sites.

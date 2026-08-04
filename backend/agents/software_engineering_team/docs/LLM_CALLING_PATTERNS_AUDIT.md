@@ -185,10 +185,9 @@ a malformed reply instead of falling back on the first bad response.
   (which its precondition assumes); it is not a runtime guarantee against a
   broken factory.
 - The fallback is **type-specific and caller-authored**, not a generic empty
-  shape: e.g. `security_agent`'s `_fallback` returns a
-  `SecurityOutput(vulnerabilities=[], approved=False, summary=f"Security
-  analysis failed: {exc}", ...)` — a deliberately unapproved, safe-by-default
-  result.
+  shape: e.g. `qa_agent`'s `_fallback` returns a `QAOutput(bugs_found=[],
+  approved=False, summary=f"QA could not parse model response: {exc}",
+  ...)` — a deliberately unapproved, safe-by-default result.
 - **No retry** — one call, one catch. (Retry, if any, would have to happen
   at a layer above the persona agent's `run`.)
 - **Fallback bypasses `on_success`** — this is a deliberate, documented
