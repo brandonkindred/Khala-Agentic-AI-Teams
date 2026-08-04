@@ -78,7 +78,7 @@ def mint_resume_token(job_id: str) -> str:
     """Mint a fresh ``resume_token``, unique per pause round.
 
     Preconditions:
-        - ``job_id`` is non-empty.
+        - ``job_id`` is non-empty; violated by raising ``ValueError``.
     Postconditions:
         - Returns ``f"{job_id}:{uuid4().hex[:12]}"`` — unique per call, never reused across
           pause rounds even for the same ``job_id``. Callers must persist the returned value
@@ -87,6 +87,8 @@ def mint_resume_token(job_id: str) -> str:
           re-emitted unchanged on a pre-work activity retry — see
           ``_check_pending_pause_reentry``).
     """
+    if not job_id:
+        raise ValueError("job_id must be non-empty")
     return f"{job_id}:{uuid.uuid4().hex[:12]}"
 
 
@@ -115,7 +117,9 @@ def _pause_context_for_source(source: str, pause_kind: str) -> Optional[Dict[str
     """Derive ``pause_context`` from ``source`` for a worker-escalation pause; ``None`` otherwise.
 
     Preconditions:
-        - ``pause_kind`` is ``_pause_kind_for_source(source)``'s result for this same ``source``.
+        - ``pause_kind`` is ``_pause_kind_for_source(source)``'s result for this same ``source``;
+          violated by raising ``ValueError`` (also fails closed if ``source`` claims to be a
+          worker escalation but carries no task id after the ``"engineer:"`` prefix).
     Postconditions:
         - For ``"worker_escalation"``, returns ``{"task_ids": [<id>]}`` where ``<id>`` is the
           task id embedded in ``source`` (``f"engineer:{task.id}"`` — the swarm's own
@@ -123,9 +127,16 @@ def _pause_context_for_source(source: str, pause_kind: str) -> Optional[Dict[str
           ``pause_context`` shape (set only for worker escalation; entry/tech-lead-clarify
           carry no per-task context).
     """
+    if pause_kind != _pause_kind_for_source(source):
+        raise ValueError(
+            f"pause_kind {pause_kind!r} does not match _pause_kind_for_source({source!r})"
+        )
     if pause_kind != "worker_escalation":
         return None
-    return {"task_ids": [source[len("engineer:") :]]}
+    task_id = source[len("engineer:") :]
+    if not task_id:
+        raise ValueError(f"worker-escalation source must carry a task id: {source!r}")
+    return {"task_ids": [task_id]}
 
 
 def _check_pending_pause_reentry(

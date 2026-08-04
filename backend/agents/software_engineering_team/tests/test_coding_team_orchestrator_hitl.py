@@ -16,7 +16,12 @@ from software_engineering_team.coding_team_orchestrator import (
     run_coding_team_orchestrator,
 )
 from software_engineering_team.models import CodingTeamPlanInput, StackSpec, TaskStatus
-from software_engineering_team.pause_cycle import _ActivityPauseSignal, _format_decisions
+from software_engineering_team.pause_cycle import (
+    _ActivityPauseSignal,
+    _format_decisions,
+    _pause_context_for_source,
+    mint_resume_token,
+)
 from software_engineering_team.task_graph import TaskGraphService
 
 GIT_UTILS = "shared.git.git_utils"
@@ -170,6 +175,29 @@ def test_pause_cycle_rejects_invalid_pause_strategy():
             update_fn=lambda **k: None,
             pause_strategy="invalid",
         )
+
+
+# --------------------------------------------------------------------------- mint_resume_token / _pause_context_for_source
+
+
+def test_mint_resume_token_rejects_empty_job_id():
+    with pytest.raises(ValueError, match="job_id must be non-empty"):
+        mint_resume_token("")
+
+
+def test_pause_context_for_source_rejects_mismatched_pause_kind():
+    with pytest.raises(ValueError, match="does not match"):
+        _pause_context_for_source("plan_input", "worker_escalation")
+
+
+def test_pause_context_for_source_rejects_engineer_source_with_no_task_id():
+    with pytest.raises(ValueError, match="must carry a task id"):
+        _pause_context_for_source("engineer:", "worker_escalation")
+
+
+def test_pause_context_for_source_extracts_task_id():
+    assert _pause_context_for_source("engineer:t1", "worker_escalation") == {"task_ids": ["t1"]}
+    assert _pause_context_for_source("plan_input", "entry") is None
 
 
 def test_pause_cycle_success_calls_on_pause(monkeypatch):
@@ -1078,6 +1106,8 @@ def test_entry_gate_returns_paused_without_blocking(tmp_path, monkeypatch):
     # source of truth (contract doc §1's precondition).
     assert job.get("resume_token") == result["resume_token"]
     assert job.get("waiting_for_answers") is True
+    assert job.get("pause_kind") == "entry"
+    assert job.get("pause_context") is None
 
 
 def test_tech_lead_clarify_returns_paused_without_blocking(tmp_path, monkeypatch):
