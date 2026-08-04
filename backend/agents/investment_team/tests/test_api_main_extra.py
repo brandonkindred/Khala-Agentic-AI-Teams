@@ -982,7 +982,12 @@ def test_recover_orphaned_paper_trading_sessions_marks_running_as_failed(
 # ---------------------------------------------------------------------------
 
 
-def test_load_run_from_job_service_returns_none_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_run_from_job_service_propagates_job_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine job-service failure (transport error, 5xx, ...) must propagate
+    rather than be silently remapped to "not found" -- swallowing it would let
+    a resumed run silently restart from offset 0 instead of failing closed."""
     from investment_team.strategy_lab import run_state
 
     class _Broken:
@@ -990,6 +995,22 @@ def test_load_run_from_job_service_returns_none_on_error(monkeypatch: pytest.Mon
             raise RuntimeError("backend down")
 
     monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.load_run_from_job_service("run-x")
+
+
+def test_load_run_from_job_service_returns_none_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely missing job (the job service returns job=None, not an error)
+    still cleanly returns None -- the fix above must not regress this path."""
+    from investment_team.strategy_lab import run_state
+
+    class _Empty:
+        def get_job(self, *a, **k):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Empty())
     assert run_state.load_run_from_job_service("run-x") is None
 
 

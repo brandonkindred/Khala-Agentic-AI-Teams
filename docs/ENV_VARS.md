@@ -1310,15 +1310,19 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`).
-Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it), but processes
-that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this unset so
-they skip Graphiti client construction and the background graph sync worker (lifespan no-ops cleanly).
-Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set `NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that
-process into graph sync (extra memory/CPU for the driver + worker). An unset value is also how the
-unit-test suite runs against a faked Graphiti without a live database. When enabled, the graph
-ingests agent memories as temporal episodes partitioned per agent (`group_id = agent_id`) and serves
-recency-ranked related knowledge back for request context and rule-proposal grounding.
+`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`),
+and it is opt-in at zero cost when unset: `unified_api.main`'s lifespan checks `is_neo4j_enabled()`
+before even importing `agent_cognition.graph.sync_worker`, and `shared.neo4j.client.get_graphiti()`
+defers its `graphiti_core` imports to first real use — so leaving `NEO4J_BOLT_URL` unset keeps the
+`graphiti_core` dependency (and its Neo4j driver) out of `sys.modules` entirely, with no import-time
+or memory cost. Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it),
+but processes that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this
+unset for exactly that reason. Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set
+`NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that process into graph sync (extra memory/CPU for the
+driver + worker). An unset value is also how the unit-test suite runs against a faked Graphiti without
+a live database. When enabled, the graph ingests agent memories as temporal episodes partitioned per
+agent (`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
+rule-proposal grounding.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change
@@ -1341,7 +1345,9 @@ agent since a watermark (`agent_cognition_graph_watermarks`). Events keyset on `
 are added as `event:<id>` episodes; summaries keyset on `(updated_at, id)` (the content-write time
 advanced by each accepted `upsert_summary`) and are added as `summary:<id>:<version>` episodes, so a
 recomputed summary — whose `version` advanced — is re-ingested as a fresh per-version episode rather
-than overwriting the prior one. The worker is a no-op when `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
+than overwriting the prior one. Unified-api's lifespan skips importing this worker's module at all when
+`NEO4J_BOLT_URL` is unset; once started (i.e. `NEO4J_BOLT_URL` is set), the worker itself is a further
+no-op when `POSTGRES_HOST` is unset.
 
 ### NEO4J_SLOW_OP_MS
 Slow-call log threshold (ms, default `1000`) for `shared.neo4j.timed_graph_op`.
