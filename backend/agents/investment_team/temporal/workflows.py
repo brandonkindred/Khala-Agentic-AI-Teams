@@ -30,7 +30,7 @@ retry (which fires on worker crash / start_to_close timeout):
 
 from __future__ import annotations
 
-import time
+import asyncio
 from datetime import timedelta
 from typing import Any
 
@@ -117,7 +117,7 @@ def run_backtest_activity(
             
         # If it's "RUNNING" or "PENDING", sleep and poll again.
         # (Use await asyncio.sleep(1) if this is an async activity)
-        time.sleep(1)
+        await asyncio.sleep(1)
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")
