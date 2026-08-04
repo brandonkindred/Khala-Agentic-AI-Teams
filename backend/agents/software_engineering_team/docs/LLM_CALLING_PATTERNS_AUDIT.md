@@ -148,12 +148,16 @@ message history), call it with `structured_output_model=<Output type>`, and
 supply a `fallback_factory` that turns any exception into a safe, final
 instance of that output type.
 
-**Call sites:** the four top-level persona agents —
-`security_agent/agent.py` (`CybersecurityExpertAgent`), `qa_agent/agent.py`,
+**Call sites:** three top-level persona agents — `qa_agent/agent.py`,
 `accessibility_agent/agent.py`, `integration_team/agent.py`. Each keeps its
 own log messages, system prompt, and fallback field values as call-site
 data; `run_structured_persona` is the shared "build → call → coerce-or-fallback"
-scaffold, previously duplicated verbatim four times.
+scaffold, previously duplicated verbatim four times across these three plus
+`security_agent/agent.py`. `security_agent` (`CybersecurityExpertAgent`) has
+since moved off this pattern onto `complete_validated`
+(`llm_service/structured.py`), the same schema-validated corrective-retry
+call `code_review_agent/chunk_reviewer.py` uses — it gets a bounded retry on
+a malformed reply instead of falling back on the first bad response.
 
 **Failure handling.**
 

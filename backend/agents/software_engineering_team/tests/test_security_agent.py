@@ -138,6 +138,59 @@ def test_security_agent_only_critical_high_flip_approved() -> None:
     assert len(result.vulnerabilities) == 2
 
 
+def test_security_agent_recovers_from_malformed_first_response() -> None:
+    """A schema-invalid first reply drives ``complete_validated``'s corrective
+    retry; a valid second reply is used instead of falling back."""
+
+    class _RecoveringClient(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            self.calls += 1
+            if self.calls == 1:
+                # Missing required top-level fields (summary, remediations,
+                # suggested_commit_message) -- schema-invalid.
+                return {"vulnerabilities": []}
+            return {
+                "vulnerabilities": [],
+                "summary": "Recovered on retry",
+                "remediations": [],
+                "suggested_commit_message": "",
+            }
+
+    client = _RecoveringClient()
+    agent = CybersecurityExpertAgent(client)
+    result = agent.run(_input())
+
+    assert isinstance(result, SecurityOutput)
+    assert result.approved is True
+    assert result.summary == "Recovered on retry"
+    assert client.calls == 2
+
+
+def test_security_agent_falls_back_when_retries_exhausted() -> None:
+    """A reply that stays schema-invalid across the corrective retry still
+    yields the safe fallback -- never raises out of ``run()``."""
+
+    class _AlwaysBrokenClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {"vulnerabilities": []}  # missing required fields every call
+
+    agent = CybersecurityExpertAgent(_AlwaysBrokenClient())
+    result = agent.run(_input())
+
+    assert isinstance(result, SecurityOutput)
+    assert result.approved is False
+    assert result.vulnerabilities == []
+    assert "Security analysis failed" in result.summary
+
+
 def test_security_agent_blocks_on_capitalized_severity() -> None:
     """Severity gating is case-insensitive: a capitalized ``"High"`` (the field
     is free-form text, not a validated lowercase Literal) still blocks."""

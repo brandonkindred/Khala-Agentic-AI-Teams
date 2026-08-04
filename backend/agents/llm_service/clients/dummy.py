@@ -1617,7 +1617,12 @@ class DummyLLMClient(LLMClient):
             # own prompt includes "Code to review" as a section header, which
             # would otherwise match the catch-all first and return an empty
             # generic review instead of the vulnerabilities-shaped stub.
-            return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
+            return {
+                "vulnerabilities": [],
+                "summary": "No security issues found (dummy)",
+                "remediations": [],
+                "suggested_commit_message": "",
+            }
         elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
             # Kept ABOVE the code-review catch-all for the same reason as the
             # security branch above: the accessibility agent's prompt also
