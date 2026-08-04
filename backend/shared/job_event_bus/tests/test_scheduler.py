@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from shared.job_event_bus import BusState
+from shared.job_event_bus import BusState, subscribe
 from shared.job_event_bus import scheduler as scheduler_module
 from shared.job_event_bus.scheduler import schedule_periodic_reap, stop_periodic_reap
 
@@ -100,6 +100,21 @@ async def test_failing_pass_is_logged_and_swallowed_and_loop_keeps_going(
         finally:
             await stop_periodic_reap(task)
     assert "periodic reap iteration failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_evicts_stale_subscription_without_manual_reap_call() -> None:
+    """Regression: the SCHEDULED task (its own timer, real reap_once — no
+    monkeypatch) must actually evict stale state, proving the asyncio loop
+    does real work on its own cadence rather than just invoking a mock."""
+    state = BusState()
+    subscribe(state, "j1").last_activity -= 1e9  # ancient -> past any TTL
+    task = schedule_periodic_reap(state, ttl_seconds=3600.0, max_jobs=1024, interval_seconds=0.01)
+    try:
+        await asyncio.sleep(0.06)  # several intervals' worth of real time for the task to fire
+        assert "j1" not in state.subscribers, "scheduled task never evicted the stale job"
+    finally:
+        await stop_periodic_reap(task)
 
 
 @pytest.mark.parametrize("bad_interval", [0, -1.0])
