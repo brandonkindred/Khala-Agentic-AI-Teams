@@ -2634,23 +2634,39 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         - None. ``running_only`` is an optional filter flag.
 
     Postconditions:
-        - Returns a read-only snapshot; never mutates ``_active_runs``.
         - Merges in-memory ``_active_runs`` with persisted job-service records,
           deduplicated by run/job id (in-memory entries take precedence).
+        - Side effect: for each in-memory run whose status is not in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, ``_reconcile_run_progress`` is
+          called, refreshing progress fields (and ``status``/``error`` on a
+          terminal transition) in place. See its docstring for details.
         - When ``running_only`` is ``True``, the result is filtered to
           ``status in ("running", "pending")``.
         - Entries are sorted by ``created_at`` descending.
 
     Raises:
-        - None. Job-service merge failures are caught and logged, and the
-          response falls back to the in-memory-only list; this endpoint always
-          returns 200.
+        - None. Job-service merge/reconciliation failures are caught and
+          logged, and the response falls back to the in-memory-only list;
+          this endpoint always returns 200.
     """
     jobs: List[InvestmentJobSummary] = []
 
-    # Single consistent snapshot of in-memory runs, taken under one lock hold.
-    # Deriving both the in-memory `jobs` entries and `in_memory_ids` from this
-    # same snapshot (rather than re-reading `_active_runs` under a second
+    # Reconcile: refresh progress (and, on a terminal transition, status/error)
+    # for every run we think is still active, before snapshotting. Mirrors the
+    # call convention in `list_strategy_lab_runs`: the id set is read under
+    # `_lock`, but `_reconcile_run_progress` itself must be called unlocked
+    # since it acquires `_lock` internally (it is not reentrant).
+    with _lock:
+        running_ids = [
+            rid for rid, r in _active_runs.items() if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
+        ]
+    for rid in running_ids:
+        _reconcile_run_progress(rid)
+
+    # Single consistent snapshot of in-memory runs, taken under one lock hold
+    # (after reconciliation, so it reflects any refreshed values). Deriving
+    # both the in-memory `jobs` entries and `in_memory_ids` from this same
+    # snapshot (rather than re-reading `_active_runs` under a second
     # `with _lock:`) prevents a run added/removed between two separate reads
     # from being omitted from or duplicated in the merged result.
     with _lock:

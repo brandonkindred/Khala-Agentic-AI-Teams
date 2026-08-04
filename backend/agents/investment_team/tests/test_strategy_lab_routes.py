@@ -936,18 +936,21 @@ def test_list_strategy_lab_jobs_merges_persisted_completed_runs(
     assert "persisted-c" not in ids2
 
 
-def test_list_strategy_lab_jobs_same_id_prefers_in_memory(
+def test_list_strategy_lab_jobs_same_id_reconciles_terminal_and_dedupes(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
-    """When the same run/job id exists in both stores, the in-memory entry wins.
+    """When the same run/job id exists in both stores, it appears exactly once,
+    reconciled against the persisted (terminal) job-service record.
 
-    Regression test for the double-lock TOCTOU bug: the in-memory and
-    persisted branches used to each acquire ``_lock`` separately, so
-    ``_active_runs`` could change between the two reads. Seeding the
-    identical id in memory and in the persisted stub (with different
-    ``status``/``progress``) pins down that the merge is deduplicated by id
-    with in-memory taking precedence, per the function's documented
-    postcondition.
+    Regression test for the double-lock TOCTOU bug (dedup by id, no
+    duplicates) combined with stale-progress reconciliation: the persisted
+    record for this id is terminal (``completed``), so
+    ``_reconcile_run_progress`` flips the in-memory entry's status/progress
+    to match it before the response is built -- the in-memory entry no
+    longer wins with stale values, but its identity still dedupes the merge
+    to a single row. ``current_phase`` is untouched because the persisted
+    stub's ``data`` has no ``current_cycle`` key (the field-presence guard
+    in ``_reconcile_run_progress`` leaves absent fields alone).
     """
     from investment_team.api import main as api_main
 
@@ -982,9 +985,60 @@ def test_list_strategy_lab_jobs_same_id_prefers_in_memory(
     matches = [j for j in body["jobs"] if j["job_id"] == shared_id]
     assert len(matches) == 1
     entry = matches[0]
-    assert entry["status"] == "running"
-    assert entry["progress"] == 25
+    assert entry["status"] == "completed"
+    assert entry["progress"] == 100
     assert entry["current_phase"] == "ideation"
+
+
+def test_list_strategy_lab_jobs_reconciles_progress_while_non_terminal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A non-terminal in-memory run's progress is refreshed from the job
+    service without its status being touched.
+
+    Regression test for issue #4299: unlike ``list_strategy_lab_runs``,
+    ``get_strategy_lab_run_status``, and the SSE snapshot, this endpoint
+    used to build summaries straight from ``_active_runs`` without ever
+    calling ``_reconcile_run_progress``, so dispatch-time progress counters
+    could go stale while a run was still active. Both records are
+    ``running`` here -- only ``completed_cycles`` differs -- confirming the
+    reconciliation is not gated on a terminal transition.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "prog-run"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": run_id,
+                "status": "running",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 4,
+                    "completed_cycles": 3,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == run_id]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["status"] == "running"
+    assert entry["progress"] == 75
+    assert api_main._active_runs[run_id]["completed_cycles"] == 3
 
 
 def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
