@@ -75,6 +75,58 @@ def test_merge_updates_existing_docstring() -> None:
     assert "return 1" in merged
 
 
+def test_merge_module_docstring_into_empty_file() -> None:
+    """A truly empty (or whitespace-only) module has no first statement to
+    anchor against via the usual body[0] path, but the module itself still
+    exists and a docstring can be inserted at the top -- this must not be
+    confused with the empty-body rejection that applies to function/class
+    targets."""
+    code = "### src/empty.py ###\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(file="src/empty.py", symbol="module", comment="Module docstring.")]
+    )
+    assert rejected == []
+    assert added == 1
+    assert updated == 0
+    assert files["src/empty.py"].startswith('"""')
+    assert "Module docstring." in files["src/empty.py"]
+
+
+def test_merge_module_docstring_into_comment_only_file() -> None:
+    code = "### src/comments.py ###\n# just a comment\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(file="src/comments.py", symbol="module", comment="Module docstring.")]
+    )
+    assert rejected == []
+    assert added == 1
+    merged = files["src/comments.py"]
+    assert merged.startswith('"""')
+    assert "Module docstring." in merged
+    assert "# just a comment" in merged
+
+
+def test_merge_function_with_empty_body_still_rejected(monkeypatch) -> None:
+    """The empty-body guard narrowed to exclude the module target must still
+    reject a function/class target whose body is empty. Valid Python can't
+    actually produce an empty function/class body (ast.parse requires at
+    least one statement), so this exercises the defensive branch directly by
+    forcing the symbol resolver to return a body-less stand-in."""
+
+    class _FakeTarget:
+        lineno = 1
+        body: list = []
+
+    monkeypatch.setattr(merge_mod, "_find_python_target", lambda tree, symbol, line: _FakeTarget())
+
+    files, added, updated, rejected = apply_dbc_insertions(
+        "### a.py ###\ndef foo(): pass\n", [_ins(symbol="foo", comment="c")]
+    )
+    assert files == {}
+    assert added == 0
+    assert len(rejected) == 1
+    assert "empty body" in rejected[0]
+
+
 def test_merge_module_docstring_via_symbol_alias() -> None:
     code = "### a.py ###\nimport os\n\ndef foo():\n    pass\n"
     files, added, updated, rejected = apply_dbc_insertions(

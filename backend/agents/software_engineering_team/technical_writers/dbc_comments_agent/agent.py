@@ -60,9 +60,11 @@ class DbcCommentsAgent:
             - input_data.language is one of: python, typescript, java
 
         Postconditions:
-            - insertions always contains the raw, unmerged list the model
-              returned (kept for observability), regardless of
-              already_compliant
+            - insertions contains the validated list of DbcCommentInsertion
+              objects parsed from the model response, kept unmerged (for
+              observability) regardless of already_compliant; malformed or
+              non-object entries are skipped and logged, so this list may be
+              shorter than the raw model output
             - already_compliant reflects the model's assessment, overridden
               to True only when the model reported False but returned no
               insertions

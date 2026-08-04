@@ -241,12 +241,16 @@ def _merge_python_file(
             )
             continue
         body = getattr(target, "body", None)
-        if not body:
+        if not body and target is not tree:
             rejected.append(f"symbol '{ins.symbol}' has an empty body, cannot anchor")
             continue
 
-        first_stmt = body[0]
-        if target is not tree and first_stmt.lineno == target.lineno:
+        # An empty module body (a file with only whitespace/comments, or truly
+        # empty) has no first statement to anchor against, but the module
+        # itself still exists -- a docstring can always be inserted at the top.
+        first_stmt = body[0] if body else None
+
+        if first_stmt is not None and target is not tree and first_stmt.lineno == target.lineno:
             # A one-liner def/class (e.g. "def f(): pass") puts the body on the
             # same physical line as the header. Inserting "before" that line
             # would land the comment outside the function/class entirely, so
@@ -257,7 +261,7 @@ def _merge_python_file(
                 "def/class header (a one-liner), cannot anchor a comment safely"
             )
             continue
-        indent = " " * first_stmt.col_offset
+        indent = "" if first_stmt is None else " " * first_stmt.col_offset
         rendered = _render_python_docstring(ins.comment, indent)
         if rendered is None:
             location = (
@@ -269,11 +273,11 @@ def _merge_python_file(
             continue
 
         used_targets.add(id(target))
-        if _is_existing_docstring(first_stmt):
+        if first_stmt is not None and _is_existing_docstring(first_stmt):
             edits.append((first_stmt.lineno - 1, first_stmt.end_lineno, rendered))
             updated += 1
         else:
-            start = first_stmt.lineno - 1
+            start = 0 if first_stmt is None else first_stmt.lineno - 1
             edits.append((start, start, rendered))
             added += 1
 

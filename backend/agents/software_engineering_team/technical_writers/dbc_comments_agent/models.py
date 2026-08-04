@@ -73,9 +73,11 @@ class DbcCommentsOutput(BaseModel):
 
     insertions: List[DbcCommentInsertion] = Field(
         default_factory=list,
-        description="Anchored DbC comment insertions the LLM proposed. Empty when "
-        "already_compliant is True. Kept for observability even when a given insertion "
-        "could not be safely merged into `files` (see `files`' description).",
+        description="Validated, unmerged DbC comment insertions the LLM proposed, regardless "
+        "of already_compliant -- the two are not mutually exclusive, since the caller trusts "
+        "already_compliant as the model's overall assessment even when it also returned "
+        "insertions. Kept for observability even when a given insertion could not be safely "
+        "merged into `files` (see `files`' description).",
     )
     files: Dict[str, str] = Field(
         default_factory=dict,
