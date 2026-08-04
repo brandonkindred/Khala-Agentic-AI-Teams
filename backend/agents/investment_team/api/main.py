@@ -1614,7 +1614,19 @@ class StrategyLabResultsResponse(BaseModel):
 
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
-    """Map LLM output to canonical labels used by the simulated ledger."""
+    """Map LLM output to canonical labels used by the simulated ledger.
+
+    Preconditions: ``raw`` may be any value, including ``None`` or an
+    unrecognized string — no type check or membership check required of
+    the caller.
+    Postconditions: returns one of the six canonical asset-class labels
+    (``stocks``, ``crypto``, ``forex``, ``options``, ``futures``,
+    ``commodities``). ``None``, empty, or unrecognized input defaults to
+    ``"stocks"``; recognized aliases (e.g. ``"equity"``, ``"fx"``,
+    ``"cryptocurrency"``) map to their canonical class. Never raises —
+    delegates entirely to :func:`normalize_asset_class`, which is total
+    over ``object``.
+    """
     return normalize_asset_class(raw)
 
 
