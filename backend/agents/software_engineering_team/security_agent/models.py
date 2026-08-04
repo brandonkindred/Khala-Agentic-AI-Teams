@@ -54,9 +54,9 @@ class SecurityLLMResponse(BaseModel):
     ``structured_output_model=SecurityOutput`` call (single-shot, no
     corrective retry on a malformed reply).
 
-    All four fields are required, not defaulted: ``SECURITY_PROMPT``'s own
+    All fields are required, not defaulted: ``SECURITY_PROMPT``'s own
     output-contract reminder explicitly tells the model to always emit
-    exactly these four top-level keys, so a reply missing one is a
+    exactly these top-level keys, so a reply missing one is a
     truncated/malformed response, not a legitimately empty field. Defaulting
     them here would silently look like a clean, empty-findings result instead
     of failing validation and driving ``complete_validated``'s corrective
@@ -66,6 +66,10 @@ class SecurityLLMResponse(BaseModel):
     model for one, and ``CybersecurityExpertAgent.run`` always re-derives
     ``SecurityOutput.approved`` from the reported ``vulnerabilities`` via
     :func:`software_engineering_team.shared.security_service.derive_approved`.
+    There is also no ``suggested_commit_message`` field: the LLM's suggestion
+    is not used downstream, so ``CybersecurityExpertAgent.run`` doesn't ask
+    the model for it and always leaves ``SecurityOutput.suggested_commit_message``
+    at its default (``""``).
     """
 
     vulnerabilities: List[SecurityVulnerability] = Field(
@@ -73,6 +77,3 @@ class SecurityLLMResponse(BaseModel):
     )
     summary: str = Field(description="Overall security assessment.")
     remediations: List[dict] = Field(description="Reference list of {issue, recommendation} pairs.")
-    suggested_commit_message: str = Field(
-        description="Conventional Commits format, e.g. fix(security): remediate SQL injection"
-    )

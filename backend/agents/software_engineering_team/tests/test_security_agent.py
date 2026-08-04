@@ -82,7 +82,6 @@ def test_security_agent_derives_approved_from_severities() -> None:
                 "approved": True,  # deliberately wrong — agent should override
                 "summary": "LGTM",
                 "remediations": [],
-                "suggested_commit_message": "",
             }
 
     agent = CybersecurityExpertAgent(_LyingClient())
@@ -129,7 +128,6 @@ def test_security_agent_only_critical_high_flip_approved() -> None:
                 ],
                 "summary": "Minor findings only",
                 "remediations": [],
-                "suggested_commit_message": "",
             }
 
     agent = CybersecurityExpertAgent(_MediumOnlyClient())
@@ -152,14 +150,13 @@ def test_security_agent_recovers_from_malformed_first_response() -> None:
         ):  # type: ignore[override]
             self.calls += 1
             if self.calls == 1:
-                # Missing required top-level fields (summary, remediations,
-                # suggested_commit_message) -- schema-invalid.
+                # Missing required top-level fields (summary, remediations)
+                # -- schema-invalid.
                 return {"vulnerabilities": []}
             return {
                 "vulnerabilities": [],
                 "summary": "Recovered on retry",
                 "remediations": [],
-                "suggested_commit_message": "",
             }
 
     client = _RecoveringClient()
@@ -210,7 +207,6 @@ def test_security_agent_blocks_on_capitalized_severity() -> None:
                 ],
                 "summary": "One high finding (capitalized)",
                 "remediations": [],
-                "suggested_commit_message": "",
             }
 
     agent = CybersecurityExpertAgent(_CapitalizedClient())

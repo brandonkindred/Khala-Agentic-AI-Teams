@@ -1621,7 +1621,6 @@ class DummyLLMClient(LLMClient):
                 "vulnerabilities": [],
                 "summary": "No security issues found (dummy)",
                 "remediations": [],
-                "suggested_commit_message": "",
             }
         elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
             # Kept ABOVE the code-review catch-all for the same reason as the

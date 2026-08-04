@@ -84,7 +84,6 @@ class CybersecurityExpertAgent:
             vulnerabilities=response.vulnerabilities,
             summary=response.summary,
             remediations=response.remediations,
-            suggested_commit_message=response.suggested_commit_message,
         )
         result.approved = derive_approved(result.vulnerabilities, llm_approved=None)
 
@@ -110,9 +109,8 @@ class CybersecurityExpertAgent:
         parts = [
             "Review the following code for security vulnerabilities. Produce "
             "structured JSON with fields: vulnerabilities, summary, "
-            "remediations, suggested_commit_message. Each vulnerability must "
-            "include severity, category, description, location, and "
-            "recommendation.",
+            "remediations. Each vulnerability must include severity, "
+            "category, description, location, and recommendation.",
             "",
             f"**Language:** {input_data.language}",
         ]
