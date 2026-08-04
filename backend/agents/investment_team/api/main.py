@@ -3427,12 +3427,18 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
 
 class ClearStrategyLabStorageResponse(BaseModel):
-    """Counts of job-service rows removed (Postgres ``jobs`` or local file cache)."""
+    """Counts of job-service rows removed (Postgres ``jobs`` or local file cache).
 
-    deleted_lab_records: int = 0
-    deleted_lab_strategies: int = 0
-    deleted_lab_backtests: int = 0
-    deleted_paper_trading_sessions: int = 0
+    A field is ``None`` rather than ``0`` when its unit didn't finish within
+    the purge's shared deadline — see ``_purge_strategy_lab_job_storage``.
+    ``None`` means "unknown, may still be deleting in the background," not
+    "confirmed nothing was deleted."
+    """
+
+    deleted_lab_records: Optional[int] = 0
+    deleted_lab_strategies: Optional[int] = 0
+    deleted_lab_backtests: Optional[int] = 0
+    deleted_paper_trading_sessions: Optional[int] = 0
     message: str = "Strategy lab and paper-trading session storage cleared."
 
 
@@ -3535,7 +3541,7 @@ def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
     return _delete_jobs_concurrently(client, matching_ids)
 
 
-def _purge_strategy_lab_job_storage() -> dict[str, int]:
+def _purge_strategy_lab_job_storage() -> dict[str, Optional[int]]:
     """Delete strategy lab jobs plus all paper-trading session jobs for this team.
 
     Preconditions:
@@ -3558,12 +3564,13 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
           of the order in which the concurrent units/deletes finish; the
           returned dict always has exactly these four keys.
         - A unit that does not finish within the shared deadline
-          (``_PURGE_TIMEOUT_S``) is counted as ``0`` even though its
-          background thread keeps running (see ``pool.shutdown(wait=False,
-          ...)`` below) and may go on to delete some or all of its matching
-          jobs asynchronously. In that case a returned count of ``0`` is not
-          a guarantee that no matching jobs were deleted — only that none
-          were confirmed deleted before the deadline.
+          (``_PURGE_TIMEOUT_S``) is reported as ``None`` — not ``0`` — even
+          though its background thread keeps running (see
+          ``pool.shutdown(wait=False, ...)`` below) and may go on to delete
+          some or all of its matching jobs asynchronously, after this
+          function (and the endpoint calling it) has already returned.
+          ``None`` means "unknown, still in flight"; only a non-``None`` int
+          is a confirmed count. Callers must not treat ``None`` as ``0``.
     """
     from job_service_client import JobServiceClient
 
@@ -3601,21 +3608,23 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
 
         # Collect against a single shared deadline so the whole fan-out is bounded
         # (per-unit timeouts would let each unit reset the clock). A unit that
-        # overruns is counted as 0 deleted; a unit that *raises* still propagates
-        # (preserving the prior error contract).
+        # overruns is reported as None (unknown, not a confirmed 0 — its worker
+        # thread is still running and may delete jobs after this call returns,
+        # see the docstring); a unit that *raises* still propagates (preserving
+        # the prior error contract).
         deadline = time.monotonic() + _PURGE_TIMEOUT_S
-        results: dict[str, int] = {}
+        results: dict[str, Optional[int]] = {}
         for key, future in units.items():
             remaining = max(0.0, deadline - time.monotonic())
             try:
                 results[key] = future.result(timeout=remaining)
             except concurrent.futures.TimeoutError:
                 logger.warning(
-                    "purge unit %s did not finish within %.0fs; counted as 0 deleted",
+                    "purge unit %s did not finish within %.0fs; reported as unknown (None)",
                     key,
                     _PURGE_TIMEOUT_S,
                 )
-                results[key] = 0
+                results[key] = None
         return results
     finally:
         # Never block on a straggler: in-flight HTTP deletes are themselves bounded
