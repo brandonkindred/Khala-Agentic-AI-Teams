@@ -16,7 +16,8 @@ fixtures. Targets:
 * ``_resolve_fee_overrides`` (0.0 sentinel handling).
 * ``_recover_orphaned_paper_trading_sessions`` startup hook.
 * ``_load_run_from_job_service`` fallback + ``_persist_run_state``
-  propagating job-service errors.
+  propagating job-service errors and not clobbering status on a
+  status-less update.
 * ``_strategy_lab_signal_expert_enabled`` env-var toggle.
 * ``run_paper_trading`` validation branches (not-winning / no strategy_code)
   + happy path with patched background worker.
@@ -1327,6 +1328,35 @@ def test_persist_run_state_propagates_job_service_error(
         api_main._persist_run_state("run-z", {"status": "running"}, create=True)
     with pytest.raises(RuntimeError, match="backend down"):
         api_main._persist_run_state("run-z", {"status": "running"}, create=False)
+
+
+def test_persist_run_state_status_less_update_does_not_clobber_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A progress-only update (state without a "status" key -- exactly what
+    the Temporal batch workflow's per-cycle/per-batch persists send) must not
+    reset the job's status to "running". Previously it defaulted the missing
+    status to "running" unconditionally, clobbering a cancelled/failed/
+    completed status a concurrent path had already persisted (issue #4185)."""
+    from investment_team.api import main as api_main
+
+    client = _FakeJobClient()
+    client.create_job("run-cancelled", status="cancelled", completed_cycles=2)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: client)
+
+    # A progress-only delta, no "status" key -- must not touch status at all.
+    api_main._persist_run_state("run-cancelled", {"completed_cycles": 3}, create=False)
+
+    job = client.get_job("run-cancelled")
+    assert job["status"] == "cancelled"
+    assert job["completed_cycles"] == 3
+
+    # When state DOES carry a status, it's still written through as before.
+    api_main._persist_run_state(
+        "run-cancelled", {"status": "failed", "error": "boom"}, create=False
+    )
+    job = client.get_job("run-cancelled")
+    assert job["status"] == "failed"
 
 
 # ---------------------------------------------------------------------------

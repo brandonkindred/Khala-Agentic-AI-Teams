@@ -2041,12 +2041,26 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
 
     Preconditions:
         - ``run_id`` is a non-empty ``str``.
-        - ``state`` contains a ``status`` key (else ``"running"`` is assumed).
 
     Postconditions:
-        - ``create=True``: creates the job via ``client.create_job(...)``.
+        - ``create=True``: creates the job via ``client.create_job(...)``,
+          defaulting ``status`` to ``"running"`` when ``state`` omits it (a
+          fresh run's initial persist always has a real status in practice --
+          see ``_build_run_state`` -- so this default is a pure safety net).
         - ``create=False`` (default): updates the existing job via
-          ``client.update_job(...)``.
+          ``client.update_job(...)``. When ``state`` includes a ``status``
+          key, that value is written. When it does NOT (a progress-only delta
+          -- e.g. the Temporal batch workflow's per-cycle/per-batch persists
+          via ``persist_run_state_activity``, which routinely omit ``status``
+          -- see ``_STRATEGY_LAB_PROGRESS_FIELDS``), NO ``status`` kwarg is
+          passed at all, so the job service's own update path
+          (``backend/job_service/db.py``: ``status`` is only written to the
+          ``UPDATE`` when actually supplied) leaves the persisted status
+          untouched. This previously defaulted a status-less update to
+          ``"running"`` unconditionally, which could clobber a
+          ``cancelled``/``failed``/``completed`` status a concurrent
+          restart/resume/cancel had already persisted with a routine
+          progress-only write.
         - Every key in ``state`` other than ``run_id``/``status`` is persisted
           as a field.
 
@@ -2071,8 +2085,10 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
     fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
     if create:
         client.create_job(run_id, status=state.get("status", "running"), **fields)
+    elif "status" in state:
+        client.update_job(run_id, status=state["status"], **fields)
     else:
-        client.update_job(run_id, status=state.get("status", "running"), **fields)
+        client.update_job(run_id, **fields)
 
 
 # Fields the Temporal workflow's persist-state activity writes as partial
