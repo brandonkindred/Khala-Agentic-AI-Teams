@@ -672,6 +672,133 @@ class GovernanceOutput(BaseModel):
     wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
 
 
+class ApprovalWorkflowOutput(BaseModel):
+    """Agent-facing approval workflow; requires non-empty fields.
+
+    Field-for-field twin of ``ApprovalWorkflow`` with required content,
+    matching the Phase 3/4 nested-output-model pattern — ``ApprovalWorkflow``
+    itself must stay soft (all-default) since it also backs
+    ``GovernanceOutput.approval_workflows``'s merge target.
+    """
+
+    asset_type: str = Field(min_length=1)
+    approvers: List[str] = Field(min_length=1)
+    sla: str = Field(min_length=1)
+    escalation_path: str = Field(min_length=1)
+
+
+class WikiEntryOutput(BaseModel):
+    """Agent-facing wiki entry; requires non-empty fields.
+
+    Field-for-field twin of ``WikiEntry`` with required content —
+    ``WikiEntry`` itself must stay soft (``title``/``summary`` unconstrained,
+    ``owners``/``update_cadence`` defaulted) since it also backs
+    ``GovernanceOutput.wiki_backlog``'s merge target.
+    """
+
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    owners: List[str] = Field(min_length=1)
+    update_cadence: str = Field(min_length=1)
+
+
+class BrandHealthKPIOutput(BaseModel):
+    """Agent-facing brand health KPI; requires non-empty fields.
+
+    Field-for-field twin of ``BrandHealthKPI`` with required content —
+    ``BrandHealthKPI`` itself must stay soft (all-default) since it also
+    backs ``GovernanceOutput.brand_health_kpis``'s merge target.
+    """
+
+    metric: str = Field(min_length=1)
+    measurement_method: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    review_frequency: str = Field(min_length=1)
+
+
+class OwnershipOutput(BaseModel):
+    """Agent-facing ownership_definer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
+
+    ownership_model: str = Field(min_length=1)
+    decision_authority: Dict[str, str] = Field(min_length=1)
+
+
+class ApprovalWorkflowsOutput(BaseModel):
+    """Agent-facing approval_workflow_designer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 workflows"
+    / "3-5 protocols". Uses ``ApprovalWorkflowOutput`` (not the soft
+    ``ApprovalWorkflow``) so each workflow's fields are individually
+    required.
+    """
+
+    approval_workflows: List[ApprovalWorkflowOutput] = Field(min_length=3, max_length=5)
+    agency_briefing_protocols: List[str] = Field(min_length=3, max_length=5)
+
+
+class AssetWikiOutput(BaseModel):
+    """Agent-facing asset_wiki_planner schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 guidelines"
+    / "4-6 wiki entries". Uses ``WikiEntryOutput`` (not the soft
+    ``WikiEntry``) so each entry's fields are individually required.
+    """
+
+    asset_management_guidance: List[str] = Field(min_length=3, max_length=5)
+    wiki_backlog: List[WikiEntryOutput] = Field(min_length=4, max_length=6)
+
+
+class TrainingOnboardingOutput(BaseModel):
+    """Agent-facing training_planner schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "4-6 training
+    initiatives".
+    """
+
+    training_onboarding_plan: List[str] = Field(min_length=4, max_length=6)
+
+
+class BrandHealthKPIsOutput(BaseModel):
+    """Agent-facing kpi_designer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "4-6 KPIs" /
+    "3-5 events". Uses ``BrandHealthKPIOutput`` (not the soft
+    ``BrandHealthKPI``) so each KPI's fields are individually required.
+    """
+
+    brand_health_kpis: List[BrandHealthKPIOutput] = Field(min_length=4, max_length=6)
+    tracking_methodology: str = Field(min_length=1)
+    review_trigger_points: List[str] = Field(min_length=3, max_length=5)
+
+
+class EvolutionFrameworkOutput(BaseModel):
+    """Agent-facing evolution_framer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
+
+    evolution_framework: str = Field(min_length=1)
+    version_control_cadence: str = Field(min_length=1)
+
+
+class BrandGuidelinesOutput(BaseModel):
+    """Agent-facing brand_rules_codifier schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "5-8 governance
+    rules".
+    """
+
+    brand_guidelines: List[str] = Field(min_length=5, max_length=8)
+
+
 # ---------------------------------------------------------------------------
 # Phase gate tracking
 # ---------------------------------------------------------------------------

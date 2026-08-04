@@ -691,22 +691,183 @@ def _branding_phase4_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     return None
 
 
+def _branding_phase5_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Return a Phase 5 agent structured-output stub, or ``None`` if unmatched.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns a dict that validates against the matching Phase 5 agent
+        ``structured_output`` schema, or ``None`` when no Phase 5 agent matches.
+        Covers all 7 Phase 5 factories: ``ownership_definer``,
+        ``approval_workflow_designer``, ``asset_wiki_planner``,
+        ``training_planner``, ``kpi_designer``, ``evolution_framer``, and
+        ``brand_rules_codifier``.
+    """
+    if "ownership_model" in system_lowered and "decision_authority" in system_lowered:
+        return {
+            "ownership_model": (
+                "The Brand Director owns final say on all brand decisions, with input from "
+                "Marketing and Product leads (dummy)."
+            ),
+            "decision_authority": {
+                "logo_changes": "Brand Director",
+                "campaign_messaging": "Marketing Lead",
+                "product_naming": "Product Lead",
+            },
+        }
+    if "approval_workflows" in system_lowered and "agency_briefing_protocols" in system_lowered:
+        return {
+            "approval_workflows": [
+                {
+                    "asset_type": "Logo usage",
+                    "approvers": ["Brand Director"],
+                    "sla": "2 business days",
+                    "escalation_path": "Escalate to CMO after 3 days (dummy).",
+                },
+                {
+                    "asset_type": "Campaign messaging",
+                    "approvers": ["Marketing Lead", "Brand Director"],
+                    "sla": "3 business days",
+                    "escalation_path": "Escalate to CMO after 5 days (dummy).",
+                },
+                {
+                    "asset_type": "Product naming",
+                    "approvers": ["Product Lead", "Brand Director"],
+                    "sla": "5 business days",
+                    "escalation_path": "Escalate to VP Product after 7 days (dummy).",
+                },
+            ],
+            "agency_briefing_protocols": [
+                "Share the brand guidelines doc before kickoff (dummy).",
+                "Require a written creative brief signed off by the Brand Director (dummy).",
+                "Hold a kickoff call covering voice, tone, and visual do's/don'ts (dummy).",
+            ],
+        }
+    if "asset_management_guidance" in system_lowered and "wiki_backlog" in system_lowered:
+        return {
+            "asset_management_guidance": [
+                "Store all approved assets in the central DAM (dummy).",
+                "Archive deprecated assets instead of deleting them (dummy).",
+                "Tag every asset with its approval date and owner (dummy).",
+            ],
+            "wiki_backlog": [
+                {
+                    "title": "Brand North Star",
+                    "summary": "One-page summary of purpose, vision, and positioning (dummy).",
+                    "owners": ["Brand Director"],
+                    "update_cadence": "quarterly",
+                },
+                {
+                    "title": "Voice Playbook",
+                    "summary": "Tone spectrum and language dos/don'ts (dummy).",
+                    "owners": ["Brand Lead"],
+                    "update_cadence": "quarterly",
+                },
+                {
+                    "title": "Design System",
+                    "summary": "Logo, color, typography, and component specs (dummy).",
+                    "owners": ["Design Lead"],
+                    "update_cadence": "monthly",
+                },
+                {
+                    "title": "Brand Review Intake",
+                    "summary": "How to submit assets for brand review (dummy).",
+                    "owners": ["Brand Director"],
+                    "update_cadence": "monthly",
+                },
+            ],
+        }
+    if "training_onboarding_plan" in system_lowered and "brand literacy" in system_lowered:
+        return {
+            "training_onboarding_plan": [
+                "New-hire brand orientation session in week one (dummy).",
+                "Quarterly brand refresher workshop (dummy).",
+                "Self-serve brand guideline course in the LMS (dummy).",
+                "Office-hours with the Brand team for open questions (dummy).",
+            ],
+        }
+    if "brand_health_kpis" in system_lowered and "tracking_methodology" in system_lowered:
+        return {
+            "brand_health_kpis": [
+                {
+                    "metric": "Brand awareness",
+                    "measurement_method": "Quarterly survey (dummy).",
+                    "target": "60% aided awareness",
+                    "review_frequency": "quarterly",
+                },
+                {
+                    "metric": "Message consistency score",
+                    "measurement_method": "Content audit against guidelines (dummy).",
+                    "target": "90% compliant",
+                    "review_frequency": "monthly",
+                },
+                {
+                    "metric": "NPS",
+                    "measurement_method": "Post-purchase survey (dummy).",
+                    "target": "+40",
+                    "review_frequency": "quarterly",
+                },
+                {
+                    "metric": "Guideline adoption rate",
+                    "measurement_method": "Percent of assets passing first-pass review (dummy).",
+                    "target": "85%",
+                    "review_frequency": "monthly",
+                },
+            ],
+            "tracking_methodology": (
+                "Combine quarterly surveys with ongoing content audits, reviewed in a monthly "
+                "brand health dashboard (dummy)."
+            ),
+            "review_trigger_points": [
+                "NPS drops more than 10 points quarter-over-quarter (dummy).",
+                "A rebrand or major product launch is planned (dummy).",
+                "Guideline adoption falls below 70% (dummy).",
+            ],
+        }
+    if "evolution_framework" in system_lowered and "version_control_cadence" in system_lowered:
+        return {
+            "evolution_framework": (
+                "The brand evolves incrementally through versioned updates, with major shifts "
+                "reserved for strategic inflection points (dummy)."
+            ),
+            "version_control_cadence": (
+                "Formal review every two quarters, with minor patches as needed (dummy)."
+            ),
+        }
+    if "brand_guidelines" in system_lowered and "governance rules" in system_lowered:
+        return {
+            "brand_guidelines": [
+                "Always use the approved wordmark; never recreate it (dummy).",
+                "Lead every message with the customer outcome, not the feature (dummy).",
+                "All external assets require Brand Director sign-off before release (dummy).",
+                "Store approved assets only in the central DAM (dummy).",
+                "Review the brand system every two quarters (dummy).",
+            ],
+        }
+    return None
+
+
 def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
-    """Try Phase 3, then Phase 4, branding structured-output stubs; first match wins.
+    """Try Phase 3, then Phase 4, then Phase 5, branding structured-output stubs;
+    first match wins.
 
     Preconditions:
         ``system_lowered`` is the agent system prompt already lowercased (may be empty).
     Postconditions:
         Returns the first non-``None`` result from
-        ``_branding_phase3_structured_stub`` / ``_branding_phase4_structured_stub``,
-        or ``None`` when neither matches. Kept as its own helper (rather than
-        inlined in ``complete_json``) so that call site's branching stays
-        unchanged and under the mccabe complexity ceiling.
+        ``_branding_phase3_structured_stub`` / ``_branding_phase4_structured_stub`` /
+        ``_branding_phase5_structured_stub``, or ``None`` when none match. Kept as
+        its own helper (rather than inlined in ``complete_json``) so that call
+        site's branching stays unchanged and under the mccabe complexity ceiling.
     """
     stub = _branding_phase3_structured_stub(system_lowered)
     if stub is not None:
         return stub
-    return _branding_phase4_structured_stub(system_lowered)
+    stub = _branding_phase4_structured_stub(system_lowered)
+    if stub is not None:
+        return stub
+    return _branding_phase5_structured_stub(system_lowered)
 
 
 class DummyLLMClient(LLMClient):
@@ -1959,7 +2120,7 @@ class DummyLLMClient(LLMClient):
                     ],
                 },
             }
-        # Branding Phase 3 / Phase 4 stubs live in ``_branding_structured_stub``
+        # Branding Phase 3 / Phase 4 / Phase 5 stubs live in ``_branding_structured_stub``
         # so ``complete_json`` stays under the mccabe complexity ceiling. Only
         # ``None`` means "unmatched" — an intentional empty dict must not
         # fall through to the generic default.

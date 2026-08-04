@@ -18,6 +18,8 @@ from strands import Agent
 
 from .graphs.shared import build_agent
 from .models import (
+    ApprovalWorkflowsOutput,
+    AssetWikiOutput,
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
@@ -25,6 +27,8 @@ from .models import (
     BrandCheckResult,
     BrandDiscoveryAuditOutput,
     BrandExperiencePrinciplesOutput,
+    BrandGuidelinesOutput,
+    BrandHealthKPIsOutput,
     BrandInActionOutput,
     BrandingMission,
     BrandStoryOutput,
@@ -34,16 +38,19 @@ from .models import (
     CreativeRefinementDecisionOutput,
     DesignSystemDefinitionOutput,
     DifferentiationPillarsOutput,
+    EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
     MoodBoardCandidatesOutput,
     MoodBoardConceptOutput,
+    OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    TrainingOnboardingOutput,
     TypographySystemOutput,
     VoiceToneOutput,
     WritingGuidelinesOutput,
@@ -785,9 +792,9 @@ def make_ownership_definer() -> Agent:
             "You are a Brand Ownership Definer. Define:\n"
             "1. ownership_model — who owns the brand (paragraph)\n"
             "2. decision_authority — a dict mapping decision types to responsible roles "
-            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')\n"
-            "Output valid JSON with these two keys."
+            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')"
         ),
+        structured_output=OwnershipOutput,
     )
 
 
@@ -806,9 +813,9 @@ def make_approval_workflow_designer() -> Agent:
             "You are an Approval Workflow Designer. Define:\n"
             "1. approval_workflows — 3-5 workflows, each with: asset_type, approvers (list), "
             "sla, escalation_path\n"
-            "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies\n"
-            "Output valid JSON with these two keys."
+            "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies"
         ),
+        structured_output=ApprovalWorkflowsOutput,
     )
 
 
@@ -827,9 +834,9 @@ def make_asset_wiki_planner() -> Agent:
             "1. asset_management_guidance — 3-5 guidelines for managing brand assets\n"
             "2. wiki_backlog — 4-6 wiki entries, each with: title, summary, owners (list), "
             "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
-            "Review Intake, Channel Playbook, Governance Charter.\n"
-            "Output valid JSON with these two keys."
+            "Review Intake, Channel Playbook, Governance Charter."
         ),
+        structured_output=AssetWikiOutput,
     )
 
 
@@ -845,10 +852,9 @@ def make_training_planner() -> Agent:
         description="Plans brand training and onboarding programmes.",
         system_prompt=(
             "You are a Training Planner. Define training_onboarding_plan — 4-6 training "
-            "initiatives for onboarding new team members and maintaining brand literacy. "
-            "Output valid JSON with a single key 'training_onboarding_plan' containing a list "
-            "of strings."
+            "initiatives for onboarding new team members and maintaining brand literacy."
         ),
+        structured_output=TrainingOnboardingOutput,
     )
 
 
@@ -868,9 +874,9 @@ def make_kpi_designer() -> Agent:
             "1. brand_health_kpis — 4-6 KPIs, each with: metric, measurement_method, target, "
             "review_frequency\n"
             "2. tracking_methodology — paragraph describing the measurement approach\n"
-            "3. review_trigger_points — 3-5 events that should trigger a brand health review\n"
-            "Output valid JSON with these three keys."
+            "3. review_trigger_points — 3-5 events that should trigger a brand health review"
         ),
+        structured_output=BrandHealthKPIsOutput,
     )
 
 
@@ -889,9 +895,9 @@ def make_evolution_framer() -> Agent:
             "You are a Brand Evolution Framer. Define:\n"
             "1. evolution_framework — paragraph describing how the brand evolves over time\n"
             "2. version_control_cadence — how often the brand system is formally reviewed "
-            "and versioned\n"
-            "Output valid JSON with these two keys."
+            "and versioned"
         ),
+        structured_output=EvolutionFrameworkOutput,
     )
 
 
@@ -910,9 +916,9 @@ def make_brand_rules_codifier() -> Agent:
             "values, narrative, visual identity), produce brand_guidelines — a list of 5-8 "
             "governance rules that everyone in the organisation must follow. Each rule is a "
             "single clear sentence. Cover: identity usage, messaging hierarchy, approval gates, "
-            "asset management, and evolution. Output valid JSON with a single key "
-            "'brand_guidelines' containing a list of strings."
+            "asset management, and evolution."
         ),
+        structured_output=BrandGuidelinesOutput,
     )
 
 
