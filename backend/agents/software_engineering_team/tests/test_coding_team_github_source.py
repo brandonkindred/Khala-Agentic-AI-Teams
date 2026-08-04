@@ -416,8 +416,12 @@ class TestClientRetries:
             return httpx.Response(502, json={"message": "bad gateway"})
 
         client = _client_with(handler)
-        with pytest.raises(GitHubAPIError):
+        with pytest.raises(GitHubAPIError) as exc_info:
             client.get_repo("o", "r")
+        # Exhausting retries on a 5xx must surface the last response's actual
+        # status/body, not the generic 0/"exceeded retries" placeholder.
+        assert exc_info.value.status == 502
+        assert "bad gateway" in exc_info.value.body
         # max_retries default = 3
         assert calls["n"] == 3
 

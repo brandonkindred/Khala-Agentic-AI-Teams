@@ -218,7 +218,7 @@ Defaults (`AGENT_DEFAULT_MODELS` in `llm_service/config.py`) when no overrides a
 | Model | Agents |
 |-------|--------|
 | `kimi-k2.7-code:cloud` | backend, frontend, code_review |
-| `glm-5.2:cloud` | code_review_verify |
+| `deepseek-v4-flash:cloud` | code_review_verify |
 | `deepseek-v4-pro:cloud` | repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility (also the fallback for any agent key not listed above) |
 
 Example: `export LLM_MODEL_tech_lead=<model-id>` overrides only the Tech Lead; other agents use their defaults or `LLM_MODEL`.

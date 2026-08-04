@@ -1,9 +1,8 @@
 """
-GitHub-issue-driven runs for the coding team.
+GitHub source integrations for the coding team.
 
-Reads open issues from a GitHub repository, picks the first one whose
-sub-issues are all closed, converts it to a CodingTeamPlanInput, and lets
-the existing orchestrator handle the work.
+Includes issue selection for issue-driven runs, PR review comment mapping,
+existing-comment handling, issue-proposal generation, and repository reading.
 """
 
 from .client import (

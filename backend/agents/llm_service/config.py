@@ -293,7 +293,7 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     # established smaller/faster model tier (already used for soc2,
     # accessibility_audit) and has no registered thinking levels of its own, so no
     # AGENT_DEFAULT_THINK entry applies here.
-    "code_review_verify": "glm-5.2:cloud",
+    "code_review_verify": "deepseek-v4-flash:cloud",
     "repair": "deepseek-v4-pro:cloud",
     "devops": "deepseek-v4-pro:cloud",
     "dbc_comments": "deepseek-v4-pro:cloud",
@@ -319,10 +319,10 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "security": "deepseek-v4-pro:cloud",
     "accessibility": "deepseek-v4-pro:cloud",
     # Other teams
-    "soc2": "glm-5.2:cloud",
+    "soc2": "deepseek-v4-flash:cloud",
     "blog": "deepseek-v4-pro:cloud",
     "personal_assistant": "llama3.2",
-    "accessibility_audit": "glm-5.2:cloud",
+    "accessibility_audit": "deepseek-v4-flash:cloud",
     "strategy_ideation": "deepseek-v4-pro:cloud",
     "signal_intelligence": "deepseek-v4-pro:cloud",
     "deepthought": "deepseek-v4-pro:cloud",
@@ -374,7 +374,7 @@ OLLAMA_MODEL_SUGGESTIONS: list[str] = [
     "deepseek-v4-pro:cloud",
     "qwen3-coder:480b-cloud",
     "qwen3.5:9b-mlx",
-    "glm-5.2:cloud",
+    "deepseek-v4-flash:cloud",
     "llama3.2",
 ]
 
@@ -470,7 +470,7 @@ def resolve_max_output_tokens() -> int:
 # present, else the short rate window (~5m). Weekly defaults to 24h because
 # Ollama Cloud weekly 429 bodies do not include a reset timestamp.
 _DEFAULT_FAILOVER_RATE_WINDOW_S = 300.0
-_DEFAULT_FAILOVER_SESSION_WINDOW_S = 5 * 3600.0
+_DEFAULT_FAILOVER_SESSION_WINDOW_S = 65 * 60.0
 _DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 24 * 3600.0
 
 
@@ -506,7 +506,7 @@ def failover_rate_window_seconds() -> float:
 
 
 def failover_session_window_seconds() -> float:
-    """Fixed reset window for a session-limit 429 (default 5h).
+    """Fixed reset window for a session-limit 429 (default 65m).
 
     Session/weekly classifications ignore ``Retry-After``; this window is measured
     from the error time.

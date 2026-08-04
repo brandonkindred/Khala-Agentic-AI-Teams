@@ -194,6 +194,9 @@ from software_engineering_team.job_store import (  # noqa: F401
     update_job,
 )
 from software_engineering_team.job_store import (
+    append_submitted_answers as store_append_submitted_answers,  # noqa: F401
+)
+from software_engineering_team.job_store import (
     submit_answers as store_submit_answers,  # noqa: F401
 )
 from software_engineering_team.models import (  # noqa: F401

@@ -182,18 +182,21 @@ def _placeholder_slug(hint: str, separator: str, max_length: int) -> str:
           whose digest portion is derived from ``hint``, so distinct hints
           produce distinct placeholders.
     """
-    digest = hashlib.md5(hint.encode()).hexdigest()[:8]
+    digest = hashlib.md5(hint.encode(), usedforsecurity=False).hexdigest()[:8]
     result = f"item{separator}{digest}"
     if len(result) > max_length:
         result = result[:max_length].rstrip(separator)
-    return result or f"item{separator}0"
+    # Fallback must also respect max_length: if separator shares a character
+    # with the literal "item" prefix, truncation above can strip result to "".
+    return result or f"item{separator}0"[:max_length]
 
 
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
     """Derive a short, identifier-friendly name from a free-form hint.
 
-    Strips common verbs, filler words, and type suffixes, then joins the
-    remaining words with ``separator`` and truncates to ``max_length``.
+    Strips common verbs, filler words, and type suffixes, keeps up to the
+    first three remaining words, joins them with ``separator``, and
+    truncates to ``max_length``.
 
     Preconditions:
         - ``hint`` is a string (may be empty; empty / all-stripped yields a
@@ -344,7 +347,13 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         ConvergeDecider, and the seven post-converge specialists
         (logo_specifier, color_system_builder, typography_builder,
         iconography_director, photography_video_director, voice_tone_builder,
-        design_system_codifier).
+        design_system_codifier). Specialist branches match on lowercased prompt
+        *substrings*, not factory names: logo_specifier matches "logo specifier"
+        (space), color_system_builder matches "color system builder", and
+        typography_builder matches "typography builder". The remaining four
+        specialists (iconography_director, photography_video_director,
+        voice_tone_builder, design_system_codifier) have no name-substring
+        anchor at all — they match on output-field names only.
 
     Ordering constraints (first three only — do not conflate them):
         1. CreativeDirector — ``mood_board_candidates`` + ``converge_decider``
@@ -353,7 +362,7 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         2. MoodBoardConceptualist — ``moodboard conceptualist`` + ``visual_direction``
            → ``MoodBoardConceptOutput``.
         3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
-           → ``CreativeRefinementOutput`` (separate from CreativeDirector).
+           → ``CreativeRefinementDecisionOutput`` (separate from CreativeDirector).
         Specialists are matched afterward by agent-specific prompt anchors.
     """
     if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
@@ -691,6 +700,163 @@ def _branding_phase4_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     return None
 
 
+def _branding_phase5_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Return a Phase 5 agent structured-output stub, or ``None`` if unmatched.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns a dict that validates against the matching Phase 5 agent
+        ``structured_output`` schema, or ``None`` when no Phase 5 agent matches.
+        Covers all 7 Phase 5 factories: ``ownership_definer``,
+        ``approval_workflow_designer``, ``asset_wiki_planner``,
+        ``training_planner``, ``kpi_designer``, ``evolution_framer``, and
+        ``brand_rules_codifier``.
+    """
+    if "ownership_model" in system_lowered and "decision_authority" in system_lowered:
+        return {
+            "ownership_model": (
+                "The Brand Director owns final say on all brand decisions, with input from "
+                "Marketing and Product leads (dummy)."
+            ),
+            "decision_authority": {
+                "logo_changes": "Brand Director",
+                "campaign_messaging": "Marketing Lead",
+                "product_naming": "Product Lead",
+            },
+        }
+    if "approval_workflows" in system_lowered and "agency_briefing_protocols" in system_lowered:
+        return {
+            "approval_workflows": [
+                {
+                    "asset_type": "Logo usage",
+                    "approvers": ["Brand Director"],
+                    "sla": "2 business days",
+                    "escalation_path": "Escalate to CMO after 3 days (dummy).",
+                },
+                {
+                    "asset_type": "Campaign messaging",
+                    "approvers": ["Marketing Lead", "Brand Director"],
+                    "sla": "3 business days",
+                    "escalation_path": "Escalate to CMO after 5 days (dummy).",
+                },
+                {
+                    "asset_type": "Product naming",
+                    "approvers": ["Product Lead", "Brand Director"],
+                    "sla": "5 business days",
+                    "escalation_path": "Escalate to VP Product after 7 days (dummy).",
+                },
+            ],
+            "agency_briefing_protocols": [
+                "Share the brand guidelines doc before kickoff (dummy).",
+                "Require a written creative brief signed off by the Brand Director (dummy).",
+                "Hold a kickoff call covering voice, tone, and visual do's/don'ts (dummy).",
+            ],
+        }
+    if "asset_management_guidance" in system_lowered and "wiki_backlog" in system_lowered:
+        return {
+            "asset_management_guidance": [
+                "Store all approved assets in the central DAM (dummy).",
+                "Archive deprecated assets instead of deleting them (dummy).",
+                "Tag every asset with its approval date and owner (dummy).",
+            ],
+            "wiki_backlog": [
+                {
+                    "title": "Brand North Star",
+                    "summary": "One-page summary of purpose, vision, and positioning (dummy).",
+                    "owners": ["Brand Director"],
+                    "update_cadence": "quarterly",
+                },
+                {
+                    "title": "Voice Playbook",
+                    "summary": "Tone spectrum and language dos/don'ts (dummy).",
+                    "owners": ["Brand Lead"],
+                    "update_cadence": "quarterly",
+                },
+                {
+                    "title": "Design System",
+                    "summary": "Logo, color, typography, and component specs (dummy).",
+                    "owners": ["Design Lead"],
+                    "update_cadence": "monthly",
+                },
+                {
+                    "title": "Brand Review Intake",
+                    "summary": "How to submit assets for brand review (dummy).",
+                    "owners": ["Brand Director"],
+                    "update_cadence": "monthly",
+                },
+            ],
+        }
+    if "training_onboarding_plan" in system_lowered and "brand literacy" in system_lowered:
+        return {
+            "training_onboarding_plan": [
+                "New-hire brand orientation session in week one (dummy).",
+                "Quarterly brand refresher workshop (dummy).",
+                "Self-serve brand guideline course in the LMS (dummy).",
+                "Office-hours with the Brand team for open questions (dummy).",
+            ],
+        }
+    if "brand_health_kpis" in system_lowered and "tracking_methodology" in system_lowered:
+        return {
+            "brand_health_kpis": [
+                {
+                    "metric": "Brand awareness",
+                    "measurement_method": "Quarterly survey (dummy).",
+                    "target": "60% aided awareness",
+                    "review_frequency": "quarterly",
+                },
+                {
+                    "metric": "Message consistency score",
+                    "measurement_method": "Content audit against guidelines (dummy).",
+                    "target": "90% compliant",
+                    "review_frequency": "monthly",
+                },
+                {
+                    "metric": "NPS",
+                    "measurement_method": "Post-purchase survey (dummy).",
+                    "target": "+40",
+                    "review_frequency": "quarterly",
+                },
+                {
+                    "metric": "Guideline adoption rate",
+                    "measurement_method": "Percent of assets passing first-pass review (dummy).",
+                    "target": "85%",
+                    "review_frequency": "monthly",
+                },
+            ],
+            "tracking_methodology": (
+                "Combine quarterly surveys with ongoing content audits, reviewed in a monthly "
+                "brand health dashboard (dummy)."
+            ),
+            "review_trigger_points": [
+                "NPS drops more than 10 points quarter-over-quarter (dummy).",
+                "A rebrand or major product launch is planned (dummy).",
+                "Guideline adoption falls below 70% (dummy).",
+            ],
+        }
+    if "evolution_framework" in system_lowered and "version_control_cadence" in system_lowered:
+        return {
+            "evolution_framework": (
+                "The brand evolves incrementally through versioned updates, with major shifts "
+                "reserved for strategic inflection points (dummy)."
+            ),
+            "version_control_cadence": (
+                "Formal review every two quarters, with minor patches as needed (dummy)."
+            ),
+        }
+    if "brand_guidelines" in system_lowered and "governance rules" in system_lowered:
+        return {
+            "brand_guidelines": [
+                "Always use the approved wordmark; never recreate it (dummy).",
+                "Lead every message with the customer outcome, not the feature (dummy).",
+                "All external assets require Brand Director sign-off before release (dummy).",
+                "Store approved assets only in the central DAM (dummy).",
+                "Review the brand system every two quarters (dummy).",
+            ],
+        }
+    return None
+
+
 def _branding_phase2_narrative_base() -> Dict[str, Any]:
     """Return the base brand-narrative fields shared by all Phase 2 stubs.
 
@@ -889,21 +1055,25 @@ def _branding_phase2_narrative_with_writing_guidelines() -> Dict[str, Any]:
 
 
 def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
-    """Try Phase 3, then Phase 4, branding structured-output stubs; first match wins.
+    """Try Phase 3, then Phase 4, then Phase 5, branding structured-output stubs;
+    first match wins.
 
     Preconditions:
         ``system_lowered`` is the agent system prompt already lowercased (may be empty).
     Postconditions:
         Returns the first non-``None`` result from
-        ``_branding_phase3_structured_stub`` / ``_branding_phase4_structured_stub``,
-        or ``None`` when neither matches. Kept as its own helper (rather than
-        inlined in ``complete_json``) so that call site's branching stays
-        unchanged and under the mccabe complexity ceiling.
+        ``_branding_phase3_structured_stub`` / ``_branding_phase4_structured_stub`` /
+        ``_branding_phase5_structured_stub``, or ``None`` when none match. Kept as
+        its own helper (rather than inlined in ``complete_json``) so that call
+        site's branching stays unchanged and under the mccabe complexity ceiling.
     """
     stub = _branding_phase3_structured_stub(system_lowered)
     if stub is not None:
         return stub
-    return _branding_phase4_structured_stub(system_lowered)
+    stub = _branding_phase4_structured_stub(system_lowered)
+    if stub is not None:
+        return stub
+    return _branding_phase5_structured_stub(system_lowered)
 
 
 def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[str, Any]]:
@@ -1128,7 +1298,11 @@ class DummyLLMClient(LLMClient):
             - Attaches Strands ``Model`` to the class MRO when importable.
         """
         ensure_strands_model_registration()
-        assert hasattr(output_model, "model_validate")
+        if not hasattr(output_model, "model_validate"):
+            raise TypeError(
+                f"DummyLLMClient.structured_output: output_model {output_model!r} "
+                "must be a Pydantic model with a model_validate class method"
+            )
         prompt_text = _aggregated_user_tool_text(prompt)
         data = self.complete_json(
             prompt_text, system_prompt=system_prompt, structured_output_model=output_model
@@ -1273,7 +1447,7 @@ class DummyLLMClient(LLMClient):
             stripped = line.strip()
             if stripped.startswith("**Task:**"):
                 return stripped.replace("**Task:**", "").strip()
-        return hashlib.md5(prompt.encode()).hexdigest()[:12]
+        return hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
 
     def get_max_context_tokens(self) -> int:
         return 16384
@@ -1962,10 +2136,10 @@ class DummyLLMClient(LLMClient):
         # with structured_output=, see agents.py). Text-anchor fallback lives
         # in _branding_phase2_text_routed_stub so this call site's branching
         # stays flat and under the mccabe complexity ceiling (mirrors
-        # _branding_structured_stub for Phase 3/4 just below).
+        # _branding_structured_stub for Phase 3/4/5 just below).
         elif (phase2_stub := _branding_phase2_text_routed_stub(system_lowered)) is not None:
             return phase2_stub
-        # Branding Phase 3 / Phase 4 stubs live in ``_branding_structured_stub``
+        # Branding Phase 3 / Phase 4 / Phase 5 stubs live in ``_branding_structured_stub``
         # so ``complete_json`` stays under the mccabe complexity ceiling. Only
         # ``None`` means "unmatched" — an intentional empty dict must not
         # fall through to the generic default.

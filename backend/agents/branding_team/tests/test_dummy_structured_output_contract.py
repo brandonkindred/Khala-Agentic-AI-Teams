@@ -16,13 +16,13 @@ silently break the no-LLM harness:
    ``{"status": ..., "output": ...}`` fallback.
 
 All three surface here as a failure naming the offending agent. Case (3) is the
-one that needed follow-up commits when Phases 3 and 4 migrated to
+one that needed follow-up commits when Phases 3, 4, and 5 migrated to
 ``structured_output=``, and ``test_generic_prompt_payload_is_rejected_by_every_schema``
 is what keeps the primary assertion honest about catching it.
 
-The seven Phase 5 governance factories are listed in
-``_FACTORIES_WITHOUT_STRUCTURED_OUTPUT`` rather than covered here: they still use
-prose ``output_mode`` and have no schema to bind.
+``governance_compositor`` (Phase 5's fan-in node) is not a ``make_*`` factory in
+this module — it's built inline in ``graphs/phase5_governance.py`` — so it never
+appears in ``dir(branding_agents)`` and needs no entry here.
 """
 
 from __future__ import annotations
@@ -36,11 +36,15 @@ from branding_team import agents as branding_agents
 from branding_team.graphs.phase3_visual import _PHASE3_CONCEPTUALIST_VARIANTS
 from branding_team.graphs.shared import build_agent, serialize_mission
 from branding_team.models import (
+    ApprovalWorkflowsOutput,
+    AssetWikiOutput,
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
     BrandDiscoveryAuditOutput,
     BrandExperiencePrinciplesOutput,
+    BrandGuidelinesOutput,
+    BrandHealthKPIsOutput,
     BrandInActionOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
@@ -49,16 +53,19 @@ from branding_team.models import (
     CreativeRefinementDecisionOutput,
     DesignSystemDefinitionOutput,
     DifferentiationPillarsOutput,
+    EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
     MoodBoardCandidatesOutput,
     MoodBoardConceptOutput,
+    OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    TrainingOnboardingOutput,
     TypographySystemOutput,
     VoiceToneOutput,
     WritingGuidelinesOutput,
@@ -149,6 +156,18 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
         branding_agents.make_brand_in_action_illustrator,
         BrandInActionOutput,
     ),
+    # Phase 5 — Governance & Evolution
+    ("ownership_definer", branding_agents.make_ownership_definer, OwnershipOutput),
+    (
+        "approval_workflow_designer",
+        branding_agents.make_approval_workflow_designer,
+        ApprovalWorkflowsOutput,
+    ),
+    ("asset_wiki_planner", branding_agents.make_asset_wiki_planner, AssetWikiOutput),
+    ("training_planner", branding_agents.make_training_planner, TrainingOnboardingOutput),
+    ("kpi_designer", branding_agents.make_kpi_designer, BrandHealthKPIsOutput),
+    ("evolution_framer", branding_agents.make_evolution_framer, EvolutionFrameworkOutput),
+    ("brand_rules_codifier", branding_agents.make_brand_rules_codifier, BrandGuidelinesOutput),
 )
 
 _CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
@@ -222,14 +241,6 @@ _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
         "make_internal_guide",
         "make_brand_architecture_builder",
         "make_brand_in_action_illustrator",
-    }
-)
-
-# Phase 5 — Governance. Still prose ``output_mode``, so there is no schema to
-# bind. Move a name out of this set and into the table above when its agent
-# migrates to ``structured_output=``.
-_FACTORIES_WITHOUT_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
-    {
         "make_ownership_definer",
         "make_approval_workflow_designer",
         "make_asset_wiki_planner",
@@ -239,6 +250,13 @@ _FACTORIES_WITHOUT_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
         "make_brand_rules_codifier",
     }
 )
+
+# All branding agent factories now use ``structured_output=`` (Phases 1-5).
+# Kept as an explicit (currently empty) set — rather than removing it and the
+# union check below — so a future phase or team addition that ships without a
+# schema has an obvious place to be listed instead of silently expanding
+# ``_FACTORIES_WITH_STRUCTURED_OUTPUT``'s assumptions.
+_FACTORIES_WITHOUT_STRUCTURED_OUTPUT: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
