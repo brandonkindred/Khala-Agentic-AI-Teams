@@ -789,6 +789,17 @@ def test_cap_open_questions_preserves_order_and_limit() -> None:
     assert cap_open_questions(questions[:3]) == questions[:3]
 
 
+def test_cap_open_questions_rejects_negative_limit() -> None:
+    """A negative limit is a precondition violation (caller bug), not malformed
+    LLM input: it must raise AssertionError rather than silently returning a
+    wrong slice, per this module's Design by Contract convention."""
+    from product_requirements_analysis_agent.question_processing import cap_open_questions
+
+    questions = [OpenQuestion(id="q0", question_text="Question?", options=[])]
+    with pytest.raises(AssertionError):
+        cap_open_questions(questions, limit=-1)
+
+
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
     llm = MagicMock()

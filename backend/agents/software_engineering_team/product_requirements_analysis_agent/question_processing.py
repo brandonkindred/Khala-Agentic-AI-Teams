@@ -32,9 +32,13 @@ from .qa_history import content_words
 
 logger = logging.getLogger(__name__)
 
+# Caps chosen to keep a single spec review digestible in one sitting rather than
+# tuned against measured user drop-off; revisit with product input if that changes.
 MAX_ISSUES = 10
 MAX_GAPS = 10
 MAX_OPEN_QUESTIONS = 10
+# Empirical SequenceMatcher.ratio() cutoff for "same answer, different wording"
+# (shared with software_engineering_team.shared.deduplication's dedupe threshold).
 ANSWER_SIMILARITY_THRESHOLD = 0.85
 
 
@@ -59,6 +63,9 @@ def cap_open_questions(
     return questions[:limit]
 
 
+# Substring matches (see filter_organizational_questions), so keep entries short
+# and specific to org/process/approval topics to avoid false-positiving on
+# legitimate technical questions. Extend by adding another lowercase phrase.
 ORGANIZATIONAL_PHRASES = [
     "decision process",
     "approval process",
