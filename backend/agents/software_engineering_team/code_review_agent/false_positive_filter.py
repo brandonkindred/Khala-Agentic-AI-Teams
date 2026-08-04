@@ -91,6 +91,10 @@ _CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 # ``_verify_timeout_seconds`` below.
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 3600
 
+# Default cap on findings inlined into a single per-file verification LLM
+# call; see ``_verify_max_findings_per_group`` below.
+DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP = 40
+
 
 def _verify_timeout_seconds() -> int:
     """Per-group verification call timeout (seconds).
@@ -105,6 +109,27 @@ def _verify_timeout_seconds() -> int:
         - Returns an int >= 1.
     """
     return parse_env_int("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", DEFAULT_VERIFY_TIMEOUT_SECONDS, 1)
+
+
+def _verify_max_findings_per_group() -> int:
+    """Cap on findings verified in a single per-file LLM call.
+
+    Bounds how many findings ``_build_group_prompt`` renders in one
+    verification call for one cited file. A file whose genuine findings
+    exceed this cap is split into multiple same-sized batches by
+    ``_verify_and_filter`` (each its own ``_verify_group`` call, within the
+    cap) instead of growing one prompt/agent turn without bound. Env-
+    overridable via ``CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`` (see
+    docs/ENV_VARS.md).
+
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    return parse_env_int(
+        "CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP",
+        DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
+        1,
+    )
 
 
 def _verify_parallelism() -> int:
@@ -1076,7 +1101,12 @@ def _verify_group(
     issues: List[CodeReviewIssue],
     input_data: CodeReviewInput,
 ) -> Dict[int, _Verdict]:
-    """Run one verification LLM call over all findings for a single file.
+    """Run one verification LLM call over one batch of a single file's findings.
+
+    ``issues`` is the whole file's findings unless the caller split them into
+    multiple batches under ``CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP``; this
+    function has no notion of "the whole file" and simply verifies whatever
+    slice it is given.
 
     Postconditions:
         - Returns ``{finding_index: _Verdict}`` for the findings the model gave
@@ -1221,7 +1251,31 @@ def _verify_and_filter(
     # single call, not the sum. A per-group failure keeps that group's findings
     # (best-effort), exactly as the sequential path did, and the merge below
     # consumes results in submission order so the outcome stays deterministic.
-    group_items = list(groups.items())
+    #
+    # A file whose finding count exceeds _verify_max_findings_per_group() is
+    # split here into multiple same-sized batches, each becoming its own
+    # group_items entry (its own _verify_group call), so no single prompt
+    # inlines more than the cap. group_items and group_orig_index_batches are
+    # positionally aligned by list index rather than keyed by file_path, since
+    # one file_path can now produce more than one entry.
+    max_per_group = _verify_max_findings_per_group()
+    group_items: List[Tuple[str, List[CodeReviewIssue]]] = []
+    group_orig_index_batches: List[List[int]] = []
+    for file_path, group in groups.items():
+        orig_indices = group_orig_indices[file_path]
+        if len(group) > max_per_group:
+            batch_count = -(-len(group) // max_per_group)
+            logger.info(
+                "FalsePositiveFilter: splitting %s findings for %s into %s batches "
+                "of up to %s (CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP)",
+                len(group),
+                file_path,
+                batch_count,
+                max_per_group,
+            )
+        for start in range(0, len(group), max_per_group):
+            group_items.append((file_path, group[start : start + max_per_group]))
+            group_orig_index_batches.append(orig_indices[start : start + max_per_group])
 
     def _verify_one(item: Tuple[str, List[CodeReviewIssue]]) -> Dict[int, _Verdict]:
         file_path, group = item
@@ -1272,8 +1326,9 @@ def _verify_and_filter(
         group_verdicts = [r if r is not None else {} for r in raw_results]
 
     removed_indices: set[int] = set()
-    for (file_path, group), verdicts in zip(group_items, group_verdicts):
-        orig_indices = group_orig_indices[file_path]
+    for (file_path, group), orig_indices, verdicts in zip(
+        group_items, group_orig_index_batches, group_verdicts
+    ):
         group_len = len(group)
         for idx, verdict in verdicts.items():
             if not isinstance(idx, int) or idx < 0 or idx >= group_len:

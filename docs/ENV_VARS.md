@@ -781,6 +781,25 @@ calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
 dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
+### CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP
+Int (default `40`, floor `1`). Cap on how many findings the false-positive
+verification phase inlines into a single per-file LLM call
+(`_build_group_prompt`/`_verify_group`). A cited file whose genuine findings
+exceed this cap is split into multiple same-sized batches — each its own
+verification call, fanned out the same way calls for additional files are
+(subject to `CODE_REVIEW_MAP_PARALLELISM` and
+`CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`, above) — instead of growing one
+prompt/agent turn without bound as a single file's finding count grows.
+Verdicts from every batch are merged back onto the *original* finding list
+via the batch's own slice of original indices, so which batch (and which
+within-batch index) confirmed a false positive does not change which finding
+gets dropped. Lowering this cap increases the number of verification LLM
+calls (and therefore cost/latency) for files with many findings; raising it
+trades that against a larger prompt per call. This is a cap on how many
+*findings* share one verification call — separate from any cap on how much
+*file content* a single tool read can return (out of scope here; tracked in
+a separate sub-issue).
+
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
 `code_review_agent/temporal/config.py::resolve_max_concurrent_activities`, the
