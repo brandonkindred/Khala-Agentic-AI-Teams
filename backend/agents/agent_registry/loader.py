@@ -47,11 +47,22 @@ def _load_team_display_names() -> dict[str, str]:
     """
     try:
         from unified_api.config import TEAM_CONFIGS  # type: ignore
-
-        return {key: cfg.name for key, cfg in TEAM_CONFIGS.items()}
-    except Exception:  # pragma: no cover — defensive
+    except ImportError:
+        # Expected outside a full unified_api checkout (e.g. a test harness) —
+        # not worth surfacing above debug.
         logger.debug(
             "Could not import unified_api.config.TEAM_CONFIGS; using key-derived names",
+            exc_info=True,
+        )
+        return {}
+    try:
+        return {key: cfg.name for key, cfg in TEAM_CONFIGS.items()}
+    except Exception:  # pragma: no cover — defensive
+        # unified_api.config imported fine but TEAM_CONFIGS itself is malformed —
+        # an unexpected configuration bug, not the routine "not on path" case, so
+        # operators should see it.
+        logger.warning(
+            "TEAM_CONFIGS imported but could not be read; using key-derived names",
             exc_info=True,
         )
         return {}
