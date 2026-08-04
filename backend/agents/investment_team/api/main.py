@@ -1476,6 +1476,11 @@ def _run_real_data_backtest(
     return run.result, run.trades
 
 
+# Cap on record.paper_trading_error's length: long enough for a useful
+# summary of the failure, short enough to keep persisted records compact.
+_MAX_PAPER_TRADING_ERROR_LENGTH = 500
+
+
 class _PaperTradingDataUnavailable(Exception):
     """Raised inside the strategy lab cycle when market data can't be fetched for paper trading.
 
@@ -1904,7 +1909,7 @@ def _finalize_strategy_lab_cycle_record(
         except Exception as exc:
             logger.warning("Paper trading step failed (non-fatal): %s", exc)
             record.paper_trading_status = "failed"
-            record.paper_trading_error = str(exc)[:500]
+            record.paper_trading_error = str(exc)[:_MAX_PAPER_TRADING_ERROR_LENGTH]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
 
     _persist_strategy_lab_record(record)
