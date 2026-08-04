@@ -343,6 +343,18 @@ def test_code_review_catch_all_matches_long_prompt_with_approved() -> None:
     assert "issues" in j
 
 
+def test_code_review_catch_all_does_not_match_unrelated_chunk_prompt() -> None:
+    """A long prompt about a "chunk" of data (not a code review) must not be
+    misclassified as a code-review response by the bare "chunk" heuristic.
+    """
+    c = DummyLLMClient()
+    padding = "x" * (CODE_REVIEW_MIN_PROMPT_LENGTH + 50)
+    prompt = f"Please process this chunk of user data and summarize it. {padding}"
+    assert len(prompt.lower()) > CODE_REVIEW_MIN_PROMPT_LENGTH
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j.get("summary") != "Code review passed (dummy)."
+
+
 def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
 
@@ -357,3 +369,39 @@ def test_senior_backend_branch_generates_valid_python_for_quote_laden_hint() -> 
     compile(j["tests"], "<tests>", "exec")
     for path, content in j["files"].items():
         compile(content, path, "exec")
+
+
+def test_security_branch_not_shadowed_by_code_review_catch_all() -> None:
+    """Security prompts include "Code to review" as an input-section header (see
+    security_agent/prompts.py), which also matches the generic code-review
+    catch-all. The security branch must win so callers get "vulnerabilities",
+    not an empty generic "issues" review.
+    """
+    c = DummyLLMClient()
+    prompt = (
+        "You are a Cybersecurity Expert. Review the code for security vulnerabilities.\n"
+        "**Input:**\n- Code to review\n- Language\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "vulnerabilities" in j
+    assert j["vulnerabilities"] == []
+    assert j["summary"] == "No security issues found (dummy)"
+    assert "issues" not in j
+
+
+def test_accessibility_branch_not_shadowed_by_code_review_catch_all() -> None:
+    """Accessibility prompts include "Code to review" as an input-section header
+    (see accessibility_agent/prompts.py), which also matches the generic
+    code-review catch-all. The accessibility branch must win so callers get
+    the WCAG-shaped stub, not the generic code-review stub.
+    """
+    c = DummyLLMClient()
+    prompt = (
+        "You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance.\n"
+        "**Input:**\n- Code to review (JSX/TSX, HTML templates)\n"
+        "Return a list of accessibility issues.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["issues"] == []
+    assert j["summary"] == "No WCAG 2.2 accessibility issues found (dummy)"
+    assert "vulnerabilities" not in j

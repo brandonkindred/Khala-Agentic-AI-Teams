@@ -1158,22 +1158,34 @@ class DummyLLMClient(LLMClient):
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "Code aligns with task requirements.",
             }
+        elif "security" in lowered and "vulnerabilities" in lowered:
+            # Kept ABOVE the code-review catch-all because the security agent's
+            # own prompt includes "Code to review" as a section header, which
+            # would otherwise match the catch-all first and return an empty
+            # generic review instead of the vulnerabilities-shaped stub.
+            return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
+        elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
+            # Kept ABOVE the code-review catch-all for the same reason as the
+            # security branch above: the accessibility agent's prompt also
+            # includes "Code to review" as a section header.
+            return {"issues": [], "summary": "No WCAG 2.2 accessibility issues found (dummy)"}
         elif (
-            "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
+            "code to review" in lowered
+            or "review this code" in lowered
+            or ("chunk" in lowered and "review" in lowered)
         ) and ("approved" not in lowered or len(lowered) > CODE_REVIEW_MIN_PROMPT_LENGTH):
             # Catch-all for code review / chunk review prompts routed through Strands.
             # Long prompts that mention "approved" still match: they carry full review
             # context, unlike short approval-only stubs below the length threshold.
+            # "chunk" alone is too broad (matches unrelated data-processing prompts);
+            # real chunk-review prompts always pair it with "review" (see
+            # CHUNK_REVIEW_NOTE / CODE_TO_REVIEW_HEADER in chunk_reviewer.py).
             return {
                 "approved": True,
                 "issues": [],
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "",
             }
-        elif "security" in lowered and "vulnerabilities" in lowered:
-            return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
-        elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
-            return {"issues": [], "summary": "No WCAG 2.2 accessibility issues found (dummy)"}
         elif "senior backend software engineer" in lowered:
             slug = (
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)

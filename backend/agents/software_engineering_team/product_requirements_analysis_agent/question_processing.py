@@ -15,7 +15,7 @@ import json
 import logging
 import re
 from difflib import SequenceMatcher
-from typing import Any, List
+from typing import Any, Iterable, List, Sequence
 
 from strands.models.model import Model
 
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 MAX_ISSUES = 10
 MAX_GAPS = 10
 MAX_OPEN_QUESTIONS = 10
+ANSWER_SIMILARITY_THRESHOLD = 0.85
 
 
 def cap_open_questions(
@@ -45,14 +46,18 @@ def cap_open_questions(
     """Return at most ``limit`` open questions, preserving order.
 
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`; ``limit`` >= 0.
-    Postconditions: returns ``questions`` unchanged when ``len(questions) <= limit``,
-        otherwise the first ``limit`` items; never raises.
+    Postconditions: returns a shallow copy of ``questions`` when
+        ``len(questions) <= limit``, otherwise the first ``limit`` items.
+        Violating preconditions raises ``AssertionError`` (Design by Contract);
+        otherwise does not raise.
     """
+    assert isinstance(questions, list), "questions must be a list"
     assert limit >= 0, f"limit must be >= 0, got {limit}"
     if len(questions) <= limit:
         return list(questions)
     logger.info("Truncated open questions: %d->%d", len(questions), limit)
     return questions[:limit]
+
 
 ORGANIZATIONAL_PHRASES = [
     "decision process",
@@ -71,44 +76,301 @@ ORGANIZATIONAL_PHRASES = [
 ]
 
 
-def _stem_candidates(w: str) -> set[str]:
-    """Return plausible root forms of ``w`` for keyword-coverage matching.
+def _clean_token(w: str) -> str:
+    """Strip punctuation so tokens like 'store?' match their bare form.
 
-    A single-guess suffix strip is ambiguous for silent-e roots (e.g. "based"
-    is "base" + d, "stored" is "store" + d) versus regular roots (e.g.
-    "documented" is "document" + ed), for "-es" plurals (e.g. "phases" is
-    "phase" + s, "classes" is "class" + es), and for "-y"/"-ied" verbs (e.g.
-    "studied" is "study" with "y" replaced by "ied") — the surface form alone
-    doesn't say which rule applies. Guessing a single stem silently drops the
-    correct one (e.g. stemming "based" to "bas" alone would never match
-    "base"). Instead this returns every plausible root and lets the caller
-    accept a match against any of them. This is a small suffix map covering
-    common regular English plural/past-tense inflections, not a linguistically
-    complete stemmer/lemmatizer: irregular forms (e.g. "geese" -> "goose")
-    are not handled, and it only strips one layer of suffix.
-
-    Preconditions: ``w`` is a lowercase string with no whitespace.
-    Postconditions: returns a non-empty set of candidate stems that always
-        includes ``w`` itself; a word ending in "ss" (e.g. "address",
-        "process") is returned unchanged, since a doubled-s ending is never
-        itself a plural/past-tense suffix here; never raises.
+    Preconditions: ``w`` is a string.
+    Postconditions: returns the alphanumeric core of ``w``, lowercased; never
+        raises. Lowercasing happens before the alphanumeric filter so uppercase
+        letters are normalized rather than stripped (``Store?`` → ``store``).
     """
-    candidates = {w}
-    if w.endswith("ss"):
-        return candidates
-    if w.endswith("ied") and len(w) > 4:
-        candidates.add(w[:-3] + "y")  # studied -> study, tried -> try
-    if w.endswith("ed") and len(w) > 4:
-        candidates.add(w[:-1])  # based -> base, stored -> store
-        candidates.add(w[:-2])  # documented -> document
-    elif w.endswith("ies") and len(w) > 4:
-        candidates.add(w[:-3] + "y")  # policies -> policy
-    elif w.endswith("es") and len(w) > 4:
-        candidates.add(w[:-1])  # phases -> phase
-        candidates.add(w[:-2])  # classes -> class
-    elif w.endswith("s") and len(w) > 4:
-        candidates.add(w[:-1])  # tokens -> token
-    return candidates
+    return re.sub(r"[^a-z0-9]", "", w.strip().lower())
+
+
+_LEXICAL_LL = frozenset(
+    {
+        "appall",
+        "distill",
+        "enrol",
+        "enroll",
+        "forestall",
+        "fulfil",
+        "fulfill",
+        "install",
+        "instill",
+        "misspell",
+        "quell",
+        "recall",
+        "reinstall",
+        "scroll",
+        "thrill",
+        "uninstall",
+    }
+)
+_SHORT_LL_CORES = frozenset(
+    {
+        "ball",
+        "bill",
+        "call",
+        "chill",
+        "drill",
+        "fall",
+        "fill",
+        "kill",
+        "pull",
+        "roll",
+        "sell",
+        "shell",
+        "small",
+        "spell",
+        "spill",
+        "stall",
+        "swell",
+        "tell",
+        "wall",
+        "will",
+    }
+)
+_LL_PREFIXES = frozenset(
+    {
+        "back",
+        "down",
+        "mis",
+        "out",
+        "over",
+        "pre",
+        "re",
+        "un",
+        "under",
+        "up",
+    }
+)
+_LEXICAL_TT = frozenset(
+    {
+        "batt",
+        "boycott",
+        "butt",
+        "mitt",
+        "putt",
+        "watt",
+    }
+)
+_COMPLETE_SES_BASES = frozenset({"bus", "gas", "bias", "lens", "corps"})
+# Complete singulars ending in -s that take -es plurals (lenses→lens, buses→bus).
+# Latinate -us/-os bases are handled separately in _stem_info.
+_INSERT_K_STEMS = frozenset(
+    {
+        "frolick",
+        "mimick",
+        "panick",
+        "picnick",
+        "traffick",
+    }
+)
+# Silent-e -oes stubs (shoe/canoe/oboe); other -oes forms are complete -o nouns.
+_SILENT_E_OES_BASES = frozenset({"sho", "cano", "obo"})
+# Silent-e -ches stubs that do not match the vowel-immediately-before-ch pattern.
+_SILENT_E_CH_BASES = frozenset({"quich", "pastich"})
+# Complete vowel+ch singulars that must not take silent-e restoration.
+_COMPLETE_VOWEL_CH = frozenset(
+    {
+        "beach",
+        "leech",
+        "mooch",
+        "peach",
+        "pooch",
+        "reach",
+        "speech",
+        "teach",
+    }
+)
+# Complete -anch singulars that must not take silent-e restoration (unlike avalanche/tranche).
+_COMPLETE_ANCH_BASES = frozenset({"branch", "ranch"})
+
+
+def _undouble_inflectional(base: str) -> str:
+    """Undouble only when -ed/-ing spelling doubled a final consonant.
+
+    Preconditions: ``base`` is a lowercase stem after suffix strip.
+    Postconditions: returns the undoubled stem when inflectional, else ``base``.
+        Lexical ``ll``/``tt``/``fsz`` doubles are preserved. Never raises.
+    """
+    vowels = set("aeiou")
+    if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
+        return base
+    doubled = base[-1]
+    if doubled in "fsz":
+        return base
+    if doubled == "l":
+        # Keep lexical cores/denylist/prefixes; default keep unknown ll.
+        if base in _SHORT_LL_CORES or base in _LEXICAL_LL:
+            return base
+        for core in _SHORT_LL_CORES:
+            if base.endswith(core) and base[: -len(core)] in _LL_PREFIXES:
+                return base
+        undoubled = base[:-1]
+        # Inflectional British -l doubling, including short bases (fuel/dial/duel).
+        if len(base) >= 5 and undoubled.endswith(("el", "ol", "al")) and len(undoubled) >= 3:
+            return undoubled
+        return base
+    if doubled == "t":
+        if base in _LEXICAL_TT or base.endswith("cott"):
+            return base
+        return base[:-1]
+    return base[:-1]
+
+
+def _strip_inserted_ck(base: str) -> str:
+    """Remove spelling-only k after known -c verbs only (mimick→mimic).
+
+    Preconditions: ``base`` is a lowercase stem after suffix strip / undoubling.
+    Postconditions: returns ``base`` without inserted ``k`` for allowlisted stems;
+        lexical ``-ick``/``-pick``/``-kick``/``-click`` forms are unchanged. Never raises.
+    """
+    if base.endswith(("pick", "kick", "click")):
+        return base
+    if base in _INSERT_K_STEMS or any(base.endswith(s) for s in _INSERT_K_STEMS):
+        return base[:-1]
+    return base
+
+
+def _stem_info(w: str) -> tuple[str, bool, bool, bool]:
+    """Normalize word for matching; flag silent-e / y-ie stubs / exact eligibility.
+
+    Preconditions: ``w`` is a cleaned token (lowercase).
+    Postconditions: returns
+        ``(stem, silent_e_candidate, y_or_ie_stub, exact_ok)``. Never raises.
+        ``exact_ok`` is False for restoration-only stubs (``ies``/``ied``, short
+        silent-e ``-ing`` stubs, and silent-e plural ``-es`` forms) so they
+        cannot exact-match unrelated raw tokens like ``spec``/``cas``/``cod``.
+        Lexical doubles and true ``-c`` verb ``k`` insertion are preserved;
+        default for unknown ``ll`` is keep. Plural ``settings``/``mappings``
+        recurse through ``-ing`` normalization.
+    """
+    w = w.strip()
+    vowels = set("aeiou")
+
+    if w in {"uses", "used"}:
+        # Third-person / past of use (len 5) must not fall through short-token guard.
+        return "use", False, False, True
+
+    if w.endswith("ied") and len(w) >= 4:
+        stub = w[:-3]
+        if stub:
+            return stub, False, True, False
+
+    if len(w) <= 4:
+        return w, False, False, True
+
+    if w.endswith("ed"):
+        if len(w) >= 5:
+            raw = w[:-2]
+            base = _strip_inserted_ck(_undouble_inflectional(raw))
+            if len(base) >= 3:
+                silent_e = base == raw
+                return base, silent_e, False, True
+
+    if w.endswith("ing") and len(w) > 5:
+        raw = w[:-3]
+        base = _strip_inserted_ck(_undouble_inflectional(raw))
+        if len(base) >= 3:
+            # Non-doubled -ing is often silent-e (coding→cod), but -x verbs
+            # (fixing→fix) never restore e.
+            silent_e = base == raw and not base.endswith("x")
+            # Short silent-e stubs (coding→cod, making→mak) are restoration-only.
+            exact_ok = not (silent_e and len(base) <= 3)
+            return base, silent_e, False, exact_ok
+
+    if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
+        return w[:-3], False, True, False
+    if w.endswith("sses") and len(w) > 4:
+        return w[:-2], False, False, True
+    if w.endswith("xes") and len(w) > 4:
+        return w[:-2], False, False, True
+    if w.endswith("zes") and len(w) > 4:
+        base = w[:-2]
+        if base.endswith("zz"):
+            # quizzes→quizz→quiz; buzzes→buzz stays lexical.
+            if base.endswith("izz") and len(base) <= 5:
+                return base[:-1], False, False, True
+            return base, False, False, True
+        return base, True, False, False
+    if w.endswith("ches") and len(w) > 4:
+        base = w[:-2]
+        if base.endswith("tch") or base in _COMPLETE_VOWEL_CH or base in _COMPLETE_ANCH_BASES:
+            return base, False, False, True
+        # Silent-e: *ache/*anche/*iche and short vowel+ch (cache); else exact (arch).
+        if (
+            (base.endswith("ach") and not base.endswith(("beach", "peach")))
+            or base.endswith("anch")
+            or base in _SILENT_E_CH_BASES
+            or (len(base) == 4 and base[-3] in vowels)
+        ):
+            return base, True, False, False
+        return base, False, False, True
+    if w.endswith("shes") and len(w) > 4:
+        return w[:-2], False, False, True
+    if w.endswith("ses") and len(w) > 4:
+        base = w[:-2]
+        # Exact for Latinate -us/-os singulars long enough that the base is the
+        # complete word (status/focus/cactus: len >= 5). Shorter -us bases like
+        # hous/abus from houses/abuses must stay silent-e so they restore to
+        # house/abuse; do not drop the length guard. Short complete -s singulars
+        # (bus/gas/bias/lens/corps) are handled via _COMPLETE_SES_BASES.
+        if (base.endswith(("us", "os")) and len(base) >= 5) or base in _COMPLETE_SES_BASES:
+            return base, False, False, True
+        return base, True, False, False
+    if w.endswith("oes") and len(w) > 4 and w[-4] not in vowels:
+        base = w[:-2]
+        # Silent-e allowlist (shoe/canoe/oboe); other -oes are complete -o nouns
+        # (echo/mango/cargo/domino/buffalo/...).
+        if base in _SILENT_E_OES_BASES:
+            return base, True, False, False
+        return base, False, False, True
+    if w.endswith("s") and len(w) > 4 and not w.endswith(("ss", "us", "is")):
+        singular = w[:-1]
+        if singular.endswith("ing") and len(singular) > 5:
+            return _stem_info(singular)
+        return singular, False, False, True
+
+    return w, False, False, True
+
+
+def _stems_match(
+    stem: str,
+    silent_e_candidate: bool,
+    y_or_ie_stub: bool,
+    exact_ok: bool,
+    qa_exact_stems: set[str],
+    qa_silent_e_stubs: set[str],
+    qa_y_or_ie_stubs: set[str],
+) -> bool:
+    """Return True when ``stem`` matches a qa stem.
+
+    Preconditions: ``stem`` is a non-empty stemmed token; qa sets come from
+        history stemming.
+    Postconditions: exact membership applies only when ``exact_ok``.
+        Restoration stubs match via ``+e`` / ``+y`` / ``+ie`` or stub-to-stub,
+        never against unrelated raw tokens. Never raises.
+    """
+    if exact_ok and stem in qa_exact_stems:
+        return True
+    # Stub-to-stub so species↔species and caches↔caches still match.
+    if y_or_ie_stub and stem in qa_y_or_ie_stubs:
+        return True
+    if silent_e_candidate and stem in qa_silent_e_stubs:
+        return True
+    if silent_e_candidate and (stem + "e") in qa_exact_stems:
+        return True
+    if stem.endswith("e") and stem[:-1] in qa_silent_e_stubs:
+        return True
+    if y_or_ie_stub and ((stem + "y") in qa_exact_stems or (stem + "ie") in qa_exact_stems):
+        return True
+    if stem.endswith("y") and stem[:-1] in qa_y_or_ie_stubs:
+        return True
+    if stem.endswith("ie") and stem[:-2] in qa_y_or_ie_stubs:
+        return True
+    return False
 
 
 def filter_duplicate_questions(
@@ -117,15 +379,13 @@ def filter_duplicate_questions(
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Filters out questions whose keywords share a common stem candidate (see
-    :func:`_stem_candidates`) with a word tokenized out of the Q&A history —
-    both sides are stemmed the same way so a root-form keyword matches an
-    inflected history word and vice versa (e.g. keyword "class" matches
-    history "classes", and keyword "classes" matches history "class"). A
-    question is considered a duplicate when at least 90% of its keywords have
-    such a match. Below-90% coverage is kept for possible consolidation
-    elsewhere. This is keyword coverage, not a similarity ratio between the
-    question and history.
+    Filters out questions whose keyword stems (plus inflectional variants such as
+    plurals, past tense, and silent-e forms) match stemmed history tokens via
+    :func:`_stem_info` / :func:`_stems_match` — not verbatim raw-token equality.
+    A question is considered a duplicate when at least 90% of its keyword stems
+    are found in the history. Below-90% coverage is kept for possible
+    consolidation elsewhere. This is keyword coverage, not a similarity ratio
+    between the question and history.
 
     Uses :func:`content_words` (stopword-based, not length-based) for the same
     keyword-admission rule as :func:`qa_history.extract_answer_from_qa_history`,
@@ -142,36 +402,63 @@ def filter_duplicate_questions(
     Preconditions: ``new_questions`` is a list of :class:`OpenQuestion`;
         ``qa_history`` is a string.
     Postconditions: the two returned lists partition ``new_questions`` (order
-        preserved within each); never raises.
+        preserved within each). Never raises for well-typed inputs
+        (``List[OpenQuestion]``, ``str``); ``_stem_info`` / ``_clean_token`` are
+        total over cleaned lowercase tokens. Precondition violations raise
+        ``AssertionError`` (raised explicitly so the guard still holds under
+        ``python -O``).
     """
-    qa_history_lower = (qa_history or "").lower()
+    if not isinstance(new_questions, list):
+        raise AssertionError("new_questions must be a list")
+    if not isinstance(qa_history, str):
+        raise AssertionError("qa_history must be a string")
+    qa_history_lower = qa_history.lower()
     filtered = []
     duplicates = []
 
+    qa_stem_infos = [
+        _stem_info(tok) for tok in re.findall(r"[a-z0-9]+", qa_history_lower) if len(tok) >= 2
+    ]
+    # Exact set excludes restoration-only stubs so species/cases cannot hit spec/cas.
+    qa_exact_stems = {stem for stem, _, _, exact_ok in qa_stem_infos if exact_ok}
+    # Silent-e stubs include both restoration-only and exact-eligible forms
+    # (e.g. moved→mov) so store↔stored matching still works.
+    qa_silent_e_stubs = {stem for stem, silent_e, _, _ in qa_stem_infos if silent_e}
+    qa_y_or_ie_stubs = {stem for stem, _, y_or_ie, _ in qa_stem_infos if y_or_ie}
+
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
-        key_words = content_words(q_text_lower)
-        if not key_words:
+        # Same keyword admission as qa_history.extract_answer_from_qa_history
+        # (stopword-based via content_words, not a length>3 gate).
+        key_stem_infos = [_stem_info(_clean_token(w)) for w in content_words(q_text_lower)]
+        key_by_stem: dict[str, tuple[bool, bool, bool]] = {}
+        for stem, silent_e, y_or_ie, exact_ok in key_stem_infos:
+            if not stem:
+                continue
+            prev_s, prev_y, prev_x = key_by_stem.get(stem, (False, False, False))
+            key_by_stem[stem] = (
+                prev_s or silent_e,
+                prev_y or y_or_ie,
+                prev_x or exact_ok,
+            )
+        if not key_by_stem:
             filtered.append(q)
             continue
-        # Tokenize qa_history the same way content_words does (so punctuation
-        # can't glue two words together), then expand every history token to
-        # its own stem candidates. A keyword matches history when the two
-        # candidate sets intersect — stemming both sides identically is what
-        # makes the match symmetric: a root-form keyword (e.g. "class")
-        # matches an inflected history word ("classes") exactly as readily as
-        # an inflected keyword ("classes") matches a root-form history word
-        # ("class"). Whole-word only (not substring containment), so a short
-        # stem can't false-match inside an unrelated longer word (e.g. "api"
-        # inside "capitalizing") now that short content words are admitted as
-        # keywords.
-        history_stem_pool: set[str] = set()
-        for history_word in re.sub(r"[^\w\s]", " ", qa_history_lower).split():
-            history_stem_pool |= _stem_candidates(history_word)
-        matches = sum(1 for w in key_words if _stem_candidates(w) & history_stem_pool)
-        match_ratio = matches / len(key_words)
-        # Only treat as duplicate of an answered question when match >= 90%.
-        # Below-90% coverage may be consolidated but should not be filtered out.
+
+        matches = sum(
+            1
+            for stem, (silent_e, y_or_ie, exact_ok) in key_by_stem.items()
+            if _stems_match(
+                stem,
+                silent_e,
+                y_or_ie,
+                exact_ok,
+                qa_exact_stems,
+                qa_silent_e_stubs,
+                qa_y_or_ie_stubs,
+            )
+        )
+        match_ratio = matches / len(key_by_stem)
         if match_ratio >= 0.90:
             logger.info(
                 "Filtering duplicate question (%.0f%% match): %s",
@@ -200,7 +487,11 @@ def filter_organizational_questions(questions: List[OpenQuestion]) -> List[OpenQ
 
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`.
     Postconditions: returns the sublist that is not organizational, order preserved.
+        Precondition violations raise ``AssertionError`` (raised explicitly so the
+        guard still holds under ``python -O``).
     """
+    if not isinstance(questions, list):
+        raise AssertionError("questions must be a list")
     kept: List[OpenQuestion] = []
     for q in questions:
         text_norm = (q.question_text or "").lower().strip()
@@ -233,24 +524,59 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         parsed but not capped here (the agent workflow applies
         ``MAX_OPEN_QUESTIONS`` after semantic consolidation and
         answer-similarity deduplication so near-duplicates do not crowd out
-        distinct topics); never raises.
+        distinct topics). Malformed open-question items are skipped and logged;
+        non-dict top-level ``raw`` and non-list ``issues``/``gaps``/
+        ``open_questions`` are logged and treated as empty; this function never
+        raises to callers.
     """
     if not isinstance(raw, dict):
+        preview = repr(raw)
+        if len(preview) > 200:
+            preview = preview[:200] + "..."
+        logger.warning(
+            "Spec review response is not a JSON object (%s): %s",
+            type(raw).__name__,
+            preview,
+        )
         return SpecReviewResult(summary="Spec review completed (no structured output)")
 
     raw_issues = raw.get("issues", [])
     raw_gaps = raw.get("gaps", [])
     raw_questions = raw.get("open_questions", [])
 
-    # Deduplicate and limit issues/gaps to prevent repetitive LLM output
-    issues = list(raw_issues) if isinstance(raw_issues, list) else []
-    gaps = list(raw_gaps) if isinstance(raw_gaps, list) else []
+    # Keep only string issues/gaps; non-string LLM elements are dropped.
+    if isinstance(raw_issues, list):
+        issues = [i for i in raw_issues if isinstance(i, str)]
+    else:
+        logger.warning(
+            "Expected list for 'issues', got %s: %r",
+            type(raw_issues).__name__,
+            raw_issues,
+        )
+        issues = []
+    if isinstance(raw_gaps, list):
+        gaps = [g for g in raw_gaps if isinstance(g, str)]
+    else:
+        logger.warning(
+            "Expected list for 'gaps', got %s: %r",
+            type(raw_gaps).__name__,
+            raw_gaps,
+        )
+        gaps = []
 
     original_issue_count = len(issues)
     original_gap_count = len(gaps)
 
-    issues = _dedupe_items(issues)[:MAX_ISSUES]
-    gaps = _dedupe_items(gaps)[:MAX_GAPS]
+    try:
+        issues = _dedupe_items(issues)[:MAX_ISSUES]
+    except Exception as exc:
+        logger.warning("Deduplication failed for issues, using raw capped list: %s", exc)
+        issues = issues[:MAX_ISSUES]
+    try:
+        gaps = _dedupe_items(gaps)[:MAX_GAPS]
+    except Exception as exc:
+        logger.warning("Deduplication failed for gaps, using raw capped list: %s", exc)
+        gaps = gaps[:MAX_GAPS]
 
     if len(issues) < original_issue_count or len(gaps) < original_gap_count:
         logger.info(
@@ -266,163 +592,243 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         for i, q in enumerate(raw_questions):
             try:
                 open_questions.append(parse_open_question(q, i))
-            except (ValueError, TypeError) as exc:
-                logger.warning("Skipping malformed open question at index %d: %s", i, exc)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping malformed open question at index %d (%s): %s; raw=%r",
+                    i,
+                    type(exc).__name__,
+                    exc,
+                    q,
+                )
+    else:
+        logger.warning(
+            "Expected list for 'open_questions', got %s: %r",
+            type(raw_questions).__name__,
+            raw_questions,
+        )
 
     return SpecReviewResult(
         issues=issues,
         gaps=gaps,
         open_questions=open_questions,
-        summary=str(raw.get("summary") or "Spec review complete"),
+        summary=_str_or_default(raw.get("summary"), "Spec review complete"),
     )
 
 
 def _str_or_default(value: Any, default: str = "") -> str:
-    """Coerce an LLM-provided field to str, treating an explicit ``None`` as missing.
+    """Return an LLM-provided string field, or ``default`` when absent/wrong-typed.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns ``default`` when ``value`` is ``None``, else ``str(value)``.
+    Postconditions: returns ``value`` when it is already a ``str``; otherwise
+        returns ``default``. Does not coerce via ``str()`` — non-string values
+        (including numbers and bools) yield ``default``.
     """
-    return default if value is None else str(value)
+    return default if value is None or not isinstance(value, str) else value
+
+
+def _require_string_field(data: dict, key: str, default: str) -> str:
+    """Accept a string field; raise on present null/non-string; default if missing.
+
+    Preconditions: ``data`` is a mapping; ``default`` is the fallback for an absent key.
+    Postconditions: returns ``default`` when ``key`` is absent; returns the value when
+        it is a ``str``; raises ``ValueError`` (including key, type, and value repr)
+        when the key is present with ``null`` or any non-string type so callers
+        cannot silently remap explicit null IDs/text onto generated defaults
+        (e.g. ``q0``) or blank content.
+    """
+    if key not in data:
+        return default
+    value = data[key]
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"expected string for {key!r}, got {type(value).__name__}: {value!r}")
 
 
 def _safe_constraint_layer(value: Any) -> int:
     """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns an int; non-numeric or missing input yields 0,
-        matching the "not a constraint question" default in :class:`OpenQuestion`.
+    Postconditions: returns a non-negative int. ``None``, non-numeric input, and
+        bools (treated as malformed, not as 0/1) yield 0, matching the
+        "not a constraint question" default in :class:`OpenQuestion`. Float
+        values (including numeric strings like ``"2.9"``) are truncated toward
+        zero via ``int(...)``.
     """
     try:
-        return int(value or 0)
-    except (ValueError, TypeError):
+        if value is None:
+            return 0
+        # bool is a subclass of int; treat it as malformed.
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float):
+            # NaN/inf -> malformed
+            if value != value or value in (float("inf"), float("-inf")):
+                return 0
+            return max(0, int(value))
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return 0
+            return max(0, int(float(s)))
+        return 0
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 
 def _safe_bool(value: Any, default: bool) -> bool:
-    """Coerce LLM-provided boolean output to bool, defaulting to ``default``.
-
-    A real JSON boolean already decodes to a Python ``bool`` via ``json.loads``;
-    this exists for when the LLM stringifies it instead (e.g. ``"false"``),
-    since ``bool("false")`` is ``True`` and would silently invert the intended
-    value.
+    """Coerce LLM-provided boolean-ish or numeric values to bool.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns ``value`` unchanged when it is already a ``bool``;
-        for a string, returns ``True``/``False`` for a case-insensitive
-        (surrounding-whitespace-stripped) ``"true"``/``"false"`` and
-        ``default`` for any other string; returns ``default`` for every other
-        type; never raises.
+    Postconditions: returns ``default`` when ``value`` is ``None`` or unrecognized;
+        returns a bool when ``value`` is already a bool, numeric 0/1, or a common
+        boolean string (``true``/``false``/``yes``/``no``/…).
     """
+    if value is None:
+        return default
     if isinstance(value, bool):
         return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized == "true":
+
+    # Numeric booleans (0/1); reject other numbers as malformed.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
             return True
-        if normalized == "false":
+        if value == 0:
             return False
+        logger.warning(
+            "Unexpected numeric boolean value %r, using default %r",
+            value,
+            default,
+        )
+        return default
+
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == "":
+            return default
+        if v in {"true", "t", "yes", "y", "1"}:
+            return True
+        if v in {"false", "f", "no", "n", "0"}:
+            return False
+        return default
+
     return default
 
 
-def _coerce_list(value: Any) -> list:
+def _coerce_list(value: Any, *, allow_str: bool = False, allow_dict: bool = False) -> list:
     """Coerce LLM-provided list-valued output to a list.
 
     Preconditions: none; ``value`` may be any decoded JSON type.
-    Postconditions: returns a list. None -> []; list/tuple -> list(value);
-        any other scalar (str, int, dict, ...) -> [value] (never iterated char-by-char).
+    Postconditions: returns a new list; does not mutate ``value`` itself.
+        - None -> []
+        - list/tuple -> list(value) (new outer list; nested objects are
+          shallow-referenced, so mutating ``result[i]`` mutates the original
+          nested object)
+        - string -> [value] when ``allow_str`` is True
+        - dict -> [value] when ``allow_dict`` is True (the dict is the single
+          top-level element ``result[0]``; mutating that dict mutates the
+          original)
+        - any other scalar -> []
     """
     if value is None:
         return []
     if isinstance(value, (list, tuple)):
         return list(value)
-    return [value]
+    if allow_str and isinstance(value, str):
+        return [value]
+    if allow_dict and isinstance(value, dict):
+        return [value]
+    return []
 
 
 def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     """Parse a single open question from LLM output.
 
-    Preconditions: ``index`` is a non-negative int; ``q_data`` is the decoded item.
-    Postconditions: returns a valid :class:`OpenQuestion`.
-        - ``options``, ``section_impact``, and ``asked_via`` are coerced to lists
-          (``None`` becomes ``[]``, scalars become single-element lists).
-        - ``section_impact`` and ``asked_via`` elements are coerced to ``str``.
+    Preconditions: ``index`` is a non-negative int; ``q_data`` is a ``dict``.
+    Postconditions: returns a valid :class:`OpenQuestion` when parsing succeeds.
+        - ``options`` is coerced to a list (``None`` becomes ``[]``); dict and
+          string entries are kept and parsed, while other types are dropped.
+        - ``section_impact`` and ``asked_via`` are coerced to lists
+          (``None`` becomes ``[]``); elements are kept only when already ``str``.
         - Option ``confidence`` values are normalized to ``[0.0, 1.0]``,
           defaulting to ``0.5`` when missing or malformed.
-        - When ``q_data`` is a dict with options but no default, the
-          highest-confidence option is marked default.
-        - The coercions above cover every known malformed-input shape from an
-          LLM response, but this function has no top-level try/except of its
-          own: it does not guarantee never raising in the face of an
-          unanticipated input, and every production caller (parse_spec_review_response,
-          consolidate_open_questions, review_question_answer_alignment,
-          run_context_constraints_discovery) wraps it accordingly.
+        - When ``q_data`` has options but no default, the highest-confidence
+          option is marked default.
+        - Malformed option entries are skipped individually (logged); they do
+          not discard the surrounding question.
+        - Missing ``id`` / ``question_text`` fall back to ``q{index}`` / ``""``.
+    Raises:
+        ValueError: when ``q_data`` is not a ``dict``; when ``id`` or
+            ``question_text`` is present but not a ``str``; or on other
+            unanticipated malformed shapes this helper does not coerce.
+            This function has no top-level try/except. Callers handle failures
+            differently: ``parse_spec_review_response``, ``consolidate_open_questions``,
+            and ``review_question_answer_alignment`` catch per item;
+            ``run_context_constraints_discovery`` catches per item and falls back
+            to the fixed list when none parse.
     """
-    if isinstance(q_data, dict):
-        raw_options = _coerce_list(q_data.get("options", []))
-        options = []
-        for i, opt in enumerate(raw_options):
+    if not isinstance(q_data, dict):
+        raise ValueError(f"parse_open_question expects dict input, got {type(q_data).__name__}")
+
+    raw_options = _coerce_list(q_data.get("options", []), allow_str=True, allow_dict=True)
+    options = []
+    for i, opt in enumerate(raw_options):
+        try:
             options.append(parse_question_option(opt, i))
+        except ValueError as exc:
+            logger.warning("Skipping malformed question option at index %d: %s", i, exc)
 
-        if options and not any(opt.is_default for opt in options):
-            default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
-            options[default_idx] = QuestionOption(
-                id=options[default_idx].id,
-                label=options[default_idx].label,
-                is_default=True,
-                rationale=options[default_idx].rationale,
-                confidence=options[default_idx].confidence,
-            )
-
-        raw_depends = q_data.get("depends_on")
-        if isinstance(raw_depends, (list, tuple)):
-            depends_on = str(raw_depends[0]) if raw_depends else None
-        elif isinstance(raw_depends, str):
-            depends_on = raw_depends
-        else:
-            depends_on = None
-
-        section_impact = [str(v) for v in _coerce_list(q_data.get("section_impact", []))]
-        asked_via = [str(v) for v in _coerce_list(q_data.get("asked_via", []))]
-
-        return OpenQuestion(
-            id=_str_or_default(q_data.get("id"), f"q{index}"),
-            question_text=_str_or_default(q_data.get("question_text")),
-            context=_str_or_default(q_data.get("context")),
-            recommendation=_str_or_default(q_data.get("recommendation")),
-            options=options,
-            allow_multiple=_safe_bool(q_data.get("allow_multiple"), False),
-            source=_str_or_default(q_data.get("source"), "spec_review"),
-            category=_str_or_default(q_data.get("category"), "general"),
-            priority=_str_or_default(q_data.get("priority"), "medium"),
-            constraint_domain=_str_or_default(q_data.get("constraint_domain")),
-            constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
-            depends_on=depends_on,
-            blocking=_safe_bool(q_data.get("blocking"), True),
-            owner=_str_or_default(q_data.get("owner"), "user"),
-            section_impact=section_impact,
-            due_date=_str_or_default(q_data.get("due_date")),
-            status=_str_or_default(q_data.get("status"), "open"),
-            asked_via=asked_via,
+    if options and not any(opt.is_default for opt in options):
+        best = max(options, key=lambda opt: opt.confidence)
+        default_idx = options.index(best)
+        options[default_idx] = QuestionOption(
+            id=best.id,
+            label=best.label,
+            is_default=True,
+            rationale=best.rationale,
+            confidence=best.confidence,
         )
 
+    raw_depends = q_data.get("depends_on")
+    if isinstance(raw_depends, (list, tuple)):
+        if len(raw_depends) > 1:
+            logger.warning(
+                "depends_on list truncated to first element for question %s (got %d entries)",
+                q_data.get("id", f"q{index}"),
+                len(raw_depends),
+            )
+        depends_on = raw_depends[0] if raw_depends and isinstance(raw_depends[0], str) else None
+    elif isinstance(raw_depends, str):
+        depends_on = raw_depends
+    else:
+        depends_on = None
+
+    raw_section_impact = _coerce_list(q_data.get("section_impact", []), allow_str=True)
+    section_impact = [v for v in raw_section_impact if isinstance(v, str)]
+
+    raw_asked_via = _coerce_list(q_data.get("asked_via", []), allow_str=True)
+    asked_via = [v for v in raw_asked_via if isinstance(v, str)]
+
     return OpenQuestion(
-        id=f"q{index}",
-        question_text=str(q_data),
-        context="This question was identified during spec review.",
-        recommendation="",
-        options=[
-            QuestionOption(id="opt1", label="Yes", is_default=True, rationale="", confidence=0.5),
-            QuestionOption(id="opt2", label="No", is_default=False, rationale="", confidence=0.5),
-        ],
-        allow_multiple=False,
-        source="spec_review",
-        blocking=True,
-        owner="user",
-        section_impact=[],
-        due_date="",
-        status="open",
-        asked_via=[],
+        id=_require_string_field(q_data, "id", f"q{index}"),
+        question_text=_require_string_field(q_data, "question_text", ""),
+        context=_str_or_default(q_data.get("context")),
+        recommendation=_str_or_default(q_data.get("recommendation")),
+        options=options,
+        allow_multiple=_safe_bool(q_data.get("allow_multiple", False), default=False),
+        source=_str_or_default(q_data.get("source"), "spec_review"),
+        category=_str_or_default(q_data.get("category"), "general"),
+        priority=_str_or_default(q_data.get("priority"), "medium"),
+        constraint_domain=_str_or_default(q_data.get("constraint_domain")),
+        constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
+        depends_on=depends_on,
+        blocking=_safe_bool(q_data.get("blocking", True), default=True),
+        owner=_str_or_default(q_data.get("owner"), "user"),
+        section_impact=section_impact,
+        due_date=_str_or_default(q_data.get("due_date")),
+        status=_str_or_default(q_data.get("status"), "open"),
+        asked_via=asked_via,
     )
 
 
@@ -446,26 +852,45 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
     """Parse a single question option from LLM output.
 
     Preconditions: ``index`` is a non-negative int; ``opt_data`` is the decoded item.
-    Postconditions: returns a valid :class:`QuestionOption`; a non-dict becomes a
-        label-only option defaulting only at ``index == 0``; a non-numeric, ``None``,
-        out-of-range, or overflowing ``confidence`` value defaults to 0.5 (or is
-        clamped to ``[0.0, 1.0]``) instead of raising.
+    Postconditions: returns a valid :class:`QuestionOption` for a dict or a string
+        label; a non-numeric, ``None``, out-of-range, or overflowing
+        ``confidence`` value defaults to 0.5 (or is clamped to ``[0.0, 1.0]``)
+        instead of raising. For a string label, the returned option uses
+        ``id=f"opt{index}"``, treats the first element (``index == 0``) as the
+        default, sets ``rationale`` to an empty string, and assigns
+        ``confidence`` 0.5. Raises ``ValueError`` for unsupported non-dict,
+        non-string entries (``null``, numbers, …) and for present ``null`` or
+        non-string ``id``/``label`` values so callers can drop them rather than
+        materializing blank default options.
     """
     if isinstance(opt_data, dict):
         return QuestionOption(
-            id=_str_or_default(opt_data.get("id"), f"opt{index}"),
-            label=_str_or_default(opt_data.get("label")),
-            is_default=_safe_bool(opt_data.get("is_default"), False),
+            id=_require_string_field(opt_data, "id", f"opt{index}"),
+            label=_require_string_field(opt_data, "label", ""),
+            is_default=_safe_bool(opt_data.get("is_default", False), default=False),
             rationale=_str_or_default(opt_data.get("rationale")),
             confidence=_safe_confidence(opt_data.get("confidence", 0.5)),
         )
-    return QuestionOption(
-        id=f"opt{index}",
-        label=str(opt_data),
-        is_default=index == 0,
-        rationale="",
-        confidence=0.5,
-    )
+
+    if isinstance(opt_data, str):
+        return QuestionOption(
+            id=f"opt{index}",
+            label=opt_data,
+            is_default=index == 0,
+            rationale="",
+            confidence=0.5,
+        )
+
+    raise ValueError(f"unsupported option type {type(opt_data).__name__!r} at index {index}")
+
+
+def _norm_answer_text(t: Any) -> str:
+    """Normalize answer/option text for similarity comparison.
+
+    Preconditions: none; ``t`` may be any value.
+    Postconditions: returns a lowercased, whitespace-collapsed string; never raises.
+    """
+    return " ".join(str(t or "").lower().split()).strip()
 
 
 def dedupe_questions_by_answer_similarity(
@@ -479,6 +904,12 @@ def dedupe_questions_by_answer_similarity(
     semantically the same as an answer we already have, we do not ask that question
     again. Preserves order of open_questions.
 
+    Complexity note: existing answers and option labels are normalized once.
+    Exact normalized matches short-circuit via a set; fuzzy matches use
+    ``SequenceMatcher.ratio`` with a pair cache. Worst case remains
+    O(open_questions × option_labels × existing_answers × L²) in string length L,
+    which is acceptable while batches stay capped near ``MAX_OPEN_QUESTIONS``.
+
     Preconditions: both arguments are lists of the respective models.
     Postconditions: returns a sublist of ``open_questions`` (order preserved);
         questions with no options/labels are always kept; never raises.
@@ -486,43 +917,64 @@ def dedupe_questions_by_answer_similarity(
     if not open_questions:
         return list(open_questions)
 
-    def norm(t: str | None) -> str:
-        return " ".join((t or "").lower().split()).strip()
-
-    # Build set of existing answers (normalized) we already have
-    existing_answers: set[str] = set()
+    # Build set of existing answers (normalized) we already have.
+    # Keep a list for stable iteration order during SequenceMatcher checks.
+    existing_answers: List[str] = []
+    existing_answers_set: set[str] = set()
     for aq in answered_questions:
-        s = norm(aq.selected_answer)
+        s = _norm_answer_text(aq.selected_answer)
         if s:
-            existing_answers.add(s)
-        if getattr(aq, "other_text", None) and aq.other_text.strip():
-            o = norm(aq.other_text)
-            if o:
-                existing_answers.add(o)
+            if s not in existing_answers_set:
+                existing_answers.append(s)
+                existing_answers_set.add(s)
+        other = getattr(aq, "other_text", None)
+        if other is not None and str(other).strip():
+            o = _norm_answer_text(other)
+            if o and o not in existing_answers_set:
+                existing_answers.append(o)
+                existing_answers_set.add(o)
 
     if not existing_answers:
         return list(open_questions)
 
     # Same threshold as shared deduplication for "same meaning"
-    SIMILARITY_THRESHOLD = 0.85
+    SIMILARITY_THRESHOLD = ANSWER_SIMILARITY_THRESHOLD
     kept: List[OpenQuestion] = []
+    ratio_cache: dict[tuple[str, str], float] = {}
+
+    def _cached_ratio(a: str, b: str) -> float:
+        key = (a, b) if a <= b else (b, a)
+        cached = ratio_cache.get(key)
+        if cached is not None:
+            return cached
+        ratio = SequenceMatcher(None, a, b).ratio()
+        ratio_cache[key] = ratio
+        return ratio
 
     for q in open_questions:
         if not q.options:
             # No options: we cannot know what answer this would get; keep it
             kept.append(q)
             continue
-        option_labels = [norm(opt.label) for opt in q.options if opt.label]
+        option_labels = [_norm_answer_text(opt.label) for opt in q.options if opt.label]
+        option_labels = [label for label in option_labels if label]
         if not option_labels:
             kept.append(q)
             continue
         # If any option is the same as an answer we already have, skip this question
         already_covered = False
         for opt_label in option_labels:
-            if not opt_label:
-                continue
+            if opt_label in existing_answers_set:
+                logger.info(
+                    "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
+                    q.id,
+                    opt_label,
+                    opt_label,
+                )
+                already_covered = True
+                break
             for existing in existing_answers:
-                if SequenceMatcher(None, opt_label, existing).ratio() >= SIMILARITY_THRESHOLD:
+                if _cached_ratio(opt_label, existing) >= SIMILARITY_THRESHOLD:
                     logger.info(
                         "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
                         q.id,
@@ -537,6 +989,73 @@ def dedupe_questions_by_answer_similarity(
             kept.append(q)
 
     return kept
+
+
+_OPTION_FULL_FIELDS: Sequence[str] = ("id", "label", "is_default", "rationale", "confidence")
+_OPTION_RECOMMEND_FIELDS: Sequence[str] = ("id", "label", "rationale")
+_CONSOLIDATE_QUESTION_FIELDS: Sequence[str] = (
+    "id",
+    "question_text",
+    "context",
+    "recommendation",
+    "source",
+    "category",
+    "priority",
+    "allow_multiple",
+    "constraint_domain",
+    "constraint_layer",
+    "depends_on",
+    "blocking",
+    "owner",
+    "section_impact",
+    "due_date",
+    "status",
+    "asked_via",
+    "options",
+)
+_ALIGN_QUESTION_FIELDS: Sequence[str] = (
+    "id",
+    "question_text",
+    "context",
+    "category",
+    "priority",
+    "allow_multiple",
+    "constraint_domain",
+    "constraint_layer",
+    "depends_on",
+    "blocking",
+    "owner",
+    "section_impact",
+    "due_date",
+    "status",
+    "asked_via",
+    "options",
+)
+_RECOMMEND_QUESTION_FIELDS: Sequence[str] = ("id", "question_text", "context", "options")
+
+
+def _open_question_to_dict(
+    q: OpenQuestion,
+    fields: Iterable[str],
+    *,
+    option_fields: Sequence[str] = _OPTION_FULL_FIELDS,
+) -> dict[str, Any]:
+    """Serialize an :class:`OpenQuestion` for LLM prompt payloads.
+
+    Preconditions: ``q`` is an :class:`OpenQuestion`; ``fields`` names attributes
+        on that model (``options`` is expanded via ``option_fields``).
+    Postconditions: returns a new dict with the requested fields; never mutates
+        ``q``. Nested option dicts only include ``option_fields``.
+    """
+    payload: dict[str, Any] = {}
+    for field in fields:
+        if field == "options":
+            payload["options"] = [
+                {name: getattr(opt, name) for name in option_fields} for opt in q.options
+            ]
+        else:
+            payload[field] = getattr(q, field)
+    return payload
 
 
 def _fetch_llm_list(
@@ -587,63 +1106,78 @@ def consolidate_open_questions(
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the consolidated list, or the unmodified list on <=1
-        input or a full-batch LLM/parse failure; never raises. Items that
-        individually fail to parse are skipped and logged rather than discarding
-        the whole batch.
+        input or any failure (payload serialization, prompt formatting, LLM call,
+        or a full-batch parse failure). Items that individually fail to parse are
+        skipped and logged rather than discarding the whole batch. Duplicate ids
+        within the LLM batch are skipped (first wins). When the LLM echoes a known
+        id, metadata is merged by starting from the original question and overlaying
+        only fields the LLM actually supplied (so omitted owner/due_date/status/
+        asked_via/section_impact/etc. are preserved). If the LLM supplies an empty
+        or ``spec_review`` source, the original source is retained; blank
+        recommendations likewise fall back to the original. Never raises to callers;
+        precondition violations raise ``AssertionError``.
     """
+    assert isinstance(model, Model), "model must be a Strands Model"
+    assert isinstance(open_questions, list), "open_questions must be a list"
     if len(open_questions) <= 1:
         return list(open_questions)
 
-    questions_json = json.dumps(
-        [
-            {
-                "id": q.id,
-                "question_text": q.question_text,
-                "context": q.context,
-                "category": q.category,
-                "priority": q.priority,
-                "allow_multiple": q.allow_multiple,
-                "constraint_domain": q.constraint_domain,
-                "constraint_layer": q.constraint_layer,
-                "depends_on": q.depends_on,
-                "blocking": q.blocking,
-                "owner": q.owner,
-                "section_impact": q.section_impact,
-                "due_date": q.due_date,
-                "status": q.status,
-                "asked_via": q.asked_via,
-                "options": [
-                    {
-                        "id": o.id,
-                        "label": o.label,
-                        "is_default": o.is_default,
-                        "rationale": o.rationale,
-                        "confidence": o.confidence,
-                    }
-                    for o in q.options
-                ],
-            }
-            for q in open_questions
-        ],
-        indent=2,
-        default=str,
-    )
-    prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
-    consolidated = _fetch_llm_list(
-        model, prompt, "consolidated_questions", "Question consolidation"
-    )
-    if consolidated is None:
-        return list(open_questions)
     try:
+        # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
+        # payload in memory is intentional and cheap at that scale.
+        questions_json = json.dumps(
+            [_open_question_to_dict(q, _CONSOLIDATE_QUESTION_FIELDS) for q in open_questions],
+            indent=2,
+            default=str,
+        )
+        prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
+        consolidated = _fetch_llm_list(
+            model, prompt, "consolidated_questions", "Question consolidation"
+        )
+        if consolidated is None:
+            return list(open_questions)
+        original_by_id = {q.id: q for q in open_questions}
         result = []
+        seen_ids: set[str] = set()
         for i, q_data in enumerate(consolidated):
             try:
-                result.append(parse_open_question(q_data, i))
+                parsed = parse_open_question(q_data, i)
+                if parsed.id in seen_ids:
+                    logger.warning(
+                        "Duplicate consolidated question id %r at index %d; skipping",
+                        parsed.id,
+                        i,
+                    )
+                    continue
+                seen_ids.add(parsed.id)
+                orig = original_by_id.get(parsed.id)
+                if orig is not None and isinstance(q_data, dict):
+                    # Start from the original; overlay only keys the LLM supplied
+                    # so omitted metadata (owner, due_date, status, …) is kept.
+                    updates = {
+                        field: getattr(parsed, field)
+                        for field in q_data
+                        if field in OpenQuestion.model_fields and field != "id"
+                    }
+                    if (
+                        "source" in updates
+                        and updates["source"] in ("", "spec_review")
+                        and orig.source
+                    ):
+                        updates["source"] = orig.source
+                    if "recommendation" in updates and not updates["recommendation"]:
+                        updates["recommendation"] = orig.recommendation
+                    parsed = orig.model_copy(update=updates)
+                result.append(parsed)
             except Exception as e:
                 logger.warning("Failed to parse consolidated question %d: %s", i, e)
         return result if result else list(open_questions)
     except Exception as e:
-        logger.warning("Question consolidation failed, using original list: %s", str(e))
+        logger.warning(
+            "Question consolidation failed, using original list: %s",
+            str(e),
+            exc_info=True,
+        )
         return list(open_questions)
 
 
@@ -655,10 +1189,12 @@ def review_question_answer_alignment(
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the aligned list, or the unmodified list (in its
         original order) on empty input or when no item in the batch parses
-        successfully; never raises. This is a per-question review (ids are
-        preserved): an item that individually fails to parse or that repeats
-        an id already placed in the result (a duplicate) falls back to its
-        original (unaligned) question by id, when that original id is not
+        successfully. Never raises to callers; precondition violations raise
+        ``AssertionError``. Serialization, prompt formatting, LLM, and parse
+        failures fall back to the unmodified list. This is a per-question review
+        (ids are preserved): an item that individually fails to parse or that
+        repeats an id already placed in the result (a duplicate) falls back to
+        its original (unaligned) question by id, when that original id is not
         already in the result; an item carrying an id not present in
         ``open_questions`` (a hallucinated/unrecognized id) has no original to
         fall back to and is dropped outright. Any original question whose id
@@ -670,47 +1206,26 @@ def review_question_answer_alignment(
         exactly one entry per original id: no question is ever dropped,
         added, or duplicated.
     """
+    assert isinstance(model, Model), "model must be a Strands Model"
+    assert isinstance(open_questions, list), "open_questions must be a list"
     if len(open_questions) == 0:
         return []
     original_by_id = {q.id: q for q in open_questions}
-    questions_payload = [
-        {
-            "id": q.id,
-            "question_text": q.question_text,
-            "context": q.context,
-            "category": q.category,
-            "priority": q.priority,
-            "allow_multiple": q.allow_multiple,
-            "constraint_domain": q.constraint_domain,
-            "constraint_layer": q.constraint_layer,
-            "depends_on": q.depends_on,
-            "blocking": q.blocking,
-            "owner": q.owner,
-            "section_impact": q.section_impact,
-            "due_date": q.due_date,
-            "status": q.status,
-            "asked_via": q.asked_via,
-            "options": [
-                {
-                    "id": o.id,
-                    "label": o.label,
-                    "is_default": o.is_default,
-                    "rationale": o.rationale,
-                    "confidence": o.confidence,
-                }
-                for o in q.options
-            ],
-        }
-        for q in open_questions
-    ]
-    questions_json = json.dumps(questions_payload, indent=2, default=str)
-    prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
-    aligned = _fetch_llm_list(
-        model, prompt, "aligned_questions", "Question-answer alignment review"
-    )
-    if aligned is None:
-        return list(open_questions)
+
     try:
+        # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
+        # payload in memory is intentional and cheap at that scale.
+        questions_json = json.dumps(
+            [_open_question_to_dict(q, _ALIGN_QUESTION_FIELDS) for q in open_questions],
+            indent=2,
+            default=str,
+        )
+        prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
+        aligned = _fetch_llm_list(
+            model, prompt, "aligned_questions", "Question-answer alignment review"
+        )
+        if aligned is None:
+            return list(open_questions)
         result = []
         seen_ids = set()
         any_parsed = False
@@ -746,6 +1261,7 @@ def review_question_answer_alignment(
         logger.warning(
             "Question-answer alignment review failed, using original list: %s",
             str(e),
+            exc_info=True,
         )
         return list(open_questions)
 
@@ -756,47 +1272,50 @@ def add_recommendations(
     """Add a short recommendation (which option and why) to each question.
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list;
-        ``spec_content`` a string.
+        ``spec_content`` is a string or ``None``.
     Postconditions: returns the list with ``recommendation`` populated where the LLM
-        supplied one, or the unmodified list on empty input or any failure; never raises.
+        supplied one, or the unmodified list on empty input or any failure
+        (payload serialization, prompt formatting, LLM call, or apply-step
+        errors). Never raises to callers; precondition violations raise
+        ``AssertionError``.
     """
+    assert isinstance(model, Model), "model must be a Strands Model"
+    assert isinstance(open_questions, list), "open_questions must be a list"
+    assert isinstance(spec_content, (str, type(None))), "spec_content must be a string or None"
     if len(open_questions) == 0:
         return list(open_questions)
-    questions_payload = [
-        {
-            "id": q.id,
-            "question_text": q.question_text,
-            "context": q.context,
-            "options": [
-                {
-                    "id": o.id,
-                    "label": o.label,
-                    "rationale": o.rationale,
-                }
-                for o in q.options
-            ],
-        }
-        for q in open_questions
-    ]
-    questions_json = json.dumps(questions_payload, indent=2, default=str)
-    spec_content_str = spec_content or ""
-    prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
-        spec_content=spec_content_str,
-        questions_json=questions_json,
-    )
-    recs = _fetch_llm_list(
-        model, prompt, "recommendations", "Recommendation generation", allow_empty=True
-    )
-    if recs is None:
-        return list(open_questions)
+
     try:
+        # Batch size is capped upstream (MAX_OPEN_QUESTIONS); building the full
+        # payload in memory is intentional and cheap at that scale.
+        questions_json = json.dumps(
+            [
+                _open_question_to_dict(
+                    q, _RECOMMEND_QUESTION_FIELDS, option_fields=_OPTION_RECOMMEND_FIELDS
+                )
+                for q in open_questions
+            ],
+            indent=2,
+            default=str,
+        )
+        spec_content_str = spec_content or ""
+        prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
+            spec_content=spec_content_str,
+            questions_json=questions_json,
+        )
+        recs = _fetch_llm_list(
+            model, prompt, "recommendations", "Recommendation generation", allow_empty=True
+        )
+        if recs is None:
+            return list(open_questions)
         rec_by_id = {
-            r.get("id"): str(r["recommendation"])
+            r.get("id"): r.get("recommendation")
             for r in recs
             if (
                 isinstance(r, dict)
                 and isinstance(r.get("id"), str)
-                and r.get("recommendation") is not None
+                and isinstance(r.get("recommendation"), str)
+                and r.get("recommendation").strip() != ""
             )
         }
         result = []
@@ -806,7 +1325,8 @@ def add_recommendations(
         return result
     except Exception as e:
         logger.warning(
-            "Recommendation generation failed, leaving recommendations empty: %s",
+            "Recommendation generation failed, returning original questions unchanged: %s",
             str(e),
+            exc_info=True,
         )
         return list(open_questions)
