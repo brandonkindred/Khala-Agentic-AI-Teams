@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import logging
-import os
 import threading
 import time
 import uuid
@@ -147,6 +146,7 @@ from investment_team.strategy_lab_context import (
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
+from shared.env_config import env_bool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1995,11 +1995,7 @@ def _finalize_strategy_lab_cycle_record(
 
 
 def _strategy_lab_signal_expert_enabled() -> bool:
-    return os.environ.get("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "true").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    return env_bool("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", default=True)
 
 
 def _compute_signal_brief_snapshot(
@@ -4159,11 +4155,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
 def _live_paper_enabled() -> bool:
     """Return True when the live paper-trading path is opted in via env var."""
-    return os.environ.get("INVESTMENT_LIVE_PAPER_ENABLED", "false").lower() in {
-        "true",
-        "1",
-        "yes",
-    }
+    return env_bool("INVESTMENT_LIVE_PAPER_ENABLED", default=False)
 
 
 # Per-session in-process StopController registry used by
