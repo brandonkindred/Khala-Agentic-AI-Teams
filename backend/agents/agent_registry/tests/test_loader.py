@@ -651,3 +651,35 @@ def test_cognition_example_manifest_is_valid() -> None:
     assert manifest.cognition.knowledge_graph.ingest_events is True
     assert manifest.cognition.knowledge_graph.ingest_summaries is True
     assert manifest.cognition.knowledge_graph.ground_rule_proposals is True
+
+
+def test_tombstone_ttl_defaults_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    reg = AgentRegistry([], {})
+    assert reg._TOMBSTONE_TTL_S == AgentRegistry._DEFAULT_TOMBSTONE_TTL_S
+
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_TTL_S", "12.5")
+    assert reg._TOMBSTONE_TTL_S == 12.5
+
+    # Negative values clamp to 0.0 rather than producing a negative TTL.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_TTL_S", "-3")
+    assert reg._TOMBSTONE_TTL_S == 0.0
+
+    # Unparseable values fall back to the default rather than raising.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_TTL_S", "not-a-number")
+    assert reg._TOMBSTONE_TTL_S == AgentRegistry._DEFAULT_TOMBSTONE_TTL_S
+
+
+def test_tombstone_max_entries_defaults_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    reg = AgentRegistry([], {})
+    assert reg._TOMBSTONE_MAX_ENTRIES == AgentRegistry._DEFAULT_TOMBSTONE_MAX_ENTRIES
+
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES", "50")
+    assert reg._TOMBSTONE_MAX_ENTRIES == 50
+
+    # Zero/negative values clamp to 1 rather than a non-positive cap.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES", "0")
+    assert reg._TOMBSTONE_MAX_ENTRIES == 1
+
+    # Unparseable values fall back to the default rather than raising.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES", "not-a-number")
+    assert reg._TOMBSTONE_MAX_ENTRIES == AgentRegistry._DEFAULT_TOMBSTONE_MAX_ENTRIES
