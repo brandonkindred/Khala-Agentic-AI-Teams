@@ -1271,6 +1271,15 @@ Default per-agent execution timeout (`asyncio.wait_for`) inside the sandbox; ove
 with `timeout_hit: true` (default `60`). Per-agent override via `invoke.timeout_seconds` in the
 manifest.
 
+### AGENT_REGISTRY_TOMBSTONE_TTL_S
+How long (seconds) a worker's own `unregister()` of a dynamic agent id masks that id from `get()`
+on the same worker, closing the window where a failed best-effort Postgres delete would otherwise
+resurrect the stale row (default `5.0`; clamped to `>= 0.0`).
+
+### AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES
+Max number of tombstoned ids `AgentRegistry` retains per worker; oldest entries are evicted first
+once the cap is exceeded (default `1000`; clamped to `>= 1`).
+
 ---
 
 ## Agent Cognition and Knowledge Graph
