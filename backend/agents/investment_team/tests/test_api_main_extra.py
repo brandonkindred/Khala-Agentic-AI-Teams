@@ -401,9 +401,11 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
 
 
 class _FakeJobClient:
-    """Minimal in-memory ``JobServiceClient`` for _PersistentDict tests.
+    """Minimal in-memory ``JobServiceClient`` for tests that exercise
+    job-service-backed helpers (e.g. ``_delete_paper_sessions_for_lab_record``,
+    ``_purge_strategy_lab_job_storage``).
 
-    Thread-safe: the purge/delete helpers under test now issue ``delete_job``
+    Thread-safe: the purge/delete helpers under test issue ``delete_job``
     calls concurrently across a thread pool, so all mutations of ``_jobs`` are
     guarded by a lock to keep the in-memory store consistent under that fan-out.
     """
@@ -692,7 +694,7 @@ def test_delete_paper_sessions_for_lab_record(monkeypatch: pytest.MonkeyPatch) -
     fake.create_job("pt-2", data={"lab_record_id": "lab-other"})
     fake.create_job("pt-3", data={"lab_record_id": "lab-1"})
     fake.create_job("pt-4", data="not-a-dict")
-    fake.create_job("pt-5")  # no job_id when listed? — set explicitly via key
+    fake.create_job("pt-5")  # record with no lab_record_id data — should not match
     monkeypatch.setattr(jsc_mod, "JobServiceClient", lambda team=None: fake)
 
     from investment_team.api.main import _delete_paper_sessions_for_lab_record

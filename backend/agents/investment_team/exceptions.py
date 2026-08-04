@@ -13,11 +13,11 @@ from __future__ import annotations
 class InvestmentBacktestError(Exception):
     """Base for domain-level failures raised by the real-data backtest pipeline.
 
-    Preconditions:
-        Raised only by ``_run_real_data_backtest`` and its callees.
+    Invariants:
+        - Raised only by ``_run_real_data_backtest`` and its callees.
     Postconditions:
-        ``str(exc)`` carries a human-readable failure message suitable for
-        direct display to a caller (job error string, HTTP detail, etc.).
+        - ``str(exc)`` carries a human-readable failure message suitable for
+          direct display to a caller (job error string, HTTP detail, etc.).
     """
 
 

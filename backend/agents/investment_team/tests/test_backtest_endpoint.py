@@ -207,7 +207,9 @@ def test_run_real_data_backtest_raises_when_no_market_data(monkeypatch) -> None:
 
 
 def test_run_real_data_backtest_succeeds_with_well_formed_strategy(monkeypatch) -> None:
-    """A valid strategy produces metrics + at least one TradeRecord."""
+    """A valid strategy completes cleanly and returns a BacktestResult plus a
+    list of TradeRecord objects (which may be empty when the position is
+    force-closed at end-of-data)."""
     from investment_team.api import main as api_main
 
     market_data = {"AAA": _sample_bars()}
