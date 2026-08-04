@@ -26,6 +26,7 @@ from llm_service.clients.dummy import (
     _content_to_text,
     _extract_name_from_hint,
     _last_user_text,
+    _placeholder_slug,
 )
 
 
@@ -244,6 +245,24 @@ def test_extract_name_from_hint_all_stripped_returns_unique_placeholder() -> Non
     assert b != c  # distinct all-stripped hints must not collide on one path
     assert re.fullmatch(r"item-[0-9a-f]+", a)
     assert re.fullmatch(r"item_[0-9a-f]+", b)
+
+
+def test_placeholder_slug_never_exceeds_max_length() -> None:
+    """Fallback must respect max_length even when truncation strips result to ""."""
+    assert _placeholder_slug("some hint", "-", 25) == "item-3082b299"
+    slug = _placeholder_slug("x", "i", 1)
+    assert slug
+    assert len(slug) <= 1
+
+
+@pytest.mark.asyncio
+async def test_structured_output_rejects_non_pydantic_output_model() -> None:
+    """output_model without model_validate must raise TypeError, not AssertionError."""
+    c = DummyLLMClient()
+    prompt = [{"role": "user", "content": [{"text": "hello"}]}]
+    with pytest.raises(TypeError, match="model_validate"):
+        async for _ in c.structured_output(object, prompt):
+            pass
 
 
 def test_strip_filter_constants_are_frozensets() -> None:
