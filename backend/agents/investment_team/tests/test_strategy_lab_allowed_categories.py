@@ -22,9 +22,9 @@ from typing import Any, Dict
 import pytest
 from pydantic import ValidationError
 
-from investment_team.api import main as lab_main  # noqa: E402
-from investment_team.api.main import RunStrategyLabRequest  # noqa: E402
-from investment_team.models import (  # noqa: E402
+from investment_team.api import main as lab_main
+from investment_team.api.main import RunStrategyLabRequest
+from investment_team.models import (
     BacktestConfig,
     BacktestRecord,
     BacktestResult,

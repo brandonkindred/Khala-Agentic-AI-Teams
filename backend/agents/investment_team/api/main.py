@@ -2279,11 +2279,15 @@ def _dispatch_strategy_lab_run(
             abort itself.
           On any other failure (Temporal disabled/unavailable, or the start
           RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised.
-          Note ``_fail_strategy_lab_run`` itself schedules a best-effort
-          delayed ``_active_runs`` cleanup via a daemon ``threading.Timer``
-          (see its own docstring) — this failure path is not thread-free,
-          only free of any *new* Temporal dispatch.
+          via ``_fail_strategy_lab_run``. A non-``HTTPException`` failure is
+          wrapped and raised as ``HTTPException(503)``; an ``HTTPException``
+          raised from inside this function's own try block (today, only
+          ``_require_temporal()`` can do so, and it only ever raises 503) is
+          re-raised unchanged rather than re-wrapped, so its original detail
+          message is preserved. Note ``_fail_strategy_lab_run`` itself
+          schedules a best-effort delayed ``_active_runs`` cleanup via a
+          daemon ``threading.Timer`` (see its own docstring) — this failure
+          path is not thread-free, only free of any *new* Temporal dispatch.
     """
     try:
         _require_temporal()
@@ -3312,12 +3316,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # exception needs its own translation to the same documented 503.
             raise HTTPException(
                 status_code=503,
-                detail="Failed to mint a new generation for this restart; job service unavailable.",
+                detail="Failed to mint a new generation for this restart; job service transport error.",
             ) from exc
         if not updated_generation_record:
             raise HTTPException(
                 status_code=503,
-                detail="Failed to mint a new generation for this restart; job service unavailable.",
+                detail="Failed to mint a new generation for this restart; run record not found in job service.",
             )
         try:
             # No default: a missing/non-int "generation" in the mint

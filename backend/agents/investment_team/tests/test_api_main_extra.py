@@ -423,6 +423,10 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
 
 
 def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() -> None:
+    """A run with no persisted "generation" field (pre-fencing, or a durable
+    read that failed) must bootstrap by +2, not +1 -- +1 would mint
+    generation 1, which is also what a stale legacy activity that omits
+    "generation" entirely is treated as presenting, defeating fencing."""
     from investment_team.api.main import (
         GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
         _legacy_generation_bootstrap_increment,
@@ -436,6 +440,9 @@ def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() 
 
 
 def test_legacy_generation_bootstrap_increment_normal_when_field_present() -> None:
+    """A run that already has a persisted "generation" field (created after
+    fencing shipped, or a legacy run past its first post-upgrade restart)
+    increments by the ordinary amount rather than re-bootstrapping."""
     from investment_team.api.main import (
         GENERATION_INCREMENT_NORMAL,
         _legacy_generation_bootstrap_increment,
