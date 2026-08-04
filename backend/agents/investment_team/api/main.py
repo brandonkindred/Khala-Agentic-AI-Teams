@@ -3412,7 +3412,7 @@ def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
 class RunPaperTradingRequest(BaseModel):
     """Start a paper trading session for a winning strategy.
 
-    PR 2 live-mode fields (``provider_id``, ``min_fills``, ``max_hours``,
+    Live-mode fields (``provider_id``, ``min_fills``, ``max_hours``,
     ``warmup_bars``, ``timeframe``) take effect only when
     ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the flag is off (the
     default), the legacy recent-OHLCV path runs and the new fields are
