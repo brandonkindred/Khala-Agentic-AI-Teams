@@ -687,6 +687,12 @@ def test_paper_trading_results_verdict_filter_counts_match_filtered_items(
     assert body["not_performant_count"] == 0
 
 
+def test_paper_trading_results_rejects_unknown_verdict(api_client) -> None:
+    """An unrecognized ``verdict`` must 422, not silently match nothing."""
+    resp = api_client.get("/strategy-lab/paper-trade/results?verdict=bogus")
+    assert resp.status_code == 422
+
+
 def test_paper_trading_session_get_404(api_client) -> None:
     resp = api_client.get("/strategy-lab/paper-trade/pt-missing")
     assert resp.status_code == 404

@@ -4139,11 +4139,16 @@ def list_providers() -> ProvidersListResponse:
 
 @app.get("/strategy-lab/paper-trade/results", response_model=PaperTradingResultsResponse)
 def get_paper_trading_results(
-    verdict: Optional[str] = None,
+    verdict: Optional[PaperTradingVerdict] = None,
 ) -> PaperTradingResultsResponse:
     """
     Return all paper trading sessions, sorted newest-first.
-    Filter by verdict with ?verdict=ready_for_live or ?verdict=not_performant.
+    Filter by verdict with ?verdict=ready_for_live or ?verdict=not_performant;
+    an unrecognized value is rejected with a 422 rather than silently matching
+    nothing. The response's ``count``, ``ready_for_live_count``, and
+    ``not_performant_count`` are derived from the returned ``items`` by
+    ``PaperTradingResultsResponse`` itself, so they always match the
+    (possibly filtered) list.
     """
     with _lock:
         raw = list(_paper_trading_sessions.values())
@@ -4152,7 +4157,7 @@ def get_paper_trading_results(
     items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
 
     if verdict is not None:
-        items = [s for s in items if s.verdict and s.verdict.value == verdict]
+        items = [s for s in items if s.verdict == verdict]
 
     # Counts are derived from ``items`` by the response model itself, so they
     # always match whatever list (filtered or not) is returned here.
