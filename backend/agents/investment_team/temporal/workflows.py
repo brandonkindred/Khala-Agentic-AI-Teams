@@ -29,6 +29,7 @@ retry (which fires on worker crash / start_to_close timeout):
 """
 
 from __future__ import annotations
+
 import time
 from datetime import timedelta
 from typing import Any
