@@ -39,9 +39,11 @@ def _discover_manifest_files(root: Path) -> list[Path]:
 def _load_team_display_names() -> dict[str, str]:
     """Best-effort import of TEAM_CONFIGS so we can pretty-print team names.
 
-    Falls back to title-casing the team key if the import fails (e.g. when the
-    registry is used from a test harness that does not have unified_api on the
-    path).
+    Returns an empty dict if the import fails (e.g. when the registry is used
+    from a test harness that does not have unified_api on the path), or if a
+    team key is simply absent from ``TEAM_CONFIGS``. Title-casing the team key
+    as a display-name fallback is the caller's responsibility — see
+    :meth:`AgentRegistry.teams`.
     """
     try:
         from unified_api.config import TEAM_CONFIGS  # type: ignore
