@@ -4154,13 +4154,6 @@ def _recover_orphaned_paper_trading_sessions() -> None:
     pass, such sessions would sit in an active status forever and clients would
     poll indefinitely with no terminal transition.
     """
-    try:
-        with _lock:
-            raw_sessions = list(_paper_trading_sessions.values())
-    except Exception:
-        logger.debug("Paper-trade recovery: could not enumerate sessions", exc_info=True)
-        return
-
     now_iso = datetime.now(tz=timezone.utc).isoformat()
     # Active statuses that indicate an in-flight session. PR 1 only used
     # RUNNING; PR 2's live path transitions through OPENING → WARMING_UP →
@@ -4174,35 +4167,44 @@ def _recover_orphaned_paper_trading_sessions() -> None:
         PaperTradingStatus.LIVE,
     }
     recovered = 0
-    for raw in raw_sessions:
-        try:
-            session = PaperTradingSession.parse_persisted(raw)
-        except Exception:
-            logger.debug(
-                "Paper-trade recovery: skipping unparseable session record",
-                exc_info=True,
-            )
-            continue
-        if session.status not in _active_statuses:
-            continue
-        session.status = PaperTradingStatus.FAILED
-        session.completed_at = now_iso
-        session.terminated_reason = "process_exit"
-        session.error = (
-            "Paper trading did not complete — the worker process exited before "
-            "finalizing the session. Re-run the paper trade from the Strategy Lab."
-        )
-        # Preserve the legacy free-form field too so older clients still read a message.
-        session.divergence_analysis = session.error
-        try:
-            with _lock:
-                _paper_trading_sessions[session.session_id] = session
-            recovered += 1
-        except Exception:
-            logger.exception(
-                "Paper-trade recovery: failed to persist failed status for %s",
-                session.session_id,
-            )
+    try:
+        # The whole enumerate-parse-mutate-write pass runs under one lock
+        # acquisition so a concurrent update (e.g. the paper-trade worker
+        # finishing) can't be read here and then clobbered by a stale
+        # write-back once the lock is briefly released.
+        with _lock:
+            raw_sessions = list(_paper_trading_sessions.values())
+            for raw in raw_sessions:
+                try:
+                    session = PaperTradingSession.parse_persisted(raw)
+                except Exception:
+                    logger.debug(
+                        "Paper-trade recovery: skipping unparseable session record",
+                        exc_info=True,
+                    )
+                    continue
+                if session.status not in _active_statuses:
+                    continue
+                session.status = PaperTradingStatus.FAILED
+                session.completed_at = now_iso
+                session.terminated_reason = "process_exit"
+                session.error = (
+                    "Paper trading did not complete — the worker process exited before "
+                    "finalizing the session. Re-run the paper trade from the Strategy Lab."
+                )
+                # Preserve the legacy free-form field too so older clients still read a message.
+                session.divergence_analysis = session.error
+                try:
+                    _paper_trading_sessions[session.session_id] = session
+                    recovered += 1
+                except Exception:
+                    logger.exception(
+                        "Paper-trade recovery: failed to persist failed status for %s",
+                        session.session_id,
+                    )
+    except Exception:
+        logger.debug("Paper-trade recovery: could not enumerate sessions", exc_info=True)
+        return
 
     if recovered:
         logger.info(
