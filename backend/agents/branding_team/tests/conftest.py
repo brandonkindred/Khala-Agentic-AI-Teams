@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
 
-from branding_team.models import BrandingMission
+# Every agent factory resolves a backing Strands model at construction time,
+# which raises ``LLMNotConfiguredError`` with no provider configured. CI sets
+# this at the job level; the setdefault keeps the suite runnable standalone
+# without overriding a provider a caller deliberately chose.
+os.environ.setdefault("LLM_PROVIDER", "dummy")
+
+from branding_team.models import BrandingMission  # noqa: E402
 
 
 def pytest_configure(config: pytest.Config) -> None:
