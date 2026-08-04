@@ -341,7 +341,20 @@ class _PersistentDict:
             - If the job is missing and ``args`` is empty, raises ``KeyError``.
         Postconditions:
             - When present: deletes the job and returns its ``data`` payload
-              (or the job mapping if ``data`` is absent).
+              (or the job mapping if ``data`` is absent) -- but ONLY when
+              ``delete_job(key)`` itself reports that this call actually
+              removed a row. If a concurrent ``pop()`` for the same key
+              already deleted it between this call's ``get_job`` read and its
+              own ``delete_job`` call, ``delete_job`` reports no row removed
+              and this call is treated exactly like a missing key (default
+              returned, or ``KeyError`` raised) rather than handing back data
+              for a job it did not itself remove. The job-service DB layer
+              has no atomic get-and-delete primitive (a plain ``DELETE``, no
+              ``RETURNING``), so the returned data is whatever ``get_job``
+              read moments before the confirmed delete -- not part of the
+              same atomic operation. A third caller overwriting the job in
+              that narrow window is a known, accepted residual gap; the
+              exactly-one-caller-claims-the-deletion guarantee above is not.
             - When missing and a default is provided in ``args``: returns that
               default without deleting.
         """
@@ -350,7 +363,10 @@ class _PersistentDict:
             if args:
                 return args[0]
             raise KeyError(key)
-        self._client.delete_job(key)
+        if not self._client.delete_job(key):
+            if args:
+                return args[0]
+            raise KeyError(key)
         return job.get("data", job)
 
     def values(self) -> List[Any]:

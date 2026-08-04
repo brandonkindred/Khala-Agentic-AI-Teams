@@ -5,7 +5,8 @@ fixtures. Targets:
 
 * ``_PersistentDict`` __setitem__/__getitem__/__contains__/pop/values
   via an in-process FakeJobClient, including __setitem__'s atomic-upsert
-  contract (no get_job read-before-write) and concurrent same-key writes.
+  contract (no get_job read-before-write), concurrent same-key writes, and
+  pop's lost-delete-race handling (a concurrent pop() already won).
 * ``_env_positive_int`` env-var parsing.
 * ``_normalize_strategy_lab_asset_class`` + ``_build_strategy_from_ideation``
   builders.
@@ -531,6 +532,44 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # get() with default returns the default when key missing.
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
+
+
+class _LostDeleteRaceClient:
+    """Stub JobServiceClient simulating a lost pop() race: get_job still
+    finds the job (read before the race is settled), but delete_job reports
+    no row was removed -- a concurrent pop() for the same key already won.
+    """
+
+    def __init__(self, job: Dict[str, Any], team: str = "x", base_url: str | None = None) -> None:
+        self._job = job
+
+    def get_job(self, job_id: str):
+        return dict(self._job) if job_id == self._job["job_id"] else None
+
+    def delete_job(self, job_id: str) -> bool:
+        return False
+
+
+def test_persistent_dict_pop_treats_lost_delete_race_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If delete_job reports no row was actually removed (a concurrent pop()
+    for the same key already won that race), this call must not hand back
+    the data it read moments earlier as though it had exclusively popped it
+    -- issue #4253."""
+    import job_service_client as jsc_mod
+    from investment_team.api.main import _PersistentDict
+
+    job = {"job_id": "k", "status": "stored", "data": {"value": "x"}}
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda **kwargs: _LostDeleteRaceClient(job, **kwargs)
+    )
+
+    pd = _PersistentDict("race_test")
+
+    assert pd.pop("k", "DEFAULT") == "DEFAULT"
+    with pytest.raises(KeyError):
+        pd.pop("k")
 
 
 def test_persistent_dict_setitem_always_upserts_no_read(monkeypatch: pytest.MonkeyPatch) -> None:
