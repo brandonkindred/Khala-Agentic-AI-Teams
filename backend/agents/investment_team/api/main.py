@@ -3531,9 +3531,17 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
         - ``deleted_paper_trading_sessions`` counts
           ``investment_paper_trading_sessions`` jobs with a truthy ``job_id``
           that ``delete_job`` removed.
-        - Each count equals the number of matching jobs successfully deleted and
-          is independent of the order in which the concurrent units/deletes
-          finish; the returned dict always has exactly these four keys.
+        - Each count equals the number of matching jobs the corresponding unit
+          *reported* deleting within the shared deadline, and is independent
+          of the order in which the concurrent units/deletes finish; the
+          returned dict always has exactly these four keys.
+        - A unit that does not finish within the shared deadline
+          (``_PURGE_TIMEOUT_S``) is counted as ``0`` even though its
+          background thread keeps running (see ``pool.shutdown(wait=False,
+          ...)`` below) and may go on to delete some or all of its matching
+          jobs asynchronously. In that case a returned count of ``0`` is not
+          a guarantee that no matching jobs were deleted — only that none
+          were confirmed deleted before the deadline.
     """
     from job_service_client import JobServiceClient
 
