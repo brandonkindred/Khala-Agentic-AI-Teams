@@ -707,7 +707,19 @@ def health() -> dict:
 
 @app.post("/profiles", response_model=CreateProfileResponse)
 def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
-    """Create an Investment Policy Statement (IPS) for a user."""
+    """Create an Investment Policy Statement (IPS) for a user.
+
+    Preconditions:
+        ``request.risk_tolerance`` is one of low/medium/high/very_high and
+        ``request.default_mode`` is one of advisory/paper/live/monitor_only
+        (validated below, not by Pydantic, since both arrive as plain
+        strings on the wire).
+    Postconditions:
+        Raises 400 if either enum field is invalid. Otherwise builds and
+        persists an ``IPS`` under ``request.user_id`` — a second call for
+        the same ``user_id`` overwrites the previously stored IPS rather
+        than being rejected as a duplicate.
+    """
     try:
         risk_tol = RiskTolerance(request.risk_tolerance)
     except ValueError:
@@ -786,7 +798,13 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
 
 @app.get("/profiles/{user_id}", response_model=GetProfileResponse)
 def get_profile(user_id: str) -> GetProfileResponse:
-    """Get the Investment Policy Statement for a user."""
+    """Get the Investment Policy Statement for a user.
+
+    Postconditions:
+        Returns ``found=True`` with the stored ``ips`` when ``user_id`` has
+        a profile; otherwise returns ``found=False`` with ``ips=None``
+        (never raises 404 — missing is a normal, expected outcome here).
+    """
     with _lock:
         ips = _profiles.get(user_id)
     if not ips:
@@ -796,7 +814,16 @@ def get_profile(user_id: str) -> GetProfileResponse:
 
 @app.post("/proposals/create", response_model=CreateProposalResponse)
 def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
-    """Create a new portfolio proposal (runs as a Temporal workflow)."""
+    """Create a new portfolio proposal (runs as a Temporal workflow).
+
+    Preconditions:
+        ``request.user_id`` must already have an IPS created via
+        ``create_profile``.
+    Postconditions:
+        Raises 404 if no IPS exists for ``request.user_id``. Otherwise
+        persists a new ``PortfolioProposal`` under a freshly generated
+        ``proposal_id`` and returns it.
+    """
     with _lock:
         ips = _profiles.get(request.user_id)
 
@@ -816,7 +843,14 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
 
 @app.get("/proposals/{proposal_id}", response_model=GetProposalResponse)
 def get_proposal(proposal_id: str) -> GetProposalResponse:
-    """Get a portfolio proposal by ID."""
+    """Get a portfolio proposal by ID.
+
+    Postconditions:
+        Returns ``found=True`` with the stored ``proposal`` when
+        ``proposal_id`` exists; otherwise returns ``found=False`` with
+        ``proposal=None`` (never raises 404 — missing is a normal, expected
+        outcome here).
+    """
     with _lock:
         proposal = _proposals.get(proposal_id)
     if not proposal:
@@ -828,7 +862,17 @@ def get_proposal(proposal_id: str) -> GetProposalResponse:
 def validate_proposal(
     proposal_id: str, request: ValidateProposalRequest
 ) -> ValidateProposalResponse:
-    """Validate a portfolio proposal against the user's IPS."""
+    """Validate a portfolio proposal against the user's IPS.
+
+    Preconditions:
+        ``proposal_id`` must identify a proposal created via
+        ``create_proposal``; ``request.user_id`` must have an IPS created
+        via ``create_profile``.
+    Postconditions:
+        Raises 404 if the proposal or the user's IPS is missing. Otherwise
+        returns whether the proposal passed IPS validation and any
+        violations found; does not mutate the stored proposal.
+    """
     with _lock:
         proposal = _proposals.get(proposal_id)
         ips = _profiles.get(request.user_id)
@@ -852,7 +896,17 @@ def validate_proposal(
 
 @app.post("/strategies", response_model=CreateStrategyResponse)
 def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
-    """Create a new investment strategy specification."""
+    """Create a new investment strategy specification.
+
+    Preconditions:
+        ``request`` rejects unknown fields (``model_config extra="forbid"``)
+        so stale/legacy client payloads fail fast rather than silently
+        dropping fields.
+    Postconditions:
+        Raises 422 if the constructed ``StrategySpec`` fails its own field
+        validation (e.g. an invalid ``asset_class``). Otherwise persists the
+        strategy under a freshly generated ``strategy_id`` and returns it.
+    """
     strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
 
     # ``StrategySpec`` enforces its field contracts (e.g. the asset_class
@@ -895,7 +949,16 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
 def validate_strategy(
     strategy_id: str, request: ValidateStrategyRequest
 ) -> ValidateStrategyResponse:
-    """Run validation checks on a strategy."""
+    """Run validation checks on a strategy.
+
+    Preconditions:
+        ``strategy_id`` must identify a strategy created via
+        ``create_strategy``.
+    Postconditions:
+        Raises 404 if the strategy is missing. Otherwise returns the
+        ``ValidationReport`` produced by the validation checks, whether the
+        strategy passed, and any failures found.
+    """
     with _lock:
         strategy = _strategies.get(strategy_id)
 
@@ -1027,11 +1090,21 @@ def _run_backtest_background(
 def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
     """Submit a backtest job against real historical market data.
 
-    Returns `{job_id, status}` immediately; poll
-    `GET /backtests/status/{job_id}` for the completed ``RunBacktestResponse``
-    in the ``result`` field. Strategies with generated ``strategy_code`` run
-    in a sandbox (the normal Strategy Lab path); strategies without
-    ``strategy_code`` are rejected with a 422.
+    Preconditions:
+        ``request.strategy_id`` must identify a strategy created via
+        ``create_strategy``.
+    Postconditions:
+        Raises 404 (synchronously) if the strategy is missing. Otherwise
+        creates a job and returns ``{job_id, status}`` immediately without
+        waiting for the backtest to run; poll
+        `GET /backtests/status/{job_id}` for the outcome. Strategies with
+        generated ``strategy_code`` run in a sandbox (the normal Strategy
+        Lab path); strategies without ``strategy_code`` are not rejected
+        synchronously here — the job is created and only fails
+        asynchronously once the background worker (``_run_backtest_background``)
+        reaches ``_run_real_data_backtest``, which raises 422. That failure
+        surfaces as job ``status="failed"`` with the 422 detail in
+        ``error``, not as an HTTP 422 response from this endpoint.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
