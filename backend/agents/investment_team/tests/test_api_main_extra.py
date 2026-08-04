@@ -1076,6 +1076,76 @@ def test_delete_strategy_lab_record_success(monkeypatch: pytest.MonkeyPatch, api
     assert api_main._backtests.get("bt-lab-X") is None
 
 
+def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backtest(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """When the linked strategy/backtest are already absent from their stores,
+    the response must not claim they were deleted."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Y",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Y",
+        strategy_id="strat-lab-Y",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Y",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Y"] = record
+    # Deliberately do NOT seed _strategies/_backtests, simulating a lab record
+    # whose linked strategy/backtest were already removed by an earlier call.
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", lambda lab_id: 0)
+
+    resp = api_client.delete("/strategy-lab/records/lab-Y")
+    body = resp.json()
+    assert body["lab_record_id"] == "lab-Y"
+    assert body["deleted_strategy_id"] is None
+    assert body["deleted_backtest_id"] is None
+    assert body["deleted_paper_trading_sessions"] == 0
+    assert api_main._strategy_lab_records.get("lab-Y") is None
+
+
 # ---------------------------------------------------------------------------
 # _recover_orphaned_paper_trading_sessions startup hook
 # ---------------------------------------------------------------------------
