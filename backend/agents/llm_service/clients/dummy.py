@@ -1113,6 +1113,32 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
     return None
 
 
+def _looks_like_structured_output_tool(name: str, description_lowered: str) -> bool:
+    """True when a tool's name/description indicates Strands' StructuredOutputTool.
+
+    Shared by ``DummyLLMClient.chat()`` and ``.stream()``, whose tool-list
+    shapes differ (OpenAI-style ``{"function": {...}}`` vs. flat ``ToolSpec``
+    dicts) and so unwrap ``name``/``description`` differently before calling
+    this — only the matching criteria itself is shared here.
+
+    Preconditions:
+        ``name`` and ``description_lowered`` are strings (may be empty);
+        ``description_lowered`` is already lowercased by the caller.
+    Postconditions:
+        Returns ``True`` if the stable-name check, either description
+        substring heuristic, or the Phase 2 dispatch table recognizes
+        ``name`` — the last arm matches Strands' actual invariant (it names
+        the tool after the model's ``__name__``) independent of description
+        wording a future SDK version could change.
+    """
+    return (
+        name == "structured_output"
+        or "structuredoutputtool" in description_lowered
+        or "structured_output" in description_lowered
+        or _branding_phase2_structured_output_stub(name) is not None
+    )
+
+
 def _branding_phase2_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
     """Text-anchor fallback for the Phase 2 "Narrative & Messaging" cluster.
 
@@ -1128,9 +1154,10 @@ def _branding_phase2_text_routed_stub(system_lowered: str) -> Optional[Dict[str,
         Returns the first matching Phase 2 payload, or ``None`` when no
         anchor combination matches. Cumulative carry-forward stubs: each
         specialist repeats upstream fields so a linear Graph predecessor
-        exposes the full prior narrative — anchors are ordered most- to
-        least-specific so a later specialist's prompt (which also contains
-        earlier fields) doesn't get caught by an earlier branch.
+        exposes the full prior narrative — anchors are ordered least- to
+        most-specific; earlier branches carry negative guards so a later
+        specialist's prompt (which also contains earlier fields) does not
+        get caught by an earlier branch.
     """
     if (
         "brand_story" in system_lowered
@@ -1294,6 +1321,8 @@ class DummyLLMClient(LLMClient):
 
         Postconditions:
             - Yields a single event ``{"output": validated}`` on success.
+            - Raises ``TypeError`` when ``output_model`` is not a Pydantic
+              model with ``model_validate``.
             - Raises ``ValueError`` when the stub dict cannot validate.
             - Attaches Strands ``Model`` to the class MRO when importable.
         """
@@ -1350,6 +1379,9 @@ class DummyLLMClient(LLMClient):
         Postconditions: yields a complete assistant stream; attaches Strands
             ``Model`` to the class MRO when importable; increments
             ``self._request_count`` exactly once per call, mirroring ``chat()``.
+
+        ``**kwargs`` is accepted for ABC compatibility with Strands' ``Model``
+        interface and is otherwise ignored by this dummy implementation.
         """
         ensure_strands_model_registration()
         self._request_count += 1
@@ -1358,24 +1390,14 @@ class DummyLLMClient(LLMClient):
         if system_prompt_content is not None:
             system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
-        # Prefer the stable tool name; keep description matching as a fallback
-        # for older Strands StructuredOutputTool metadata shapes. A name that
-        # matches one of the known Phase 2 classes is also treated as
-        # detection on its own — this is the invariant Strands actually
-        # guarantees (it names the tool after the model's __name__), so it
-        # doesn't depend on description wording a future SDK version could
-        # change.
+        # See _looks_like_structured_output_tool for the shared detection
+        # criteria (also used by chat()).
         structured_tool_name = None
         if tool_specs:
             for spec in tool_specs:
                 name = spec.get("name", "") or ""
                 desc = (spec.get("description") or "").lower()
-                if (
-                    name == "structured_output"
-                    or "structuredoutputtool" in desc
-                    or "structured_output" in desc
-                    or _branding_phase2_structured_output_stub(name) is not None
-                ):
+                if _looks_like_structured_output_tool(name, desc):
                     structured_tool_name = name or "structured_output"
                     break
 
@@ -2198,20 +2220,11 @@ class DummyLLMClient(LLMClient):
             structured_tool = None
             for t in tools:
                 fn = (t or {}).get("function") or {}
-                # Prefer the stable tool name; description substring is a
-                # fallback for StructuredOutputTool metadata that embeds
-                # "StructuredOutputTool" in the human-readable description. A
-                # name matching a known Phase 2 class is also treated as
-                # detection on its own, independent of description wording —
-                # see the identical comment in stream().
+                # See _looks_like_structured_output_tool for the shared
+                # detection criteria (also used by stream()).
                 name = fn.get("name") or ""
                 desc = (fn.get("description") or "").lower()
-                if (
-                    name == "structured_output"
-                    or "structuredoutputtool" in desc
-                    or "structured_output" in desc
-                    or _branding_phase2_structured_output_stub(name) is not None
-                ):
+                if _looks_like_structured_output_tool(name, desc):
                     structured_tool = fn
                     break
 

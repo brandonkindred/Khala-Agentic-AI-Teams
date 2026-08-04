@@ -680,6 +680,45 @@ def test_chat_unrecognized_tool_name_falls_back_to_text_scan() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_unrecognized_tool_name_falls_back_to_text_scan() -> None:
+    """A tool name outside the six Phase 2 classes must not break detection in
+    stream() either — falls back to the existing complete_json pattern
+    matcher, mirroring test_chat_unrecognized_tool_name_falls_back_to_text_scan."""
+    c = DummyLLMClient()
+    messages = _as_stream_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": "Generate architecture_document with components "
+                        "and overview for the system."
+                    }
+                ],
+            }
+        ]
+    )
+    tool_specs = cast(
+        Any,
+        [
+            {
+                "name": "SomeOtherOutput",
+                "description": "IMPORTANT: This StructuredOutputTool should only be invoked...",
+                "inputSchema": {"json": {"type": "object", "properties": {}}},
+            }
+        ],
+    )
+    chunks: list[str] = []
+    async for event in c.stream(messages, tool_specs=tool_specs):
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        tool_input = (delta.get("toolUse") or {}).get("input")
+        if tool_input:
+            chunks.append(tool_input)
+    data = json.loads(chunks[0])
+    assert "architecture_document" in data
+
+
+@pytest.mark.asyncio
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt() -> None:
     """stream() must route by tool_specs' name, not by scanning the user text."""
     c = DummyLLMClient()
