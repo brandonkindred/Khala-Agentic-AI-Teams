@@ -404,6 +404,17 @@ sampler is passed (see `shared.observability.otel.init_otel`). Raise the ratio
 toward `1.0` when you need denser traces on the opted-in services; leave unset
 services alone — without an endpoint they never export regardless of sampler.
 
+### OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT / OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT
+Standard OpenTelemetry span-limit knobs bounding attribute value length and the
+number of attributes per span (SDK defaults: unbounded length, 128 count). The
+docker stack and `shared.observability.otel.init_otel` both default these to
+`2048` / `64` so a single oversized LLM prompt/response attribute can't push a
+span past Tempo's `max_bytes_per_trace` ingest cap (`docker/tempo/tempo.yaml`)
+and get refused. `init_otel` applies this default in every runtime mode —
+including thread-mode, local dev, and pytest, which never source
+docker-compose.yml's env block — by resolving these vars itself before
+constructing `SpanLimits` (see `_build_span_limits` in `otel.py`).
+
 ### OTEL_EXPORTER_OTLP_TIMEOUT
 Standard OTel exporter timeout in seconds (SDK default 10). The docker stack sets
 `5` so a slow/unavailable collector fails fast instead of stalling the in-process
