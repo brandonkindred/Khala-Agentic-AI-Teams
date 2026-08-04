@@ -2746,6 +2746,10 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
 
     Preconditions:
         - None. ``running_only`` is an optional filter flag.
+        - Every ``_active_runs`` entry has ``run_id`` and ``status`` set --
+          guaranteed by construction, since the only writers of this dict
+          (``_build_run_state`` and ``run_state.normalize_persisted_job``)
+          unconditionally set both, and no mutation site ever removes them.
 
     Postconditions:
         - Merges in-memory ``_active_runs`` with persisted job-service records,
@@ -2759,9 +2763,12 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         - Entries are sorted by ``created_at`` descending.
 
     Raises:
-        - None. Job-service merge/reconciliation failures are caught and
-          logged, and the response falls back to the in-memory-only list;
-          this endpoint always returns 200.
+        - None. ``current_cycle``/``strategy`` reconciled from job-service data
+          are not schema-validated at ingestion, so their shape is checked
+          defensively before use rather than assumed. Job-service
+          merge/reconciliation failures are caught and logged, and the
+          response falls back to the in-memory-only list; this endpoint
+          always returns 200.
     """
     jobs: List[InvestmentJobSummary] = []
 
@@ -2788,11 +2795,18 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
 
     # Active in-memory runs
     for state in active_states:
+        # `current_cycle` can arrive from unvalidated job-service data via
+        # `_reconcile_run_progress` (which copies it in verbatim, with no
+        # shape check), not just first-party code -- guard both levels
+        # before indexing into them.
         cycle = state.get("current_cycle")
+        cycle = cycle if isinstance(cycle, dict) else None
         phase = cycle.get("phase") if cycle else None
         hypothesis = ""
-        if cycle and cycle.get("strategy"):
-            hypothesis = cycle["strategy"].get("hypothesis", "")[:60]
+        if cycle:
+            strategy = cycle.get("strategy")
+            if isinstance(strategy, dict):
+                hypothesis = strategy.get("hypothesis", "")[:60]
         completed = state.get("completed_cycles", 0)
         total = state.get("total_cycles", 1)
         progress = _job_progress_percent(completed, total)
