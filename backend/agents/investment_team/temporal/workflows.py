@@ -85,7 +85,7 @@ def run_backtest_activity(
         _run_backtest_background,
     )
     from investment_team.models import BacktestConfig, StrategySpec
-    from temporalio.exceptions import ApplicationError
+    
 
     current_status = _backtest_job_status(job_id)
     if current_status == _BT_JOB_STATUS_COMPLETED:
