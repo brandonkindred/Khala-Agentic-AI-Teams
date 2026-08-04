@@ -3675,10 +3675,11 @@ class RunPaperTradingRequest(BaseModel):
     """Start a paper trading session for a winning strategy.
 
     Live-mode fields (``provider_id``, ``min_fills``, ``max_hours``,
-    ``warmup_bars``, ``timeframe``) take effect only when
-    ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the flag is off (the
-    default), the legacy recent-OHLCV path runs and the new fields are
-    ignored so existing clients and tests remain unaffected.
+    ``warmup_bars``, ``timeframe``) are validated at the API boundary and
+    take effect only when ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the
+    flag is off (the default), the legacy recent-OHLCV path runs and the
+    new fields are not used by the trading logic, but invalid values are
+    still rejected to keep request validation consistent.
     """
 
     lab_record_id: str = Field(..., description="ID of a winning StrategyLabRecord to paper trade")
