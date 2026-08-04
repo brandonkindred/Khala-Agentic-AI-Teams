@@ -33,7 +33,7 @@ import os
 import re
 import threading
 import time
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, TypeVar
 
 from .models import AgentManifest
 
@@ -63,7 +63,7 @@ _ALL_CACHE_TTL_S = 2.0
 # concurrent all() query's network round trip.
 _all_cache_lock = threading.Lock()
 _all_cache_refresh_lock = threading.Lock()
-_all_cache: Optional[list[AgentManifest]] = None
+_all_cache: list[AgentManifest] | None = None
 _all_cache_at: float = 0.0
 
 # Bounds retries of a write (upsert/delete) whose first attempt hits a transient
@@ -400,7 +400,7 @@ def all() -> list[AgentManifest]:  # noqa: A001 - intentional: mirrors the publi
     from shared.postgres import dict_row, get_conn
     from shared.postgres.metrics import timed_query
 
-    def _fresh_copy() -> Optional[list[AgentManifest]]:
+    def _fresh_copy() -> list[AgentManifest] | None:
         with _all_cache_lock:
             if _all_cache is not None and (time.monotonic() - _all_cache_at) < _ALL_CACHE_TTL_S:
                 return list(_all_cache)
