@@ -119,6 +119,37 @@ them is explicitly out of scope (see below).
 an option going forward — it exists as a record of pre-decision code, not
 as a menu choice for new work.
 
+### `run_single_shot_review` — shared single-shot `LLMClient` helper
+
+`shared/single_shot_review.py`'s `run_single_shot_review(llm_client,
+agent_key, prompt, system_prompt, *, schema=..., ...)` is justified as a
+narrow exception distinct from Patterns 1-5 above: it is a plain function,
+not an agent, so it has no review/generate/plan-specific shape to subclass
+into any of Patterns 1-4's recipes. It exists to give already-hand-rolled
+(Pattern 5) call sites — and any narrowly-scoped future ones with the same
+shape — one shared implementation of the "resolve an `LLMClient` for
+`agent_key` unless one is already injected, then make one single-shot call"
+boilerplate they currently duplicate by hand, rather than each repeating
+it. **It is not a sixth menu option for a new agent's overall calling
+shape** — new agents still default to Pattern 1 (or its justified
+exceptions 2-4) exactly as stated above; this helper is for call sites that
+need the underlying single-shot `LLMClient` call itself, e.g. a future
+migration of existing Pattern 5 sites onto one shared implementation
+instead of N duplicated ones (tracked separately, not part of this
+helper's introduction).
+
+**Relationship to `llm_service.api.generate_structured`.** The
+schema-validated branch's happy path (resolve a client by `agent_key`,
+then `complete_validated`) overlaps with `generate_structured`
+(`llm_service/api.py`). `run_single_shot_review` does not delegate to it
+because `generate_structured` has no injectable-client parameter — it
+cannot serve `run_single_shot_review`'s dependency-injection callers — and
+has no plain-JSON mode or `think`/`context` forwarding, both of which
+`run_single_shot_review` supports for callers not yet migrated to a
+schema. Extending `generate_structured` to close that gap and then
+delegating to it is worth doing but is out of scope for this helper's
+introduction.
+
 ## Out of scope
 
 - Migrating any existing agent between patterns.

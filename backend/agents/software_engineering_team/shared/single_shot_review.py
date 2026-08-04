@@ -24,6 +24,18 @@ to define one before they can adopt the resolution half of this helper:
   — no schema validation or self-correction. Returns the raw JSON dict, for
   callers that build their own result model by hand.
 
+Architecture note (see ``docs/LLM_CALLING_PATTERN_DECISION.md``): this
+module is documented there as a narrow, justified exception to that
+decision's Pattern 1 (``LlmToolAgentBase``) default for *new agents* — it
+is a plain function, not an agent, and exists to give already-hand-rolled
+(Pattern 5) call sites one shared implementation of the resolve+call
+boilerplate they already duplicate, not a sixth agent-shape choice. It also
+does not delegate to ``llm_service.api.generate_structured`` (which
+overlaps with the schema-validated branch's client-resolution +
+``complete_validated`` happy path) because ``generate_structured`` has no
+injectable-client parameter and no plain-JSON mode — see the decision doc
+for the full rationale.
+
 Usage::
 
     from software_engineering_team.shared.single_shot_review import run_single_shot_review
@@ -77,14 +89,17 @@ def run_single_shot_review(
 
     Postconditions:
         The client used is ``llm_client`` when given, else
-        ``get_client(agent_key)`` — ``agent_key`` is always forwarded to
-        ``get_client`` for attribution even when it is not needed for
-        resolution. When ``schema`` is given, returns a validated instance of
-        ``schema`` (see ``llm_service.structured.complete_validated`` for the
+        ``get_client(agent_key)`` — only that second branch forwards
+        ``agent_key`` to ``get_client`` (for that client's
+        attribution/telemetry); an injected ``llm_client`` keeps whatever
+        attribution it already carries, unaffected by ``agent_key``.
+        Independent of which branch resolved the client, ``objective``, when
+        omitted, defaults to ``f"{agent_key} single-shot review"``. When
+        ``schema`` is given, returns a validated instance of ``schema`` (see
+        ``llm_service.structured.complete_validated`` for the
         self-correction-retry and error semantics on a parse/validation
         failure). When ``schema`` is ``None``, returns the raw dict from
-        ``client.complete_json`` with no validation or retry. ``objective``,
-        when omitted, defaults to ``f"{agent_key} single-shot review"``.
+        ``client.complete_json`` with no validation or retry.
         ``correction_attempts`` and ``context`` are forwarded only in
         schema-validated mode (``complete_json`` has no equivalent
         parameters). ``**kwargs`` is forwarded to the underlying call in
