@@ -182,18 +182,21 @@ def _placeholder_slug(hint: str, separator: str, max_length: int) -> str:
           whose digest portion is derived from ``hint``, so distinct hints
           produce distinct placeholders.
     """
-    digest = hashlib.md5(hint.encode()).hexdigest()[:8]
+    digest = hashlib.md5(hint.encode(), usedforsecurity=False).hexdigest()[:8]
     result = f"item{separator}{digest}"
     if len(result) > max_length:
         result = result[:max_length].rstrip(separator)
-    return result or f"item{separator}0"
+    # Fallback must also respect max_length: if separator shares a character
+    # with the literal "item" prefix, truncation above can strip result to "".
+    return result or f"item{separator}0"[:max_length]
 
 
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
     """Derive a short, identifier-friendly name from a free-form hint.
 
-    Strips common verbs, filler words, and type suffixes, then joins the
-    remaining words with ``separator`` and truncates to ``max_length``.
+    Strips common verbs, filler words, and type suffixes, keeps up to the
+    first three remaining words, joins them with ``separator``, and
+    truncates to ``max_length``.
 
     Preconditions:
         - ``hint`` is a string (may be empty; empty / all-stripped yields a
@@ -344,7 +347,13 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         ConvergeDecider, and the seven post-converge specialists
         (logo_specifier, color_system_builder, typography_builder,
         iconography_director, photography_video_director, voice_tone_builder,
-        design_system_codifier).
+        design_system_codifier). Specialist branches match on lowercased prompt
+        *substrings*, not factory names: logo_specifier matches "logo specifier"
+        (space), color_system_builder matches "color system builder", and
+        typography_builder matches "typography builder". The remaining four
+        specialists (iconography_director, photography_video_director,
+        voice_tone_builder, design_system_codifier) have no name-substring
+        anchor at all — they match on output-field names only.
 
     Ordering constraints (first three only — do not conflate them):
         1. CreativeDirector — ``mood_board_candidates`` + ``converge_decider``
@@ -353,7 +362,7 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         2. MoodBoardConceptualist — ``moodboard conceptualist`` + ``visual_direction``
            → ``MoodBoardConceptOutput``.
         3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
-           → ``CreativeRefinementOutput`` (separate from CreativeDirector).
+           → ``CreativeRefinementDecisionOutput`` (separate from CreativeDirector).
         Specialists are matched afterward by agent-specific prompt anchors.
     """
     if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
@@ -997,7 +1006,11 @@ class DummyLLMClient(LLMClient):
             - Attaches Strands ``Model`` to the class MRO when importable.
         """
         ensure_strands_model_registration()
-        assert hasattr(output_model, "model_validate")
+        if not hasattr(output_model, "model_validate"):
+            raise TypeError(
+                f"DummyLLMClient.structured_output: output_model {output_model!r} "
+                "must be a Pydantic model with a model_validate class method"
+            )
         prompt_text = _aggregated_user_tool_text(prompt)
         data = self.complete_json(prompt_text, system_prompt=system_prompt)
         try:
@@ -1112,7 +1125,7 @@ class DummyLLMClient(LLMClient):
             stripped = line.strip()
             if stripped.startswith("**Task:**"):
                 return stripped.replace("**Task:**", "").strip()
-        return hashlib.md5(prompt.encode()).hexdigest()[:12]
+        return hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
 
     def get_max_context_tokens(self) -> int:
         return 16384
