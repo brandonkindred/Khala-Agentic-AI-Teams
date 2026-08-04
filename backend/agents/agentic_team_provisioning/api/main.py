@@ -272,8 +272,10 @@ def create_team(req: CreateTeamRequest):
         provisioning failure, the team row is removed (best-effort — a
         rollback failure is logged but never masks the ``500``) and an
         ``HTTPException(500)`` is raised.
-    Invariants: a failed provisioning attempt never leaves a team row in
-        Postgres without corresponding infrastructure.
+    Invariants: when provisioning fails and the compensating delete succeeds,
+        no team row remains in Postgres without corresponding infrastructure.
+        The delete is best-effort, so a rollback failure is logged but the row
+        may remain — see Postconditions.
     """
     team = _store.create_team(name=req.name, description=req.description)
     try:
