@@ -1781,6 +1781,12 @@ def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
         ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
         activity can reuse the identical write without duplicating it.
     """
+    # StrategySpec/BacktestRecord are required (non-Optional) fields, but
+    # Pydantic doesn't validate on assignment here, so a stray `record.strategy
+    # = None` elsewhere would otherwise surface as an opaque AttributeError
+    # below instead of a clear precondition failure at this boundary.
+    assert record.strategy is not None, "record.strategy must be populated before persisting"
+    assert record.backtest is not None, "record.backtest must be populated before persisting"
     with _lock:
         _strategy_lab_records[record.lab_record_id] = record
         _strategies[record.strategy.strategy_id] = record.strategy
