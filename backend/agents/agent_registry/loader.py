@@ -237,10 +237,21 @@ class AgentRegistry:
     def _dynamic_store(self):
         """Return the ``dynamic_store`` module iff it should back this process.
 
+        Side effect: re-runs ``from . import dynamic_store`` on every call.
+        Python caches this in ``sys.modules`` after the first successful
+        import, so every call after the first is a cheap dict lookup, not a
+        re-execution of the module body — and that body has no import-time
+        side effects of its own (no Postgres I/O, no schema DDL; module-level
+        state is just locks/constants). Schema DDL (``_ensure_schema``) only
+        runs lazily inside ``dynamic_store``'s write functions
+        (``upsert``/``delete``/``replace_manifests``), never from here.
+
         Postconditions:
-            * Returns the module when Postgres is configured and we are not inside
-              a per-invoke sandbox; otherwise ``None`` (in-memory-only, as before).
-              Any import failure degrades to ``None`` — a Postgres-less environment
+            * Returns the ``dynamic_store`` module when
+              :func:`dynamic_store._store_active` returns ``True`` (Postgres
+              configured **and** we are not inside a per-invoke sandbox);
+              otherwise ``None`` (in-memory-only, as before). Any import
+              failure also degrades to ``None`` — a Postgres-less environment
               must never break registry resolution.
         """
         try:
