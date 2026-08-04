@@ -130,8 +130,9 @@ def _install_fake_market_service(monkeypatch, market_data: Dict[str, List[OHLCVB
 
 
 _BUY_AND_HOLD_CODE = textwrap.dedent('''\
-    """Enter LONG on the first bar, never exit. TradingService force-closes
-    the open position at end-of-data so we still get a TradeRecord."""
+    """Enter LONG on the first bar, never exit. The open position is
+    force-closed at end-of-data; the test only verifies that execution
+    completes cleanly and returns type-correct result objects."""
     from contract import OrderSide, OrderType, Strategy
 
 

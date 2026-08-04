@@ -1361,7 +1361,6 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
             detail="Advisory execution returned unexpected response structure",
         )
     with _lock:
-        _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
         escalation = result.get("escalation_enqueued")
         if escalation is not None:
             required_escalation_keys = ("queue", "payload_id", "priority")
@@ -1385,6 +1384,12 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
                 raise HTTPException(
                     status_code=502, detail=f"Invalid escalation queue: {queue_name}"
                 )
+        # Only mutate shared state once escalation shape/queue validation has
+        # passed — an early raise above must leave _workflow_state untouched,
+        # or a client that retries after a 502 would see duplicated audit-log
+        # entries from the rejected attempt.
+        _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
+        if escalation is not None:
             _workflow_state.queues[queue_name].append(
                 QueueItem(
                     queue=queue_name,

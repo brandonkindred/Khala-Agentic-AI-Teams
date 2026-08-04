@@ -586,6 +586,35 @@ def test_promotion_decision_502_on_unknown_escalation_queue(api_client, monkeypa
     assert "not-a-real-queue" in resp.json()["detail"]
 
 
+def test_promotion_decision_502_leaves_audit_log_untouched_on_bad_escalation(
+    api_client, monkeypatch
+) -> None:
+    """A malformed/unknown escalation must raise before audit_log is mutated —
+    otherwise a client that retries after the 502 sees duplicated entries from
+    the rejected attempt."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {},
+            "audit_log_appended": [f"promotion:{sid}:reject"],
+            "escalation_enqueued": {
+                "queue": "not-a-real-queue",
+                "payload_id": sid,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+
+    status = api_client.get("/workflow/status").json()
+    assert status["audit_log"] == []
+
+
 def test_workflow_status_and_queues(api_client) -> None:
     resp = api_client.get("/workflow/status")
     assert resp.status_code == 200
