@@ -65,10 +65,7 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
     """
     missing = [f for f in _REQUIRED_FIELDS if not request.get(f)]
     if missing:
-        raise ValueError(
-            "github_branch_prep_activity requires non-empty repo_path/remote/"
-            f"default_branch/integration_branch fields; missing: {missing!r}."
-        )
+        raise ValueError(f"github_branch_prep_activity missing required fields: {missing!r}")
     from software_engineering_team.api.coding_team_main import _prepare_issue_branch
 
     ok, err, notes = _prepare_issue_branch(

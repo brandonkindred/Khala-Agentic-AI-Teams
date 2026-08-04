@@ -13,8 +13,10 @@ threading -- the "equivalent to the current thread-mode behavior" coverage
 
 from __future__ import annotations
 
+import pathlib
 import subprocess
 import sys
+from typing import Any, Optional
 
 import pytest
 
@@ -58,7 +60,8 @@ def _stub_orchestrator_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def api(monkeypatch):
+def api(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Import ``coding_team_main`` fresh, with the real git/GitHub stack in place."""
     _ensure_real_modules()
     _stub_orchestrator_only(monkeypatch)
     from software_engineering_team.api import coding_team_main as api_main
@@ -67,10 +70,20 @@ def api(monkeypatch):
 
 
 def _git(repo: str, *args: str) -> None:
+    """Run a git command in ``repo`` with ``check=True``.
+
+    Raises ``subprocess.CalledProcessError`` on a non-zero exit.
+    """
     subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True, text=True)
 
 
-def _init_repo(path) -> str:
+def _init_repo(path: pathlib.Path) -> str:
+    """Create a temporary git repo under ``path / "repo"`` and return its path.
+
+    Configures user identity, disables signing, forces the branch to "main",
+    creates a seed commit, and adds a self-referential "origin" remote so
+    fetch works without a real network remote.
+    """
     repo = str(path / "repo")
     import os
 
@@ -158,21 +171,53 @@ def test_branch_prep_activity_unsafe_ref_returns_ok_false(api) -> None:
 
 
 @pytest.mark.parametrize(
-    "request_dict",
+    "request_dict,expected_fields,fake_token",
     [
-        {"repo_path": "/x", "remote": "origin"},
-        {"repo_path": "/x", "remote": "origin", "default_branch": "main", "integration_branch": ""},
+        ({"repo_path": "/x", "remote": "origin"}, ["default_branch", "integration_branch"], None),
+        (
+            {
+                "repo_path": "/x",
+                "remote": "origin",
+                "default_branch": "main",
+                "integration_branch": "",
+            },
+            ["integration_branch"],
+            None,
+        ),
+        (
+            {
+                "repo_path": "/x",
+                "remote": "origin",
+                "default_branch": "main",
+                "integration_branch": "",
+                "token": "fake-token-xyz",
+            },
+            ["integration_branch"],
+            "fake-token-xyz",
+        ),
     ],
 )
-def test_branch_prep_activity_raises_on_missing_required_field(request_dict) -> None:
+def test_branch_prep_activity_raises_on_missing_required_field(
+    request_dict: dict[str, Any], expected_fields: list[str], fake_token: Optional[str]
+) -> None:
     """A missing OR falsy-but-present required field is a caller-wiring bug,
-    not a git failure -- it must raise, not be conflated with ok=False."""
+    not a git failure -- it must raise, not be conflated with ok=False, and
+    the message must name only the missing fields, never the request payload
+    (which may carry a token -- an activity exception message is recorded in
+    Temporal history)."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
     )
 
-    with pytest.raises(ValueError, match="missing"):
+    with pytest.raises(ValueError, match="missing") as exc_info:
         github_branch_prep_activity(request_dict)
+
+    msg = str(exc_info.value)
+    for field in expected_fields:
+        assert field in msg
+    assert repr(request_dict) not in msg
+    if fake_token is not None:
+        assert fake_token not in msg
 
 
 def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None:
@@ -186,7 +231,9 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
 
     calls = []
 
-    def fake_git(repo_path, *args, timeout=120.0, env=None):
+    def fake_git(
+        repo_path: str, *args: str, timeout: float = 120.0, env: Optional[dict[str, str]] = None
+    ) -> tuple[int, str]:
         calls.append((args, env))
         return 0, ""
 
@@ -220,7 +267,9 @@ def test_branch_prep_activity_without_token_uses_no_auth_env(api, monkeypatch) -
 
     calls = []
 
-    def fake_git(repo_path, *args, timeout=120.0, env=None):
+    def fake_git(
+        repo_path: str, *args: str, timeout: float = 120.0, env: Optional[dict[str, str]] = None
+    ) -> tuple[int, str]:
         calls.append((args, env))
         return 0, ""
 
@@ -238,3 +287,17 @@ def test_branch_prep_activity_without_token_uses_no_auth_env(api, monkeypatch) -
 
     assert out["ok"] is True
     assert all(env is None for _, env in calls)
+
+
+def test_branch_prep_activity_registered_under_expected_temporal_name() -> None:
+    """The activity must be registered as ``coding_team_github_branch_prep``,
+    matching the name workflow.execute_activity dispatch (and any future
+    #3993 workflow wiring) will reference -- a decorator with a wrong or
+    accidentally-dropped name would silently break that dispatch without
+    this test catching it."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+    )
+
+    definition = github_branch_prep_activity.__temporal_activity_definition
+    assert definition.name == "coding_team_github_branch_prep"
