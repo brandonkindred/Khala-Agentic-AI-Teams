@@ -2061,8 +2061,8 @@ def _dispatch_strategy_lab_run(
             abort itself.
           On any other failure (Temporal disabled/unavailable, or the start
           RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised
-          — never spawns a thread.
+          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised;
+          a delayed cleanup timer is scheduled by ``_fail_strategy_lab_run``.
     """
     try:
         _require_temporal()
