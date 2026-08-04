@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Callable
 
 import pytest
+from pydantic import BaseModel
 from strands import Agent
 
 from branding_team.agents import (
@@ -47,7 +48,6 @@ from branding_team.models import (
 )
 from branding_team.tests.conftest import make_mission
 from llm_service import DummyLLMClient
-from pydantic import BaseModel
 
 # (factory, expected structured_output model) — mirrors the pairing declared
 # in each factory's ``build_agent(..., structured_output=...)`` call in
