@@ -898,6 +898,14 @@ def test_job_progress_percent_computes_normal_ratio() -> None:
     assert api_main._job_progress_percent(4, 4) == 100
 
 
+def test_job_progress_percent_clamps_out_of_range_values() -> None:
+    """``completed`` exceeding ``total`` or negative can't yield an out-of-range percentage."""
+    from investment_team.api import main as api_main
+
+    assert api_main._job_progress_percent(5, 4) == 100  # completed exceeds total
+    assert api_main._job_progress_percent(-1, 4) == 0  # negative completed
+
+
 # ---------------------------------------------------------------------------
 # list_strategy_lab_jobs — persisted merge + running filter
 # ---------------------------------------------------------------------------
