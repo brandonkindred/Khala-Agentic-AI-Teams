@@ -470,7 +470,7 @@ def resolve_max_output_tokens() -> int:
 # present, else the short rate window (~5m). Weekly defaults to 24h because
 # Ollama Cloud weekly 429 bodies do not include a reset timestamp.
 _DEFAULT_FAILOVER_RATE_WINDOW_S = 300.0
-_DEFAULT_FAILOVER_SESSION_WINDOW_S = 5 * 3600.0
+_DEFAULT_FAILOVER_SESSION_WINDOW_S = 65 * 60.0
 _DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 24 * 3600.0
 
 
@@ -506,7 +506,7 @@ def failover_rate_window_seconds() -> float:
 
 
 def failover_session_window_seconds() -> float:
-    """Fixed reset window for a session-limit 429 (default 5h).
+    """Fixed reset window for a session-limit 429 (default 65m).
 
     Session/weekly classifications ignore ``Retry-After``; this window is measured
     from the error time.

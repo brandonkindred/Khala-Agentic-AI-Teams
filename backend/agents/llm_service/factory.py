@@ -390,7 +390,7 @@ def _mark_entry_exhausted(entry: "provider_store.ProviderEntry", err: LLMRateLim
     (:data:`OLLAMA_WEEKLY_LIMIT_MESSAGE` / Ollama Cloud body text). Windows:
 
     - ``session`` — fixed :func:`llm_config.failover_session_window_seconds`
-      (default 5h); **ignores** ``Retry-After``.
+      (default 65m); **ignores** ``Retry-After``.
     - ``weekly`` — fixed :func:`llm_config.failover_weekly_window_seconds`
       (default 24h); **ignores** ``Retry-After``.
     - ``rate`` — honors ``Retry-After`` when present (including ``0`` = retry
