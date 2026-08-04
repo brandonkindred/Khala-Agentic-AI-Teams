@@ -27,7 +27,7 @@ retry (which fires on worker crash / start_to_close timeout):
   the failure (and retries within the bounded policy) instead of the swallowed
   exception being reported as success.
 """
-
+import time
 from __future__ import annotations
 
 from datetime import timedelta
@@ -101,13 +101,22 @@ def run_backtest_activity(
         submitted_by,
         notes,
     )
-    final_status = _backtest_job_status(job_id)
-    if final_status == _BT_JOB_STATUS_FAILED:
-        raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
-    elif final_status == _BT_JOB_STATUS_CANCELLED:
-        return {"job_id": job_id, "status": "cancelled"}
+    while True:
+        final_status = _backtest_job_status(job_id)
         
-    return {"job_id": job_id, "status": "completed"}
+        if final_status == _BT_JOB_STATUS_FAILED:
+            # This will properly raise the error the test expects
+            raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
+            
+        elif final_status == _BT_JOB_STATUS_CANCELLED:
+            return {"job_id": job_id, "status": "cancelled"}
+            
+        elif final_status == _BT_JOB_STATUS_COMPLETED:
+            return {"job_id": job_id, "status": "completed"}
+            
+        # If it's "RUNNING" or "PENDING", sleep and poll again.
+        # (Use await asyncio.sleep(1) if this is an async activity)
+        time.sleep(1)
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")
