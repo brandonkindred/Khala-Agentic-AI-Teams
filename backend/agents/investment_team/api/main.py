@@ -1665,6 +1665,8 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
     if not isinstance(strategy_data, dict):
         raise TypeError(f"strategy_data must be a mapping, got {type(strategy_data).__name__}")
     strategy_id = f"strat-lab-{uuid.uuid4().hex[:8]}"
+    raw_sizing = strategy_data.get("sizing")
+    sizing = raw_sizing if isinstance(raw_sizing, dict) else DEFAULT_SIZING_PAYLOAD
     strategy = StrategySpec(
         strategy_id=strategy_id,
         authored_by="strategy_ideation_agent",
@@ -1681,9 +1683,7 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         # ideation LLM response doesn't crash the cycle.
         entry_rules=[r for r in (strategy_data.get("entry_rules") or []) if isinstance(r, dict)],
         exit_rules=[r for r in (strategy_data.get("exit_rules") or []) if isinstance(r, dict)],
-        sizing=strategy_data.get("sizing")
-        if isinstance(strategy_data.get("sizing"), dict)
-        else DEFAULT_SIZING_PAYLOAD,
+        sizing=sizing,
         risk_limits=strategy_data.get("risk_limits") or {},
         speculative=bool(strategy_data.get("speculative", False)),
     )
