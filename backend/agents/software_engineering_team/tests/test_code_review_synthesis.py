@@ -19,6 +19,7 @@ from code_review_agent.synthesis import (
     SynthesisResult,
     build_findings_digest,
     synthesize_review_findings,
+    synthesize_spec_compliance,
 )
 
 from llm_service.clients.dummy import DummyLLMClient
@@ -278,6 +279,92 @@ def test_synthesize_returns_none_on_exception() -> None:
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# synthesize_spec_compliance — single dedicated pass, paired with
+# synthesize_review_findings; not yet wired into the coordinator (see its
+# own docstring), so these tests exercise it standalone.
+# ---------------------------------------------------------------------------
+
+
+def test_spec_compliance_success_returns_notes_string() -> None:
+    client = _PayloadClient({"spec_compliance_notes": "AC2 is not implemented"})
+    result = synthesize_spec_compliance(
+        client,
+        input_data=_input(acceptance_criteria=["AC1", "AC2"]),
+        issues=[_issue("high", "missing endpoint")],
+    )
+    assert result == "AC2 is not implemented"
+
+
+def test_spec_compliance_allows_empty_notes() -> None:
+    """An empty ``spec_compliance_notes`` is a valid, successful result — it
+    means no gaps were found, matching CodeReviewOutput's own contract."""
+    client = _PayloadClient({"spec_compliance_notes": ""})
+    result = synthesize_spec_compliance(client, input_data=_input(), issues=[])
+    assert result == ""
+
+
+def test_spec_compliance_forwards_full_spec_and_criteria_into_prompt() -> None:
+    """The full spec/acceptance-criteria text reaches the model verbatim —
+    this pass runs once, so it need not compact or truncate that text the way
+    a per-chunk prompt would."""
+    client = _RecordingClient({"spec_compliance_notes": ""})
+    long_spec = "SPEC " * 2_000
+    synthesize_spec_compliance(
+        client,
+        input_data=_input(spec_content=long_spec, acceptance_criteria=["Must support X"]),
+        issues=[],
+    )
+    assert len(client.prompts) == 1
+    assert long_spec in client.prompts[0]
+    assert "Must support X" in client.prompts[0]
+
+
+def test_spec_compliance_forwards_merged_issues_into_prompt() -> None:
+    client = _RecordingClient({"spec_compliance_notes": ""})
+    synthesize_spec_compliance(
+        client,
+        input_data=_input(),
+        issues=[_issue("critical", "SQL injection risk", file_path="app/db.py")],
+    )
+    assert len(client.prompts) == 1
+    assert "SQL injection risk" in client.prompts[0]
+    assert "app/db.py" in client.prompts[0]
+
+
+def test_spec_compliance_returns_none_on_missing_key() -> None:
+    client = _PayloadClient({"unrelated_key": "value"})
+    assert synthesize_spec_compliance(client, input_data=_input(), issues=[]) is None
+
+
+def test_spec_compliance_returns_none_on_malformed_json() -> None:
+    client = _PayloadClient("<<< not valid json >>>")
+    assert synthesize_spec_compliance(client, input_data=_input(), issues=[]) is None
+
+
+def test_spec_compliance_returns_none_on_non_object_json() -> None:
+    client = _PayloadClient('"a bare json string"')
+    assert synthesize_spec_compliance(client, input_data=_input(), issues=[]) is None
+
+
+def test_spec_compliance_returns_none_on_exception() -> None:
+    assert (
+        synthesize_spec_compliance(
+            _RaisingClient(), input_data=_input(), issues=[_issue("critical", "c")]
+        )
+        is None
+    )
+
+
+def test_spec_compliance_never_mutates_issues() -> None:
+    issues = [_issue("high", "h")]
+    original = list(issues)
+    synthesize_spec_compliance(
+        _PayloadClient({"spec_compliance_notes": "gap found"}), input_data=_input(), issues=issues
+    )
+    assert issues == original
 
 
 # ---------------------------------------------------------------------------
