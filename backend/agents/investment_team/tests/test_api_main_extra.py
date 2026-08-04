@@ -15,7 +15,8 @@ fixtures. Targets:
 * ``_purge_strategy_lab_job_storage`` + ``_delete_paper_sessions_for_lab_record``.
 * ``_resolve_fee_overrides`` (0.0 sentinel handling).
 * ``_recover_orphaned_paper_trading_sessions`` startup hook.
-* ``_load_run_from_job_service`` fallback + ``_persist_run_state`` swallowing.
+* ``_load_run_from_job_service`` fallback + ``_persist_run_state``
+  propagating job-service errors.
 * ``_strategy_lab_signal_expert_enabled`` env-var toggle.
 * ``run_paper_trading`` validation branches (not-winning / no strategy_code)
   + happy path with patched background worker.
@@ -1262,7 +1263,13 @@ def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch)
     assert out["status"] == "completed"
 
 
-def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_persist_run_state_propagates_job_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine job-service failure must propagate, not be silently logged
+    and swallowed -- callers (run/resume/restart dispatch, and the Temporal
+    persist activity's retry policy) need to detect a durable-write failure
+    instead of continuing as if it succeeded (issue #4150)."""
     from investment_team.api import main as api_main
 
     class _Broken:
@@ -1273,9 +1280,10 @@ def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -
             raise RuntimeError("backend down")
 
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
-    # Must not raise.
-    api_main._persist_run_state("run-z", {"status": "running"}, create=True)
-    api_main._persist_run_state("run-z", {"status": "running"}, create=False)
+    with pytest.raises(RuntimeError, match="backend down"):
+        api_main._persist_run_state("run-z", {"status": "running"}, create=True)
+    with pytest.raises(RuntimeError, match="backend down"):
+        api_main._persist_run_state("run-z", {"status": "running"}, create=False)
 
 
 # ---------------------------------------------------------------------------
