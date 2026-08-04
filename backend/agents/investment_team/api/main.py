@@ -2126,6 +2126,9 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
         return False
 
 
+STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS = 900.0
+
+
 def _fail_strategy_lab_run(run_id: str, error: str) -> None:
     """Mark a strategy-lab run "failed" (best-effort, idempotent).
 
@@ -2135,7 +2138,8 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
         - If the run exists and isn't already in
           ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
           with ``error`` recorded, the new state persisted, and a delayed
-          cleanup of the ``_active_runs`` entry scheduled 900s out — so a
+          cleanup of the ``_active_runs`` entry scheduled
+          ``STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS`` out — so a
           dispatch failure (e.g. a Temporal outage) doesn't leak the entry
           forever. That cleanup is a no-op if
           ``run_id`` gets resumed (and thus a new state object installed)
@@ -2230,7 +2234,7 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
                 _active_runs.pop(run_id, None)
             cleanup_job(run_id)
 
-        timer = threading.Timer(900.0, _cleanup)
+        timer = threading.Timer(STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS, _cleanup)
         timer.daemon = True
         timer.start()
     except Exception:
@@ -2275,8 +2279,11 @@ def _dispatch_strategy_lab_run(
             abort itself.
           On any other failure (Temporal disabled/unavailable, or the start
           RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised
-          — never spawns a thread.
+          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised.
+          Note ``_fail_strategy_lab_run`` itself schedules a best-effort
+          delayed ``_active_runs`` cleanup via a daemon ``threading.Timer``
+          (see its own docstring) — this failure path is not thread-free,
+          only free of any *new* Temporal dispatch.
     """
     try:
         _require_temporal()

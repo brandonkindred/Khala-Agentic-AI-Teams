@@ -23,6 +23,9 @@ fixtures. Targets:
 * ``complete_advisor_session`` happy path.
 * ``RunStrategyLabRequest`` batch_size/batch_count bounds.
 * ``acquire_run_transition_lock`` per-run_id serialization primitive.
+* ``run_state.get_run_generation_strict`` and ``_build_run_state``'s
+  ``generation`` field, plus ``_legacy_generation_bootstrap_increment``
+  (generation-fencing coverage).
 """
 
 from __future__ import annotations
