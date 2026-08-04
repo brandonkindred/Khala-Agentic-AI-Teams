@@ -154,6 +154,24 @@ def test_pause_cycle_nothing_to_ask():
     )
 
 
+def test_pause_cycle_rejects_invalid_pause_strategy():
+    """_run_pause_cycle validates pause_strategy itself, not just its callers.
+
+    run_coding_team_orchestrator and CodingTeamSwarm.run both validate before calling in,
+    but a direct caller (a test, or future code) that bypasses both must still fail fast
+    rather than silently falling through to block-mode's hitl.wait_for_answers call.
+    """
+    with pytest.raises(ValueError, match="pause_strategy must be 'block' or 'return'"):
+        _run_pause_cycle(
+            "j",
+            ["Q?"],
+            "s",
+            get_job_fn=lambda j: {},
+            update_fn=lambda **k: None,
+            pause_strategy="invalid",
+        )
+
+
 def test_pause_cycle_success_calls_on_pause(monkeypatch):
     job: Dict[str, Any] = {}
     updates: List[Dict[str, Any]] = []

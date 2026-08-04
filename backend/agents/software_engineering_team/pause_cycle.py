@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from software_engineering_team import hitl
 from software_engineering_team.models import CodingTeamPlanInput
@@ -393,7 +393,7 @@ def _run_pause_cycle(
     get_job_fn: Callable[[str], Optional[Dict[str, Any]]],
     update_fn: Callable[..., None],
     on_pause: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
-    pause_strategy: str = "block",
+    pause_strategy: Literal["block", "return"] = "block",
 ) -> "tuple[List[Dict[str, Any]], bool]":
     """Surface open questions, pause the job, then either block until answered or return promptly.
 
@@ -402,7 +402,11 @@ def _run_pause_cycle(
     in the SAME atomic update either way.
 
     Preconditions:
-        - ``pause_strategy`` is ``"block"`` or ``"return"``.
+        - ``pause_strategy`` is ``"block"`` or ``"return"``; violated by raising ``ValueError`` (this
+          is the sole enforcement point for every caller, including ones that bypass the type
+          annotation — e.g. tests calling this function directly rather than through
+          ``run_coding_team_orchestrator``, which validates its own ``pause_strategy`` parameter
+          before ever reaching here, but cannot enforce what a lower-level direct caller passes).
     Postconditions:
         - Returns ``([], True)`` immediately when there is nothing to ask (both modes, unchanged).
         - ``pause_strategy="block"`` (unchanged from before ``pause_strategy`` existed): optionally
@@ -417,6 +421,8 @@ def _run_pause_cycle(
           raises ``_ActivityPauseSignal`` carrying that payload — never calls ``on_pause`` or
           ``hitl.wait_for_answers`` in this mode; this call never returns normally.
     """
+    if pause_strategy not in ("block", "return"):
+        raise ValueError(f"pause_strategy must be 'block' or 'return', got {pause_strategy!r}")
     structured = hitl.convert_to_structured_questions(questions, source=source)
     if not structured:
         return [], True

@@ -69,6 +69,26 @@ def test_run_returns_immediately_when_not_paused(monkeypatch: pytest.MonkeyPatch
     assert len(calls) == 1
 
 
+def test_run_raises_on_paused_result_missing_resume_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paused result without a valid resume_token must fail the workflow task
+    deterministically, not silently assign None and let wait_condition's predicate
+    become permanently unsatisfiable (submit_answers drops every signal while
+    self._active_resume_token is None) -- an unresolvable hang is a much worse
+    failure mode than an immediate, diagnosable error."""
+    workflow_obj = CodingTeamWorkflow()
+    _patch_execute(monkeypatch, [{"outcome": "paused", "job_id": "j1"}])
+
+    async def _no_wait(*_a, **_kw):  # pragma: no cover - must not be called
+        raise AssertionError("wait_condition must not be reached with no resume_token")
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
+
+    with pytest.raises(ValueError, match="missing a valid resume_token"):
+        asyncio.run(workflow_obj.run({"repo_path": "/repo", "plan_input": {}}))
+
+
 def test_submit_answers_signal_wakes_wait_condition_and_reloops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

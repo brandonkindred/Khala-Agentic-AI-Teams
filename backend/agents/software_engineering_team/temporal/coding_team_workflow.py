@@ -197,8 +197,15 @@ class CodingTeamWorkflow:
               until a non-``"paused"`` outcome is returned — production
               behavior is no longer "call the activity once."
             - When an activity result's ``"outcome"`` key IS
-              ``"paused"``, this instead records the pause's
-              ``resume_token`` as ``self._active_resume_token``, resets
+              ``"paused"``, this validates ``result["resume_token"]`` is a
+              non-empty string, raising ``ValueError`` (failing this workflow
+              task deterministically) if not — the contract guarantees a
+              paused result always carries one, so a missing/malformed value
+              means the activity-side contract broke, and assigning ``None``
+              would instead make ``submit_answers``'s guard silently drop
+              every future signal, stranding this workflow in
+              ``wait_condition`` forever with no diagnostic. Otherwise
+              records it as ``self._active_resume_token``, resets
               ``self._submitted_answers`` to ``None``, and waits on
               ``workflow.wait_condition`` for a token-matching
               ``submit_answers`` signal to set it (see ``submit_answers``'s
@@ -233,7 +240,16 @@ class CodingTeamWorkflow:
             start_to_close_timeout=timedelta(hours=4),
         )
         while result.get("outcome") == "paused":
-            self._active_resume_token = result.get("resume_token")
+            resume_token = result.get("resume_token")
+            if not isinstance(resume_token, str) or not resume_token:
+                # The contract guarantees a paused result always carries a resume_token; a
+                # missing/malformed one means the activity-side contract broke. Fail fast and
+                # deterministically here rather than assign None and let wait_condition's
+                # predicate become permanently unsatisfiable (submit_answers drops every signal
+                # while self._active_resume_token is None) -- an unresolvable hang is a much
+                # worse failure mode than an immediate, diagnosable workflow-task error.
+                raise ValueError(f"Paused activity result missing a valid resume_token: {result!r}")
+            self._active_resume_token = resume_token
             self._submitted_answers = None
             await workflow.wait_condition(lambda: self._submitted_answers is not None)
             request["acknowledged_resume_token"] = self._active_resume_token
