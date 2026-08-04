@@ -199,6 +199,19 @@ def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
 
     monkeypatch.setattr(config, "clamp_max_parallel", lambda n: n)
     monkeypatch.setattr(run_state, "rehydrate_active_run_offset", lambda run_id: 0)
+    # get_resume_seed_counters also falls through to a real job-service call
+    # (now uncaught -- see run_state.load_run_from_job_service) unless stubbed.
+    monkeypatch.setattr(
+        run_state,
+        "get_resume_seed_counters",
+        lambda run_id: {
+            "skipped_cycles": 0,
+            "errored_cycles": 0,
+            "errored_details": [],
+            "tracker_merge_error_count": 0,
+            "completed_record_ids": [],
+        },
+    )
     # ``excluded_for_allowed`` is imported from its home module, not laundered
     # through api.main, so patch it at the source.
     monkeypatch.setattr(

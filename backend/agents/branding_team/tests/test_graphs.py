@@ -179,6 +179,34 @@ def test_build_phase5_graph_is_a_graph() -> None:
     assert isinstance(build_phase5_graph(), Graph)
 
 
+def test_phase5_prompts_drop_redundant_json_reminder() -> None:
+    """The Pydantic structured-output schema is the contract; the redundant
+    "Output valid JSON" sentence is no longer needed for any of the 7 Phase 5
+    factories migrated to ``build_agent(structured_output=...)``.
+    """
+    from branding_team.agents import (
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_brand_rules_codifier,
+        make_evolution_framer,
+        make_kpi_designer,
+        make_ownership_definer,
+        make_training_planner,
+    )
+
+    for factory in (
+        make_ownership_definer,
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_training_planner,
+        make_kpi_designer,
+        make_evolution_framer,
+        make_brand_rules_codifier,
+    ):
+        agent = factory()
+        assert "Output valid JSON" not in agent.system_prompt, factory.__name__
+
+
 # ---------------------------------------------------------------------------
 # Top-level builder — each target_phase exercises a different gating branch
 # ---------------------------------------------------------------------------

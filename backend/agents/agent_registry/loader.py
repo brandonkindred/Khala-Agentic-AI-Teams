@@ -21,6 +21,8 @@ from typing import Any, Iterable, Sequence
 import yaml
 from pydantic import ValidationError
 
+from shared.env import parse_float, parse_int
+
 from .models import AgentDetail, AgentManifest, AgentSummary, TeamGroup
 
 logger = logging.getLogger(__name__)
@@ -39,17 +41,30 @@ def _discover_manifest_files(root: Path) -> list[Path]:
 def _load_team_display_names() -> dict[str, str]:
     """Best-effort import of TEAM_CONFIGS so we can pretty-print team names.
 
-    Falls back to title-casing the team key if the import fails (e.g. when the
-    registry is used from a test harness that does not have unified_api on the
-    path).
+    Returns an empty dict if the import fails (e.g. when the registry is used
+    from a test harness that does not have unified_api on the path), or if a
+    team key is simply absent from ``TEAM_CONFIGS``. Title-casing the team key
+    as a display-name fallback is the caller's responsibility — see
+    :meth:`AgentRegistry.teams`.
     """
     try:
         from unified_api.config import TEAM_CONFIGS  # type: ignore
-
-        return {key: cfg.name for key, cfg in TEAM_CONFIGS.items()}
-    except Exception:  # pragma: no cover — defensive
+    except ImportError:
+        # Expected outside a full unified_api checkout (e.g. a test harness) —
+        # not worth surfacing above debug.
         logger.debug(
             "Could not import unified_api.config.TEAM_CONFIGS; using key-derived names",
+            exc_info=True,
+        )
+        return {}
+    try:
+        return {key: cfg.name for key, cfg in TEAM_CONFIGS.items()}
+    except Exception:  # pragma: no cover — defensive
+        # unified_api.config imported fine but TEAM_CONFIGS itself is malformed —
+        # an unexpected configuration bug, not the routine "not on path" case, so
+        # operators should see it.
+        logger.warning(
+            "TEAM_CONFIGS imported but could not be read; using key-derived names",
             exc_info=True,
         )
         return {}
@@ -67,17 +82,48 @@ class AgentRegistry:
     and :meth:`unregister`.
     """
 
-    # Bounds how long a locally-issued unregister() masks a dynamic id from get()
-    # after its best-effort Postgres delete fails (see _is_tombstoned). Short
-    # enough that a legitimate external re-registration of the same id (another
-    # worker) becomes visible again promptly; long enough to close the window
-    # where the very next get() on this worker would otherwise resurrect the
-    # stale row it just tried to delete.
-    _TOMBSTONE_TTL_S = 5.0
+    # Defaults for the env-tunable properties below. Bounds how long a
+    # locally-issued unregister() masks a dynamic id from get() after its
+    # best-effort Postgres delete fails (see _is_tombstoned). Short enough that
+    # a legitimate external re-registration of the same id (another worker)
+    # becomes visible again promptly; long enough to close the window where the
+    # very next get() on this worker would otherwise resurrect the stale row it
+    # just tried to delete.
+    _DEFAULT_TOMBSTONE_TTL_S = 5.0
     # Bounds _tombstones' size so an id that's unregistered and never revisited
     # doesn't accumulate forever over a long-lived worker's lifetime; oldest
     # entries are evicted first once the cap is exceeded (see unregister()).
-    _TOMBSTONE_MAX_ENTRIES = 1000
+    _DEFAULT_TOMBSTONE_MAX_ENTRIES = 1000
+
+    @property
+    def _TOMBSTONE_TTL_S(self) -> float:
+        """Tombstone window (seconds), re-read from the environment on every access.
+
+        Postconditions:
+            * Returns ``AGENT_REGISTRY_TOMBSTONE_TTL_S`` parsed as a float,
+              clamped to ``>= 0.0``; falls back to
+              :attr:`_DEFAULT_TOMBSTONE_TTL_S` when unset/blank/unparseable. A
+              property (not a class constant) so operators can tune it via the
+              environment without a code change.
+        """
+        return parse_float(
+            "AGENT_REGISTRY_TOMBSTONE_TTL_S", self._DEFAULT_TOMBSTONE_TTL_S, minimum=0.0
+        )
+
+    @property
+    def _TOMBSTONE_MAX_ENTRIES(self) -> int:
+        """Max size of ``_tombstones``, re-read from the environment on every access.
+
+        Postconditions:
+            * Returns ``AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES`` parsed as an int,
+              clamped to ``>= 1``; falls back to
+              :attr:`_DEFAULT_TOMBSTONE_MAX_ENTRIES` when unset/blank/unparseable.
+        """
+        return parse_int(
+            "AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES",
+            self._DEFAULT_TOMBSTONE_MAX_ENTRIES,
+            minimum=1,
+        )
 
     def __init__(
         self,
@@ -130,10 +176,13 @@ class AgentRegistry:
         Postconditions:
             * Returns ``True`` iff ``unregister(agent_id)`` ran on this worker less
               than :attr:`_TOMBSTONE_TTL_S` ago, ``False`` otherwise (including an
-              expired entry). Read-only — never mutates ``_tombstones``, so a
-              concurrent ``unregister()`` refreshing the same id's stamp can never
-              race an eviction triggered by this check; expiry/size pruning happens
-              only in :meth:`unregister`.
+              expired entry). Read-only — never mutates ``_tombstones``; expiry and
+              size-cap pruning happen only in :meth:`unregister`, not here.
+        Invariants:
+            * Safe to call without holding :attr:`_lock` — ``OrderedDict.get`` is
+              atomic in CPython — but every current caller (:meth:`get`,
+              :meth:`_drop_tombstoned`) already holds the lock for the surrounding
+              read, so this always observes a consistent snapshot in practice.
         """
         stamped_at = self._tombstones.get(agent_id)
         return stamped_at is not None and (time.monotonic() - stamped_at) <= self._TOMBSTONE_TTL_S
@@ -188,10 +237,21 @@ class AgentRegistry:
     def _dynamic_store(self):
         """Return the ``dynamic_store`` module iff it should back this process.
 
+        Side effect: re-runs ``from . import dynamic_store`` on every call.
+        Python caches this in ``sys.modules`` after the first successful
+        import, so every call after the first is a cheap dict lookup, not a
+        re-execution of the module body — and that body has no import-time
+        side effects of its own (no Postgres I/O, no schema DDL; module-level
+        state is just locks/constants). Schema DDL (``_ensure_schema``) only
+        runs lazily inside ``dynamic_store``'s write functions
+        (``upsert``/``delete``/``replace_manifests``), never from here.
+
         Postconditions:
-            * Returns the module when Postgres is configured and we are not inside
-              a per-invoke sandbox; otherwise ``None`` (in-memory-only, as before).
-              Any import failure degrades to ``None`` — a Postgres-less environment
+            * Returns the ``dynamic_store`` module when
+              :func:`dynamic_store._store_active` returns ``True`` (Postgres
+              configured **and** we are not inside a per-invoke sandbox);
+              otherwise ``None`` (in-memory-only, as before). Any import
+              failure also degrades to ``None`` — a Postgres-less environment
               must never break registry resolution.
         """
         try:

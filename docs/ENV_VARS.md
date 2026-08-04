@@ -157,7 +157,7 @@ Ollama Cloud 429 bodies are classified into `session` / `weekly` / `rate` from p
 
 | Kind | Env | Default | Notes |
 |---|---|---|---|
-| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `18000` (5h) | Fixed from error time; **ignores** `Retry-After` |
+| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `3900` (65m) | Fixed from error time; **ignores** `Retry-After` |
 | `weekly` | `LLM_FAILOVER_WEEKLY_WINDOW_S` | `86400` (24h) | Fixed from error time; **ignores** `Retry-After` (Cloud weekly bodies omit a reset timestamp) |
 | `rate` | `LLM_FAILOVER_RATE_WINDOW_S` | `300` (5m) | Used only when the 429 carries no `Retry-After`; otherwise `Retry-After` wins |
 
@@ -403,6 +403,17 @@ parent decision). The Python SDK's `TracerProvider` reads these when no explicit
 sampler is passed (see `shared.observability.otel.init_otel`). Raise the ratio
 toward `1.0` when you need denser traces on the opted-in services; leave unset
 services alone — without an endpoint they never export regardless of sampler.
+
+### OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT / OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT
+Standard OpenTelemetry span-limit knobs bounding attribute value length and the
+number of attributes per span (SDK defaults: unbounded length, 128 count). The
+docker stack and `shared.observability.otel.init_otel` both default these to
+`2048` / `64` so a single oversized LLM prompt/response attribute can't push a
+span past Tempo's `max_bytes_per_trace` ingest cap (`docker/tempo/tempo.yaml`)
+and get refused. `init_otel` applies this default in every runtime mode —
+including thread-mode, local dev, and pytest, which never source
+docker-compose.yml's env block — by resolving these vars itself before
+constructing `SpanLimits` (see `_build_span_limits` in `otel.py`).
 
 ### OTEL_EXPORTER_OTLP_TIMEOUT
 Standard OTel exporter timeout in seconds (SDK default 10). The docker stack sets
@@ -1260,6 +1271,15 @@ Default per-agent execution timeout (`asyncio.wait_for`) inside the sandbox; ove
 with `timeout_hit: true` (default `60`). Per-agent override via `invoke.timeout_seconds` in the
 manifest.
 
+### AGENT_REGISTRY_TOMBSTONE_TTL_S
+How long (seconds) a worker's own `unregister()` of a dynamic agent id masks that id from `get()`
+on the same worker, closing the window where a failed best-effort Postgres delete would otherwise
+resurrect the stale row (default `5.0`; clamped to `>= 0.0`).
+
+### AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES
+Max number of tombstoned ids `AgentRegistry` retains per worker; oldest entries are evicted first
+once the cap is exceeded (default `1000`; clamped to `>= 1`).
+
 ---
 
 ## Agent Cognition and Knowledge Graph
@@ -1299,15 +1319,19 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`).
-Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it), but processes
-that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this unset so
-they skip Graphiti client construction and the background graph sync worker (lifespan no-ops cleanly).
-Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set `NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that
-process into graph sync (extra memory/CPU for the driver + worker). An unset value is also how the
-unit-test suite runs against a faked Graphiti without a live database. When enabled, the graph
-ingests agent memories as temporal episodes partitioned per agent (`group_id = agent_id`) and serves
-recency-ranked related knowledge back for request context and rule-proposal grounding.
+`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`),
+and it is opt-in at zero cost when unset: `unified_api.main`'s lifespan checks `is_neo4j_enabled()`
+before even importing `agent_cognition.graph.sync_worker`, and `shared.neo4j.client.get_graphiti()`
+defers its `graphiti_core` imports to first real use — so leaving `NEO4J_BOLT_URL` unset keeps the
+`graphiti_core` dependency (and its Neo4j driver) out of `sys.modules` entirely, with no import-time
+or memory cost. Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it),
+but processes that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this
+unset for exactly that reason. Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set
+`NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that process into graph sync (extra memory/CPU for the
+driver + worker). An unset value is also how the unit-test suite runs against a faked Graphiti without
+a live database. When enabled, the graph ingests agent memories as temporal episodes partitioned per
+agent (`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
+rule-proposal grounding.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change
@@ -1330,7 +1354,9 @@ agent since a watermark (`agent_cognition_graph_watermarks`). Events keyset on `
 are added as `event:<id>` episodes; summaries keyset on `(updated_at, id)` (the content-write time
 advanced by each accepted `upsert_summary`) and are added as `summary:<id>:<version>` episodes, so a
 recomputed summary — whose `version` advanced — is re-ingested as a fresh per-version episode rather
-than overwriting the prior one. The worker is a no-op when `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
+than overwriting the prior one. Unified-api's lifespan skips importing this worker's module at all when
+`NEO4J_BOLT_URL` is unset; once started (i.e. `NEO4J_BOLT_URL` is set), the worker itself is a further
+no-op when `POSTGRES_HOST` is unset.
 
 ### NEO4J_SLOW_OP_MS
 Slow-call log threshold (ms, default `1000`) for `shared.neo4j.timed_graph_op`.
