@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Callable, Optional, TypeVar
@@ -42,6 +43,15 @@ logger = logging.getLogger(__name__)
 
 _STORE = "agent_registry_dynamic"
 _TABLE = "agent_registry_dynamic_manifests"
+# psycopg's %s placeholders only parameterize values, never identifiers, so
+# every query below interpolates ``_TABLE`` into the SQL string directly
+# (matching the identifier-safety approach in shared.postgres.aggregate).
+# ``_TABLE`` is a fixed code literal, never attacker-controlled, but this
+# validates it as a bare SQL identifier once at import time so any future
+# change to its value (e.g. adding a schema-qualified prefix) that isn't a
+# safe identifier fails loudly here instead of silently becoming an
+# injection vector at every f-string call site below.
+assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _TABLE), f"_TABLE is not a bare identifier: {_TABLE!r}"
 
 # Small TTL micro-cache for the full-list read (``all()``), which backs the
 # catalog list/search/teams endpoints. Point ``get()`` lookups (the invoke /

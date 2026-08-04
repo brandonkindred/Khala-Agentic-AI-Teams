@@ -350,8 +350,12 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
         current persisted generation — a later restart has already minted a
         newer one, so this write belongs to a superseded incarnation and
         must not land. Otherwise delegates to ``investment_team.api.main.
-        _persist_run_state`` verbatim, which never raises on its own (it
-        logs and swallows any job-service failure internally).
+        _persist_run_state`` verbatim, which now propagates any job-service
+        failure rather than swallowing it -- letting this activity raise
+        too, so its caller's Temporal retry policy (``_ACTIVITY_RETRY`` in
+        ``strategy_lab/temporal/workflows.py``) can retry the durable write.
+        If retries are exhausted, the workflow fails visibly instead of
+        silently continuing with an unpersisted run state.
 
         Not a fully atomic check-then-write: the fencing read and the
         eventual write are two separate job-service calls, so a restart

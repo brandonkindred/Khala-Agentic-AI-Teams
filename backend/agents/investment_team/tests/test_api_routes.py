@@ -151,15 +151,71 @@ def test_create_profile_happy_path_round_trips(api_client) -> None:
 
 
 def test_create_profile_invalid_risk_tolerance(api_client) -> None:
+    from investment_team.models import RiskTolerance
+
     resp = api_client.post("/profiles", json=_profile_payload(risk_tolerance="extreme"))
     assert resp.status_code == 400
-    assert "Invalid risk_tolerance" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "Invalid risk_tolerance" in detail
+    allowed = ", ".join(m.value for m in RiskTolerance)
+    assert allowed in detail
 
 
 def test_create_profile_invalid_default_mode(api_client) -> None:
+    from investment_team.models import WorkflowMode
+
     resp = api_client.post("/profiles", json=_profile_payload(default_mode="wild"))
     assert resp.status_code == 400
-    assert "Invalid default_mode" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "Invalid default_mode" in detail
+    allowed = ", ".join(m.value for m in WorkflowMode)
+    assert allowed in detail
+
+
+def test_create_profile_duplicate_user_id_returns_409(api_client) -> None:
+    first = api_client.post("/profiles", json=_profile_payload())
+    assert first.status_code == 200
+    first_ips = first.json()["ips"]
+
+    second = api_client.post("/profiles", json=_profile_payload())
+    assert second.status_code == 409
+    assert "already exists" in second.json()["detail"]
+
+    # The original profile must survive untouched — no silent overwrite.
+    got = api_client.get("/profiles/u1")
+    assert got.status_code == 200
+    assert got.json()["ips"] == first_ips
+
+
+def test_create_profile_non_dict_goal_rejected(api_client) -> None:
+    # ``CreateProfileRequest.goals`` is typed ``List[Dict[str, Any]]``, so a
+    # non-dict element should already be rejected by FastAPI/Pydantic request
+    # validation before the handler runs — not by handler code.
+    resp = api_client.post("/profiles", json=_profile_payload(goals=["not-a-dict"]))
+    assert resp.status_code == 422
+
+
+def test_create_profile_malformed_goal_field_returns_422(api_client) -> None:
+    # A goal dict that type-checks as Dict[str, Any] at the request boundary
+    # but fails UserGoal's stricter field types (target_amount: float) must
+    # surface as a 422 with Pydantic-shaped detail, not an unhandled 500.
+    resp = api_client.post(
+        "/profiles",
+        json=_profile_payload(
+            goals=[
+                {
+                    "name": "retire",
+                    "target_amount": "not-a-number",
+                    "target_date": "2040-01-01T00:00:00Z",
+                    "priority": "high",
+                }
+            ]
+        ),
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert isinstance(detail, list)
+    assert any("target_amount" in str(err.get("loc", "")) for err in detail)
 
 
 def test_get_profile_not_found_returns_found_false(api_client) -> None:

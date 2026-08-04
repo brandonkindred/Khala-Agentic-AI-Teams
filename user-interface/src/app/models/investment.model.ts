@@ -784,10 +784,10 @@ export interface DeleteStrategyLabRecordResponse {
 }
 
 export interface ClearStrategyLabStorageResponse {
-  deleted_lab_records: number;
-  deleted_lab_strategies: number;
-  deleted_lab_backtests: number;
-  deleted_paper_trading_sessions: number;
+  deleted_lab_records: number | null;
+  deleted_lab_strategies: number | null;
+  deleted_lab_backtests: number | null;
+  deleted_paper_trading_sessions: number | null;
   message: string;
 }
 

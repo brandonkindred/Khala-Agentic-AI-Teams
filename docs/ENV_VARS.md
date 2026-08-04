@@ -781,6 +781,25 @@ calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
 dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
+### CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP
+Int (default `40`, floor `1`). Cap on how many findings the false-positive
+verification phase inlines into a single per-file LLM call
+(`_build_group_prompt`/`_verify_group`). A cited file whose genuine findings
+exceed this cap is split into multiple same-sized batches — each its own
+verification call, fanned out the same way calls for additional files are
+(subject to `CODE_REVIEW_MAP_PARALLELISM` and
+`CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`, above) — instead of growing one
+prompt/agent turn without bound as a single file's finding count grows.
+Verdicts from every batch are merged back onto the *original* finding list
+via the batch's own slice of original indices, so which batch (and which
+within-batch index) confirmed a false positive does not change which finding
+gets dropped. Lowering this cap increases the number of verification LLM
+calls (and therefore cost/latency) for files with many findings; raising it
+trades that against a larger prompt per call. This is a cap on how many
+*findings* share one verification call — separate from any cap on how much
+*file content* a single tool read can return (out of scope here; tracked in
+a separate sub-issue).
+
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
 `code_review_agent/temporal/config.py::resolve_max_concurrent_activities`, the
@@ -1108,6 +1127,27 @@ only turns off merging, the underlying findings are unaffected.
 Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
+
+### CODE_REVIEW_SPEC_COMPLIANCE_PASS
+Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
+for moving spec/acceptance-criteria compliance checking out of every chunk's
+prompt and into one dedicated post-merge pass. Design decision recorded in
+`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`; not
+yet implemented.
+
+When unset or any value other than `true`/`1`/`yes`/`on`, behavior is
+unchanged from today: `acceptance_criteria` and `spec_excerpt` are rendered
+into every chunk's review prompt, and per-chunk `spec_compliance_notes` are
+synthesized into the final narrative exactly as they are now. When enabled,
+the per-chunk prompt omits the acceptance-criteria/spec-excerpt blocks
+(architecture overview and sibling-surface context are unaffected — out of
+scope for this toggle), and a new once-per-submission tail pass evaluates
+spec/acceptance-criteria compliance against the full changed-code content
+instead, feeding a single consolidated note into the existing narrative
+synthesis step in place of the per-chunk notes. Restricted to the
+`CODE_REVIEW` profile. Any setup or LLM failure is fail-safe: it is logged
+and yields an empty compliance note, never blocking or changing the rest of
+the review.
 
 ---
 

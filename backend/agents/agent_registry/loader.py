@@ -237,10 +237,21 @@ class AgentRegistry:
     def _dynamic_store(self):
         """Return the ``dynamic_store`` module iff it should back this process.
 
+        Side effect: re-runs ``from . import dynamic_store`` on every call.
+        Python caches this in ``sys.modules`` after the first successful
+        import, so every call after the first is a cheap dict lookup, not a
+        re-execution of the module body — and that body has no import-time
+        side effects of its own (no Postgres I/O, no schema DDL; module-level
+        state is just locks/constants). Schema DDL (``_ensure_schema``) only
+        runs lazily inside ``dynamic_store``'s write functions
+        (``upsert``/``delete``/``replace_manifests``), never from here.
+
         Postconditions:
-            * Returns the module when Postgres is configured and we are not inside
-              a per-invoke sandbox; otherwise ``None`` (in-memory-only, as before).
-              Any import failure degrades to ``None`` — a Postgres-less environment
+            * Returns the ``dynamic_store`` module when
+              :func:`dynamic_store._store_active` returns ``True`` (Postgres
+              configured **and** we are not inside a per-invoke sandbox);
+              otherwise ``None`` (in-memory-only, as before). Any import
+              failure also degrades to ``None`` — a Postgres-less environment
               must never break registry resolution.
         """
         try:
@@ -280,7 +291,11 @@ class AgentRegistry:
         invisible in the catalog, while a *confirmed* id absent from the store (i.e.
         deleted on another worker) is correctly dropped rather than resurrected.
         Degrades to the local ``_by_id`` view entirely on any store error, so the
-        catalog never breaks when Postgres is down.
+        catalog never breaks when Postgres is down — this fallback still applies
+        :meth:`_drop_tombstoned` (belt-and-braces: ``unregister()`` already pops
+        the id from ``_by_id`` under the same lock that sets its tombstone, so in
+        practice ``_by_id`` never holds a tombstoned id; the explicit call makes
+        that invariant local to this method instead of implicit across two).
 
         Consistency note: ``store.all()`` runs *before* the lock is taken (a slow
         Postgres scan must not serialize the whole registry). A dynamic id
@@ -299,13 +314,17 @@ class AgentRegistry:
         store = self._dynamic_store()
         if store is None:
             with self._lock:
-                return list(self._by_id.values())
+                merged = dict(self._by_id)
+                self._drop_tombstoned(merged)
+                return list(merged.values())
         try:
             merged: dict[str, AgentManifest] = {m.id: m for m in store.all()}
         except Exception:
             logger.warning("dynamic store all() failed; serving local registry", exc_info=True)
             with self._lock:
-                return list(self._by_id.values())
+                merged = dict(self._by_id)
+                self._drop_tombstoned(merged)
+                return list(merged.values())
         with self._lock:
             for agent_id, local in self._by_id.items():
                 if agent_id in self._static_ids:
@@ -325,10 +344,16 @@ class AgentRegistry:
 
         Materializes only the matching subset in one pass, unlike :meth:`all`, which
         copies the whole registry before the caller filters — useful for a caller that
-        wants just one namespace's entries (e.g. a single team's generated wrappers)
-        and runs the scan while holding a lock. When a dynamic store is active the
-        scan spans **all workers'** dynamic entries (not just this process's), so a
-        roster-replacement cleanup drops stale generated agents everywhere.
+        wants just one namespace's entries (e.g. a single team's generated wrappers).
+        The local ``_by_id`` scan runs under a single lock acquisition together with
+        the merge and tombstone drop (mirrors :meth:`_merged_manifests`'s structure)
+        rather than a separate lock just to snapshot the local subset before the
+        store call and a second one to merge — one fewer lock/unlock pair, and no
+        window between them where a concurrent register()/unregister() could be
+        reflected in one locked section but not the other. When a dynamic store is
+        active the scan spans **all workers'** dynamic entries (not just this
+        process's), so a roster-replacement cleanup drops stale generated agents
+        everywhere.
 
         Preconditions: ``prefix`` is a string.
         Postconditions: returns every registered manifest ``m`` with
@@ -336,16 +361,20 @@ class AgentRegistry:
             Carries the same brief scan-then-lock eventual-consistency window as
             :meth:`_merged_manifests` (a dynamic id registered between the store
             prefix scan and the lock may be momentarily absent); see that method's
-            consistency note. Default store-scan failure degrades to this process's
-            local subset. When ``require_store`` is True and a dynamic store is
-            active, a scan failure propagates instead — fail-closed callers (roster
-            replace) must not omit another worker's stale ids.
+            consistency note. Default store-scan failure (or no active store)
+            degrades to this process's local subset, with :meth:`_drop_tombstoned`
+            still applied — consistent with :meth:`get` and :meth:`_merged_manifests`,
+            a dynamic id this worker recently unregistered stays excluded even in the
+            local-only fallback. When ``require_store`` is True and a dynamic store
+            is active, a scan failure propagates instead — fail-closed callers
+            (roster replace) must not omit another worker's stale ids.
         """
-        with self._lock:
-            local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
         store = self._dynamic_store()
         if store is None:
-            return local
+            with self._lock:
+                merged = {m.id: m for m in self._by_id.values() if m.id.startswith(prefix)}
+                self._drop_tombstoned(merged)
+                return list(merged.values())
         try:
             dynamic = store.manifests_with_prefix(prefix)
         except Exception:
@@ -354,7 +383,10 @@ class AgentRegistry:
             logger.warning(
                 "dynamic store prefix scan failed for %r; serving local", prefix, exc_info=True
             )
-            return local
+            with self._lock:
+                merged = {m.id: m for m in self._by_id.values() if m.id.startswith(prefix)}
+                self._drop_tombstoned(merged)
+                return list(merged.values())
         merged = {m.id: m for m in dynamic}
         # Static (disk) ids always win; a dynamic id missing from the store's scan
         # falls back to its local copy ONLY when unconfirmed — same read-your-writes
@@ -362,7 +394,9 @@ class AgentRegistry:
         # this scan (used by the generated-roster stale-cleanup pass), while a
         # confirmed id deleted on another worker is dropped rather than resurrected.
         with self._lock:
-            for m in local:
+            for m in self._by_id.values():
+                if not m.id.startswith(prefix):
+                    continue
                 if m.id in self._static_ids:
                     merged[m.id] = m
                 elif m.id not in merged and m.id in self._unconfirmed:
@@ -726,7 +760,7 @@ class AgentRegistry:
         → ``<team_dir>/agent_console/samples/<agent_id>/``.
 
         Falls back to ``<agents_root>/<manifest.team>/...`` when the source
-        path is unknown (e.g. tests that instantiate ``AgentRegistry`` manually).
+        path is unknown (e.g. in tests that construct the registry manually).
         """
         with self._lock:
             source = self._source_paths.get(agent_id)

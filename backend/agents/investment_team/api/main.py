@@ -143,7 +143,13 @@ from investment_team.strategy_lab_context import (
     normalize_allowed_asset_classes,
     normalize_asset_class,
 )
-from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+from job_service_client import (
+    RESTARTABLE_STATUSES,
+    RESUMABLE_STATUSES,
+    JobNotFoundError,
+    JobStateError,
+    validate_job_for_action,
+)
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
 
@@ -826,87 +832,106 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
     Preconditions:
-        ``request.risk_tolerance`` is one of low/medium/high/very_high and
-        ``request.default_mode`` is one of advisory/paper/live/monitor_only
-        (validated below, not by Pydantic, since both arrive as plain
-        strings on the wire).
+        - ``request.risk_tolerance`` must be a valid ``RiskTolerance`` value.
+        - ``request.default_mode`` must be a valid ``WorkflowMode`` value.
+        - No profile may already exist for ``request.user_id`` — this endpoint
+          creates; it does not upsert.
+
     Postconditions:
-        Raises 400 if either enum field is invalid. Otherwise builds and
-        persists an ``IPS`` under ``request.user_id`` — a second call for
-        the same ``user_id`` overwrites the previously stored IPS rather
-        than being rejected as a duplicate.
+        - On success: a new IPS is persisted under ``_profiles[request.user_id]``
+          and returned; no prior profile is overwritten.
+        - Raises ``HTTPException`` 400 if ``risk_tolerance`` or ``default_mode``
+          is invalid (message lists the current enum values).
+        - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
+          ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
+        - Raises ``HTTPException`` 409 if a profile already exists for
+          ``request.user_id``.
     """
     try:
         risk_tol = RiskTolerance(request.risk_tolerance)
     except ValueError:
+        allowed = ", ".join(m.value for m in RiskTolerance)
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: low, medium, high, very_high",
+            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: {allowed}",
         )
 
     try:
         workflow_mode = WorkflowMode(request.default_mode)
     except ValueError:
+        allowed = ", ".join(m.value for m in WorkflowMode)
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: advisory, paper, live, monitor_only",
+            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: {allowed}",
         )
 
-    goals = [
-        UserGoal(
-            name=g.get("name", ""),
-            target_amount=g.get("target_amount", 0),
-            target_date=g.get("target_date", ""),
-            priority=g.get("priority", "medium"),
+    try:
+        goals = [
+            UserGoal(
+                name=g.get("name", ""),
+                target_amount=g.get("target_amount", 0),
+                target_date=g.get("target_date", ""),
+                priority=g.get("priority", "medium"),
+            )
+            for g in request.goals
+        ]
+
+        profile = InvestmentProfile(
+            user_id=request.user_id,
+            created_at=_now(),
+            risk_tolerance=risk_tol,
+            max_drawdown_tolerance_pct=request.max_drawdown_tolerance_pct,
+            time_horizon_years=request.time_horizon_years,
+            liquidity_needs=LiquidityNeeds(emergency_fund_months=request.emergency_fund_months),
+            income=IncomeProfile(
+                annual_gross=request.annual_gross_income, stability=request.income_stability
+            ),
+            net_worth=NetWorth(
+                total=request.total_net_worth, investable_assets=request.investable_assets
+            ),
+            savings_rate=SavingsRate(
+                monthly=request.monthly_savings, annual=request.annual_savings
+            ),
+            tax_profile=TaxProfile(
+                country=request.tax_country,
+                state=request.tax_state,
+                account_types=request.account_types,
+            ),
+            preferences=UserPreferences(
+                excluded_asset_classes=request.excluded_asset_classes,
+                excluded_industries=request.excluded_industries,
+                esg_preference=request.esg_preference,
+                crypto_allowed=request.crypto_allowed,
+                options_allowed=request.options_allowed,
+                leverage_allowed=request.leverage_allowed,
+            ),
+            goals=goals,
+            constraints=PortfolioConstraints(
+                max_single_position_pct=request.max_single_position_pct,
+                max_asset_class_pct=request.max_asset_class_pct,
+            ),
         )
-        for g in request.goals
-    ]
 
-    profile = InvestmentProfile(
-        user_id=request.user_id,
-        created_at=_now(),
-        risk_tolerance=risk_tol,
-        max_drawdown_tolerance_pct=request.max_drawdown_tolerance_pct,
-        time_horizon_years=request.time_horizon_years,
-        liquidity_needs=LiquidityNeeds(emergency_fund_months=request.emergency_fund_months),
-        income=IncomeProfile(
-            annual_gross=request.annual_gross_income, stability=request.income_stability
-        ),
-        net_worth=NetWorth(
-            total=request.total_net_worth, investable_assets=request.investable_assets
-        ),
-        savings_rate=SavingsRate(monthly=request.monthly_savings, annual=request.annual_savings),
-        tax_profile=TaxProfile(
-            country=request.tax_country,
-            state=request.tax_state,
-            account_types=request.account_types,
-        ),
-        preferences=UserPreferences(
-            excluded_asset_classes=request.excluded_asset_classes,
-            excluded_industries=request.excluded_industries,
-            esg_preference=request.esg_preference,
-            crypto_allowed=request.crypto_allowed,
-            options_allowed=request.options_allowed,
-            leverage_allowed=request.leverage_allowed,
-        ),
-        goals=goals,
-        constraints=PortfolioConstraints(
-            max_single_position_pct=request.max_single_position_pct,
-            max_asset_class_pct=request.max_asset_class_pct,
-        ),
-    )
-
-    ips = IPS(
-        profile=profile,
-        live_trading_enabled=request.live_trading_enabled,
-        human_approval_required_for_live=request.human_approval_required_for_live,
-        speculative_sleeve_cap_pct=request.speculative_sleeve_cap_pct,
-        rebalance_frequency=request.rebalance_frequency,
-        default_mode=workflow_mode,
-        notes=request.notes,
-    )
+        ips = IPS(
+            profile=profile,
+            live_trading_enabled=request.live_trading_enabled,
+            human_approval_required_for_live=request.human_approval_required_for_live,
+            speculative_sleeve_cap_pct=request.speculative_sleeve_cap_pct,
+            rebalance_frequency=request.rebalance_frequency,
+            default_mode=workflow_mode,
+            notes=request.notes,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_url=False, include_context=False)
+        ) from exc
 
     with _lock:
+        if request.user_id in _profiles:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Profile already exists for user {request.user_id}",
+            )
         _profiles[request.user_id] = ips
 
     return CreateProfileResponse(user_id=request.user_id, ips=ips)
@@ -1556,6 +1581,11 @@ def _run_real_data_backtest(
     return run.result, run.trades
 
 
+# Cap on record.paper_trading_error's length: long enough for a useful
+# summary of the failure, short enough to keep persisted records compact.
+_MAX_PAPER_TRADING_ERROR_LENGTH = 500
+
+
 class _PaperTradingDataUnavailable(Exception):
     """Raised inside the strategy lab cycle when market data can't be fetched for paper trading.
 
@@ -1906,12 +1936,17 @@ def _finalize_strategy_lab_cycle_record(
         success, ``failed`` (non-fatal) on a paper-trading error. The record is
         durably persisted via :func:`_persist_strategy_lab_record` before
         returning. Any ``on_phase`` callback fires as a side effect only; it
-        never affects the returned record.
+        never affects the returned record — an exception raised by the
+        callback is caught and logged, never propagated, so a broken
+        callback can't skip persistence or abort finalization.
     """
 
     def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
         if on_phase:
-            on_phase(phase, data or {})
+            try:
+                on_phase(phase, data or {})
+            except Exception:
+                logger.exception("Strategy lab phase callback failed for phase %s", phase)
 
     # Attach signal brief before persisting (PersistentDict serializes at assignment)
     if signal_brief_storage and not record.signal_intelligence_brief:
@@ -1980,7 +2015,7 @@ def _finalize_strategy_lab_cycle_record(
         except Exception as exc:
             logger.warning("Paper trading step failed (non-fatal): %s", exc)
             record.paper_trading_status = "failed"
-            record.paper_trading_error = str(exc)[:500]
+            record.paper_trading_error = str(exc)[:_MAX_PAPER_TRADING_ERROR_LENGTH]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
 
     _persist_strategy_lab_record(record)
@@ -2122,9 +2157,31 @@ def _persist_run_state(
     """Write the run state to the job service so it survives restarts.
 
     Preconditions:
+        - ``run_id`` is a non-empty ``str``.
         - ``exclude_fields`` names keys of ``state`` to omit from the write
           entirely (beyond the always-omitted ``run_id``/``status``).
+
     Postconditions:
+        - ``create=True``: creates the job via ``client.create_job(...)``,
+          defaulting ``status`` to ``"running"`` when ``state`` omits it (a
+          fresh run's initial persist always has a real status in practice --
+          see ``_build_run_state`` -- so this default is a pure safety net).
+        - ``create=False`` (default): updates the existing job via
+          ``client.update_job(...)``. When ``state`` includes a ``status``
+          key, that value is written. When it does NOT (a progress-only delta
+          -- e.g. the Temporal batch workflow's per-cycle/per-batch persists
+          via ``persist_run_state_activity``, which routinely omit ``status``
+          -- see ``_STRATEGY_LAB_PROGRESS_FIELDS``), NO ``status`` kwarg is
+          passed at all, so the job service's own update path
+          (``backend/job_service/db.py``: ``status`` is only written to the
+          ``UPDATE`` when actually supplied) leaves the persisted status
+          untouched. This previously defaulted a status-less update to
+          ``"running"`` unconditionally, which could clobber a
+          ``cancelled``/``failed``/``completed`` status a concurrent
+          restart/resume/cancel had already persisted with a routine
+          progress-only write.
+        - Every key in ``state`` other than ``run_id``/``status`` is persisted
+          as a field, except any named in ``exclude_fields``.
         - ``update_job``/``create_job`` merge the written fields into the
           job's durable data (a partial merge, not a full replace — see
           ``job_service.db.update_job``): any field named in
@@ -2137,25 +2194,34 @@ def _persist_run_state(
           write; omitting ``generation`` here means such a write can never
           regress the durable high-water mark back down, without needing an
           atomic conditional-write primitive the job service doesn't expose.
-        - Failure handling: if the job-service call raises (e.g. the store is
-          unreachable), the exception is caught, logged at warning level, and
-          this function returns normally — the caller is not notified the
-          write failed. This is a deliberate best-effort design (callers use
-          this for progress checkpoints, not the primary source of truth for
-          run state), not an oversight; a caller that needs to know the write
-          landed must verify it independently.
+
+    Raises:
+        - Whatever ``create_job``/``update_job`` raises (transport errors,
+          HTTP error statuses, a ``RuntimeError`` for unconfigured
+          ``JOB_SERVICE_URL``, ...) propagates uncaught. A durable-write
+          failure must not be silently absorbed here: run/resume/restart
+          dispatch a Temporal workflow immediately after calling this, and
+          that workflow's own resume-from-restart safety depends on this
+          write having actually landed. ``persist_run_state_activity``
+          (``strategy_lab/temporal/activities.py``) delegates to this
+          verbatim, so propagating also lets that activity's already-
+          configured Temporal retry policy (``_ACTIVITY_RETRY`` in
+          ``strategy_lab/temporal/workflows.py``) retry a transient failure
+          instead of it going unnoticed. A caller with a genuine best-effort/
+          never-raises contract (``_fail_strategy_lab_run``, or restart's
+          rollback-on-collision persist) must catch and log locally instead
+          of relying on this helper to swallow the error.
     """
-    try:
-        client = _get_lab_run_job_client()
-        fields = {
-            k: v for k, v in state.items() if k not in ("run_id", "status") and k not in exclude_fields
-        }
-        if create:
-            client.create_job(run_id, status=state.get("status", "running"), **fields)
-        else:
-            client.update_job(run_id, status=state.get("status", "running"), **fields)
-    except Exception as exc:
-        logger.warning("Failed to persist run state for %s: %s", run_id, exc)
+    client = _get_lab_run_job_client()
+    fields = {
+        k: v for k, v in state.items() if k not in ("run_id", "status") and k not in exclude_fields
+    }
+    if create:
+        client.create_job(run_id, status=state.get("status", "running"), **fields)
+    elif "status" in state:
+        client.update_job(run_id, status=state["status"], **fields)
+    else:
+        client.update_job(run_id, **fields)
 
 
 # Fields the Temporal workflow's persist-state activity writes as partial
@@ -2956,11 +3022,14 @@ def _job_progress_percent(completed: int, total: int) -> int:
     Postconditions:
         - Returns ``0`` when ``total <= 0`` (never divides by a non-positive
           total, so this can never raise ``ZeroDivisionError``).
-        - Otherwise returns ``int((completed / total) * 100)``.
+        - Otherwise returns ``int((completed / total) * 100)``, clamped to
+          ``0..100`` -- ``completed`` exceeding ``total`` or being negative
+          (both possible from malformed persisted state) can never produce
+          an out-of-range percentage.
     """
     if total <= 0:
         return 0
-    return int((completed / total) * 100)
+    return max(0, min(100, int((completed / total) * 100)))
 
 
 @app.get(
@@ -3177,9 +3246,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         state = _get_run_state(run_id)
         try:
             validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
-        except ValueError as exc:
-            code = 404 if "not found" in str(exc) else 400
-            raise HTTPException(status_code=code, detail=str(exc)) from exc
+        except JobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except JobStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         payload = state.get("request_payload")
         if not isinstance(payload, dict):
@@ -3465,9 +3535,10 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         state = _get_run_state(run_id)
         try:
             validate_job_for_action(state, run_id, STRATEGY_LAB_RESTARTABLE_STATUSES, "restarted")
-        except ValueError as exc:
-            code = 404 if "not found" in str(exc) else 400
-            raise HTTPException(status_code=code, detail=str(exc)) from exc
+        except JobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except JobStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         payload = state.get("request_payload")
         if not isinstance(payload, dict):
@@ -3714,7 +3785,19 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 rolled_back_state["generation"] = current_generation
                 with _lock:
                     _active_runs[run_id] = rolled_back_state
-                _persist_run_state(run_id, rolled_back_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+                try:
+                    _persist_run_state(
+                        run_id, rolled_back_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS
+                    )
+                except Exception:
+                    # Best-effort rollback persist: a failure here must not
+                    # replace the more actionable 409 below with an unrelated
+                    # error from this cleanup step.
+                    logger.warning(
+                        "Failed to persist restart-rollback state for run %s",
+                        run_id,
+                        exc_info=True,
+                    )
                 # Known, accepted residual limitation (matches #4028's own
                 # documented multi-process scope boundary — not new here):
                 # this rollback can still overwrite a concurrently-dispatched
@@ -3970,12 +4053,18 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
 
 class ClearStrategyLabStorageResponse(BaseModel):
-    """Counts of job-service rows removed (Postgres ``jobs`` or local file cache)."""
+    """Counts of job-service rows removed (Postgres ``jobs`` or local file cache).
 
-    deleted_lab_records: int = 0
-    deleted_lab_strategies: int = 0
-    deleted_lab_backtests: int = 0
-    deleted_paper_trading_sessions: int = 0
+    A field is ``None`` rather than ``0`` when its unit didn't finish within
+    the purge's shared deadline — see ``_purge_strategy_lab_job_storage``.
+    ``None`` means "unknown, may still be deleting in the background," not
+    "confirmed nothing was deleted."
+    """
+
+    deleted_lab_records: Optional[int] = 0
+    deleted_lab_strategies: Optional[int] = 0
+    deleted_lab_backtests: Optional[int] = 0
+    deleted_paper_trading_sessions: Optional[int] = 0
     message: str = "Strategy lab and paper-trading session storage cleared."
 
 
@@ -4078,7 +4167,7 @@ def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
     return _delete_jobs_concurrently(client, matching_ids)
 
 
-def _purge_strategy_lab_job_storage() -> dict[str, int]:
+def _purge_strategy_lab_job_storage() -> dict[str, Optional[int]]:
     """Delete strategy lab jobs plus all paper-trading session jobs for this team.
 
     Preconditions:
@@ -4101,12 +4190,13 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
           of the order in which the concurrent units/deletes finish; the
           returned dict always has exactly these four keys.
         - A unit that does not finish within the shared deadline
-          (``_PURGE_TIMEOUT_S``) is counted as ``0`` even though its
-          background thread keeps running (see ``pool.shutdown(wait=False,
-          ...)`` below) and may go on to delete some or all of its matching
-          jobs asynchronously. In that case a returned count of ``0`` is not
-          a guarantee that no matching jobs were deleted — only that none
-          were confirmed deleted before the deadline.
+          (``_PURGE_TIMEOUT_S``) is reported as ``None`` — not ``0`` — even
+          though its background thread keeps running (see
+          ``pool.shutdown(wait=False, ...)`` below) and may go on to delete
+          some or all of its matching jobs asynchronously, after this
+          function (and the endpoint calling it) has already returned.
+          ``None`` means "unknown, still in flight"; only a non-``None`` int
+          is a confirmed count. Callers must not treat ``None`` as ``0``.
     """
     from job_service_client import JobServiceClient
 
@@ -4144,21 +4234,23 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
 
         # Collect against a single shared deadline so the whole fan-out is bounded
         # (per-unit timeouts would let each unit reset the clock). A unit that
-        # overruns is counted as 0 deleted; a unit that *raises* still propagates
-        # (preserving the prior error contract).
+        # overruns is reported as None (unknown, not a confirmed 0 — its worker
+        # thread is still running and may delete jobs after this call returns,
+        # see the docstring); a unit that *raises* still propagates (preserving
+        # the prior error contract).
         deadline = time.monotonic() + _PURGE_TIMEOUT_S
-        results: dict[str, int] = {}
+        results: dict[str, Optional[int]] = {}
         for key, future in units.items():
             remaining = max(0.0, deadline - time.monotonic())
             try:
                 results[key] = future.result(timeout=remaining)
             except concurrent.futures.TimeoutError:
                 logger.warning(
-                    "purge unit %s did not finish within %.0fs; counted as 0 deleted",
+                    "purge unit %s did not finish within %.0fs; reported as unknown (None)",
                     key,
                     _PURGE_TIMEOUT_S,
                 )
-                results[key] = 0
+                results[key] = None
         return results
     finally:
         # Never block on a straggler: in-flight HTTP deletes are themselves bounded
@@ -4189,6 +4281,13 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
           ``delete_job`` bool), so an unconditional ``del`` can't be used to
           infer whether anything was actually removed; existence is checked
           via ``in`` first instead.
+        - ``_strategies``/``_backtests`` are ``_PersistentDict`` instances
+          (see their module-level construction), not plain in-memory dicts —
+          deleting from them deletes the underlying ``investment_strategies``/
+          ``investment_backtests`` job-service rows too, via
+          ``_PersistentDict.__delitem__`` -> ``JobServiceClient.delete_job``.
+          "linked lab strategy/backtest jobs" in the summary above refers to
+          exactly this.
 
     Raises:
         - ``HTTPException`` 404: ``lab_record_id`` does not resolve to any
@@ -4206,6 +4305,9 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         backtest_id = record.backtest.backtest_id
 
         del _strategy_lab_records[lab_record_id]
+        # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
+        # these deletes also remove the investment_strategies/investment_backtests
+        # job-service rows, not just a process-local cache entry.
         strategy_deleted = strategy_id in _strategies
         if strategy_deleted:
             del _strategies[strategy_id]

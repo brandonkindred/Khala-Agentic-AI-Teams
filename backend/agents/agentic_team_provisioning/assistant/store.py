@@ -24,7 +24,7 @@ from agentic_team_provisioning.models import (
 )
 from shared.postgres import get_conn
 from shared.postgres.metrics import timed_query
-from user_profile import ArtifactType, record_association_safe
+from user_profile import ArtifactType, record_association_safe, remove_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,35 @@ class AgenticTeamStore:
             created_at=now.isoformat(),
             updated_at=now.isoformat(),
         )
+
+    @timed_query(store=_STORE, op="delete_team")
+    def delete_team(self, team_id: str) -> bool:
+        """Delete a team row and its best-effort profile association.
+
+        Compensating action for a ``create_team`` whose subsequent
+        infrastructure provisioning failed: the team row already committed,
+        but with no infrastructure behind it, so it must not be left listable.
+        Safe only in that narrow window — immediately after ``create_team``
+        returns, before any process/agent/conversation row exists for the
+        team — since this does not cascade-delete dependents.
+
+        Preconditions: ``team_id`` is a non-empty string.
+        Postconditions: returns ``True`` iff a row was deleted (and, in that
+            case, the best-effort association is also unlinked via
+            ``remove_association_safe``). Returns ``False`` (not an error)
+            when no such row exists, e.g. a concurrent caller already rolled
+            it back.
+        """
+        if not team_id:
+            raise ValueError("team_id must be non-empty")
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM agentic_teams WHERE team_id = %s", (team_id,))
+            deleted = cur.rowcount > 0
+        if deleted:
+            # Best-effort: remove_association_safe never raises, so a cleanup
+            # failure can't mask the caller's original provisioning error.
+            remove_association_safe(ArtifactType.AGENTIC_TEAM, team_id)
+        return deleted
 
     @timed_query(store=_STORE, op="get_team")
     def get_team(self, team_id: str) -> Optional[AgenticTeam]:

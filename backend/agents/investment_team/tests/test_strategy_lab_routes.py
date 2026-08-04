@@ -1312,6 +1312,43 @@ def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
     assert "stale-record" not in api_main._active_runs["run-stale"].get("completed_record_ids", [])
 
 
+def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
+    lab_job_client, api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart that collides with a still-running old execution (409) must
+    still surface that 409 even when the best-effort rollback persist itself
+    fails -- a job-service failure in that cleanup step must not replace the
+    more actionable conflict response with an unrelated error (issue #4150)."""
+    from fastapi import HTTPException
+
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-rollback"] = {
+        "run_id": "run-rollback",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+
+    def _raise_409(*args, **kwargs):
+        raise HTTPException(status_code=409, detail="still winding down")
+
+    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", _raise_409)
+
+    # The route's own primary persist (before dispatch) must still succeed --
+    # only the rollback persist (after the 409) is the one under test here.
+    persist_calls = {"n": 0}
+
+    def _persist_fails_after_first_call(*args, **kwargs):
+        persist_calls["n"] += 1
+        if persist_calls["n"] > 1:
+            raise RuntimeError("job service down")
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _persist_fails_after_first_call)
+
+    resp = api_client.post("/strategy-lab/runs/run-rollback/restart")
+    assert resp.status_code == 409
+
+
 # ---------------------------------------------------------------------------
 # run/resume/restart — same-run_id transition-lock serialization (#4028)
 # ---------------------------------------------------------------------------
@@ -1808,6 +1845,14 @@ def test_job_progress_percent_computes_normal_ratio() -> None:
     assert api_main._job_progress_percent(0, 4) == 0
     assert api_main._job_progress_percent(1, 4) == 25
     assert api_main._job_progress_percent(4, 4) == 100
+
+
+def test_job_progress_percent_clamps_out_of_range_values() -> None:
+    """``completed`` exceeding ``total`` or negative can't yield an out-of-range percentage."""
+    from investment_team.api import main as api_main
+
+    assert api_main._job_progress_percent(5, 4) == 100  # completed exceeds total
+    assert api_main._job_progress_percent(-1, 4) == 0  # negative completed
 
 
 # ---------------------------------------------------------------------------

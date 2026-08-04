@@ -15,7 +15,9 @@ fixtures. Targets:
 * ``_purge_strategy_lab_job_storage`` + ``_delete_paper_sessions_for_lab_record``.
 * ``_resolve_fee_overrides`` (0.0 sentinel handling).
 * ``_recover_orphaned_paper_trading_sessions`` startup hook.
-* ``_load_run_from_job_service`` fallback + ``_persist_run_state`` swallowing.
+* ``_load_run_from_job_service`` fallback + ``_persist_run_state``
+  propagating job-service errors and not clobbering status on a
+  status-less update.
 * ``_strategy_lab_signal_expert_enabled`` env-var toggle.
 * ``run_paper_trading`` validation branches (not-winning / no strategy_code)
   + happy path with patched background worker.
@@ -994,6 +996,49 @@ def test_purge_strategy_lab_job_storage_many_jobs_concurrent(
     assert {j["job_id"] for j in bt.list_jobs()} == {f"bt-keep-{i}" for i in range(7)}
 
 
+def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A unit that doesn't finish within the shared deadline is reported as
+    None (unknown, still in flight) rather than a misleadingly-confirmed 0."""
+    import job_service_client as jsc_mod
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_PURGE_TIMEOUT_S", 0.2)
+
+    release = threading.Event()
+
+    class _SlowLabRecordsClient(_FakeJobClient):
+        """Blocks list_jobs past the (shrunk) shared deadline for one team only,
+        so its unit is still "in flight" when the collector's deadline elapses."""
+
+        def list_jobs(self, *, statuses=None):
+            if self.team == "investment_strategy_lab_records":
+                assert release.wait(timeout=5.0), "test never released the slow unit"
+            return super().list_jobs(statuses=statuses)
+
+    clients_by_team: Dict[str, _SlowLabRecordsClient] = {}
+
+    def _factory(team: str = "x"):
+        if team not in clients_by_team:
+            clients_by_team[team] = _SlowLabRecordsClient(team=team)
+        return clients_by_team[team]
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _factory)
+
+    try:
+        counts = api_main._purge_strategy_lab_job_storage()
+    finally:
+        # Unblock the slow unit's background thread regardless of outcome, so
+        # it doesn't keep running past the end of the test.
+        release.set()
+
+    assert counts["deleted_lab_records"] is None
+    assert counts["deleted_lab_strategies"] == 0
+    assert counts["deleted_lab_backtests"] == 0
+    assert counts["deleted_paper_trading_sessions"] == 0
+
+
 def test_clear_strategy_lab_storage_route(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """The DELETE /strategy-lab/storage route forwards purge counts."""
     from investment_team.api import main as api_main
@@ -1608,7 +1653,13 @@ def test_build_run_state_generation_override_is_carried_through() -> None:
     assert state["generation"] == 7
 
 
-def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_persist_run_state_propagates_job_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine job-service failure must propagate, not be silently logged
+    and swallowed -- callers (run/resume/restart dispatch, and the Temporal
+    persist activity's retry policy) need to detect a durable-write failure
+    instead of continuing as if it succeeded (issue #4150)."""
     from investment_team.api import main as api_main
 
     class _Broken:
@@ -1619,9 +1670,39 @@ def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -
             raise RuntimeError("backend down")
 
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
-    # Must not raise.
-    api_main._persist_run_state("run-z", {"status": "running"}, create=True)
-    api_main._persist_run_state("run-z", {"status": "running"}, create=False)
+    with pytest.raises(RuntimeError, match="backend down"):
+        api_main._persist_run_state("run-z", {"status": "running"}, create=True)
+    with pytest.raises(RuntimeError, match="backend down"):
+        api_main._persist_run_state("run-z", {"status": "running"}, create=False)
+
+
+def test_persist_run_state_status_less_update_does_not_clobber_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A progress-only update (state without a "status" key -- exactly what
+    the Temporal batch workflow's per-cycle/per-batch persists send) must not
+    reset the job's status to "running". Previously it defaulted the missing
+    status to "running" unconditionally, clobbering a cancelled/failed/
+    completed status a concurrent path had already persisted (issue #4185)."""
+    from investment_team.api import main as api_main
+
+    client = _FakeJobClient()
+    client.create_job("run-cancelled", status="cancelled", completed_cycles=2)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: client)
+
+    # A progress-only delta, no "status" key -- must not touch status at all.
+    api_main._persist_run_state("run-cancelled", {"completed_cycles": 3}, create=False)
+
+    job = client.get_job("run-cancelled")
+    assert job["status"] == "cancelled"
+    assert job["completed_cycles"] == 3
+
+    # When state DOES carry a status, it's still written through as before.
+    api_main._persist_run_state(
+        "run-cancelled", {"status": "failed", "error": "boom"}, create=False
+    )
+    job = client.get_job("run-cancelled")
+    assert job["status"] == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -1825,3 +1906,89 @@ def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch)
     )
 
     api_main._run_investment_service_shutdown()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# _finalize_strategy_lab_cycle_record: on_phase callback isolation
+# ---------------------------------------------------------------------------
+
+
+def _make_finalize_test_record(lab_record_id: str) -> Any:
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id=f"strat-{lab_record_id}",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=1.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=40.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id=f"bt-{lab_record_id}",
+        strategy_id=strat.strategy_id,
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    return StrategyLabRecord(
+        lab_record_id=lab_record_id,
+        strategy=strat,
+        backtest=bt,
+        # is_winning=False takes the earliest skip branch, so the finalize
+        # call only needs to exercise the on_phase callback + persistence —
+        # no paper-trading infra required.
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+
+
+def test_finalize_strategy_lab_cycle_record_isolates_raising_on_phase_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising on_phase callback must not abort finalization: the callback's
+    exception is caught/logged, persistence still runs, and the record is
+    still returned — matching the documented postcondition."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-finalize-callback-boom")
+
+    def _boom_on_phase(phase: str, data: Dict[str, Any]) -> None:
+        raise RuntimeError("callback exploded")
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, on_phase=_boom_on_phase)
+
+    assert result is record
+    assert result.paper_trading_status == "skipped"
+    assert result.paper_trading_skipped_reason == "not_winning"
+    # Persistence must have run despite the callback raising.
+    assert api_main._strategy_lab_records["lab-finalize-callback-boom"] is record

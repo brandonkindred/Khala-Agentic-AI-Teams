@@ -686,12 +686,15 @@ class StrategyLabBatchWorkflow:
         (a non-retryable ``ApplicationError`` — a fenced write means this incarnation
         has been superseded by a restart and this workflow should stop, so letting the
         error propagate and fail the workflow is correct, not a bug to swallow). Apart
-        from that stale-generation case, the activity itself does not raise for
-        job-service failures (the underlying helper swallows them) — but
-        ``workflow.execute_activity`` can still propagate infrastructure-level
-        failures (retry-policy exhaustion, worker unavailability, cancellation)
-        unrelated to the activity's own business logic; those are not swallowed
-        here and still propagate per Temporal's normal retry/timeout handling.
+        from that stale-generation case, the underlying helper no longer swallows
+        job-service failures either: a transient error is retried per
+        ``_ACTIVITY_RETRY`` (2 attempts), and if that's exhausted this call — and
+        thus the workflow — fails rather than silently continuing with a run
+        state that never durably persisted. ``workflow.execute_activity`` can
+        also propagate infrastructure-level failures (retry-policy exhaustion,
+        worker unavailability, cancellation) unrelated to the activity's own
+        business logic; those still propagate per Temporal's normal
+        retry/timeout handling too.
         """
         create = False  # this call always updates an existing run's state, never creates one
         await workflow.execute_activity(

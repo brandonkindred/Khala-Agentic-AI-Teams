@@ -8,10 +8,19 @@ tests.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from agent_registry import dynamic_store as ds
 from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SandboxSpec, SourceInfo
+
+
+def test_table_is_a_bare_sql_identifier() -> None:
+    # _TABLE is f-string-interpolated into every raw SQL statement in this
+    # module (psycopg %s placeholders can't parameterize identifiers); this
+    # locks in the module-load-time invariant that guards that interpolation.
+    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", ds._TABLE)
 
 
 def _manifest(agent_id: str, team: str = "agent_studio") -> AgentManifest:

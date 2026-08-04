@@ -16,11 +16,14 @@ suite no longer requires Postgres or a live job-service.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 import pytest
 
 from investment_team.api.main import (
     RunPaperTradingRequest,
+    _lock,
     _paper_trading_sessions,
     _recover_orphaned_paper_trading_sessions,
     _resolve_fee_overrides,
@@ -202,3 +205,59 @@ def test_recovery_logs_and_skips_unparseable_session(
     finally:
         _paper_trading_sessions.pop("pt-bad", None)
         _paper_trading_sessions.pop("pt-good", None)
+
+
+def test_recovery_holds_lock_for_entire_pass_against_concurrent_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent writer racing to update the same session must be fully
+    serialized against the recovery pass (blocked until recovery releases
+    the lock), not interleaved between recovery's snapshot read and its
+    write-back. Otherwise recovery would silently clobber the writer's
+    newer state with a stale FAILED status.
+    """
+    session = _make_session("pt-race", PaperTradingStatus.OPENING)
+    _install_session(session)
+
+    background_started = threading.Event()
+    background_done = threading.Event()
+    threads: list[threading.Thread] = []
+
+    def _background_writer() -> None:
+        background_started.set()
+        with _lock:
+            _install_session(_make_session("pt-race", PaperTradingStatus.COMPLETED))
+        background_done.set()
+
+    original_values = _paper_trading_sessions.values
+
+    def _values_with_concurrent_writer() -> list:
+        result = original_values()
+        thread = threading.Thread(target=_background_writer)
+        threads.append(thread)
+        thread.start()
+        assert background_started.wait(timeout=1), "background writer never started"
+        # `values()` is only reached here while recovery still holds `_lock`
+        # (per the fix). Give the background thread a moment to attempt its
+        # own acquisition; if the lock is not held for the whole pass, it
+        # will race ahead and finish before recovery writes back. Do NOT
+        # join here — the writer can't unblock until recovery itself
+        # releases `_lock`, which only happens after this call returns.
+        time.sleep(0.05)
+        assert not background_done.is_set(), (
+            "concurrent writer completed while recovery held only a partial "
+            "lock — the fix must hold `_lock` for the entire enumerate/"
+            "mutate/write pass"
+        )
+        return result
+
+    try:
+        monkeypatch.setattr(_paper_trading_sessions, "values", _values_with_concurrent_writer)
+        _recover_orphaned_paper_trading_sessions()
+        for thread in threads:
+            thread.join(timeout=1)
+        # The writer's update happened after recovery released the lock, so
+        # its terminal status is authoritative and must not be overwritten.
+        assert _fetch_session("pt-race").status == PaperTradingStatus.COMPLETED
+    finally:
+        _paper_trading_sessions.pop("pt-race", None)
