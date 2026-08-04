@@ -181,9 +181,10 @@ def test_dbc_run_non_list_insertions(monkeypatch) -> None:
     assert out.insertions == []
 
 
-def test_dbc_run_filters_invalid_insertion_entries(monkeypatch) -> None:
+def test_dbc_run_filters_invalid_insertion_entries(monkeypatch, caplog) -> None:
     """Verifies malformed insertion entries (missing required fields, wrong
-    type) are skipped rather than failing the whole review."""
+    type) are skipped -- and logged, per the run() docstring's guarantee --
+    rather than failing the whole review."""
     fake = _FakeCompleteJson(
         {
             "insertions": [
@@ -196,9 +197,12 @@ def test_dbc_run_filters_invalid_insertion_entries(monkeypatch) -> None:
         }
     )
     a = _build_agent(monkeypatch, fake)
-    out = a.run(DbcCommentsInput(code="def f(): pass"))
+    with caplog.at_level("WARNING"):
+        out = a.run(DbcCommentsInput(code="def f(): pass"))
     assert len(out.insertions) == 1
     assert out.insertions[0].file == "good.py"
+    assert "skipping non-object insertion entry" in caplog.text
+    assert "skipping malformed insertion" in caplog.text
 
 
 def test_dbc_run_safety_override(monkeypatch) -> None:

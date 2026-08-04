@@ -179,6 +179,11 @@ class DbcCommentsAgent:
         insertions: list[DbcCommentInsertion] = []
         for entry in raw_insertions:
             if not isinstance(entry, dict):
+                logger.warning(
+                    "DbcComments: skipping non-object insertion entry (%s): %r",
+                    type(entry).__name__,
+                    entry,
+                )
                 continue
             try:
                 insertions.append(DbcCommentInsertion(**entry))

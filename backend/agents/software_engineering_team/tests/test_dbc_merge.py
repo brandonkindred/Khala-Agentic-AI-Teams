@@ -75,6 +75,33 @@ def test_merge_updates_existing_docstring() -> None:
     assert "return 1" in merged
 
 
+def test_merge_adds_new_docstring_to_class_without_one() -> None:
+    code = "### a.py ###\nclass Foo:\n    pass\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(symbol="Foo", comment="A sample class.")]
+    )
+    assert rejected == []
+    assert added == 1
+    assert updated == 0
+    assert '"""' in files["a.py"]
+    assert "A sample class." in files["a.py"]
+    assert "class Foo:" in files["a.py"]
+
+
+def test_merge_updates_existing_class_docstring() -> None:
+    code = '### a.py ###\nclass Foo:\n    """Old class doc."""\n    pass\n'
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(symbol="Foo", comment="New class doc.")]
+    )
+    assert rejected == []
+    assert added == 0
+    assert updated == 1
+    merged = files["a.py"]
+    assert "Old class doc." not in merged
+    assert "New class doc." in merged
+    assert "class Foo:" in merged
+
+
 def test_merge_module_docstring_into_empty_file() -> None:
     """A truly empty (or whitespace-only) module has no first statement to
     anchor against via the usual body[0] path, but the module itself still
@@ -210,6 +237,43 @@ def test_merge_non_python_valid_line_anchor_renders_block_comment() -> None:
     assert "* Adds a and b." in merged
     assert "*/" in merged
     assert "export function add(a, b) {" in merged
+
+
+def test_merge_non_python_preformatted_jsdoc_not_doubled() -> None:
+    """A model returning an already-formatted /** ... */ block (a common,
+    reasonable output) must not get its own '* ' markers doubled."""
+    code = "### a.ts ###\nexport function add(a, b) {\n  return a + b;\n}\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code,
+        [_ins(file="a.ts", symbol="add", line=1, comment="/**\n * Adds a and b.\n */")],
+    )
+    assert rejected == []
+    merged = files["a.ts"]
+    assert "* * Adds a and b." not in merged
+    assert "* Adds a and b." in merged
+    assert merged.count("/**") == 1
+    assert merged.count("*/") == 1
+
+
+def test_merge_non_python_preformatted_jsdoc_multiline_preserved() -> None:
+    code = "### a.ts ###\nexport function add(a, b) {\n  return a + b;\n}\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code,
+        [
+            _ins(
+                file="a.ts",
+                symbol="add",
+                line=1,
+                comment="/**\n * Line one.\n * Line two.\n */",
+            )
+        ],
+    )
+    assert rejected == []
+    merged = files["a.ts"]
+    assert "* Line one." in merged
+    assert "* Line two." in merged
+    assert "* * Line one." not in merged
+    assert merged.count("/**") == 1
 
 
 def test_merge_non_python_out_of_range_line_rejected() -> None:

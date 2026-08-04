@@ -276,8 +276,17 @@ def _merge_python_file(
         if first_stmt is not None and _is_existing_docstring(first_stmt):
             edits.append((first_stmt.lineno - 1, first_stmt.end_lineno, rendered))
             updated += 1
+        elif first_stmt is None:
+            # Fresh module docstring on an empty-bodied module: also consume any
+            # purely-blank leading lines (never real content -- a blank line can't
+            # contain a def/class, so this can't collide with another edit's range)
+            # so the docstring lands directly at the top, with no stray blank line
+            # left dangling between it and the file's first real content.
+            end = next((i for i, line in enumerate(lines) if line.strip()), len(lines))
+            edits.append((0, end, rendered))
+            added += 1
         else:
-            start = 0 if first_stmt is None else first_stmt.lineno - 1
+            start = first_stmt.lineno - 1
             edits.append((start, start, rendered))
             added += 1
 
@@ -294,11 +303,30 @@ def _merge_python_file(
 
 
 def _render_block_comment(comment: str, indent: str) -> List[str]:
-    """Render ``comment`` as an indented ``/** ... */`` block (JSDoc/Javadoc style)."""
+    """Render ``comment`` as an indented ``/** ... */`` block (JSDoc/Javadoc style).
+
+    If ``comment`` is already a fully-formed ``/** ... */`` block (a common,
+    reasonable model output), each inner line's own leading ``*``/``* ``
+    marker is stripped before re-wrapping -- otherwise re-wrapping would
+    double it (``/**\\n * existing\\n */`` becoming `` *  * existing``).
+    """
     text = comment.strip()
     if text.startswith("/**") and text.endswith("*/"):
-        text = text[3:-2].strip("\n")
-    body_lines = text.splitlines() if text else [""]
+        raw_lines = text.splitlines()
+        if len(raw_lines) == 1:
+            # Single physical line, e.g. "/** short comment */": extract the
+            # inner text directly, there are no delimiter lines to drop.
+            body_lines = [text[3:-2].strip()]
+        else:
+            # The model's own opening "/**" and closing "*/" each occupy their
+            # own line (the exact style shown to it in DBC_COMMENTS_PROMPT), so
+            # drop those two delimiter lines and strip each remaining line's
+            # own "*"/"* " marker -- this preserves interior content, including
+            # any intentional blank lines, instead of losing or doubling it.
+            inner_lines = raw_lines[1:-1] or [text[3:-2]]
+            body_lines = [line.strip().removeprefix("*").strip() for line in inner_lines]
+    else:
+        body_lines = text.splitlines() if text else [""]
     rendered = [f"{indent}/**"]
     for line in body_lines:
         stripped = line.strip()
