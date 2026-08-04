@@ -4019,13 +4019,18 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
     # case is swallowed; a real delivery failure (client not connected, RPC
     # timeout, any other RPC error) must surface, not be silently reported as a
     # successful stop on a live-trading kill switch.
+    #
+    # Imported here (rather than inside the except block below) so an import
+    # failure can't mask the real _signal_paper_trading_stop exception being
+    # handled — an ImportError raised while already handling exc would
+    # discard exc and propagate the ImportError instead.
+    from temporalio.service import RPCError, RPCStatusCode
+
     try:
         _signal_paper_trading_stop(session_id)
     except HTTPException:
         raise
     except Exception as exc:
-        from temporalio.service import RPCError, RPCStatusCode
-
         if isinstance(exc, RPCError) and exc.status == RPCStatusCode.NOT_FOUND:
             logger.info(
                 "Stop signal for paper-trading session %s found no running workflow "
