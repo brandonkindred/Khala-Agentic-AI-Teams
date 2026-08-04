@@ -933,6 +933,49 @@ def test_purge_strategy_lab_job_storage_many_jobs_concurrent(
     assert {j["job_id"] for j in bt.list_jobs()} == {f"bt-keep-{i}" for i in range(7)}
 
 
+def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A unit that doesn't finish within the shared deadline is reported as
+    None (unknown, still in flight) rather than a misleadingly-confirmed 0."""
+    import job_service_client as jsc_mod
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_PURGE_TIMEOUT_S", 0.2)
+
+    release = threading.Event()
+
+    class _SlowLabRecordsClient(_FakeJobClient):
+        """Blocks list_jobs past the (shrunk) shared deadline for one team only,
+        so its unit is still "in flight" when the collector's deadline elapses."""
+
+        def list_jobs(self, *, statuses=None):
+            if self.team == "investment_strategy_lab_records":
+                assert release.wait(timeout=5.0), "test never released the slow unit"
+            return super().list_jobs(statuses=statuses)
+
+    clients_by_team: Dict[str, _SlowLabRecordsClient] = {}
+
+    def _factory(team: str = "x"):
+        if team not in clients_by_team:
+            clients_by_team[team] = _SlowLabRecordsClient(team=team)
+        return clients_by_team[team]
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _factory)
+
+    try:
+        counts = api_main._purge_strategy_lab_job_storage()
+    finally:
+        # Unblock the slow unit's background thread regardless of outcome, so
+        # it doesn't keep running past the end of the test.
+        release.set()
+
+    assert counts["deleted_lab_records"] is None
+    assert counts["deleted_lab_strategies"] == 0
+    assert counts["deleted_lab_backtests"] == 0
+    assert counts["deleted_paper_trading_sessions"] == 0
+
+
 def test_clear_strategy_lab_storage_route(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """The DELETE /strategy-lab/storage route forwards purge counts."""
     from investment_team.api import main as api_main
