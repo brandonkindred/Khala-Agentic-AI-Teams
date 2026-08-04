@@ -3637,6 +3637,13 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
           ``delete_job`` bool), so an unconditional ``del`` can't be used to
           infer whether anything was actually removed; existence is checked
           via ``in`` first instead.
+        - ``_strategies``/``_backtests`` are ``_PersistentDict`` instances
+          (see their module-level construction), not plain in-memory dicts —
+          deleting from them deletes the underlying ``investment_strategies``/
+          ``investment_backtests`` job-service rows too, via
+          ``_PersistentDict.__delitem__`` -> ``JobServiceClient.delete_job``.
+          "linked lab strategy/backtest jobs" in the summary above refers to
+          exactly this.
 
     Raises:
         - ``HTTPException`` 404: ``lab_record_id`` does not resolve to any
@@ -3654,6 +3661,9 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         backtest_id = record.backtest.backtest_id
 
         del _strategy_lab_records[lab_record_id]
+        # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
+        # these deletes also remove the investment_strategies/investment_backtests
+        # job-service rows, not just a process-local cache entry.
         strategy_deleted = strategy_id in _strategies
         if strategy_deleted:
             del _strategies[strategy_id]
