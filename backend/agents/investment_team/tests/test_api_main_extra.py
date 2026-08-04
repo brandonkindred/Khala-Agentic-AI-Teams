@@ -5,7 +5,8 @@ fixtures. Targets:
 
 * ``_PersistentDict`` __setitem__/__getitem__/__contains__/pop/values
   via an in-process FakeJobClient, including __setitem__'s atomic-upsert
-  contract (no get_job read-before-write) and concurrent same-key writes.
+  contract (no get_job read-before-write), concurrent same-key writes, and
+  pop's lost-delete-race handling (a concurrent pop() already won).
 * ``_env_positive_int`` env-var parsing.
 * ``_normalize_strategy_lab_asset_class`` + ``_build_strategy_from_ideation``
   builders.
@@ -594,6 +595,44 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
 
 
+class _LostDeleteRaceClient:
+    """Stub JobServiceClient simulating a lost pop() race: get_job still
+    finds the job (read before the race is settled), but delete_job reports
+    no row was removed -- a concurrent pop() for the same key already won.
+    """
+
+    def __init__(self, job: Dict[str, Any], team: str = "x", base_url: str | None = None) -> None:
+        self._job = job
+
+    def get_job(self, job_id: str):
+        return dict(self._job) if job_id == self._job["job_id"] else None
+
+    def delete_job(self, job_id: str) -> bool:
+        return False
+
+
+def test_persistent_dict_pop_treats_lost_delete_race_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If delete_job reports no row was actually removed (a concurrent pop()
+    for the same key already won that race), this call must not hand back
+    the data it read moments earlier as though it had exclusively popped it
+    -- issue #4253."""
+    import job_service_client as jsc_mod
+    from investment_team.api.main import _PersistentDict
+
+    job = {"job_id": "k", "status": "stored", "data": {"value": "x"}}
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda **kwargs: _LostDeleteRaceClient(job, **kwargs)
+    )
+
+    pd = _PersistentDict("race_test")
+
+    assert pd.pop("k", "DEFAULT") == "DEFAULT"
+    with pytest.raises(KeyError):
+        pd.pop("k")
+
+
 def test_persistent_dict_setitem_always_upserts_no_read(monkeypatch: pytest.MonkeyPatch) -> None:
     """__setitem__ must go straight to create_job's atomic upsert, with no
     get_job read-before-write -- that read was the check-then-act race this
@@ -1096,6 +1135,76 @@ def test_delete_strategy_lab_record_success(monkeypatch: pytest.MonkeyPatch, api
     assert api_main._strategy_lab_records.get("lab-X") is None
     assert api_main._strategies.get("strat-lab-X") is None
     assert api_main._backtests.get("bt-lab-X") is None
+
+
+def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backtest(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """When the linked strategy/backtest are already absent from their stores,
+    the response must not claim they were deleted."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Y",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Y",
+        strategy_id="strat-lab-Y",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Y",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Y"] = record
+    # Deliberately do NOT seed _strategies/_backtests, simulating a lab record
+    # whose linked strategy/backtest were already removed by an earlier call.
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", lambda lab_id: 0)
+
+    resp = api_client.delete("/strategy-lab/records/lab-Y")
+    body = resp.json()
+    assert body["lab_record_id"] == "lab-Y"
+    assert body["deleted_strategy_id"] is None
+    assert body["deleted_backtest_id"] is None
+    assert body["deleted_paper_trading_sessions"] == 0
+    assert api_main._strategy_lab_records.get("lab-Y") is None
 
 
 # ---------------------------------------------------------------------------

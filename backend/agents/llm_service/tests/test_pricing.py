@@ -26,7 +26,7 @@ def test_zero_tokens_is_zero() -> None:
 
 
 def test_local_model_priced_zero() -> None:
-    assert estimate_cost_usd("glm-5.2:cloud", 100000, 100000) == 0.0
+    assert estimate_cost_usd("deepseek-v4-flash:cloud", 100000, 100000) == 0.0
 
 
 def test_negative_tokens_raise() -> None:

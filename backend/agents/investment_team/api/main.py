@@ -347,7 +347,20 @@ class _PersistentDict:
             - If the job is missing and ``args`` is empty, raises ``KeyError``.
         Postconditions:
             - When present: deletes the job and returns its ``data`` payload
-              (or the job mapping if ``data`` is absent).
+              (or the job mapping if ``data`` is absent) -- but ONLY when
+              ``delete_job(key)`` itself reports that this call actually
+              removed a row. If a concurrent ``pop()`` for the same key
+              already deleted it between this call's ``get_job`` read and its
+              own ``delete_job`` call, ``delete_job`` reports no row removed
+              and this call is treated exactly like a missing key (default
+              returned, or ``KeyError`` raised) rather than handing back data
+              for a job it did not itself remove. The job-service DB layer
+              has no atomic get-and-delete primitive (a plain ``DELETE``, no
+              ``RETURNING``), so the returned data is whatever ``get_job``
+              read moments before the confirmed delete -- not part of the
+              same atomic operation. A third caller overwriting the job in
+              that narrow window is a known, accepted residual gap; the
+              exactly-one-caller-claims-the-deletion guarantee above is not.
             - When missing and a default is provided in ``args``: returns that
               default without deleting.
         """
@@ -356,7 +369,10 @@ class _PersistentDict:
             if args:
                 return args[0]
             raise KeyError(key)
-        self._client.delete_job(key)
+        if not self._client.delete_job(key):
+            if args:
+                return args[0]
+            raise KeyError(key)
         return job.get("data", job)
 
     def values(self) -> List[Any]:
@@ -1745,7 +1761,8 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
     if not isinstance(strategy_data, dict):
         raise TypeError(f"strategy_data must be a mapping, got {type(strategy_data).__name__}")
     strategy_id = f"strat-lab-{uuid.uuid4().hex[:8]}"
-    sizing = strategy_data.get("sizing")
+    raw_sizing = strategy_data.get("sizing")
+    sizing = raw_sizing if isinstance(raw_sizing, dict) else DEFAULT_SIZING_PAYLOAD
     strategy = StrategySpec(
         strategy_id=strategy_id,
         authored_by="strategy_ideation_agent",
@@ -1762,7 +1779,7 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         # ideation LLM response doesn't crash the cycle.
         entry_rules=[r for r in (strategy_data.get("entry_rules") or []) if isinstance(r, dict)],
         exit_rules=[r for r in (strategy_data.get("exit_rules") or []) if isinstance(r, dict)],
-        sizing=sizing if isinstance(sizing, dict) else DEFAULT_SIZING_PAYLOAD,
+        sizing=sizing,
         risk_limits=strategy_data.get("risk_limits") or {},
         speculative=bool(strategy_data.get("speculative", False)),
     )
@@ -1784,16 +1801,11 @@ def _run_one_strategy_lab_cycle(
     """Single ideation → validate → execute → refine → analyze (+ paper-trading) cycle via the v2 orchestrator.
 
     The orchestrator handles the full code-generation + sandboxed-execution pipeline
-    internally, including up to 10 refinement rounds.
-
-    After the orchestrator returns a complete ``StrategyLabRecord``, the paper-trading
-    step runs only when the record is flagged as publishable
-    (``record.is_publishable``). Losing strategies record
-    ``paper_trading_status = "skipped"`` with reason ``"not_winning"``; winning
-    but non-publishable strategies skip with the joined gate codes from
-    ``publishability_skip_reason``. Paper-trading failures are non-fatal: the
-    cycle still persists the record with ``paper_trading_status = "failed"``
-    and the error message.
+    internally, including up to 10 refinement rounds. Once it returns a complete
+    ``StrategyLabRecord``, this function delegates paper-trading finalization and
+    persistence to :func:`_finalize_strategy_lab_cycle_record` — see that function's
+    docstring for the winning/publishable/disabled/failure semantics; this function
+    does not implement any of that logic itself.
 
     Args:
         prior_records: Precomputed prior-record snapshot, supplied by the wave
@@ -1801,10 +1813,12 @@ def _run_one_strategy_lab_cycle(
             cycle. Precondition: it must reflect pre-wave state (the caller reads
             it once before launching the wave). When None, this cycle reads and
             parses the snapshot itself (the path direct/test callers take).
-        paper_trading_enabled: Opt-out flag; when False, every winning strategy
-            records ``paper_trading_status = "skipped"`` with reason ``"disabled"``.
-        paper_trading_lookback_days: Forwarded to ``MarketDataService.fetch_multi_symbol``
-            when the paper-trading step runs.
+        paper_trading_enabled: Forwarded to :func:`_finalize_strategy_lab_cycle_record`.
+        paper_trading_lookback_days: Forwarded to :func:`_finalize_strategy_lab_cycle_record`.
+
+    Returns:
+        The finalized ``StrategyLabRecord``, already durably persisted by
+        :func:`_finalize_strategy_lab_cycle_record`.
     """
 
     # When the caller (the wave driver) precomputes the prior records once per
@@ -1848,6 +1862,12 @@ def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
         Temporal activity can reuse the identical write without duplicating
         it.
     """
+    # StrategySpec/BacktestRecord are required (non-Optional) fields, but
+    # Pydantic doesn't validate on assignment here, so a stray `record.strategy
+    # = None` elsewhere would otherwise surface as an opaque AttributeError
+    # below instead of a clear precondition failure at this boundary.
+    assert record.strategy is not None, "record.strategy must be populated before persisting"
+    assert record.backtest is not None, "record.backtest must be populated before persisting"
     with _lock:
         _strategy_lab_records[record.lab_record_id] = record
         _strategies[record.strategy.strategy_id] = record.strategy
@@ -3961,8 +3981,8 @@ class ClearStrategyLabStorageResponse(BaseModel):
 
 class DeleteStrategyLabRecordResponse(BaseModel):
     lab_record_id: str
-    deleted_strategy_id: str
-    deleted_backtest_id: str
+    deleted_strategy_id: Optional[str] = None
+    deleted_backtest_id: Optional[str] = None
     deleted_paper_trading_sessions: int = 0
 
 
@@ -4076,9 +4096,17 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
         - ``deleted_paper_trading_sessions`` counts
           ``investment_paper_trading_sessions`` jobs with a truthy ``job_id``
           that ``delete_job`` removed.
-        - Each count equals the number of matching jobs successfully deleted and
-          is independent of the order in which the concurrent units/deletes
-          finish; the returned dict always has exactly these four keys.
+        - Each count equals the number of matching jobs the corresponding unit
+          *reported* deleting within the shared deadline, and is independent
+          of the order in which the concurrent units/deletes finish; the
+          returned dict always has exactly these four keys.
+        - A unit that does not finish within the shared deadline
+          (``_PURGE_TIMEOUT_S``) is counted as ``0`` even though its
+          background thread keeps running (see ``pool.shutdown(wait=False,
+          ...)`` below) and may go on to delete some or all of its matching
+          jobs asynchronously. In that case a returned count of ``0`` is not
+          a guarantee that no matching jobs were deleted — only that none
+          were confirmed deleted before the deadline.
     """
     from job_service_client import JobServiceClient
 
@@ -4147,6 +4175,24 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
     """
     Delete one strategy lab run: lab card, linked lab strategy/backtest jobs, and any paper-trading
     sessions that reference this ``lab_record_id``.
+
+    Preconditions:
+        - ``lab_record_id`` may or may not resolve to a known lab record.
+
+    Postconditions:
+        - ``_strategy_lab_records[lab_record_id]`` is always removed (its
+          existence is the 404 gate above).
+        - ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless
+          the corresponding entry actually existed in ``_strategies``/
+          ``_backtests`` *before* this call — ``_PersistentDict.__delitem__``
+          never raises on a missing key (it discards the underlying
+          ``delete_job`` bool), so an unconditional ``del`` can't be used to
+          infer whether anything was actually removed; existence is checked
+          via ``in`` first instead.
+
+    Raises:
+        - ``HTTPException`` 404: ``lab_record_id`` does not resolve to any
+          known lab record.
     """
     with _lock:
         raw = _strategy_lab_records.get(lab_record_id)
@@ -4160,21 +4206,19 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         backtest_id = record.backtest.backtest_id
 
         del _strategy_lab_records[lab_record_id]
-        try:
+        strategy_deleted = strategy_id in _strategies
+        if strategy_deleted:
             del _strategies[strategy_id]
-        except KeyError:
-            pass
-        try:
+        backtest_deleted = backtest_id in _backtests
+        if backtest_deleted:
             del _backtests[backtest_id]
-        except KeyError:
-            pass
 
     paper_deleted = _delete_paper_sessions_for_lab_record(lab_record_id)
 
     return DeleteStrategyLabRecordResponse(
         lab_record_id=lab_record_id,
-        deleted_strategy_id=strategy_id,
-        deleted_backtest_id=backtest_id,
+        deleted_strategy_id=strategy_id if strategy_deleted else None,
+        deleted_backtest_id=backtest_id if backtest_deleted else None,
         deleted_paper_trading_sessions=paper_deleted,
     )
 
