@@ -30,7 +30,7 @@ retry (which fires on worker crash / start_to_close timeout):
 
 from __future__ import annotations
 
-import asyncio
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -102,7 +102,11 @@ def run_backtest_activity(
         submitted_by,
         notes,
     )
-    while True:
+    max_polling_attempts = 30
+    attempts = 0
+    
+    while attempts < max_polling_attempts:
+        attempts += 1
         final_status = _backtest_job_status(job_id)
         
         if final_status == _BT_JOB_STATUS_FAILED:
@@ -115,9 +119,11 @@ def run_backtest_activity(
         elif final_status == _BT_JOB_STATUS_COMPLETED:
             return {"job_id": job_id, "status": "completed"}
             
-        # If it's "RUNNING" or "PENDING", sleep and poll again.
-        # (Use await asyncio.sleep(1) if this is an async activity)
-        await asyncio.sleep(1)
+        # Synchronous sleep safely blocks the loop without throwing an async SyntaxError
+        time.sleep(1)
+        
+    # Fail-safe termination if the loop completes without a valid status
+    raise TimeoutError(f"Backtest polling timed out for job {job_id} after {max_polling_attempts} attempts. CI hang prevented.")
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")
