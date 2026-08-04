@@ -105,10 +105,12 @@ def _dispatch() -> DispatchTable:
         (team_id,) = params
         cur.set_one((team_id,) if team_id in cur.db["teams"] else None)
 
+    # Team-row deletion used by the create_team rollback path when provisioning fails.
     def match_delete_team(norm: str) -> bool:
         return norm.startswith("delete from agentic_teams where team_id")
 
     def handle_delete_team(cur: FakeCursor, params: tuple) -> None:
+        """``params`` is ``(team_id,)``; ``cur.rowcount`` reflects whether the row existed."""
         (team_id,) = params
         removed = cur.db["teams"].pop(team_id, None)
         cur.rowcount = 1 if removed else 0
