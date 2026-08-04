@@ -3600,9 +3600,14 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     Because paper trading can take 2-3 minutes (market data fetch + sandbox
     execution + LLM divergence analysis), this endpoint validates inputs, creates
     a session in ``OPENING`` status (live path) or ``running`` status (legacy
-    path), kicks off a background worker, and returns that session immediately.
-    Clients should poll ``GET /strategy-lab/paper-trade/{session_id}`` for
-    progress until ``status`` is ``completed`` or ``failed``.
+    path), then dispatches a durable ``PaperTradingWorkflow`` via
+    ``_start_paper_trading`` (Temporal-only). Execution happens inside
+    ``run_paper_trading_activity`` on the investment task queue, which runs
+    either ``_run_live_paper_trading_background`` (live path) or
+    ``_run_paper_trading_background`` (legacy recent-OHLCV path) depending on
+    whether the live path is enabled. Clients should poll
+    ``GET /strategy-lab/paper-trade/{session_id}`` for progress until
+    ``status`` is ``completed`` or ``failed``.
     """
     # 1 — Look up the winning strategy lab record (synchronous validation)
     with _lock:
@@ -3984,9 +3989,12 @@ def _run_live_paper_trading_background(
 def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
     """Idempotent user-stop for a live paper-trading session.
 
-    Sets the session's stop flag; the background worker terminates at the next
-    bar boundary. Returns the session's current state (still ``live`` /
-    ``warming_up`` if the worker hasn't yet noticed — clients poll
+    Delivers a durable stop signal to the running ``PaperTradingWorkflow`` via
+    ``_signal_paper_trading_stop`` (a Temporal signal); the live loop terminates
+    when the activity's background heartbeat observes the Temporal cancellation
+    and trips the session's ``StopController`` (registered in
+    ``_live_paper_stop_controllers``). Returns the session's current state
+    (still ``live`` / ``warming_up`` if the worker hasn't yet noticed — clients poll
     ``GET /strategy-lab/paper-trade/{session_id}`` for the final record).
     """
     if not _live_paper_enabled():
