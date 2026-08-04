@@ -268,6 +268,7 @@ def test_signal_paper_trading_stop_sends_stop_signal(monkeypatch) -> None:
 
 def test_worker_boots_all_three_queues(monkeypatch) -> None:
     from investment_team.strategy_lab.temporal import worker as sl_worker
+    from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE as STRATEGY_LAB_QUEUE
     from investment_team.temporal import worker as worker_mod
 
     monkeypatch.setattr(worker_mod, "is_temporal_enabled", lambda: True)
@@ -277,13 +278,20 @@ def test_worker_boots_all_three_queues(monkeypatch) -> None:
         "start_team_worker",
         lambda team, wfs, acts, *, task_queue, **kw: started.append((team, task_queue)) or True,
     )
-    monkeypatch.setattr(sl_worker, "start_strategy_lab_temporal_worker_thread", lambda: True)
+    strategy_lab_started = []
+    monkeypatch.setattr(
+        sl_worker,
+        "start_strategy_lab_temporal_worker_thread",
+        lambda: strategy_lab_started.append(True) or True,
+    )
 
     assert worker_mod.start_investment_temporal_worker_thread() is True
     teams = {t for t, _ in started}
     queues = {q for _, q in started}
     assert {"investment", "investment_advisory"} <= teams
     assert {"investment-queue", "investment-advisory-queue"} <= queues
+    assert strategy_lab_started == [True]  # third queue: the strategy-lab worker thread started
+    assert STRATEGY_LAB_QUEUE == "strategy-lab-queue"
 
 
 def test_investment_queue_worker_uses_tuned_concurrency(monkeypatch) -> None:

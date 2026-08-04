@@ -867,7 +867,7 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         {"proposal_id": proposal_id, "request": request.model_dump(mode="json")},
         key=proposal_id,
     )
-    if not isinstance(result, dict) or "proposal" not in result:
+    if not isinstance(result, dict) or not isinstance(result.get("proposal"), dict):
         logger.error("Invalid advisory response for proposal %s: %r", proposal_id, result)
         raise HTTPException(
             status_code=502,
@@ -928,7 +928,11 @@ def validate_proposal(
         {"proposal_id": proposal_id, "user_id": request.user_id},
         key=proposal_id,
     )
-    if not isinstance(result, dict) or "valid" not in result or "violations" not in result:
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("valid"), bool)
+        or not isinstance(result.get("violations"), list)
+    ):
         logger.error(
             "Invalid advisory response for proposal %s validation: %r", proposal_id, result
         )
@@ -2614,10 +2618,13 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
           corresponding activity's preconditions; ``key`` is a stable id for the
           logical operation.
     Postconditions:
-        - Returns the workflow's result dict. Raises ``HTTPException(503)`` when
-          Temporal is disabled/unavailable; on any other workflow failure,
-          raises the ``HTTPException`` :func:`_translate_advisory_failure` maps
-          it to (never an opaque unhandled exception).
+        - Returns the workflow's result dict. Raises ``HTTPException(503)``
+          when Temporal is disabled/unavailable, or when the Temporal client
+          didn't become ready in time (a bare ``RuntimeError`` from
+          ``shared.temporal._await_client``, mapped here to the same 503 as
+          the up-front check). On any other workflow failure, raises the
+          ``HTTPException`` :func:`_translate_advisory_failure` maps it to
+          (never an opaque unhandled exception).
     """
     _require_temporal()
     from investment_team.temporal.start_workflow import execute_advisory_workflow
@@ -4700,13 +4707,14 @@ def send_advisor_message(
 @app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
+
     Preconditions:
-        - `session_id` must identify a previously started advisor session.
-        
+        - `session_id` is a non-empty advisor session identifier.
+
     Postconditions:
         - Returns the session if found.
         - Otherwise, returns `found=False` with `session=None`.
-        
+
     Raises:
         - None (intentionally avoids standard 404 errors for missing sessions).
     """

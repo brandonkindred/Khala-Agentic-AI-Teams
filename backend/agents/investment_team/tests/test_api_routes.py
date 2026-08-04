@@ -228,6 +228,20 @@ def test_create_proposal_502_on_malformed_advisory_result(api_client, monkeypatc
     assert resp.json()["detail"]
 
 
+def test_create_proposal_502_on_non_dict_proposal_value(api_client, monkeypatch) -> None:
+    """A 'proposal' value that isn't a dict (e.g. None) must not fall through to a
+    Pydantic ValidationError / 422 — it's still a malformed advisory result."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"proposal": None}
+    )
+    resp = api_client.post("/proposals/create", json=_proposal_body())
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_get_proposal_not_found(api_client) -> None:
     resp = api_client.get("/proposals/nope")
     assert resp.status_code == 200
@@ -263,6 +277,25 @@ def test_validate_proposal_502_on_malformed_advisory_result(api_client, monkeypa
     pid = create.json()["proposal_id"]
 
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"valid": True})
+    resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_validate_proposal_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """'valid'/'violations' present but wrong-typed must not fall through to a
+    Pydantic ValidationError / 422 — it's still a malformed advisory result."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/proposals/create", json=_proposal_body())
+    pid = create.json()["proposal_id"]
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"valid": "yes", "violations": "none"},
+    )
     resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
     assert resp.status_code == 502
     assert resp.json()["detail"]

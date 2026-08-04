@@ -946,7 +946,7 @@ def test_clear_strategy_lab_storage_does_not_block_on_lock(monkeypatch: pytest.M
     def _call() -> None:
         try:
             result.append(api_main.clear_strategy_lab_storage())
-        except BaseException as exc:  # pragma: no cover - surfaced via assertion below
+        except Exception as exc:  # pragma: no cover - surfaced via assertion below
             result.append(exc)
 
     api_main._lock.acquire()
