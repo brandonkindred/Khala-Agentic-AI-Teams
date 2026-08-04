@@ -3107,13 +3107,21 @@ def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
     Deletes from the job service before touching in-memory state, so a
     failed or exceptional job-service delete leaves ``_active_runs``
     untouched instead of dropping the entry while the persisted record
-    still exists.
+    still exists. Holds this run_id's transition lock for the whole
+    delete-then-pop sequence so a concurrent run/resume/restart for the
+    SAME run_id can't write a fresh "running" state (and dispatch a
+    workflow) around a delete that's removing the record out from under
+    it — the two would otherwise race to leave an orphaned in-memory
+    "running" entry with no persisted record, or a workflow dispatched for
+    a run_id whose record is already gone.
 
     Preconditions:
         - None on run status — any run can be deleted regardless of its
           current status.
         - The job service must have a record for ``run_id`` for the delete
           to succeed.
+        - No other run/resume/restart/delete transition for this run_id is
+          currently in flight.
 
     Postconditions:
         - The job-service record for ``run_id`` is deleted before
@@ -3125,16 +3133,22 @@ def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
     Raises:
         - ``HTTPException`` 404: ``client.delete_job(run_id)`` returns a
           falsy result (no such run in the job service).
+        - ``HTTPException`` 409: another transition for this run_id is
+          already in flight.
         - An exception raised by ``client.delete_job`` itself is not caught
           and propagates uncaught (surfaces as a 500) — ``_active_runs`` is
           left untouched in that case.
     """
-    client = _get_lab_run_job_client()
-    deleted = client.delete_job(run_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    with _lock:
-        _active_runs.pop(run_id, None)
+    run_lock = _require_run_transition_lock(run_id)
+    try:
+        client = _get_lab_run_job_client()
+        deleted = client.delete_job(run_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        with _lock:
+            _active_runs.pop(run_id, None)
+    finally:
+        run_lock.release()
     return {"job_id": run_id, "deleted": True}
 
 

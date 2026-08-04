@@ -1285,6 +1285,29 @@ def test_delete_strategy_lab_run_success(monkeypatch: pytest.MonkeyPatch, api_cl
     assert "delete-me" not in api_main._active_runs
 
 
+def test_delete_strategy_lab_run_409_when_transition_lock_held(
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
+) -> None:
+    """A delete request for a run_id whose transition lock is already held is
+    rejected with 409 without touching the job service or _active_runs."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-lock-held-delete"
+    api_main._active_runs[run_id] = {"run_id": run_id, "status": "completed"}
+
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.delete(f"/strategy-lab/runs/{run_id}")
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+        assert lab_job_client.deleted == []
+        assert run_id in api_main._active_runs
+    finally:
+        held_lock.release()
+
+
 # ---------------------------------------------------------------------------
 # stream_strategy_lab_run — terminal short-circuit + 404
 # ---------------------------------------------------------------------------
