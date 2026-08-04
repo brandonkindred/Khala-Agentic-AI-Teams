@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from software_engineering_team.models import Task, TaskStatus
-from software_engineering_team.pause_cycle import _format_decisions
+from software_engineering_team.pause_cycle import _ActivityPauseSignal, _format_decisions
 from software_engineering_team.team_routing import _quality_gate_agent_type
 
 logger = logging.getLogger(__name__)
@@ -53,8 +53,8 @@ class _ImplementationMixin:
               ``_review_and_merge``'s fan-out suppression); ``True`` (default) for the serial/solo
               path, which keeps today's live per-phase status text unchanged.
         Postconditions:
-            - Never raises: any exception — including a failure to resolve this worker's worktree,
-              or from ``run_implement`` itself — is contained and routed through
+            - Never raises for a genuine implementation failure: any exception from resolving this
+              worker's worktree or from ``run_implement`` itself is contained and routed through
               ``_handle_incomplete_implementation`` exactly like a ``status="failed"`` result, so
               one worker's crash fails only its own task and never aborts the round. This is
               required, not defensive: ``shared.concurrency.parallel_map`` re-raises a worker
@@ -62,6 +62,12 @@ class _ImplementationMixin:
               containment one worker crashing would abort every other concurrently-running
               worker's round too — worse than the prior serial loop, where a crash only prevented
               workers later in the loop from running this round.
+            - EXCEPTION to the above: ``_ActivityPauseSignal`` (raised by ``_escalate_decision`` ->
+              ``pause_for_questions`` under ``pause_strategy="return"``) is deliberately NOT
+              contained here — it is re-raised unchanged, so it can unwind all the way up through
+              ``parallel_map`` (with ``wait_for_stragglers=True`` — see ``CodingTeamSwarm.run``) to
+              ``run_coding_team_orchestrator``'s own catch. Swallowing it here into a "failed" task
+              result would silently convert a HITL pause into a spurious task failure.
         """
         task = self.graph.get_task_for_agent(swe.agent_id)
         if not task:
@@ -125,6 +131,11 @@ class _ImplementationMixin:
                     result.get("error"),
                 )
                 self._handle_incomplete_implementation(task, result)
+        except _ActivityPauseSignal:
+            # Not a worker crash -- a HITL pause under pause_strategy="return". Must propagate
+            # unchanged (see this method's docstring); catching it below into a "failed" task
+            # result would silently convert a pause into a spurious task failure.
+            raise
         except Exception as exc:  # noqa: BLE001 - one worker's crash must fail only its own task
             logger.exception("Worker %s implementation raised for task %s", swe.agent_id, task.id)
             self._handle_incomplete_implementation(task, {"status": "failed", "error": str(exc)})
@@ -405,10 +416,17 @@ class _ImplementationMixin:
         without answers (terminal/timeout) aborts the swarm.
 
         Postconditions:
-            - On a successful pause the task is IN_PROGRESS with a ``user_decision`` feedback entry
-              and the same engineer, so the answer is implemented next round (revision count
-              unchanged). On an unanswered pause ``self.aborted`` is set. With no answer channel the
-              task is FAILED (fail closed).
+            - Under ``pause_strategy="block"`` (``self._pause_strategy``): on a successful pause
+              the task is IN_PROGRESS with a ``user_decision`` feedback entry and the same
+              engineer, so the answer is implemented next round (revision count unchanged). On an
+              unanswered pause ``self.aborted`` is set. With no answer channel the task is FAILED
+              (fail closed).
+            - Under ``pause_strategy="return"``: ``pause_for_questions`` raises
+              ``pause_cycle._ActivityPauseSignal`` as soon as the pause is published (see
+              Concurrency below), so neither the task update nor ``self.aborted`` happens here —
+              the task is left as-is (IN_PROGRESS, unescalated) and the orchestrator's re-entry
+              check consumes the persisted pause on the next invocation instead. With no answer
+              channel the task is still FAILED in this mode too (fail-closed is unconditional).
 
         Concurrency:
             The pause cycle stores exactly one outstanding batch in job-level
@@ -422,6 +440,24 @@ class _ImplementationMixin:
             this whole method) serializes the pause-and-resume round-trip across workers so each
             escalation's questions are posted, answered, and resolved before the next one starts;
             workers that never escalate a decision are unaffected and keep running fully concurrently.
+
+            Under ``pause_strategy="return"`` (``self._pause_strategy``), ``pause_for_questions``
+            raises instead of blocking, so ``self._pause_lock`` releases again almost immediately —
+            it no longer serializes the FULL round-trip the way it does in block mode, only the
+            instant of publishing. A second, concurrently-escalating worker could otherwise acquire
+            the lock right after and publish its OWN competing pause, overwriting the first's
+            job-record write, with whichever exception ``parallel_map`` happens to observe first
+            being non-deterministic. ``self._escalation_pause_committed`` (reset once per round in
+            ``CodingTeamSwarm.run``) closes this: checked-and-set atomically under the SAME lock
+            acquisition, before calling ``pause_for_questions``. A worker that finds it already set
+            leaves its task ``IN_PROGRESS`` unescalated this round (re-evaluated fresh next round —
+            deferred, not lost) instead of racing to publish. This is a narrower guarantee than the
+            target design's full drain (no cross-worker question batching/namespacing, no bounded
+            wait for other in-flight workers to also escalate into the same pause) — see
+            ``system_design/hitl_pause_resume_contract.md`` §1's "Concurrent worker-escalation
+            serialization" for the deferred full version. In block mode this flag is never set
+            (guarded below), so every escalating worker gets its own full pause-and-resolve cycle in
+            sequence, exactly as before ``pause_strategy`` existed.
         """
         from software_engineering_team import coding_team_orchestrator as _orch
 
@@ -452,9 +488,13 @@ class _ImplementationMixin:
         # second escalation blocks here until this one is fully answered and resolved, then runs
         # its own pause cycle from a clean slate.
         with self._pause_lock:
-            resolved, ok = self.pause_for_questions(
-                questions, f"engineer:{task.assigned_agent_id or task.id}"
-            )
+            if self._pause_strategy == "return":
+                if self._escalation_pause_committed:
+                    # Another worker already published this round's pause (see the Concurrency
+                    # note). Defer: leave this task IN_PROGRESS, unescalated, for next round.
+                    return
+                self._escalation_pause_committed = True
+            resolved, ok = self.pause_for_questions(questions, f"engineer:{task.id}")
         if not ok:
             self.aborted = True
             return

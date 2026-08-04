@@ -4155,17 +4155,6 @@ def _recover_orphaned_paper_trading_sessions() -> None:
     poll indefinitely with no terminal transition.
     """
     now_iso = datetime.now(tz=timezone.utc).isoformat()
-    # Active statuses that indicate an in-flight session. PR 1 only used
-    # RUNNING; PR 2's live path transitions through OPENING → WARMING_UP →
-    # LIVE. A SIGKILL during any of those leaves the row orphaned; without
-    # recovery the new per-strategy concurrency guard (409) would lock out
-    # future runs for that strategy indefinitely.
-    _active_statuses = {
-        PaperTradingStatus.RUNNING,
-        PaperTradingStatus.OPENING,
-        PaperTradingStatus.WARMING_UP,
-        PaperTradingStatus.LIVE,
-    }
     recovered = 0
     try:
         # The whole enumerate-parse-mutate-write pass runs under one lock
@@ -4183,7 +4172,7 @@ def _recover_orphaned_paper_trading_sessions() -> None:
                         exc_info=True,
                     )
                     continue
-                if session.status not in _active_statuses:
+                if session.status not in _ACTIVE_PT_STATES:
                     continue
                 session.status = PaperTradingStatus.FAILED
                 session.completed_at = now_iso

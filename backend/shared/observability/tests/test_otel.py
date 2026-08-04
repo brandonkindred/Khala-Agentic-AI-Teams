@@ -126,6 +126,57 @@ def test_get_tracer_and_meter_surface_is_usable() -> None:
     histogram.record(42, {"team": _TEAM_KEY})
 
 
+def test_span_attribute_exceeding_default_length_limit_is_truncated(span_exporter) -> None:
+    """Non-compose runtime paths (pytest included) never source docker-compose.yml's
+    OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT default, so init_otel must wire its own 2048
+    default into the TracerProvider's SpanLimits directly (see _build_span_limits)."""
+    from shared.observability import get_tracer
+
+    tracer = get_tracer("unit-test-span-limits")
+    with tracer.start_as_current_span("khala.test.oversized_attribute") as span:
+        span.set_attribute("khala.test.long_value", "x" * 3000)
+
+    spans = span_exporter.get_finished_spans()
+    target = next(s for s in spans if s.name == "khala.test.oversized_attribute")
+    attributes = dict(target.attributes)
+    assert len(attributes["khala.test.long_value"]) == 2048
+
+
+def test_build_span_limits_honors_env_overrides(monkeypatch) -> None:
+    """OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT / OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT must override
+    the 2048/64 defaults. init_otel is a session-wide singleton, so overrides can't be
+    exercised through it once the session provider exists — this hits the resolution
+    helper directly instead."""
+    pytest.importorskip("opentelemetry.sdk.trace")
+    from shared.observability.otel import _build_span_limits
+
+    monkeypatch.delenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", raising=False)
+    monkeypatch.delenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", raising=False)
+    default_limits = _build_span_limits()
+    assert default_limits.max_attribute_length == 2048
+    assert default_limits.max_span_attributes == 64
+
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "100")
+    monkeypatch.setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "5")
+    overridden = _build_span_limits()
+    assert overridden.max_attribute_length == 100
+    assert overridden.max_span_attributes == 5
+
+
+def test_build_span_limits_clamps_garbage_and_negative_values(monkeypatch) -> None:
+    """Garbage falls back to the documented default; a negative value clamps to 0 —
+    matches CLAUDE.md's numeric-env-var contract, same as every other parse_int call
+    site in this codebase."""
+    pytest.importorskip("opentelemetry.sdk.trace")
+    from shared.observability.otel import _build_span_limits
+
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "not-a-number")
+    assert _build_span_limits().max_attribute_length == 2048
+
+    monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "-5")
+    assert _build_span_limits().max_attribute_length == 0
+
+
 def test_instrument_fastapi_app_attaches_server_spans(span_exporter) -> None:
     pytest.importorskip("opentelemetry.instrumentation.fastapi")
     pytest.importorskip("fastapi")

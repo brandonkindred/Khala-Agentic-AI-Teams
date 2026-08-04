@@ -56,6 +56,8 @@ from software_engineering_team.models import (
 from software_engineering_team.pause_cycle import (
     MAX_TECH_LEAD_QUESTION_ROUNDS,  # noqa: F401 - late-bound via `_orch.MAX_TECH_LEAD_QUESTION_ROUNDS` in pause_cycle._plan_with_hitl
     PauseCycle,
+    _ActivityPauseSignal,
+    _check_pending_pause_reentry,
     _hydrate_resolved_from_record,
     _plan_with_hitl,
     _run_pause_cycle,
@@ -250,7 +252,9 @@ def run_coding_team_orchestrator(
     progress_span: int = _DEFAULT_PROGRESS_SPAN,
     engine_provider: Optional[Any] = None,
     retry_failed: bool = False,
-) -> None:
+    pause_strategy: str = "block",
+    acknowledged_resume_token: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Run the coding_team pipeline: plan → groom → Task Graph → assign → implement → review → merge.
     Uses in-process job store (coding_team/job_store) for task graph persistence.
@@ -266,28 +270,54 @@ def run_coding_team_orchestrator(
     job service on every real update — see job_service/db.py — so plain ``_update``
     writes count as activity while the 120s liveness heartbeat does not.
 
+    pause_strategy / acknowledged_resume_token: per-caller HITL pause behavior, per
+    ``system_design/hitl_pause_resume_contract.md`` §1. ``"block"`` (the default) preserves
+    every prior caller's behavior byte-for-byte — a HITL gate blocks until answered, exactly
+    as before this parameter existed; ``run_orchestrator_wired``'s thread-mode uses and
+    ``_run_with_github_hooks`` both rely on this default and pass neither parameter.
+    ``"return"`` (used only by the Temporal activity path) makes a HITL gate return this
+    function immediately instead of blocking; see the Postconditions below.
+
     Preconditions:
         - ``progress_base``/``progress_span`` are non-negative and sum to <= 100 (the band this run
           owns on the job's overall progress bar); violated by raising ``ValueError``.
         - ``repo_path`` is a git checkout the pipeline can branch/merge in; ``plan_input`` carries
           the plan text (and any already-resolved HITL decisions) the Tech Lead plans from.
+        - ``pause_strategy`` is ``"block"`` or ``"return"``; violated by raising ``ValueError``.
+          ``acknowledged_resume_token`` is only meaningful when ``pause_strategy == "return"``.
     Postconditions:
-        - On a normal (non-raising) return, the pipeline has reached a terminal job status
-          (completed, completed-with-failures, already-complete, failed, or cancelled) via
-          ``update_job_fn``/the default job store, or ended early via a HITL pause whose own
-          cycle already recorded the terminal status. Only specific, individually-handled
-          failures (the progress-band precondition, worker construction) are guaranteed to end
-          this way; an exception from planning, job-store I/O, persistence, or ``swarm.run()``
-          itself is not caught here and propagates to the caller, which is then responsible for
-          recording/handling it — the job may be left without a terminal status in that case.
+        - ``pause_strategy == "block"``: return value is always ``None`` — unchanged from every
+          caller's behavior before this parameter existed. On a normal (non-raising) return, the
+          pipeline has reached a terminal job status (completed, completed-with-failures,
+          already-complete, failed, or cancelled) via ``update_job_fn``/the default job store, or
+          ended early via a HITL pause whose own cycle already recorded the terminal status. Only
+          specific, individually-handled failures (the progress-band precondition, worker
+          construction) are guaranteed to end this way; an exception from planning, job-store I/O,
+          persistence, or ``swarm.run()`` itself is not caught here and propagates to the caller,
+          which is then responsible for recording/handling it — the job may be left without a
+          terminal status in that case.
+        - ``pause_strategy == "return"``: first checks the job record for an already-persisted,
+          unresolved pause (``_check_pending_pause_reentry``) before doing any other work — a
+          match against ``acknowledged_resume_token`` atomically consumes it and proceeds
+          normally; a stale/missing token re-emits that exact pause immediately without
+          re-running any work (a pre-work Temporal activity retry). Otherwise, if a HITL gate
+          pauses during this invocation, returns a dict with keys ``outcome`` (``"paused"``),
+          ``job_id``, ``resume_token``, ``pause_kind``, ``pause_context``, and
+          ``pending_questions`` promptly instead of blocking — the pause envelope has already
+          been durably persisted to the job record before this returns (a notification, not the
+          source of truth, per the contract doc). Returns ``None`` when the pipeline instead
+          reaches a terminal state (terminal status is still reported via the job record, as in
+          block mode — this function's return is a pause notification only).
         - The task graph's persist/flush coordinator is always stopped before this function exits,
-          on every exit path including an unexpected exception.
+          on every exit path including an unexpected exception or a pause return.
     """
     if not (0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100):
         raise ValueError(
             f"progress_base ({progress_base}) and progress_span ({progress_span}) "
             "must be non-negative and sum to <= 100"
         )
+    if pause_strategy not in ("block", "return"):
+        raise ValueError(f"pause_strategy must be 'block' or 'return', got {pause_strategy!r}")
     # The implementation engines (v2 team leads, quality gates, code review) are injected, not
     # imported: prefer the provider passed explicitly (the software-engineering team supplies one
     # per call) and fall back to the process-wide default the standalone service installs at
@@ -336,6 +366,13 @@ def run_coding_team_orchestrator(
         tech_lead = TechLeadAgent(llm)
 
         def _pause_cycle(questions: List[Any], source: str) -> "tuple[List[Dict[str, Any]], bool]":
+            """Thin binding of ``_run_pause_cycle`` to this job's context.
+
+            The return type annotation describes the ``pause_strategy="block"`` contract only:
+            under ``pause_strategy="return"`` (closed over above), ``_run_pause_cycle`` raises
+            ``pause_cycle._ActivityPauseSignal`` instead of returning — see that function's own
+            contract for the discriminating detail this annotation can't express.
+            """
             return _run_pause_cycle(
                 job_id,
                 questions,
@@ -343,6 +380,7 @@ def run_coding_team_orchestrator(
                 get_job_fn=_get_job,
                 update_fn=coord.update,
                 on_pause=on_pause,
+                pause_strategy=pause_strategy,
             )
 
         # Resume from a persisted snapshot (e.g. a Temporal retry of the same job_id) instead of
@@ -350,6 +388,38 @@ def run_coding_team_orchestrator(
         # task snapshot every round; the stacks are persisted alongside it on the fresh path below.
         existing = _get_job(job_id) or {}
         snapshot_tasks = existing.get("task_graph_snapshot") or []
+
+        # pause_strategy="return" re-entry check: tell a genuine resume (acknowledged_resume_token
+        # matches the persisted, unresolved pause) apart from a pre-work Temporal activity retry
+        # (token missing/stale — re-emit the exact same pause, do not re-run any work) apart from
+        # "no pause outstanding" (proceed normally below). Must run BEFORE _hydrate_resolved_from_record
+        # so a consumed pause's freshly appended submitted_answers are picked up by that call, and
+        # before any planning work so a retry never re-runs the Tech Lead LLM call. Block-mode callers
+        # never persist resume_token, so this is a no-op for them regardless.
+        if pause_strategy == "return":
+            reentry = _check_pending_pause_reentry(existing, acknowledged_resume_token)
+            if reentry is not None:
+                if not reentry["consume"]:
+                    return {
+                        "outcome": "paused",
+                        "job_id": job_id,
+                        "resume_token": reentry["resume_token"],
+                        "pause_kind": reentry["pause_kind"],
+                        "pause_context": reentry["pause_context"],
+                        "pending_questions": reentry["pending_questions"],
+                    }
+                # Consume: atomically clear the pause envelope (sole responsibility of the
+                # orchestrator, never the answers-submission route — see contract doc §1's
+                # ownership invariant) and continue normally; _hydrate_resolved_from_record below
+                # folds the already-appended submitted_answers into plan_input.resolved_questions.
+                coord.update(
+                    waiting_for_answers=False,
+                    pending_questions=[],
+                    resume_token=None,
+                    pause_kind=None,
+                    pause_context=None,
+                )
+                existing = _get_job(job_id) or existing
 
         # Human-in-the-loop decision gate (entry). Fold any answers persisted from a prior attempt,
         # then if open questions handed in still have no answer, pause for the user before doing any
@@ -564,6 +634,7 @@ def run_coding_team_orchestrator(
                     persist_fn=coord.persist_sync,
                     update_fn=coord.update,
                     pause_for_questions=_pause_cycle,
+                    pause_strategy=pause_strategy,
                 )
         finally:
             _flush_thinking(thinking, coord.update)
@@ -622,6 +693,13 @@ def run_coding_team_orchestrator(
             progress=100,
             current_activity=None,
         )
+    except _ActivityPauseSignal as sig:
+        # Raised only under pause_strategy="return" (see _run_pause_cycle) — a HITL gate paused
+        # somewhere in this call's stack (the entry-gate call above, _plan_with_hitl's loop, or a
+        # worker escalation deep inside swarm.run()). The pause envelope is already durably
+        # persisted to the job record by _run_pause_cycle before this was raised; this return
+        # value is a notification to the Temporal activity caller, not the source of truth.
+        return {"outcome": "paused", "job_id": job_id, **sig.payload}
     finally:
         # Guaranteed on every exit path (normal completion, every early return above, or an
         # unexpected exception): drains any pending write, then tears down the daemon thread so
@@ -668,6 +746,18 @@ class CodingTeamSwarm(
         - ``aborted`` starts ``False`` and is the sole flag that both stops the ``run()`` loop
           early and tells ``run_coding_team_orchestrator`` not to report the job as completed;
           once set it is never cleared within the instance's lifetime.
+        - ``_pause_strategy`` defaults to ``"block"`` in ``__init__`` and is set from ``run()``'s
+          own ``pause_strategy`` argument (same pattern as ``pause_for_questions``); in this
+          codebase a swarm instance is constructed fresh per orchestrator invocation and
+          ``run()`` is called at most once on it, so it is effectively constant for the
+          instance's lifetime even though nothing prevents a second ``run()`` call from
+          changing it. Read by ``_escalate_decision`` to decide whether the one-shot pause
+          guard below applies.
+        - ``_escalation_pause_committed`` is reset to ``False`` at the start of every round in
+          ``run()`` and is only ever set to ``True`` while ``_pause_lock`` is held; under
+          ``pause_strategy="return"`` it guarantees at most one worker-escalation pause is
+          published per round (see ``_escalate_decision``'s Concurrency note). It is a no-op
+          in block mode.
     """
 
     def __init__(
@@ -733,6 +823,21 @@ class CodingTeamSwarm(
         # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
         # the orchestrator not to overwrite the failure status with "completed".
         self.aborted = False
+        # pause_strategy="block"|"return" (set in run()); read by _escalate_decision to decide
+        # whether the one-shot "pause already committed this round" guard applies (see that
+        # guard's own comment — it must be a no-op in block mode to preserve today's behavior of
+        # every escalating worker getting its own full pause-and-resolve cycle in sequence). In
+        # "return" mode the guard causes a second concurrently-escalating worker to defer its
+        # task to next round (IN_PROGRESS, unescalated) rather than racing to publish a competing
+        # pause; in "block" mode it never fires (see run()'s docstring on _escalation_pause_committed).
+        self._pause_strategy = "block"
+        # One-shot, _pause_lock-protected guard: True once some worker has published this round's
+        # escalation pause under pause_strategy="return". In that mode _pause_lock releases almost
+        # immediately as the pause exception unwinds (unlike block mode, where it's held for the
+        # whole answer round-trip), so without this a second concurrently-escalating worker could
+        # publish a competing pause overwriting the first's job-record write. Reset at the top of
+        # every round in run().
+        self._escalation_pause_committed = False
         # Per-task Tech Lead review-verdict cache: task.id -> (cache_key, verdict), where cache_key
         # (see swarm_review._review_verdict_cache_key) covers every input run_code_review actually
         # sees (changes_summary/evidence, which embeds the branch diff, plus user_decisions) — not
@@ -769,25 +874,49 @@ class CodingTeamSwarm(
         persist_fn: Optional[Callable] = None,
         update_fn: Optional[Callable] = None,
         pause_for_questions: Optional[PauseCycle] = None,
+        pause_strategy: str = "block",
     ) -> None:
         """Main swarm loop: assign → implement + quality gates → review → merge.
 
         ``pause_for_questions`` is the bound HITL gate used to escalate a worker-raised decision to
         the user; when omitted, a worker that raises a decision fails its task closed (no silent
-        decide). The loop stops early if a pause ends without answers (``self.aborted``).
+        decide). ``pause_strategy`` mirrors ``run_coding_team_orchestrator``'s own parameter of the
+        same name — ``"block"`` (default) preserves today's behavior exactly; ``"return"`` makes a
+        worker-escalation pause raise instead of blocking (see
+        ``swarm_implementation._escalate_decision``) and additionally makes the implement-phase
+        ``parallel_map`` fan-out wait for every in-flight worker to finish before that exception is
+        allowed to propagate, so no sibling worker is left mutating the checkout/job-record
+        unsupervised after the activity has already reported "paused". The loop stops early if a
+        pause ends without answers (``self.aborted``) — in block mode only; in return mode, a
+        worker-escalation pause instead raises out of this method entirely (see Postconditions).
 
         Preconditions:
             - The swarm was constructed with a non-empty ``workers``/``agent_ids`` roster and a
               ``graph`` already seeded with the job's tasks (or empty, for a no-op run).
+            - ``pause_strategy`` is ``"block"`` or ``"return"``; violated by raising ``ValueError``.
         Postconditions:
             - Every worker's git worktree (see WorktreeManager) is removed before this method
-              returns, on every exit path (normal completion, cancellation, abort, a worktree-setup
-              failure, or an unexpected exception) — the worktree lifecycle is scoped exactly to
-              one run() call.
+              returns OR raises, on every exit path (normal completion, cancellation, abort, a
+              worktree-setup failure, an unexpected exception, or a ``pause_strategy="return"``
+              worker-escalation pause propagating out) — the worktree lifecycle is scoped exactly
+              to one ``run()`` call.
+        Outcomes:
+            - Returns ``None`` normally: the swarm completed, was cancelled, or aborted because a
+              block-mode pause ended without answers (``self.aborted``).
+            - Raises ``pause_cycle._ActivityPauseSignal`` when ``pause_strategy="return"`` and a
+              worker escalates a HITL decision (from ``swarm_implementation._escalate_decision``,
+              via the bound ``pause_for_questions`` cycle) — the pause envelope is already
+              durably persisted to the job record before this raises; the caller
+              (``run_coding_team_orchestrator``) catches it and returns the discriminated
+              ``{"outcome": "paused", ...}`` result. Worktree cleanup still runs first (see
+              Postconditions above).
         """
+        if pause_strategy not in ("block", "return"):
+            raise ValueError(f"pause_strategy must be 'block' or 'return', got {pause_strategy!r}")
         _update = update_fn or (lambda **kw: None)
         _persist = persist_fn or (lambda: None)
         self.pause_for_questions = pause_for_questions
+        self._pause_strategy = pause_strategy
 
         try:
             # Check before doing any work — including worktree setup, which is neither free
@@ -818,6 +947,10 @@ class CodingTeamSwarm(
                 if check_cancel and check_cancel():
                     _update(status=JobStatus.CANCELLED.value, status_text="Cancelled by user")
                     return
+                # Fresh per round: a round in which no one has escalated yet may freely publish
+                # one; see the flag's own comment in __init__ for why this only matters in
+                # pause_strategy="return".
+                self._escalation_pause_committed = False
 
                 # Coordinator: assign ready tasks to free workers
                 ready = self._find_ready_tasks()
@@ -850,6 +983,15 @@ class CodingTeamSwarm(
                         lambda swe: self._implement_and_verify(swe, _update, live_progress=False),
                         max_workers=_implementation_concurrency(),
                         skip_none=False,
+                        # Only under pause_strategy="return": a worker escalation raises
+                        # _ActivityPauseSignal instead of returning normally (see
+                        # swarm_implementation._escalate_decision), and parallel_map's default
+                        # fast-fail (wait_for_stragglers=False) would let that exception propagate
+                        # while sibling workers are still running unsupervised in the background —
+                        # exactly the "silent corruption" risk the pause is trying to report
+                        # cleanly. wait_for_stragglers=True makes every in-flight worker finish
+                        # first. Block mode never raises here, so this is a no-op there.
+                        wait_for_stragglers=(self._pause_strategy == "return"),
                     )
                 _persist()
                 # A worker escalation that ended without answers aborts the loop; the orchestrator
