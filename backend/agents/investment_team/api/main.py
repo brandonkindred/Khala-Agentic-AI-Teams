@@ -91,6 +91,9 @@ from investment_team.shared.job_store import (
     list_jobs as _bt_list_jobs,
 )
 from investment_team.shared.job_store import (
+    mark_all_running_jobs_failed as _bt_mark_all_running_jobs_failed,
+)
+from investment_team.shared.job_store import (
     update_job as _bt_update_job,
 )
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
@@ -173,13 +176,22 @@ def _startup() -> None:
 
 def _run_investment_service_shutdown() -> (
     None
-):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; the meaningful exercise needs a live server. The body is a defensive try/except around the event-bus reaper teardown.
-    """Stop the per-job event-bus reaper thread before process exit.
+):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; the meaningful exercise needs a live server. The body is a defensive try/except around the event-bus reaper teardown and the backtest-job failure sweep.
+    """Stop the per-job event-bus reaper and fail any still-running backtest jobs.
+
+    ``run_backtest``'s Temporal-unavailable fallback runs backtests on a
+    ``daemon=True`` thread, which is killed abruptly on process shutdown
+    without updating the job's status — leaving it stuck at RUNNING forever
+    after a restart. This sweep closes that gap: any job the store still
+    considers pending/running when the process exits could not have
+    finished, so it is marked FAILED here instead.
 
     Postconditions:
         - The event-bus reaper thread is stopped (idempotent; a missing or
-          already-stopped reaper is a no-op). Never raises — teardown failures are
-          logged and swallowed so they cannot abort process shutdown.
+          already-stopped reaper is a no-op). All jobs still pending/running
+          in the backtest job store are marked FAILED (best-effort; a store
+          error is logged and swallowed). Never raises — teardown failures
+          are logged and swallowed so they cannot abort process shutdown.
     """
     try:
         from investment_team.api.job_event_bus import shutdown as _shutdown_event_bus
@@ -187,6 +199,11 @@ def _run_investment_service_shutdown() -> (
         _shutdown_event_bus()
     except Exception:
         logger.debug("Investment event-bus reaper shutdown skipped", exc_info=True)
+
+    try:
+        _bt_mark_all_running_jobs_failed("server shutdown")
+    except Exception:
+        logger.debug("Investment backtest job failure sweep skipped", exc_info=True)
 
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
@@ -1195,24 +1212,19 @@ def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
     Preconditions:
         ``job_id`` identifies a job previously created by ``run_backtest``.
     Postconditions:
-        Raises 404 if no job with that ID exists. Otherwise returns
-        ``{"job_id", "status", "success", ...}``: ``success`` is True and
-        ``status`` is cancelled when the job was pending/running at the time
-        of the call; ``success`` is False (with an explanatory ``message``)
-        when the job was already in a terminal status and could not be
-        cancelled.
+        Raises 404 if no job with that ID exists. Raises 409 if the job
+        exists but is no longer pending/running (already completed, failed,
+        or cancelled) and so cannot be cancelled. Otherwise cancels the job
+        and returns ``{"job_id", "status": "cancelled", "success": True}``.
     """
     data = _bt_get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if _bt_cancel_job(job_id):
         return {"job_id": job_id, "status": _BT_JOB_STATUS_CANCELLED, "success": True}
-    return {
-        "job_id": job_id,
-        "status": data.get("status"),
-        "success": False,
-        "message": f"Cannot cancel job in status {data.get('status')}",
-    }
+    raise HTTPException(
+        status_code=409, detail=f"Cannot cancel job in status {data.get('status')}"
+    )
 
 
 @app.delete("/backtests/jobs/{job_id}")
@@ -1616,7 +1628,19 @@ class StrategyLabResultsResponse(BaseModel):
 
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
-    """Map LLM output to canonical labels used by the simulated ledger."""
+    """Map LLM output to canonical labels used by the simulated ledger.
+
+    Preconditions: ``raw`` may be any value, including ``None`` or an
+    unrecognized string — no type check or membership check required of
+    the caller.
+    Postconditions: returns one of the six canonical asset-class labels
+    (``stocks``, ``crypto``, ``forex``, ``options``, ``futures``,
+    ``commodities``). ``None``, empty, or unrecognized input defaults to
+    ``"stocks"``; recognized aliases (e.g. ``"equity"``, ``"fx"``,
+    ``"cryptocurrency"``) map to their canonical class. Never raises —
+    delegates entirely to :func:`normalize_asset_class`, which is total
+    over ``object``.
+    """
     return normalize_asset_class(raw)
 
 
@@ -2709,23 +2733,39 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         - None. ``running_only`` is an optional filter flag.
 
     Postconditions:
-        - Returns a read-only snapshot; never mutates ``_active_runs``.
         - Merges in-memory ``_active_runs`` with persisted job-service records,
           deduplicated by run/job id (in-memory entries take precedence).
+        - Side effect: for each in-memory run whose status is not in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, ``_reconcile_run_progress`` is
+          called, refreshing progress fields (and ``status``/``error`` on a
+          terminal transition) in place. See its docstring for details.
         - When ``running_only`` is ``True``, the result is filtered to
           ``status in ("running", "pending")``.
         - Entries are sorted by ``created_at`` descending.
 
     Raises:
-        - None. Job-service merge failures are caught and logged, and the
-          response falls back to the in-memory-only list; this endpoint always
-          returns 200.
+        - None. Job-service merge/reconciliation failures are caught and
+          logged, and the response falls back to the in-memory-only list;
+          this endpoint always returns 200.
     """
     jobs: List[InvestmentJobSummary] = []
 
-    # Single consistent snapshot of in-memory runs, taken under one lock hold.
-    # Deriving both the in-memory `jobs` entries and `in_memory_ids` from this
-    # same snapshot (rather than re-reading `_active_runs` under a second
+    # Reconcile: refresh progress (and, on a terminal transition, status/error)
+    # for every run we think is still active, before snapshotting. Mirrors the
+    # call convention in `list_strategy_lab_runs`: the id set is read under
+    # `_lock`, but `_reconcile_run_progress` itself must be called unlocked
+    # since it acquires `_lock` internally (it is not reentrant).
+    with _lock:
+        running_ids = [
+            rid for rid, r in _active_runs.items() if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
+        ]
+    for rid in running_ids:
+        _reconcile_run_progress(rid)
+
+    # Single consistent snapshot of in-memory runs, taken under one lock hold
+    # (after reconciliation, so it reflects any refreshed values). Deriving
+    # both the in-memory `jobs` entries and `in_memory_ids` from this same
+    # snapshot (rather than re-reading `_active_runs` under a second
     # `with _lock:`) prevents a run added/removed between two separate reads
     # from being omitted from or duplicated in the merged result.
     with _lock:
@@ -3577,9 +3617,15 @@ def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
 
     Does **not** remove advisor sessions, IPS, proposals, or strategies/backtests created via
     ``POST /strategies`` / ``POST /backtests`` outside the lab.
+
+    Runs the purge without holding ``_lock``: ``_purge_strategy_lab_job_storage``
+    only performs job-service I/O (bounded by its own internal deadline,
+    ``_PURGE_TIMEOUT_S``) and never reads or writes any state ``_lock``
+    protects (``_active_runs`` and friends). Holding ``_lock`` for that whole
+    I/O span would serialize every unrelated run/resume/restart/delete
+    request behind this purge for no reason.
     """
-    with _lock:
-        counts = _purge_strategy_lab_job_storage()
+    counts = _purge_strategy_lab_job_storage()
     return ClearStrategyLabStorageResponse(
         deleted_lab_records=counts["deleted_lab_records"],
         deleted_lab_strategies=counts["deleted_lab_strategies"],

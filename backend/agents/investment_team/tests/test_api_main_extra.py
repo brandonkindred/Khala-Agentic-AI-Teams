@@ -838,6 +838,51 @@ def test_clear_strategy_lab_storage_route(monkeypatch: pytest.MonkeyPatch, api_c
     assert body["deleted_paper_trading_sessions"] == 4
 
 
+def test_clear_strategy_lab_storage_does_not_block_on_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The purge runs without holding `_lock`, so a concurrent holder of `_lock`
+    (e.g. an in-flight resume/restart transition) doesn't block this call.
+
+    Calls the endpoint function directly (not through ``api_client``) and
+    bounds the wait with ``thread.join(timeout=...)``, mirroring the
+    established pattern in ``test_restart_strategy_lab_run_serializes_
+    concurrent_restarts_for_same_run_id`` — a real deadlock here would
+    otherwise hang the test indefinitely instead of failing cleanly.
+    """
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_purge_strategy_lab_job_storage",
+        lambda: {
+            "deleted_lab_records": 1,
+            "deleted_lab_strategies": 0,
+            "deleted_lab_backtests": 0,
+            "deleted_paper_trading_sessions": 0,
+        },
+    )
+
+    result: List[Any] = []
+
+    def _call() -> None:
+        try:
+            result.append(api_main.clear_strategy_lab_storage())
+        except BaseException as exc:  # pragma: no cover - surfaced via assertion below
+            result.append(exc)
+
+    api_main._lock.acquire()
+    try:
+        thread = threading.Thread(target=_call, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "clear_strategy_lab_storage blocked while _lock was held"
+    finally:
+        api_main._lock.release()
+
+    assert len(result) == 1
+    assert not isinstance(result[0], BaseException), result[0]
+    assert result[0].deleted_lab_records == 1
+
+
 # ---------------------------------------------------------------------------
 # delete_strategy_lab_record happy path
 # ---------------------------------------------------------------------------
@@ -1210,3 +1255,39 @@ def test_complete_advisor_session_builds_ips(api_client) -> None:
     body = done.json()
     assert body["user_id"] == "u-complete"
     assert body["ips"]["profile"]["user_id"] == "u-complete"
+
+
+# ---------------------------------------------------------------------------
+# Shutdown hook: event-bus reaper stop + backtest job failure sweep.
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    calls: List[str] = []
+    monkeypatch.setattr(
+        api_main, "_bt_mark_all_running_jobs_failed", lambda reason: calls.append(reason)
+    )
+    monkeypatch.setattr(
+        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
+    )
+
+    api_main._run_investment_service_shutdown()
+
+    assert calls == ["server shutdown"]
+
+
+def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising failure-sweep must NOT abort shutdown teardown."""
+    from investment_team.api import main as api_main
+
+    def _boom(reason: str) -> None:
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", _boom)
+    monkeypatch.setattr(
+        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
+    )
+
+    api_main._run_investment_service_shutdown()  # must not raise
