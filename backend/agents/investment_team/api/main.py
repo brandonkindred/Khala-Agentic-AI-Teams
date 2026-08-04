@@ -3589,14 +3589,19 @@ def _run_paper_trading_background(
         # return a terminal session with completed_at set. A violation here is
         # a bug in the callee, not something to coerce around — raising lets
         # the except block below turn it into a FAILED record, same as any
-        # other in-worker crash.
-        assert result_session.status in (
+        # other in-worker crash. Explicit raises (not ``assert``) so the guard
+        # stays active under ``python -O``/``-OO``.
+        if result_session.status not in (
             PaperTradingStatus.COMPLETED,
             PaperTradingStatus.FAILED,
-        ), f"PaperTradingAgent.run_session returned non-terminal status {result_session.status!r}"
-        assert result_session.completed_at, (
-            "PaperTradingAgent.run_session returned a session with no completed_at"
-        )
+        ):
+            raise ValueError(
+                f"PaperTradingAgent.run_session returned non-terminal status {result_session.status!r}"
+            )
+        if not result_session.completed_at:
+            raise ValueError(
+                "PaperTradingAgent.run_session returned a session with no completed_at"
+            )
         # Preserve the session_id and lab_record_id that the caller committed to.
         result_session.session_id = session_id
         result_session.lab_record_id = lab_record_id
@@ -4015,10 +4020,11 @@ def _run_live_paper_trading_background(
 def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
     """Idempotent user-stop for a live paper-trading session.
 
-    Sets the session's stop flag; the background worker terminates at the next
-    bar boundary. Returns the session's current state (still ``live`` /
-    ``warming_up`` if the worker hasn't yet noticed — clients poll
-    ``GET /strategy-lab/paper-trade/{session_id}`` for the final record).
+    Delivers a durable ``stop`` signal to the session's ``PaperTradingWorkflow``;
+    the activity's heartbeat trips the session's ``StopController`` so the live
+    loop ends at the next bar boundary. Returns the session's current state
+    (still ``live`` / ``warming_up`` if the worker hasn't yet noticed — clients
+    poll ``GET /strategy-lab/paper-trade/{session_id}`` for the final record).
     """
     if not _live_paper_enabled():
         raise HTTPException(
