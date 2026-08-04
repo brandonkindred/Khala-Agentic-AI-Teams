@@ -782,13 +782,7 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     if options and not any(opt.is_default for opt in options):
         best = max(options, key=lambda opt: opt.confidence)
         default_idx = options.index(best)
-        options[default_idx] = QuestionOption(
-            id=best.id,
-            label=best.label,
-            is_default=True,
-            rationale=best.rationale,
-            confidence=best.confidence,
-        )
+        options[default_idx] = best.model_copy(update={"is_default": True})
 
     raw_depends = q_data.get("depends_on")
     if isinstance(raw_depends, (list, tuple)):

@@ -908,6 +908,38 @@ def test_parse_open_question_preserves_option_order_when_marking_default() -> No
     assert [opt.is_default for opt in parsed.options] == [False, True, False]
 
 
+def test_parse_open_question_marking_default_preserves_every_other_field() -> None:
+    """Marking the highest-confidence option default must only flip is_default,
+    not silently drop other fields (a hazard of manually reconstructing the
+    option instead of copying it with a targeted update)."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-005",
+            "question_text": "Which option should be default?",
+            "options": [
+                {
+                    "id": "opt_a",
+                    "label": "A",
+                    "is_default": False,
+                    "rationale": "Industry standard for this use case.",
+                    "confidence": 0.95,
+                },
+            ],
+        },
+        index=0,
+    )
+
+    default_opt = parsed.options[0]
+    assert default_opt.is_default is True
+    assert default_opt.id == "opt_a"
+    assert default_opt.label == "A"
+    assert default_opt.rationale == "Industry standard for this use case."
+    assert default_opt.confidence == 0.95
+
+
 def test_parse_open_question_treats_explicit_null_optional_fields_as_empty() -> None:
     """Optional string fields with explicit JSON null must not stringify as 'None'."""
     llm = MagicMock()
