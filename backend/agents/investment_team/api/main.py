@@ -262,22 +262,25 @@ class _PersistentDict:
         self._entity_type = entity_type
 
     def __setitem__(self, key: str, value: Any) -> None:
-        """Persist ``value`` under ``key`` (create or update).
+        """Persist ``value`` under ``key`` (create or overwrite), atomically.
 
         Preconditions:
             - ``key`` is a ``str``.
         Postconditions:
             - Values with ``model_dump`` are stored via ``model_dump(mode="json")``;
               other values are stored as ``{"value": value}``.
-            - An existing job for ``key`` is updated; otherwise a new job is
-              created with status ``"stored"``.
+            - Always calls ``create_job(key, status="stored", data=data)`` --
+              no read-before-write. The job-service DB layer implements
+              ``create_job`` as ``INSERT ... ON CONFLICT (team, job_id) DO
+              UPDATE`` (see ``backend/job_service/db.py``), so this atomically
+              creates the job if absent or overwrites it in place if present,
+              in one statement. Concurrent writers for the same key can no
+              longer race on a stale "does it exist yet" read -- and unlike a
+              per-process ``threading.Lock``, this holds across every worker
+              process/replica, not just within one.
         """
         data = value.model_dump(mode="json") if hasattr(value, "model_dump") else {"value": value}
-        existing = self._client.get_job(key)
-        if existing:
-            self._client.update_job(key, data=data)
-        else:
-            self._client.create_job(key, status="stored", data=data)
+        self._client.create_job(key, status="stored", data=data)
 
     def __getitem__(self, key: str) -> Any:
         """Return the persisted data dict for ``key``.
