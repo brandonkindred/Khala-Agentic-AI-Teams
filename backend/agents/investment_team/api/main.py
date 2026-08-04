@@ -3603,9 +3603,15 @@ def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
 
     Does **not** remove advisor sessions, IPS, proposals, or strategies/backtests created via
     ``POST /strategies`` / ``POST /backtests`` outside the lab.
+
+    Runs the purge without holding ``_lock``: ``_purge_strategy_lab_job_storage``
+    only performs job-service I/O (bounded by its own internal deadline,
+    ``_PURGE_TIMEOUT_S``) and never reads or writes any state ``_lock``
+    protects (``_active_runs`` and friends). Holding ``_lock`` for that whole
+    I/O span would serialize every unrelated run/resume/restart/delete
+    request behind this purge for no reason.
     """
-    with _lock:
-        counts = _purge_strategy_lab_job_storage()
+    counts = _purge_strategy_lab_job_storage()
     return ClearStrategyLabStorageResponse(
         deleted_lab_records=counts["deleted_lab_records"],
         deleted_lab_strategies=counts["deleted_lab_strategies"],
