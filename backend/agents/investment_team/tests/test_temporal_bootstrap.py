@@ -311,7 +311,7 @@ def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_clien
     _enable_temporal(
         monkeypatch,
         "start_strategy_lab_batch_workflow",
-        lambda run_id, request, generation: started.append(run_id),
+        lambda run_id, request, generation: started.append((run_id, generation)),
         module=sl_sw,
     )
     thread_ctor = mock.Mock()
@@ -323,7 +323,10 @@ def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_clien
     )
 
     assert resp.status_code == 200
-    assert len(started) == 1 and started[0].startswith("run-")
+    assert len(started) == 1
+    run_id, generation = started[0]
+    assert run_id.startswith("run-")
+    assert generation  # a real fencing generation was threaded through, not None/0
     thread_ctor.assert_not_called()
 
 

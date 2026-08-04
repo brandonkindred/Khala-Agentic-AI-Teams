@@ -427,3 +427,13 @@ def test_module_exports_workflow_and_activities():
     assert wf.WORKFLOWS == [wf.StrategyLabCycleWorkflow, wf.StrategyLabBatchWorkflow]
     assert wf.TASK_QUEUE == "strategy-lab-queue"
     assert wf.ACTIVITIES == act.ACTIVITIES
+
+
+def test_default_fencing_generation_matches_run_state():
+    """wf._DEFAULT_FENCING_GENERATION is duplicated (not imported) from
+    run_state.DEFAULT_FENCING_GENERATION because this module runs inside the
+    temporalio workflow sandbox, which can't tolerate run_state's module-level
+    threading.Lock() side effect. Guard against the two silently drifting."""
+    from investment_team.strategy_lab import run_state
+
+    assert wf._DEFAULT_FENCING_GENERATION == run_state.DEFAULT_FENCING_GENERATION
