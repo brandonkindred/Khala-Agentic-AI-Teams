@@ -89,7 +89,8 @@ class AgenticTeamStore:
             when no such row exists, e.g. a concurrent caller already rolled
             it back.
         """
-        assert team_id, "team_id must be non-empty"
+        if not team_id:
+            raise ValueError("team_id must be non-empty")
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM agentic_teams WHERE team_id = %s", (team_id,))
             deleted = cur.rowcount > 0
