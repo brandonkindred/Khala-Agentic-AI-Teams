@@ -551,6 +551,18 @@ def test_all_excludes_tombstoned_id_even_though_store_row_still_there(
     assert "agent_studio.tombstoned-listing-1" not in ids
 
 
+def test_all_excludes_tombstoned_id_when_store_all_fails(fake_store: _FakeStore) -> None:
+    # Same guarantee as the happy path above, but when store.all() itself raises
+    # (e.g. Postgres outage) and _merged_manifests falls back to the local-only
+    # view — that fallback must apply _drop_tombstoned too.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("agent_studio.tombstoned-outage-1"))
+    reg.unregister("agent_studio.tombstoned-outage-1")
+    fake_store.raise_on = {"all"}
+    ids = {m.id for m in reg.all()}
+    assert "agent_studio.tombstoned-outage-1" not in ids
+
+
 def test_manifests_with_id_prefix_excludes_tombstoned_id(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
     reg.register(_manifest("agentic.team-z.tombstoned-1", team="agentic_team_provisioning"))
