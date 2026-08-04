@@ -182,18 +182,21 @@ def _placeholder_slug(hint: str, separator: str, max_length: int) -> str:
           whose digest portion is derived from ``hint``, so distinct hints
           produce distinct placeholders.
     """
-    digest = hashlib.md5(hint.encode()).hexdigest()[:8]
+    digest = hashlib.md5(hint.encode(), usedforsecurity=False).hexdigest()[:8]
     result = f"item{separator}{digest}"
     if len(result) > max_length:
         result = result[:max_length].rstrip(separator)
-    return result or f"item{separator}0"
+    # Fallback must also respect max_length: if separator shares a character
+    # with the literal "item" prefix, truncation above can strip result to "".
+    return result or f"item{separator}0"[:max_length]
 
 
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
     """Derive a short, identifier-friendly name from a free-form hint.
 
-    Strips common verbs, filler words, and type suffixes, then joins the
-    remaining words with ``separator`` and truncates to ``max_length``.
+    Strips common verbs, filler words, and type suffixes, keeps up to the
+    first three remaining words, joins them with ``separator``, and
+    truncates to ``max_length``.
 
     Preconditions:
         - ``hint`` is a string (may be empty; empty / all-stripped yields a
@@ -344,7 +347,13 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         ConvergeDecider, and the seven post-converge specialists
         (logo_specifier, color_system_builder, typography_builder,
         iconography_director, photography_video_director, voice_tone_builder,
-        design_system_codifier).
+        design_system_codifier). Specialist branches match on lowercased prompt
+        *substrings*, not factory names: logo_specifier matches "logo specifier"
+        (space), color_system_builder matches "color system builder", and
+        typography_builder matches "typography builder". The remaining four
+        specialists (iconography_director, photography_video_director,
+        voice_tone_builder, design_system_codifier) have no name-substring
+        anchor at all — they match on output-field names only.
 
     Ordering constraints (first three only — do not conflate them):
         1. CreativeDirector — ``mood_board_candidates`` + ``converge_decider``
@@ -353,7 +362,7 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         2. MoodBoardConceptualist — ``moodboard conceptualist`` + ``visual_direction``
            → ``MoodBoardConceptOutput``.
         3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
-           → ``CreativeRefinementOutput`` (separate from CreativeDirector).
+           → ``CreativeRefinementDecisionOutput`` (separate from CreativeDirector).
         Specialists are matched afterward by agent-specific prompt anchors.
     """
     if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
@@ -589,6 +598,447 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     return None
 
 
+def _branding_phase4_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Return a Phase 4 agent structured-output stub, or ``None`` if unmatched.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns a dict that validates against the matching Phase 4 agent
+        ``structured_output`` schema, or ``None`` when no Phase 4 agent matches.
+        Covers all four distinct Phase 4 schemas: ``brand_experience_principler``,
+        the six ``_make_channel_guide`` agents (all share ``ChannelGuidelineOutput``,
+        so one stub branch covers all six), ``brand_architecture_builder``, and
+        ``brand_in_action_illustrator``.
+    """
+    if "content_types" in system_lowered and "frequency_guidance" in system_lowered:
+        channel_match = re.search(r"channel:\s*'([a-z_]+)'", system_lowered)
+        channel_value = channel_match.group(1) if channel_match else "channel"
+        return {
+            "channel": channel_value,
+            "strategy": f"Lead with proof points tailored to the {channel_value} audience (dummy).",
+            "dos": [
+                "Match the channel's native format (dummy).",
+                "Lead with the strongest proof point (dummy).",
+                "Keep a consistent voice across posts (dummy).",
+            ],
+            "donts": [
+                "Don't repurpose copy verbatim from other channels (dummy).",
+                "Don't bury the call to action (dummy).",
+                "Don't ignore channel-specific limits (dummy).",
+            ],
+            "content_types": [
+                "Short-form updates (dummy).",
+                "Case study highlights (dummy).",
+                "Behind-the-scenes moments (dummy).",
+            ],
+            "frequency_guidance": "Publish on a predictable weekly cadence (dummy).",
+        }
+    if "brand_experience_principles" in system_lowered and "sensory_elements" in system_lowered:
+        return {
+            "brand_experience_principles": [
+                "Every touchpoint should feel intentional (dummy).",
+                "Consistency builds trust over time (dummy).",
+                "Speed should never break polish (dummy).",
+            ],
+            "signature_moments": [
+                "First login walkthrough (dummy).",
+                "Onboarding welcome email (dummy).",
+                "Renewal confirmation moment (dummy).",
+            ],
+            "sensory_elements": [
+                "Confident, low-pitched notification chime (dummy).",
+                "Matte, tactile packaging texture (dummy).",
+            ],
+        }
+    if "brand_architecture" in system_lowered and "terminology_glossary" in system_lowered:
+        return {
+            "brand_architecture": [
+                {
+                    "entity": "parent brand",
+                    "relationship": "Umbrella over all products (dummy).",
+                    "naming_convention": "Dummy Co. + [Product] (dummy).",
+                    "visual_treatment": "Shared wordmark, distinct accent color (dummy).",
+                }
+            ],
+            "naming_conventions": [
+                "Product names are one word (dummy).",
+                "Avoid internal codenames externally (dummy).",
+                "Always pair sub-brand with parent brand on first mention (dummy).",
+            ],
+            "terminology_glossary": {
+                "brand architecture": "How parent and sub-brands relate (dummy).",
+                "sub-brand": "A named offering under the parent brand (dummy).",
+                "wordmark": "The brand's logotype (dummy).",
+                "boilerplate": "Standard company description (dummy).",
+                "voice": "How the brand sounds in writing (dummy).",
+            },
+        }
+    if "correct_example" in system_lowered and "incorrect_example" in system_lowered:
+        return {
+            "brand_in_action": [
+                {
+                    "context": "Sales deck header (dummy).",
+                    "correct_example": "Uses the approved wordmark and tagline (dummy).",
+                    "incorrect_example": "Stretches the logo and adds a drop shadow (dummy).",
+                    "rationale": "Keeps the mark legible and on-brand (dummy).",
+                },
+                {
+                    "context": "Support email signature (dummy).",
+                    "correct_example": "Plain-text signature with the approved title (dummy).",
+                    "incorrect_example": "Adds an unapproved emoji and banner image (dummy).",
+                    "rationale": "Matches the calm, helpful support tone (dummy).",
+                },
+                {
+                    "context": "Social post header (dummy).",
+                    "correct_example": "Uses the brand accent color and approved crop (dummy).",
+                    "incorrect_example": "Uses an off-palette gradient background (dummy).",
+                    "rationale": "Preserves visual consistency across channels (dummy).",
+                },
+            ]
+        }
+    return None
+
+
+def _branding_phase5_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Return a Phase 5 agent structured-output stub, or ``None`` if unmatched.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns a dict that validates against the matching Phase 5 agent
+        ``structured_output`` schema, or ``None`` when no Phase 5 agent matches.
+        Covers all 7 Phase 5 factories: ``ownership_definer``,
+        ``approval_workflow_designer``, ``asset_wiki_planner``,
+        ``training_planner``, ``kpi_designer``, ``evolution_framer``, and
+        ``brand_rules_codifier``.
+    """
+    if "ownership_model" in system_lowered and "decision_authority" in system_lowered:
+        return {
+            "ownership_model": (
+                "The Brand Director owns final say on all brand decisions, with input from "
+                "Marketing and Product leads (dummy)."
+            ),
+            "decision_authority": {
+                "logo_changes": "Brand Director",
+                "campaign_messaging": "Marketing Lead",
+                "product_naming": "Product Lead",
+            },
+        }
+    if "approval_workflows" in system_lowered and "agency_briefing_protocols" in system_lowered:
+        return {
+            "approval_workflows": [
+                {
+                    "asset_type": "Logo usage",
+                    "approvers": ["Brand Director"],
+                    "sla": "2 business days",
+                    "escalation_path": "Escalate to CMO after 3 days (dummy).",
+                },
+                {
+                    "asset_type": "Campaign messaging",
+                    "approvers": ["Marketing Lead", "Brand Director"],
+                    "sla": "3 business days",
+                    "escalation_path": "Escalate to CMO after 5 days (dummy).",
+                },
+                {
+                    "asset_type": "Product naming",
+                    "approvers": ["Product Lead", "Brand Director"],
+                    "sla": "5 business days",
+                    "escalation_path": "Escalate to VP Product after 7 days (dummy).",
+                },
+            ],
+            "agency_briefing_protocols": [
+                "Share the brand guidelines doc before kickoff (dummy).",
+                "Require a written creative brief signed off by the Brand Director (dummy).",
+                "Hold a kickoff call covering voice, tone, and visual do's/don'ts (dummy).",
+            ],
+        }
+    if "asset_management_guidance" in system_lowered and "wiki_backlog" in system_lowered:
+        return {
+            "asset_management_guidance": [
+                "Store all approved assets in the central DAM (dummy).",
+                "Archive deprecated assets instead of deleting them (dummy).",
+                "Tag every asset with its approval date and owner (dummy).",
+            ],
+            "wiki_backlog": [
+                {
+                    "title": "Brand North Star",
+                    "summary": "One-page summary of purpose, vision, and positioning (dummy).",
+                    "owners": ["Brand Director"],
+                    "update_cadence": "quarterly",
+                },
+                {
+                    "title": "Voice Playbook",
+                    "summary": "Tone spectrum and language dos/don'ts (dummy).",
+                    "owners": ["Brand Lead"],
+                    "update_cadence": "quarterly",
+                },
+                {
+                    "title": "Design System",
+                    "summary": "Logo, color, typography, and component specs (dummy).",
+                    "owners": ["Design Lead"],
+                    "update_cadence": "monthly",
+                },
+                {
+                    "title": "Brand Review Intake",
+                    "summary": "How to submit assets for brand review (dummy).",
+                    "owners": ["Brand Director"],
+                    "update_cadence": "monthly",
+                },
+            ],
+        }
+    if "training_onboarding_plan" in system_lowered and "brand literacy" in system_lowered:
+        return {
+            "training_onboarding_plan": [
+                "New-hire brand orientation session in week one (dummy).",
+                "Quarterly brand refresher workshop (dummy).",
+                "Self-serve brand guideline course in the LMS (dummy).",
+                "Office-hours with the Brand team for open questions (dummy).",
+            ],
+        }
+    if "brand_health_kpis" in system_lowered and "tracking_methodology" in system_lowered:
+        return {
+            "brand_health_kpis": [
+                {
+                    "metric": "Brand awareness",
+                    "measurement_method": "Quarterly survey (dummy).",
+                    "target": "60% aided awareness",
+                    "review_frequency": "quarterly",
+                },
+                {
+                    "metric": "Message consistency score",
+                    "measurement_method": "Content audit against guidelines (dummy).",
+                    "target": "90% compliant",
+                    "review_frequency": "monthly",
+                },
+                {
+                    "metric": "NPS",
+                    "measurement_method": "Post-purchase survey (dummy).",
+                    "target": "+40",
+                    "review_frequency": "quarterly",
+                },
+                {
+                    "metric": "Guideline adoption rate",
+                    "measurement_method": "Percent of assets passing first-pass review (dummy).",
+                    "target": "85%",
+                    "review_frequency": "monthly",
+                },
+            ],
+            "tracking_methodology": (
+                "Combine quarterly surveys with ongoing content audits, reviewed in a monthly "
+                "brand health dashboard (dummy)."
+            ),
+            "review_trigger_points": [
+                "NPS drops more than 10 points quarter-over-quarter (dummy).",
+                "A rebrand or major product launch is planned (dummy).",
+                "Guideline adoption falls below 70% (dummy).",
+            ],
+        }
+    if "evolution_framework" in system_lowered and "version_control_cadence" in system_lowered:
+        return {
+            "evolution_framework": (
+                "The brand evolves incrementally through versioned updates, with major shifts "
+                "reserved for strategic inflection points (dummy)."
+            ),
+            "version_control_cadence": (
+                "Formal review every two quarters, with minor patches as needed (dummy)."
+            ),
+        }
+    if "brand_guidelines" in system_lowered and "governance rules" in system_lowered:
+        return {
+            "brand_guidelines": [
+                "Always use the approved wordmark; never recreate it (dummy).",
+                "Lead every message with the customer outcome, not the feature (dummy).",
+                "All external assets require Brand Director sign-off before release (dummy).",
+                "Store approved assets only in the central DAM (dummy).",
+                "Review the brand system every two quarters (dummy).",
+            ],
+        }
+    return None
+
+
+def _branding_phase2_narrative_base() -> Dict[str, Any]:
+    """Return the base brand-narrative fields shared by all Phase 2 stubs.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns a fresh dict with ``brand_story``, ``hero_narrative``, and
+        ``boilerplate_variants`` — the fields every Phase 2 branding stub
+        carries forward, regardless of how much further downstream fields
+        each specific agent also requires.
+    """
+    return {
+        "brand_story": (
+            "Dummy Co. began when product teams kept shipping off-brand experiences. "
+            "We built a system that keeps every touchpoint intentional (dummy)."
+        ),
+        "hero_narrative": "Brand experiences that ship with the product (dummy).",
+        "boilerplate_variants": [
+            "Dummy Co. helps teams ship on-brand (short).",
+            "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
+            (
+                "Dummy Co. partners with product organizations to make every customer "
+                "touchpoint feel cohesive and intentional (long)."
+            ),
+        ],
+    }
+
+
+def _branding_phase2_narrative_with_archetype() -> Dict[str, Any]:
+    """Return the Phase 2 base narrative plus ``brand_archetypes``.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns a fresh dict extending ``_branding_phase2_narrative_base()``
+        with a single-entry ``brand_archetypes`` list.
+    """
+    return {
+        **_branding_phase2_narrative_base(),
+        "brand_archetypes": [
+            {
+                "archetype": "The Creator",
+                "rationale": "Fits teams that invent cohesive experiences (dummy).",
+                "personality_traits": ["Inventive", "Hands-on", "Clear"],
+            }
+        ],
+    }
+
+
+def _branding_phase2_narrative_with_tagline() -> Dict[str, Any]:
+    """Return the Phase 2 narrative-with-archetype payload plus tagline fields.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns a fresh dict extending
+        ``_branding_phase2_narrative_with_archetype()`` with ``tagline``,
+        ``tagline_rationale``, and ``elevator_pitches``.
+    """
+    return {
+        **_branding_phase2_narrative_with_archetype(),
+        "tagline": "Ship brand with the product",
+        "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
+        "elevator_pitches": [
+            {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
+            {
+                "tier": "30-second",
+                "pitch": (
+                    "Dummy Co. helps product teams keep every touchpoint intentional "
+                    "without slowing delivery (dummy)."
+                ),
+            },
+            {
+                "tier": "2-minute",
+                "pitch": (
+                    "We turn brand strategy into a workable system so marketing, product, "
+                    "and design stay aligned as you ship (dummy)."
+                ),
+            },
+        ],
+    }
+
+
+def _branding_phase2_narrative_with_messaging() -> Dict[str, Any]:
+    """Return the Phase 2 narrative-with-tagline payload plus messaging fields.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns a fresh dict extending
+        ``_branding_phase2_narrative_with_tagline()`` with
+        ``messaging_framework`` and ``audience_message_maps``.
+    """
+    return {
+        **_branding_phase2_narrative_with_tagline(),
+        "messaging_framework": [
+            {
+                "pillar": "Cohesion",
+                "key_message": "Every touchpoint feels intentional (dummy).",
+                "proof_points": ["Shared tokens", "Review gates"],
+            },
+            {
+                "pillar": "Speed",
+                "key_message": "Brand work ships with the product (dummy).",
+                "proof_points": ["Weekly cadence", "Embedded strategists"],
+            },
+            {
+                "pillar": "Clarity",
+                "key_message": "Plain language over jargon (dummy).",
+                "proof_points": ["Short docs", "Approved phrases"],
+            },
+        ],
+        "audience_message_maps": [
+            {
+                "audience_segment": "Enterprise product leaders",
+                "primary_message": "Ship cohesive experiences faster (dummy).",
+                "supporting_messages": ["Reduce rework", "Align teams"],
+                "tone_adjustments": "Confident and concrete",
+            }
+        ],
+    }
+
+
+def _branding_phase2_narrative_with_personas() -> Dict[str, Any]:
+    """Return the Phase 2 narrative-with-messaging payload plus persona profiles.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns a fresh dict extending
+        ``_branding_phase2_narrative_with_messaging()`` with
+        ``persona_profiles``.
+    """
+    return {
+        **_branding_phase2_narrative_with_messaging(),
+        "persona_profiles": [
+            {
+                "name": "Alex Rivera",
+                "role": "VP Product",
+                "demographics": "Enterprise B2B, 10+ years experience (dummy).",
+                "psychographics": "Values clarity and speed (dummy).",
+                "goals": ["Ship cohesive UX", "Cut brand rework"],
+                "frustrations": ["Inconsistent messaging", "Slow agencies"],
+                "media_habits": ["Product communities", "LinkedIn"],
+                "jobs_to_be_done": ["Align brand and product delivery"],
+            },
+            {
+                "name": "Jordan Lee",
+                "role": "Brand Lead",
+                "demographics": "Mid-market org, design-background (dummy).",
+                "psychographics": "Protects voice without blocking shipping (dummy).",
+                "goals": ["Keep voice consistent", "Enable product teams"],
+                "frustrations": ["Ad-hoc copy", "No system of record"],
+                "media_habits": ["Design newsletters", "Team wikis"],
+                "jobs_to_be_done": ["Codify writing guidelines"],
+            },
+        ],
+    }
+
+
+def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Try Phase 3, then Phase 4, then Phase 5, branding structured-output stubs;
+    first match wins.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns the first non-``None`` result from
+        ``_branding_phase3_structured_stub`` / ``_branding_phase4_structured_stub`` /
+        ``_branding_phase5_structured_stub``, or ``None`` when none match. Kept as
+        its own helper (rather than inlined in ``complete_json``) so that call
+        site's branching stays unchanged and under the mccabe complexity ceiling.
+    """
+    stub = _branding_phase3_structured_stub(system_lowered)
+    if stub is not None:
+        return stub
+    stub = _branding_phase4_structured_stub(system_lowered)
+    if stub is not None:
+        return stub
+    return _branding_phase5_structured_stub(system_lowered)
+
+
 class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM.
 
@@ -717,7 +1167,11 @@ class DummyLLMClient(LLMClient):
             - Attaches Strands ``Model`` to the class MRO when importable.
         """
         ensure_strands_model_registration()
-        assert hasattr(output_model, "model_validate")
+        if not hasattr(output_model, "model_validate"):
+            raise TypeError(
+                f"DummyLLMClient.structured_output: output_model {output_model!r} "
+                "must be a Pydantic model with a model_validate class method"
+            )
         prompt_text = _aggregated_user_tool_text(prompt)
         data = self.complete_json(prompt_text, system_prompt=system_prompt)
         try:
@@ -832,7 +1286,7 @@ class DummyLLMClient(LLMClient):
             stripped = line.strip()
             if stripped.startswith("**Task:**"):
                 return stripped.replace("**Task:**", "").strip()
-        return hashlib.md5(prompt.encode()).hexdigest()[:12]
+        return hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
 
     def get_max_context_tokens(self) -> int:
         return 16384
@@ -1158,36 +1612,52 @@ class DummyLLMClient(LLMClient):
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "Code aligns with task requirements.",
             }
+        elif "security" in lowered and "vulnerabilities" in lowered:
+            # Kept ABOVE the code-review catch-all because the security agent's
+            # own prompt includes "Code to review" as a section header, which
+            # would otherwise match the catch-all first and return an empty
+            # generic review instead of the vulnerabilities-shaped stub.
+            return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
+        elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
+            # Kept ABOVE the code-review catch-all for the same reason as the
+            # security branch above: the accessibility agent's prompt also
+            # includes "Code to review" as a section header.
+            return {"issues": [], "summary": "No WCAG 2.2 accessibility issues found (dummy)"}
         elif (
-            "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
+            "code to review" in lowered
+            or "review this code" in lowered
+            or ("chunk" in lowered and "review" in lowered)
         ) and ("approved" not in lowered or len(lowered) > CODE_REVIEW_MIN_PROMPT_LENGTH):
             # Catch-all for code review / chunk review prompts routed through Strands.
             # Long prompts that mention "approved" still match: they carry full review
             # context, unlike short approval-only stubs below the length threshold.
+            # "chunk" alone is too broad (matches unrelated data-processing prompts);
+            # real chunk-review prompts always pair it with "review" (see
+            # CHUNK_REVIEW_NOTE / CODE_TO_REVIEW_HEADER in chunk_reviewer.py).
             return {
                 "approved": True,
                 "issues": [],
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "",
             }
-        elif "security" in lowered and "vulnerabilities" in lowered:
-            return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
-        elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
-            return {"issues": [], "summary": "No WCAG 2.2 accessibility issues found (dummy)"}
         elif "senior backend software engineer" in lowered:
             slug = (
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)
                 or f"module_{counter}"
             )
+            # task_hint is free-form prompt text and may contain quote characters
+            # or "\"\"\"" sequences; keep the docstring static and put the hint in
+            # a repr()-encoded comment so the generated source stays valid Python
+            # regardless of what it contains.
             return {
-                "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
+                "code": f'"""Backend module."""\n# Task: {task_hint!r}\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
                 "summary": f"Backend implementation for: {task_hint}",
                 "files": {
-                    f"app/routers/{slug}.py": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
-                    f"tests/test_{slug}.py": f'"""Tests for {task_hint}."""\ndef test_{slug}():\n    assert True\n',
+                    f"app/routers/{slug}.py": f'"""Backend module."""\n# Task: {task_hint!r}\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
+                    f"tests/test_{slug}.py": f'"""Tests."""\n# Task: {task_hint!r}\ndef test_{slug}():\n    assert True\n',
                 },
-                "tests": f'"""Tests for {task_hint}."""\ndef test_{slug}():\n    assert True\n',
+                "tests": f'"""Tests."""\n# Task: {task_hint!r}\ndef test_{slug}():\n    assert True\n',
                 "suggested_commit_message": f"feat(api): implement {slug.replace('_', ' ')}",
             }
         elif "senior frontend software engineer" in lowered:
@@ -1469,337 +1939,20 @@ class DummyLLMClient(LLMClient):
                 and "writing_guidelines" not in system_lowered
             )
         ):
-            return {
-                "brand_story": (
-                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
-                    "We built a system that keeps every touchpoint intentional (dummy)."
-                ),
-                "hero_narrative": "Brand experiences that ship with the product (dummy).",
-                "boilerplate_variants": [
-                    "Dummy Co. helps teams ship on-brand (short).",
-                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
-                    (
-                        "Dummy Co. partners with product organizations to make every customer "
-                        "touchpoint feel cohesive and intentional (long)."
-                    ),
-                ],
-            }
+            return _branding_phase2_narrative_base()
         elif (
             "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered
         ):
-            return {
-                **{
-                    "brand_story": (
-                        "Dummy Co. began when product teams kept shipping off-brand experiences. "
-                        "We built a system that keeps every touchpoint intentional (dummy)."
-                    ),
-                    "hero_narrative": "Brand experiences that ship with the product (dummy).",
-                    "boilerplate_variants": [
-                        "Dummy Co. helps teams ship on-brand (short).",
-                        "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
-                        (
-                            "Dummy Co. partners with product organizations to make every customer "
-                            "touchpoint feel cohesive and intentional (long)."
-                        ),
-                    ],
-                },
-                "brand_archetypes": [
-                    {
-                        "archetype": "The Creator",
-                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
-                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
-                    }
-                ],
-            }
+            return _branding_phase2_narrative_with_archetype()
         elif "tagline_rationale" in system_lowered and "elevator_pitches" in system_lowered:
-            return {
-                "brand_story": (
-                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
-                    "We built a system that keeps every touchpoint intentional (dummy)."
-                ),
-                "hero_narrative": "Brand experiences that ship with the product (dummy).",
-                "boilerplate_variants": [
-                    "Dummy Co. helps teams ship on-brand (short).",
-                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
-                    (
-                        "Dummy Co. partners with product organizations to make every customer "
-                        "touchpoint feel cohesive and intentional (long)."
-                    ),
-                ],
-                "brand_archetypes": [
-                    {
-                        "archetype": "The Creator",
-                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
-                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
-                    }
-                ],
-                "tagline": "Ship brand with the product",
-                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
-                "elevator_pitches": [
-                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
-                    {
-                        "tier": "30-second",
-                        "pitch": (
-                            "Dummy Co. helps product teams keep every touchpoint intentional "
-                            "without slowing delivery (dummy)."
-                        ),
-                    },
-                    {
-                        "tier": "2-minute",
-                        "pitch": (
-                            "We turn brand strategy into a workable system so marketing, product, "
-                            "and design stay aligned as you ship (dummy)."
-                        ),
-                    },
-                ],
-            }
+            return _branding_phase2_narrative_with_tagline()
         elif "messaging_framework" in system_lowered and "audience_message_maps" in system_lowered:
-            return {
-                "brand_story": (
-                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
-                    "We built a system that keeps every touchpoint intentional (dummy)."
-                ),
-                "hero_narrative": "Brand experiences that ship with the product (dummy).",
-                "boilerplate_variants": [
-                    "Dummy Co. helps teams ship on-brand (short).",
-                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
-                    (
-                        "Dummy Co. partners with product organizations to make every customer "
-                        "touchpoint feel cohesive and intentional (long)."
-                    ),
-                ],
-                "brand_archetypes": [
-                    {
-                        "archetype": "The Creator",
-                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
-                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
-                    }
-                ],
-                "tagline": "Ship brand with the product",
-                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
-                "elevator_pitches": [
-                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
-                    {
-                        "tier": "30-second",
-                        "pitch": (
-                            "Dummy Co. helps product teams keep every touchpoint intentional "
-                            "without slowing delivery (dummy)."
-                        ),
-                    },
-                    {
-                        "tier": "2-minute",
-                        "pitch": (
-                            "We turn brand strategy into a workable system so marketing, product, "
-                            "and design stay aligned as you ship (dummy)."
-                        ),
-                    },
-                ],
-                "messaging_framework": [
-                    {
-                        "pillar": "Cohesion",
-                        "key_message": "Every touchpoint feels intentional (dummy).",
-                        "proof_points": ["Shared tokens", "Review gates"],
-                    },
-                    {
-                        "pillar": "Speed",
-                        "key_message": "Brand work ships with the product (dummy).",
-                        "proof_points": ["Weekly cadence", "Embedded strategists"],
-                    },
-                    {
-                        "pillar": "Clarity",
-                        "key_message": "Plain language over jargon (dummy).",
-                        "proof_points": ["Short docs", "Approved phrases"],
-                    },
-                ],
-                "audience_message_maps": [
-                    {
-                        "audience_segment": "Enterprise product leaders",
-                        "primary_message": "Ship cohesive experiences faster (dummy).",
-                        "supporting_messages": ["Reduce rework", "Align teams"],
-                        "tone_adjustments": "Confident and concrete",
-                    }
-                ],
-            }
+            return _branding_phase2_narrative_with_messaging()
         elif "jobs_to_be_done" in system_lowered and "media_habits" in system_lowered:
-            return {
-                "brand_story": (
-                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
-                    "We built a system that keeps every touchpoint intentional (dummy)."
-                ),
-                "hero_narrative": "Brand experiences that ship with the product (dummy).",
-                "boilerplate_variants": [
-                    "Dummy Co. helps teams ship on-brand (short).",
-                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
-                    (
-                        "Dummy Co. partners with product organizations to make every customer "
-                        "touchpoint feel cohesive and intentional (long)."
-                    ),
-                ],
-                "brand_archetypes": [
-                    {
-                        "archetype": "The Creator",
-                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
-                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
-                    }
-                ],
-                "tagline": "Ship brand with the product",
-                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
-                "elevator_pitches": [
-                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
-                    {
-                        "tier": "30-second",
-                        "pitch": (
-                            "Dummy Co. helps product teams keep every touchpoint intentional "
-                            "without slowing delivery (dummy)."
-                        ),
-                    },
-                    {
-                        "tier": "2-minute",
-                        "pitch": (
-                            "We turn brand strategy into a workable system so marketing, product, "
-                            "and design stay aligned as you ship (dummy)."
-                        ),
-                    },
-                ],
-                "messaging_framework": [
-                    {
-                        "pillar": "Cohesion",
-                        "key_message": "Every touchpoint feels intentional (dummy).",
-                        "proof_points": ["Shared tokens", "Review gates"],
-                    },
-                    {
-                        "pillar": "Speed",
-                        "key_message": "Brand work ships with the product (dummy).",
-                        "proof_points": ["Weekly cadence", "Embedded strategists"],
-                    },
-                    {
-                        "pillar": "Clarity",
-                        "key_message": "Plain language over jargon (dummy).",
-                        "proof_points": ["Short docs", "Approved phrases"],
-                    },
-                ],
-                "audience_message_maps": [
-                    {
-                        "audience_segment": "Enterprise product leaders",
-                        "primary_message": "Ship cohesive experiences faster (dummy).",
-                        "supporting_messages": ["Reduce rework", "Align teams"],
-                        "tone_adjustments": "Confident and concrete",
-                    }
-                ],
-                "persona_profiles": [
-                    {
-                        "name": "Alex Rivera",
-                        "role": "VP Product",
-                        "demographics": "Enterprise B2B, 10+ years experience (dummy).",
-                        "psychographics": "Values clarity and speed (dummy).",
-                        "goals": ["Ship cohesive UX", "Cut brand rework"],
-                        "frustrations": ["Inconsistent messaging", "Slow agencies"],
-                        "media_habits": ["Product communities", "LinkedIn"],
-                        "jobs_to_be_done": ["Align brand and product delivery"],
-                    },
-                    {
-                        "name": "Jordan Lee",
-                        "role": "Brand Lead",
-                        "demographics": "Mid-market org, design-background (dummy).",
-                        "psychographics": "Protects voice without blocking shipping (dummy).",
-                        "goals": ["Keep voice consistent", "Enable product teams"],
-                        "frustrations": ["Ad-hoc copy", "No system of record"],
-                        "media_habits": ["Design newsletters", "Team wikis"],
-                        "jobs_to_be_done": ["Codify writing guidelines"],
-                    },
-                ],
-            }
+            return _branding_phase2_narrative_with_personas()
         elif "writing_guidelines" in system_lowered and "editorial_quality_bar" in system_lowered:
-            persona_blob = {
-                "brand_story": (
-                    "Dummy Co. began when product teams kept shipping off-brand experiences. "
-                    "We built a system that keeps every touchpoint intentional (dummy)."
-                ),
-                "hero_narrative": "Brand experiences that ship with the product (dummy).",
-                "boilerplate_variants": [
-                    "Dummy Co. helps teams ship on-brand (short).",
-                    "Dummy Co. turns brand strategy into consistent day-to-day execution (medium).",
-                    (
-                        "Dummy Co. partners with product organizations to make every customer "
-                        "touchpoint feel cohesive and intentional (long)."
-                    ),
-                ],
-                "brand_archetypes": [
-                    {
-                        "archetype": "The Creator",
-                        "rationale": "Fits teams that invent cohesive experiences (dummy).",
-                        "personality_traits": ["Inventive", "Hands-on", "Clear"],
-                    }
-                ],
-                "tagline": "Ship brand with the product",
-                "tagline_rationale": "Ties cohesion to shipping speed (dummy).",
-                "elevator_pitches": [
-                    {"tier": "5-second", "pitch": "On-brand experiences, shipped weekly (dummy)."},
-                    {
-                        "tier": "30-second",
-                        "pitch": (
-                            "Dummy Co. helps product teams keep every touchpoint intentional "
-                            "without slowing delivery (dummy)."
-                        ),
-                    },
-                    {
-                        "tier": "2-minute",
-                        "pitch": (
-                            "We turn brand strategy into a workable system so marketing, product, "
-                            "and design stay aligned as you ship (dummy)."
-                        ),
-                    },
-                ],
-                "messaging_framework": [
-                    {
-                        "pillar": "Cohesion",
-                        "key_message": "Every touchpoint feels intentional (dummy).",
-                        "proof_points": ["Shared tokens", "Review gates"],
-                    },
-                    {
-                        "pillar": "Speed",
-                        "key_message": "Brand work ships with the product (dummy).",
-                        "proof_points": ["Weekly cadence", "Embedded strategists"],
-                    },
-                    {
-                        "pillar": "Clarity",
-                        "key_message": "Plain language over jargon (dummy).",
-                        "proof_points": ["Short docs", "Approved phrases"],
-                    },
-                ],
-                "audience_message_maps": [
-                    {
-                        "audience_segment": "Enterprise product leaders",
-                        "primary_message": "Ship cohesive experiences faster (dummy).",
-                        "supporting_messages": ["Reduce rework", "Align teams"],
-                        "tone_adjustments": "Confident and concrete",
-                    }
-                ],
-                "persona_profiles": [
-                    {
-                        "name": "Alex Rivera",
-                        "role": "VP Product",
-                        "demographics": "Enterprise B2B, 10+ years experience (dummy).",
-                        "psychographics": "Values clarity and speed (dummy).",
-                        "goals": ["Ship cohesive UX", "Cut brand rework"],
-                        "frustrations": ["Inconsistent messaging", "Slow agencies"],
-                        "media_habits": ["Product communities", "LinkedIn"],
-                        "jobs_to_be_done": ["Align brand and product delivery"],
-                    },
-                    {
-                        "name": "Jordan Lee",
-                        "role": "Brand Lead",
-                        "demographics": "Mid-market org, design-background (dummy).",
-                        "psychographics": "Protects voice without blocking shipping (dummy).",
-                        "goals": ["Keep voice consistent", "Enable product teams"],
-                        "frustrations": ["Ad-hoc copy", "No system of record"],
-                        "media_habits": ["Design newsletters", "Team wikis"],
-                        "jobs_to_be_done": ["Codify writing guidelines"],
-                    },
-                ],
-            }
             return {
-                **persona_blob,
+                **_branding_phase2_narrative_with_personas(),
                 "writing_guidelines": {
                     "voice_principles": [
                         "Use a confident, human voice (dummy).",
@@ -1823,11 +1976,11 @@ class DummyLLMClient(LLMClient):
                     ],
                 },
             }
-        # Branding Phase 3 stubs live in ``_branding_phase3_structured_stub``
-        # so ``complete_json`` stays under the mccabe complexity ceiling.
-        # Only ``None`` means "unmatched" — an intentional empty dict must not
+        # Branding Phase 3 / Phase 4 / Phase 5 stubs live in ``_branding_structured_stub``
+        # so ``complete_json`` stays under the mccabe complexity ceiling. Only
+        # ``None`` means "unmatched" — an intentional empty dict must not
         # fall through to the generic default.
-        stub = _branding_phase3_structured_stub(system_lowered)
+        stub = _branding_structured_stub(system_lowered)
         return stub if stub is not None else {"output": "Dummy response", "status": "ok"}
 
     def chat(

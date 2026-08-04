@@ -121,30 +121,90 @@ def test_build_phase4_graph_is_a_graph() -> None:
 def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
     """Documented channel/description preconditions are enforced before construction."""
     from branding_team.agents import _make_channel_guide
+    from branding_team.models import ChannelGuidelineOutput
 
     with pytest.raises(AssertionError, match="channel must be a non-empty string"):
-        _make_channel_guide("", "some description")
+        _make_channel_guide("", "some description", ChannelGuidelineOutput)
     with pytest.raises(AssertionError, match="channel must be a non-empty string"):
-        _make_channel_guide("   ", "some description")
+        _make_channel_guide("   ", "some description", ChannelGuidelineOutput)
     with pytest.raises(AssertionError, match="description must be a non-empty string"):
-        _make_channel_guide("website", "")
+        _make_channel_guide("website", "", ChannelGuidelineOutput)
     with pytest.raises(AssertionError, match="description must be a non-empty string"):
-        _make_channel_guide("website", "   ")
+        _make_channel_guide("website", "   ", ChannelGuidelineOutput)
 
 
-def test_channel_guide_and_brand_experience_prompts_drop_redundant_json_reminder() -> None:
-    """The prompt's field list is the contract; ``output_mode="json"`` already forces the wire format."""
-    from branding_team.agents import _make_channel_guide, make_brand_experience_principler
+def test_make_channel_guide_rejects_non_basemodel_structured_output() -> None:
+    """Documented structured_output precondition is enforced before construction."""
+    from branding_team.agents import _make_channel_guide
 
-    channel_agent = _make_channel_guide("website", "a marketing site")
-    assert "Output valid JSON" not in channel_agent.system_prompt
+    with pytest.raises(
+        AssertionError, match="structured_output must be a Pydantic BaseModel subclass"
+    ):
+        _make_channel_guide("website", "a marketing site", dict)
 
-    principler_agent = make_brand_experience_principler()
-    assert "Output valid JSON" not in principler_agent.system_prompt
+
+def test_phase4_prompts_drop_redundant_json_reminder() -> None:
+    """The Pydantic structured-output schema is the contract; the redundant
+    "Output valid JSON" sentence is no longer needed for any of the 9 Phase 4
+    factories migrated to ``build_agent(structured_output=...)``.
+    """
+    from branding_team.agents import (
+        make_brand_architecture_builder,
+        make_brand_experience_principler,
+        make_brand_in_action_illustrator,
+        make_email_guide,
+        make_events_guide,
+        make_internal_guide,
+        make_partnerships_guide,
+        make_social_guide,
+        make_website_guide,
+    )
+
+    for factory in (
+        make_website_guide,
+        make_social_guide,
+        make_email_guide,
+        make_events_guide,
+        make_partnerships_guide,
+        make_internal_guide,
+        make_brand_architecture_builder,
+        make_brand_in_action_illustrator,
+        make_brand_experience_principler,
+    ):
+        agent = factory()
+        assert "Output valid JSON" not in agent.system_prompt, factory.__name__
 
 
 def test_build_phase5_graph_is_a_graph() -> None:
     assert isinstance(build_phase5_graph(), Graph)
+
+
+def test_phase5_prompts_drop_redundant_json_reminder() -> None:
+    """The Pydantic structured-output schema is the contract; the redundant
+    "Output valid JSON" sentence is no longer needed for any of the 7 Phase 5
+    factories migrated to ``build_agent(structured_output=...)``.
+    """
+    from branding_team.agents import (
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_brand_rules_codifier,
+        make_evolution_framer,
+        make_kpi_designer,
+        make_ownership_definer,
+        make_training_planner,
+    )
+
+    for factory in (
+        make_ownership_definer,
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_training_planner,
+        make_kpi_designer,
+        make_evolution_framer,
+        make_brand_rules_codifier,
+    ):
+        agent = factory()
+        assert "Output valid JSON" not in agent.system_prompt, factory.__name__
 
 
 # ---------------------------------------------------------------------------

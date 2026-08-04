@@ -229,32 +229,32 @@ def _load_run_from_job_service_strict(run_id: str) -> Optional[Dict[str, Any]]:
 def load_run_from_job_service(run_id: str) -> Optional[Dict[str, Any]]:
     """Try to load a run state from the job service (fallback when not in ``active_runs``).
 
-    Lenient: swallows ANY job-service read failure (transport error,
-    malformed response) and returns ``None`` -- indistinguishable from "no
-    durable state exists for this run". Safe for the best-effort/existence-
-    check callers that use it (``get_run_state``, in turn used by route
-    pre-lock existence checks and general state reads, all of which already
-    treat "no state" as an ordinary, expected outcome). NOT safe for a
-    caller that would otherwise silently treat a swallowed failure as "no
-    prior state" in a way that causes replayed work -- see
-    ``get_run_state_strict`` for that case.
-
     Preconditions:
-        - ``run_id`` names a strategy-lab run (may not exist).
+        - ``run_id`` may or may not name a persisted job.
+
     Postconditions:
-        - Returns the persisted state, or ``None`` when the job does not
-          exist OR the durable read failed for any reason. Never raises. A
-          swallowed durable-read failure (as opposed to a genuine "job not
-          found") is logged at warning level so operators can distinguish
-          the two cases in production, even though both return ``None`` here.
+        - Returns the normalized state dict (via ``normalize_persisted_job``)
+          when the job service holds a record for ``run_id``.
+        - Returns ``None`` when the job service reports no record — the job
+          service's ``GET /jobs/{team}/{job_id}`` always responds 200 with
+          ``job: null`` for a missing job (see ``backend/job_service/main.py``),
+          never an error, so this is the only "not found" outcome and it
+          never involves an exception.
+
+    Raises:
+        - Whatever ``get_lab_run_job_client().get_job(run_id)`` raises
+          (transport errors, HTTP error statuses, a ``RuntimeError`` for
+          unconfigured ``JOB_SERVICE_URL``, etc.) propagates uncaught. These
+          are genuine failures, not "run not found" — swallowing them here
+          previously made a transient job-service outage indistinguishable
+          from a nonexistent run, which corrupted resume behavior downstream
+          (``rehydrate_active_run_offset``/``get_resume_seed_counters`` would
+          silently default to 0/empty instead of the real persisted offset).
+          Now equivalent to ``_load_run_from_job_service_strict``; kept as a
+          separate public name since it predates that helper and is the
+          name every existing caller/test already uses.
     """
-    try:
-        return _load_run_from_job_service_strict(run_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to load run %s from job service; treating as missing: %s", run_id, exc
-        )
-        return None
+    return _load_run_from_job_service_strict(run_id)
 
 
 def get_run_state(run_id: str) -> Optional[Dict[str, Any]]:
@@ -268,11 +268,18 @@ def get_run_state(run_id: str) -> Optional[Dict[str, Any]]:
 
     Postconditions:
         - Returns the in-memory state when present, otherwise the persisted state
-          from the job store, or ``None`` when neither exists OR the durable
-          fallback read failed (``load_run_from_job_service`` swallows read
-          failures the same as a genuine "not found" -- see
-          ``get_run_state_strict`` for a variant that doesn't). Does not
-          mutate ``active_runs``.
+          from the job store, or ``None`` when neither exists. Does not mutate
+          ``active_runs``.
+
+    Raises:
+        - Whatever ``load_run_from_job_service`` raises when ``run_id`` is
+          absent from ``active_runs`` and the job-service lookup itself fails
+          (as opposed to genuinely finding no record) — see its docstring.
+          Not caught here so callers can fail closed rather than silently
+          treating a job-service outage as "no state." Now equivalent to
+          ``get_run_state_strict``; kept as a separate public name since it
+          predates that helper and is the name every existing caller/test
+          already uses.
     """
     with lock:
         state = active_runs.get(run_id)
@@ -301,10 +308,12 @@ def get_run_state_strict(run_id: str) -> Optional[Dict[str, Any]]:
           state from the job store, or ``None`` when neither exists (not a
           read failure). Raises whatever the underlying job-service client
           raises on a durable-read failure. Does not mutate ``active_runs``.
+          Delegates to ``get_run_state`` (now equivalent, since it also
+          fails closed) rather than duplicating its body, so a test/caller
+          that patches either ``get_run_state`` or ``load_run_from_job_service``
+          observes the same behavior through this name too.
     """
-    with lock:
-        state = active_runs.get(run_id)
-    return state if state is not None else _load_run_from_job_service_strict(run_id)
+    return get_run_state(run_id)
 
 
 def rehydrate_active_run_offset(run_id: str) -> int:
@@ -327,20 +336,21 @@ def rehydrate_active_run_offset(run_id: str) -> int:
         - ``active_runs[run_id]`` is populated when durable state exists.
         - Returns the number of contiguous completed cycles to pass as
           ``start_cycle_offset`` (``0`` for a fresh or restarted run, or when
-          no durable state is found). Uses ``get_run_state_strict`` (not the
-          lenient ``get_run_state``) deliberately: a transient job-service
-          outage must raise here rather than silently defaulting to ``0``,
-          which would otherwise cause a resumed run to replay
-          already-completed cycles with no error Temporal could retry on.
-          Raises whatever the underlying job-service client raises on a
-          durable-read failure; the caller's caller
-          (``_dispatch_strategy_lab_run``) maps that to a 503 + failed run.
-          Also raises ``ValueError`` when durable state exists but its
-          ``contiguous_cycles`` field is present and unparseable as an int
-          (e.g. a non-numeric string) — for the identical replay-risk reason
-          the durable-read failure above raises rather than defaulting: a
-          silent ``0`` here is indistinguishable from a genuinely fresh run
-          and would replay already-completed cycles.
+          no durable state is found). Uses ``get_run_state_strict`` (now
+          equivalent to ``get_run_state`` itself, which also fails closed --
+          see its docstring) deliberately: a transient job-service outage
+          must raise here rather than silently defaulting to ``0``, which
+          would otherwise cause a resumed run to replay already-completed
+          cycles with no error Temporal could retry on. Raises whatever the
+          underlying job-service client raises on a durable-read failure;
+          the caller's caller (``_dispatch_strategy_lab_run``) maps that to
+          a 503 + failed run. Also raises ``ValueError`` when durable state
+          exists but its ``contiguous_cycles`` field is present and
+          unparseable as an int (e.g. a non-numeric string) — for the
+          identical replay-risk reason the durable-read failure above
+          raises rather than defaulting: a silent ``0`` here is
+          indistinguishable from a genuinely fresh run and would replay
+          already-completed cycles.
     """
     state = get_run_state_strict(run_id)
     if state is not None:
@@ -380,8 +390,9 @@ def get_resume_seed_counters(run_id: str) -> Dict[str, Any]:
           post-resume records the next time the batch workflow persists it
           (``update_job`` replaces the field's value wholesale, it does not
           append). Read from ``get_run_state_strict(run_id)`` -- like
-          ``rehydrate_active_run_offset``, deliberately not the lenient
-          ``get_run_state``, so a transient job-service outage raises (mapped
+          ``rehydrate_active_run_offset``, deliberately (now equivalent to
+          ``get_run_state`` itself, which also fails closed -- see its
+          docstring), so a transient job-service outage raises (mapped
           by ``_dispatch_strategy_lab_run`` to a 503 + failed run) rather than
           being indistinguishable from a fresh/unknown run and silently
           resetting these counters to zero. A fresh/unknown run (no

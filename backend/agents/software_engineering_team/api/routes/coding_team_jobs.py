@@ -70,7 +70,14 @@ def post_run(request: RunRequest) -> RunResponse:
 
 @router.get("/status/{job_id}", response_model=StatusResponse)
 def get_status(job_id: str) -> StatusResponse:
-    """Get job status and task graph summary."""
+    """Get job status, task graph summary, and HITL pause state.
+
+    ``resume_token`` is populated only for a Temporal-native (``pause_strategy="return"``)
+    pause; it is the value a client must echo on ``SubmitAnswersRequest.resume_token`` when
+    it discovers the pause by polling this endpoint rather than from the original pause
+    notification. ``waiting_for_answers``/``pending_questions`` are set for either pause
+    mechanism (thread-mode or Temporal-native).
+    """
     data = _main.get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -96,6 +103,7 @@ def get_status(job_id: str) -> StatusResponse:
         review_summary=data.get("review_summary"),
         pending_questions=pending_questions_from_raw(data.get("pending_questions", [])),
         waiting_for_answers=bool(data.get("waiting_for_answers", False)),
+        resume_token=data.get("resume_token"),
         current_activity=data.get("current_activity")
         if isinstance(data.get("current_activity"), dict)
         else None,

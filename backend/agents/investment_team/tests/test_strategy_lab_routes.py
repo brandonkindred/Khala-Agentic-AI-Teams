@@ -213,11 +213,22 @@ def lab_job_client(monkeypatch: pytest.MonkeyPatch) -> "_StubLabClient":
     client and don't care about pre-seeded jobs. Tests that need specific
     persisted jobs should construct their own ``_StubLabClient(jobs=[...])``
     and patch it directly instead of using this fixture.
+
+    Also patches ``run_state.get_lab_run_job_client`` (the *same* stub
+    instance) -- ``run_state.load_run_from_job_service`` builds its own
+    client via that module-level function, independent of ``api.main``'s.
+    Since ``load_run_from_job_service`` no longer swallows job-service
+    errors (see run_state.py), leaving that source unpatched would make a
+    route that falls through to it (e.g. resume/restart's 404-when-missing
+    check) attempt a real network call and raise a connection error instead
+    of the empty-store 404 these tests intend to exercise.
     """
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
 
     stub = _StubLabClient()
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(_run_state, "get_lab_run_job_client", lambda: stub)
     return stub
 
 
@@ -1848,6 +1859,164 @@ def test_list_strategy_lab_jobs_merges_persisted_completed_runs(
     assert "persisted-c" not in ids2
 
 
+def test_list_strategy_lab_jobs_same_id_reconciles_terminal_and_dedupes(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """When the same run/job id exists in both stores, it appears exactly once,
+    reconciled against the persisted (terminal) job-service record.
+
+    Regression test for the double-lock TOCTOU bug (dedup by id, no
+    duplicates) combined with stale-progress reconciliation: the persisted
+    record for this id is terminal (``completed``), so
+    ``_reconcile_run_progress`` flips the in-memory entry's status/progress
+    to match it before the response is built -- the in-memory entry no
+    longer wins with stale values, but its identity still dedupes the merge
+    to a single row. ``current_phase`` is untouched because the persisted
+    stub's ``data`` has no ``current_cycle`` key (the field-presence guard
+    in ``_reconcile_run_progress`` leaves absent fields alone).
+    """
+    from investment_team.api import main as api_main
+
+    shared_id = "dup-run"
+    api_main._active_runs[shared_id] = {
+        "run_id": shared_id,
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+        "current_cycle": {"phase": "ideation", "strategy": {"hypothesis": "in-memory wins"}},
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": shared_id,
+                "status": "completed",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 4,
+                    "completed_cycles": 4,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == shared_id]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["status"] == "completed"
+    assert entry["progress"] == 100
+    assert entry["current_phase"] == "ideation"
+
+
+def test_list_strategy_lab_jobs_reconciles_progress_while_non_terminal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A non-terminal in-memory run's progress is refreshed from the job
+    service without its status being touched.
+
+    Regression test for issue #4299: unlike ``list_strategy_lab_runs``,
+    ``get_strategy_lab_run_status``, and the SSE snapshot, this endpoint
+    used to build summaries straight from ``_active_runs`` without ever
+    calling ``_reconcile_run_progress``, so dispatch-time progress counters
+    could go stale while a run was still active. Both records are
+    ``running`` here -- only ``completed_cycles`` differs -- confirming the
+    reconciliation is not gated on a terminal transition.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "prog-run"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": run_id,
+                "status": "running",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 4,
+                    "completed_cycles": 3,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == run_id]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["status"] == "running"
+    assert entry["progress"] == 75
+    assert api_main._active_runs[run_id]["completed_cycles"] == 3
+
+
+def test_list_strategy_lab_jobs_tolerates_malformed_current_cycle(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A non-dict ``current_cycle``/``strategy`` reconciled from job-service
+    data doesn't 500 the whole endpoint.
+
+    Regression test for issue #4261: ``current_cycle`` is never populated by
+    any first-party writer, but it does pass through an unvalidated
+    boundary -- ``_reconcile_run_progress`` copies it verbatim from the raw
+    job-service record's ``data`` into a live ``_active_runs`` entry with no
+    shape check. Simulate that by seeding a persisted record whose
+    ``current_cycle`` is a plain string (a stand-in for corrupted/foreign
+    data), and confirm the endpoint degrades to a fallback label/phase
+    instead of raising ``AttributeError``.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "malformed-run"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+        "current_cycle": None,
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": run_id,
+                "status": "running",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 4,
+                    "completed_cycles": 1,
+                    "current_cycle": "not-a-dict",
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == run_id]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["current_phase"] is None
+    assert entry["label"] == "Strategy batch (1/4)"
+
+
 def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -2133,6 +2302,29 @@ def test_delete_strategy_lab_run_success(monkeypatch: pytest.MonkeyPatch, api_cl
     assert resp.json()["deleted"] is True
     # And the in-memory entry was popped.
     assert "delete-me" not in api_main._active_runs
+
+
+def test_delete_strategy_lab_run_409_when_transition_lock_held(
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
+) -> None:
+    """A delete request for a run_id whose transition lock is already held is
+    rejected with 409 without touching the job service or _active_runs."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    run_id = "run-lock-held-delete"
+    api_main._active_runs[run_id] = {"run_id": run_id, "status": "completed"}
+
+    held_lock = _run_state.acquire_run_transition_lock(run_id)
+    assert held_lock is not None
+    try:
+        resp = api_client.delete(f"/strategy-lab/runs/{run_id}")
+        assert resp.status_code == 409
+        assert "Another transition" in resp.json()["detail"]
+        assert lab_job_client.deleted == []
+        assert run_id in api_main._active_runs
+    finally:
+        held_lock.release()
 
 
 # ---------------------------------------------------------------------------

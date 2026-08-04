@@ -11,7 +11,7 @@ Implements a 5-phase brand development framework:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -508,6 +508,26 @@ class ChannelGuideline(BaseModel):
     frequency_guidance: str = ""
 
 
+class ChannelGuidelineOutput(BaseModel):
+    """Agent-facing channel-guide schema for the six ``_make_channel_guide`` agents.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated cardinalities
+    ("3-4 best practices" / "3-4 things to avoid" / "3-5 recommended content
+    formats"). Field-for-field twin of ``ChannelGuideline``, which itself must
+    stay soft (all-default) since ``test_orchestrator.py`` and
+    ``ChannelActivationOutput.channel_guidelines`` construct/merge it with
+    only a subset of fields populated.
+    """
+
+    channel: str = Field(min_length=1)
+    strategy: str = Field(min_length=1)
+    dos: List[str] = Field(min_length=3, max_length=4)
+    donts: List[str] = Field(min_length=3, max_length=4)
+    content_types: List[str] = Field(min_length=3, max_length=5)
+    frequency_guidance: str = Field(min_length=1)
+
+
 class BrandArchitectureRule(BaseModel):
     """Brand architecture rules for multi-product organizations."""
 
@@ -526,6 +546,20 @@ class BrandInActionExample(BaseModel):
     rationale: str = ""
 
 
+class BrandInActionExampleOutput(BaseModel):
+    """Agent-facing brand-in-action example; requires non-empty fields.
+
+    Field-for-field twin of ``BrandInActionExample`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``).
+    """
+
+    context: str = Field(min_length=1)
+    correct_example: str = Field(min_length=1)
+    incorrect_example: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+
 class ChannelActivationOutput(BaseModel):
     """Phase 4 output: activation playbook for marketing execution."""
 
@@ -537,6 +571,62 @@ class ChannelActivationOutput(BaseModel):
     naming_conventions: List[str] = Field(default_factory=list)
     terminology_glossary: Dict[str, str] = Field(default_factory=dict)
     brand_in_action: List[BrandInActionExample] = Field(default_factory=list)
+
+
+class BrandExperiencePrinciplesOutput(BaseModel):
+    """Agent-facing brand_experience_principler schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated cardinalities.
+    """
+
+    brand_experience_principles: List[str] = Field(min_length=3, max_length=5)
+    signature_moments: List[str] = Field(min_length=3, max_length=5)
+    sensory_elements: List[str] = Field(min_length=2, max_length=4)
+
+
+class BrandArchitectureRuleOutput(BaseModel):
+    """Agent-facing brand architecture rule; requires non-empty fields.
+
+    Field-for-field twin of ``BrandArchitectureRule`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``)
+    and this file's own ``BrandInActionExampleOutput``/``BrandInActionExample``
+    split — ``BrandArchitectureRule`` itself must stay soft (all-default) since
+    it also backs ``ChannelActivationOutput.brand_architecture``'s merge target.
+    """
+
+    entity: str = Field(min_length=1)
+    relationship: str = Field(min_length=1)
+    naming_convention: str = Field(min_length=1)
+    visual_treatment: str = Field(min_length=1)
+
+
+class BrandArchitectureOutput(BaseModel):
+    """Agent-facing brand_architecture_builder schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    Uses ``BrandArchitectureRuleOutput`` (not the soft ``BrandArchitectureRule``)
+    so each rule's fields are individually required — a fully populated
+    ``brand_architecture`` list of blank-field rules must fail validation.
+    """
+
+    brand_architecture: List[BrandArchitectureRuleOutput] = Field(min_length=1)
+    naming_conventions: List[str] = Field(min_length=3, max_length=5)
+    terminology_glossary: Dict[str, str] = Field(min_length=5, max_length=10)
+
+
+class BrandInActionOutput(BaseModel):
+    """Agent-facing brand_in_action_illustrator schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 applied examples".
+    Uses ``BrandInActionExampleOutput`` (not the soft ``BrandInActionExample``)
+    so each example's fields are individually required — a fully populated
+    list of blank-field examples must fail validation.
+    """
+
+    brand_in_action: List[BrandInActionExampleOutput] = Field(min_length=3, max_length=5)
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +670,139 @@ class GovernanceOutput(BaseModel):
     brand_guidelines: List[str] = Field(default_factory=list)
     # Knowledge-base backlog (from asset_wiki_planner)
     wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
+
+
+# Individual list/dict items, not just container length, must be non-empty —
+# a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
+# strings, undermining every "requires non-empty content" docstring below.
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+
+
+class ApprovalWorkflowOutput(BaseModel):
+    """Agent-facing approval workflow; requires non-empty fields.
+
+    Field-for-field twin of ``ApprovalWorkflow`` with required content,
+    matching the Phase 3/4 nested-output-model pattern — ``ApprovalWorkflow``
+    itself must stay soft (all-default) since it also backs
+    ``GovernanceOutput.approval_workflows``'s merge target.
+    """
+
+    asset_type: str = Field(min_length=1)
+    approvers: List[NonEmptyStr] = Field(min_length=1)
+    sla: str = Field(min_length=1)
+    escalation_path: str = Field(min_length=1)
+
+
+class WikiEntryOutput(BaseModel):
+    """Agent-facing wiki entry; requires non-empty fields.
+
+    Field-for-field twin of ``WikiEntry`` with required content —
+    ``WikiEntry`` itself must stay soft (``title``/``summary`` unconstrained,
+    ``owners``/``update_cadence`` defaulted) since it also backs
+    ``GovernanceOutput.wiki_backlog``'s merge target.
+    """
+
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    owners: List[NonEmptyStr] = Field(min_length=1)
+    update_cadence: str = Field(min_length=1)
+
+
+class BrandHealthKPIOutput(BaseModel):
+    """Agent-facing brand health KPI; requires non-empty fields.
+
+    Field-for-field twin of ``BrandHealthKPI`` with required content —
+    ``BrandHealthKPI`` itself must stay soft (all-default) since it also
+    backs ``GovernanceOutput.brand_health_kpis``'s merge target.
+    """
+
+    metric: str = Field(min_length=1)
+    measurement_method: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    review_frequency: str = Field(min_length=1)
+
+
+class OwnershipOutput(BaseModel):
+    """Agent-facing ownership_definer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
+
+    ownership_model: str = Field(min_length=1)
+    decision_authority: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=1)
+
+
+class ApprovalWorkflowsOutput(BaseModel):
+    """Agent-facing approval_workflow_designer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 workflows"
+    / "3-5 protocols". Uses ``ApprovalWorkflowOutput`` (not the soft
+    ``ApprovalWorkflow``) so each workflow's fields are individually
+    required.
+    """
+
+    approval_workflows: List[ApprovalWorkflowOutput] = Field(min_length=3, max_length=5)
+    agency_briefing_protocols: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+
+
+class AssetWikiOutput(BaseModel):
+    """Agent-facing asset_wiki_planner schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 guidelines"
+    / "4-6 wiki entries". Uses ``WikiEntryOutput`` (not the soft
+    ``WikiEntry``) so each entry's fields are individually required.
+    """
+
+    asset_management_guidance: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    wiki_backlog: List[WikiEntryOutput] = Field(min_length=4, max_length=6)
+
+
+class TrainingOnboardingOutput(BaseModel):
+    """Agent-facing training_planner schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "4-6 training
+    initiatives".
+    """
+
+    training_onboarding_plan: List[NonEmptyStr] = Field(min_length=4, max_length=6)
+
+
+class BrandHealthKPIsOutput(BaseModel):
+    """Agent-facing kpi_designer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "4-6 KPIs" /
+    "3-5 events". Uses ``BrandHealthKPIOutput`` (not the soft
+    ``BrandHealthKPI``) so each KPI's fields are individually required.
+    """
+
+    brand_health_kpis: List[BrandHealthKPIOutput] = Field(min_length=4, max_length=6)
+    tracking_methodology: str = Field(min_length=1)
+    review_trigger_points: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+
+
+class EvolutionFrameworkOutput(BaseModel):
+    """Agent-facing evolution_framer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
+
+    evolution_framework: str = Field(min_length=1)
+    version_control_cadence: str = Field(min_length=1)
+
+
+class BrandGuidelinesOutput(BaseModel):
+    """Agent-facing brand_rules_codifier schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "5-8 governance
+    rules".
+    """
+
+    brand_guidelines: List[NonEmptyStr] = Field(min_length=5, max_length=8)
 
 
 # ---------------------------------------------------------------------------

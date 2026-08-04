@@ -764,6 +764,39 @@ def test_rehydrate_active_run_offset_defaults_to_zero(monkeypatch) -> None:
     assert run_state.rehydrate_active_run_offset("missing") == 0
 
 
+def test_rehydrate_active_run_offset_propagates_job_service_error(monkeypatch) -> None:
+    """A genuine job-service failure during resume must fail closed, not
+    silently resolve the offset to 0 as if the run never existed -- that
+    would replay every already-completed cycle."""
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+
+    def _broken(rid):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", _broken)
+
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.rehydrate_active_run_offset("run-broken")
+
+
+def test_get_resume_seed_counters_propagates_job_service_error(monkeypatch) -> None:
+    """Mirrors the offset case: a job-service failure must not be seeded as
+    zero/empty resume counters."""
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+
+    def _broken(rid):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", _broken)
+
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_resume_seed_counters("run-broken")
+
+
 def test_get_resume_seed_counters_defaults_for_unknown_run(monkeypatch) -> None:
     from investment_team.strategy_lab import run_state
 

@@ -771,16 +771,22 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     except Exception:
         logger.warning("Agent Console run pruner failed to start", exc_info=True)
 
-    # 6. Start the Agent Cognition knowledge-graph sync worker. It self-disables
-    #    (returns without looping) when NEO4J_BOLT_URL / POSTGRES_HOST are unset.
-    graph_sync_task: asyncio.Task | None = None
-    try:
-        from agent_cognition.graph.sync_worker import run_graph_sync
+    # 6. Start the Agent Cognition knowledge-graph sync worker, gated on
+    #    NEO4J_BOLT_URL so the module (and the graphiti_core import chain it
+    #    eventually reaches) is never pulled into sys.modules when the
+    #    knowledge-graph layer is unused. Once started, the worker also
+    #    self-disables (returns without looping) when POSTGRES_HOST is unset.
+    from shared.neo4j import is_neo4j_enabled
 
-        graph_sync_task = asyncio.create_task(run_graph_sync())
-        logger.info("Started Agent Cognition graph sync worker")
-    except Exception:
-        logger.warning("Agent Cognition graph sync worker failed to start", exc_info=True)
+    graph_sync_task: asyncio.Task | None = None
+    if is_neo4j_enabled():
+        try:
+            from agent_cognition.graph.sync_worker import run_graph_sync
+
+            graph_sync_task = asyncio.create_task(run_graph_sync())
+            logger.info("Started Agent Cognition graph sync worker")
+        except Exception:
+            logger.warning("Agent Cognition graph sync worker failed to start", exc_info=True)
 
     # 7. Start the Agent Cognition scheduler (rollups → reflection → pruning). It
     #    self-disables when POSTGRES_HOST is unset and never activates a rule.

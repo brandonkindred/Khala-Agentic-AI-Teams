@@ -37,13 +37,13 @@ class RunRequest(BaseModel):
         default=None,
         description=(
             "Set by CodingTeamWorkflow (system_design/hitl_pause_resume_contract.md "
-            "§2/§3) on the invocation resolving a pause, naming the resume_token of "
-            "the persisted pause it resolves. Declared here so Pydantic's default "
-            "ignore-extra-keys behavior does not silently drop it; not yet consumed "
-            "by run_pipeline_activity or the orchestrator re-entry check — that "
-            "requires the orchestrator to first mint and persist a resume_token per "
-            "pause, which is separate, not-yet-implemented activity-side work "
-            "(contract §1, sibling issues #3987/#3988)."
+            "§2/§3) on the invocation that resolves a pause, naming the resume_token "
+            "of the persisted pause it resolves. run_pipeline_activity forwards this "
+            "to run_orchestrator_wired, whose orchestrator re-entry check "
+            "(pause_cycle._check_pending_pause_reentry) consumes the matching "
+            "persisted pause envelope instead of re-running planning work; a "
+            "missing/stale value re-emits that pause unchanged (a pre-work activity "
+            "retry)."
         ),
     )
 
@@ -89,6 +89,13 @@ class StatusResponse(BaseModel):
     waiting_for_answers: bool = Field(
         default=False,
         description="True when the job is paused waiting for the user to answer pending questions.",
+    )
+    resume_token: Optional[str] = Field(
+        default=None,
+        description='Set only for a Temporal-native (pause_strategy="return") pause; the client '
+        "must echo this back on SubmitAnswersRequest.resume_token. A client discovering the "
+        "pause via polling status (rather than the original pause notification) has no other "
+        "way to obtain it.",
     )
     current_activity: Optional[Dict[str, Any]] = Field(
         default=None,

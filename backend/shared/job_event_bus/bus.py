@@ -39,7 +39,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 __all__ = [
     "Subscription",
@@ -49,7 +49,49 @@ __all__ = [
     "publish",
     "cleanup_job",
     "reap_once",
+    "FloatSource",
+    "IntSource",
+    "resolve_float",
+    "resolve_int",
 ]
+
+# Shared by every reap_once scheduler (ReaperHandle, schedule_periodic_reap):
+# a plain value, or a zero-arg callable evaluated on each pass so a caller can
+# retune TTL/cap live (e.g. a lambda closing over a module global a test
+# monkeypatches, honoured by the very next reap).
+FloatSource = Union[float, Callable[[], float]]
+IntSource = Union[int, Callable[[], int]]
+
+
+def resolve_float(src: FloatSource) -> float:
+    """Resolve a float source to a float value.
+
+    If *src* is callable, it is invoked with no arguments and its result is
+    converted to float. Otherwise *src* itself is converted to float. This
+    allows TTL/max-job limits to be retuned live between reaper passes.
+
+    Preconditions:
+        - ``src`` is either a float or a zero-argument callable returning a
+          value convertible to float.
+    Postconditions:
+        - Returns the resolved float value.
+    """
+    return float(src() if callable(src) else src)
+
+
+def resolve_int(src: IntSource) -> int:
+    """Resolve an int source to an int value.
+
+    If *src* is callable, it is invoked with no arguments and its result is
+    converted to int. Otherwise *src* itself is converted to int.
+
+    Preconditions:
+        - ``src`` is either an int or a zero-argument callable returning a
+          value convertible to int.
+    Postconditions:
+        - Returns the resolved int value.
+    """
+    return int(src() if callable(src) else src)
 
 
 @dataclass

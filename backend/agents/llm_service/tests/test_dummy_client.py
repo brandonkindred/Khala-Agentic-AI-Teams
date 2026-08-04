@@ -2,9 +2,9 @@
 
 Covers ``complete`` / ``complete_json`` / ``complete_text``, ``get_max_context_tokens``,
 async ``structured_output`` (including multi-turn routing), ``stream`` with
-``system_prompt_content`` (branding Phase 1 anchors and empty-list overrides),
-and helpers (``_extract_name_from_hint``, strip-filter frozensets,
-``_content_to_text`` / ``_last_user_text`` / ``_aggregated_user_tool_text``).
+``system_prompt_content`` (branding Phase 1 anchors, Phase 2 narrative stubs, and
+empty-list overrides), and helpers (``_extract_name_from_hint``, strip-filter
+frozensets, ``_content_to_text`` / ``_last_user_text`` / ``_aggregated_user_tool_text``).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from llm_service.clients.dummy import (
     _content_to_text,
     _extract_name_from_hint,
     _last_user_text,
+    _placeholder_slug,
 )
 
 
@@ -246,6 +247,24 @@ def test_extract_name_from_hint_all_stripped_returns_unique_placeholder() -> Non
     assert re.fullmatch(r"item_[0-9a-f]+", b)
 
 
+def test_placeholder_slug_never_exceeds_max_length() -> None:
+    """Fallback must respect max_length even when truncation strips result to ""."""
+    assert _placeholder_slug("some hint", "-", 25) == "item-3082b299"
+    slug = _placeholder_slug("x", "i", 1)
+    assert slug
+    assert len(slug) <= 1
+
+
+@pytest.mark.asyncio
+async def test_structured_output_rejects_non_pydantic_output_model() -> None:
+    """output_model without model_validate must raise TypeError, not AssertionError."""
+    c = DummyLLMClient()
+    prompt = [{"role": "user", "content": [{"text": "hello"}]}]
+    with pytest.raises(TypeError, match="model_validate"):
+        async for _ in c.structured_output(object, prompt):
+            pass
+
+
 def test_strip_filter_constants_are_frozensets() -> None:
     assert isinstance(_STRIP_VERBS, frozenset)
     assert isinstance(_STRIP_FILLERS, frozenset)
@@ -343,5 +362,183 @@ def test_code_review_catch_all_matches_long_prompt_with_approved() -> None:
     assert "issues" in j
 
 
+def test_code_review_catch_all_does_not_match_unrelated_chunk_prompt() -> None:
+    """A long prompt about a "chunk" of data (not a code review) must not be
+    misclassified as a code-review response by the bare "chunk" heuristic.
+    """
+    c = DummyLLMClient()
+    padding = "x" * (CODE_REVIEW_MIN_PROMPT_LENGTH + 50)
+    prompt = f"Please process this chunk of user data and summarize it. {padding}"
+    assert len(prompt.lower()) > CODE_REVIEW_MIN_PROMPT_LENGTH
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j.get("summary") != "Code review passed (dummy)."
+
+
 def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
+
+
+_BRANDING_PHASE2_SYSTEM_PROMPTS = [
+    (
+        "brand_story and boilerplate_variants for the brand story specialist",
+        {"brand_story", "hero_narrative", "boilerplate_variants"},
+    ),
+    (
+        "personality_traits — carry forward brand_story for the archetype specialist",
+        {"brand_story", "hero_narrative", "boilerplate_variants", "brand_archetypes"},
+    ),
+    (
+        "tagline_rationale and elevator_pitches for the tagline specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+        },
+    ),
+    (
+        "messaging_framework and audience_message_maps for the messaging specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+            "messaging_framework",
+            "audience_message_maps",
+        },
+    ),
+    (
+        "jobs_to_be_done and media_habits for the persona specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+            "messaging_framework",
+            "audience_message_maps",
+            "persona_profiles",
+        },
+    ),
+    (
+        "writing_guidelines and editorial_quality_bar for the voice specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+            "messaging_framework",
+            "audience_message_maps",
+            "persona_profiles",
+            "writing_guidelines",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("system_prompt,expected_keys", _BRANDING_PHASE2_SYSTEM_PROMPTS)
+def test_branding_phase2_branches_return_cumulative_keys(
+    system_prompt: str, expected_keys: set[str]
+) -> None:
+    """Each Phase 2 branding specialist must carry forward exactly the keys
+    its predecessors introduced, plus its own — pinning the incremental
+    ``_branding_phase2_narrative_*`` helper composition against silent
+    branch desync."""
+    c = DummyLLMClient()
+    j = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    assert set(j.keys()) == expected_keys
+
+
+def test_branding_phase2_branch_results_do_not_share_mutable_state() -> None:
+    """Each ``complete_json`` call must hand back independent objects so
+    mutating one response's nested lists/dicts can't leak into another call's
+    response."""
+    c = DummyLLMClient()
+    system_prompt = _BRANDING_PHASE2_SYSTEM_PROMPTS[0][0]
+    first = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    second = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    first["boilerplate_variants"].append("mutated")
+    assert "mutated" not in second["boilerplate_variants"]
+
+
+def test_senior_backend_branch_generates_valid_python_for_quote_laden_hint() -> None:
+    """A task_hint with quotes/triple-quotes must not corrupt the generated source."""
+    c = DummyLLMClient()
+    hint = '''Build user's "profile" module """ oops'''
+    prompt = f"You are a senior backend software engineer. Task: {hint}"
+    j = c.complete_json(prompt, temperature=0.0)
+    compile(j["code"], "<code>", "exec")
+    compile(j["tests"], "<tests>", "exec")
+    for path, content in j["files"].items():
+        compile(content, path, "exec")
+
+
+def test_security_branch_not_shadowed_by_code_review_catch_all() -> None:
+    """Security prompts include "Code to review" as an input-section header (see
+    security_agent/prompts.py), which also matches the generic code-review
+    catch-all. The security branch must win so callers get "vulnerabilities",
+    not an empty generic "issues" review.
+    """
+    c = DummyLLMClient()
+    prompt = (
+        "You are a Cybersecurity Expert. Review the code for security vulnerabilities.\n"
+        "**Input:**\n- Code to review\n- Language\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "vulnerabilities" in j
+    assert j["vulnerabilities"] == []
+    assert j["summary"] == "No security issues found (dummy)"
+    assert "issues" not in j
+
+
+def test_accessibility_branch_not_shadowed_by_code_review_catch_all() -> None:
+    """Accessibility prompts include "Code to review" as an input-section header
+    (see accessibility_agent/prompts.py), which also matches the generic
+    code-review catch-all. The accessibility branch must win so callers get
+    the WCAG-shaped stub, not the generic code-review stub.
+    """
+    c = DummyLLMClient()
+    prompt = (
+        "You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance.\n"
+        "**Input:**\n- Code to review (JSX/TSX, HTML templates)\n"
+        "Return a list of accessibility issues.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["issues"] == []
+    assert j["summary"] == "No WCAG 2.2 accessibility issues found (dummy)"
+    assert "vulnerabilities" not in j
+
+
+def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelines() -> None:
+    """The VoicePrinciplesDrafter branch must return ``editorial_quality_bar``
+    nested inside ``writing_guidelines`` (matching ``WritingGuidelinesBody``),
+    not as a sibling top-level key.
+    """
+    c = DummyLLMClient()
+    system_prompt = (
+        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs "
+        "from previous nodes and the mission's desired_voice, carry the prior fields forward "
+        "unchanged and produce writing_guidelines:\n"
+        "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
+        "2. style_dos — 3-4 writing best practices\n"
+        "3. style_donts — 3-4 things to avoid\n"
+        "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
+        "This is the final step in narrative development."
+    )
+    j = c.complete_json("go", system_prompt=system_prompt, temperature=0.0)
+    assert isinstance(j["writing_guidelines"], dict)
+    guidelines = j["writing_guidelines"]
+    for field in ("voice_principles", "style_dos", "style_donts", "editorial_quality_bar"):
+        assert len(guidelines[field]) == 3
+    assert "editorial_quality_bar" not in j
