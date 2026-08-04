@@ -27,9 +27,9 @@ retry (which fires on worker crash / start_to_close timeout):
   the failure (and retries within the bounded policy) instead of the swallowed
   exception being reported as success.
 """
-import time
-from __future__ import annotations
 
+from __future__ import annotations
+import time
 from datetime import timedelta
 from typing import Any
 
