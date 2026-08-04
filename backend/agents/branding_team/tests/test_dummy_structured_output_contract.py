@@ -2,10 +2,13 @@
 
 Every branding agent built with ``structured_output=`` hands Strands a Pydantic
 model that the provider response *must* validate against. Under
-``LLM_PROVIDER=dummy`` that response comes from ``DummyLLMClient.complete_json``,
-which routes on substrings of the agent's system prompt. Nothing else in the
-suite drives those two halves against each other, so three independent edits can
-silently break the no-LLM harness:
+``LLM_PROVIDER=dummy`` that response comes from ``DummyLLMClient.complete_json``
+(via ``chat()``/``stream()``/``structured_output()``), which routes the six
+Phase 2 "Narrative & Messaging" classes deterministically by the
+``structured_output_model``'s class name and routes every other class by
+scanning the agent's system prompt for field-name substrings. Nothing else in
+the suite drives those two halves against each other, so three independent
+edits can silently break the no-LLM harness:
 
 1. tightening a model in ``branding_team.models`` (adding a field, a ``Literal``,
    an enum, or a length bound) past what the dummy stub supplies;
@@ -13,12 +16,17 @@ silently break the no-LLM harness:
    satisfies its model;
 3. rewording an agent's system prompt in ``branding_team.agents`` so it stops
    matching its dummy routing branch and falls through to the generic
-   ``{"status": ..., "output": ...}`` fallback.
+   ``{"status": ..., "output": ...}`` fallback — this applies only to the
+   text-routed classes; the six Phase 2 classes route on class name and are
+   unaffected by prompt wording.
 
 All three surface here as a failure naming the offending agent. Case (3) is the
 one that needed follow-up commits when Phases 3, 4, and 5 migrated to
 ``structured_output=``, and ``test_generic_prompt_payload_is_rejected_by_every_schema``
-is what keeps the primary assertion honest about catching it.
+is what keeps the primary assertion honest about catching it — for the
+text-routed classes only; the six Phase 2 classes moved to
+``test_model_routed_payload_validates_regardless_of_prompt_text`` since an
+unrouted prompt no longer breaks them, which is the point of their fix.
 
 ``governance_compositor`` (Phase 5's fan-in node) is not a ``make_*`` factory in
 this module — it's built inline in ``graphs/phase5_governance.py`` — so it never

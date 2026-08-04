@@ -1076,6 +1076,24 @@ def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
     return _branding_phase5_structured_stub(system_lowered)
 
 
+# Single source of truth for the six class names
+# _branding_phase2_structured_output_stub recognizes. Kept separate from that
+# function's if-chain (rather than driving the if-chain off this set) so the
+# existing, already-tested dispatch body stays untouched; this set exists for
+# callers — currently just _looks_like_structured_output_tool — that only
+# need a cheap membership check, not the constructed payload.
+_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES: frozenset[str] = frozenset(
+    {
+        "BrandStoryOutput",
+        "BrandArchetypesOutput",
+        "TaglineOutput",
+        "MessagingFrameworkOutput",
+        "PersonaProfilesOutput",
+        "WritingGuidelinesOutput",
+    }
+)
+
+
 def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[str, Any]]:
     """Deterministic Branding Phase 2 "Narrative & Messaging" payload for a known
     ``structured_output`` model class name.
@@ -1089,7 +1107,9 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
     detection) only ever see the Strands tool's ``name`` — which Strands sets
     to ``model.__name__`` — never the Python class; ``complete_json`` derives
     the same string from its own ``structured_output_model`` class parameter
-    so all three callers share one dispatch table.
+    so all three callers share one dispatch table. The recognized names are
+    also listed in ``_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES``, for callers that
+    need the name set without the payload.
 
     Preconditions:
         ``model_name`` is a string, typically a ``type.__name__``.
@@ -1126,16 +1146,18 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         ``description_lowered`` is already lowercased by the caller.
     Postconditions:
         Returns ``True`` if the stable-name check, either description
-        substring heuristic, or the Phase 2 dispatch table recognizes
-        ``name`` — the last arm matches Strands' actual invariant (it names
+        substring heuristic, or ``name`` is one of the six known Phase 2
+        classes — the last arm matches Strands' actual invariant (it names
         the tool after the model's ``__name__``) independent of description
-        wording a future SDK version could change.
+        wording a future SDK version could change. Checks membership rather
+        than calling ``_branding_phase2_structured_output_stub`` so a pure
+        boolean check doesn't also construct (and discard) a payload dict.
     """
     return (
         name == "structured_output"
         or "structuredoutputtool" in description_lowered
         or "structured_output" in description_lowered
-        or _branding_phase2_structured_output_stub(name) is not None
+        or name in _PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES
     )
 
 
