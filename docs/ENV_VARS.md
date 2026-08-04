@@ -157,7 +157,7 @@ Ollama Cloud 429 bodies are classified into `session` / `weekly` / `rate` from p
 
 | Kind | Env | Default | Notes |
 |---|---|---|---|
-| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `18000` (5h) | Fixed from error time; **ignores** `Retry-After` |
+| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `3900` (65m) | Fixed from error time; **ignores** `Retry-After` |
 | `weekly` | `LLM_FAILOVER_WEEKLY_WINDOW_S` | `86400` (24h) | Fixed from error time; **ignores** `Retry-After` (Cloud weekly bodies omit a reset timestamp) |
 | `rate` | `LLM_FAILOVER_RATE_WINDOW_S` | `300` (5m) | Used only when the 429 carries no `Retry-After`; otherwise `Retry-After` wins |
 

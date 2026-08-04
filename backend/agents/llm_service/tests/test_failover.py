@@ -257,7 +257,7 @@ def test_mark_session_from_limit_kind_ignores_retry_after(monkeypatch):
     _mark_entry_exhausted(_entry(3), err)
     assert captured["limit_type"] == "session"
     delta = (captured["reset_at"] - before).total_seconds()
-    assert 4.5 * 3600 < delta < 5.5 * 3600
+    assert 60 * 60 < delta < 70 * 60
 
 
 def test_mark_session_from_body_phrase(monkeypatch):
