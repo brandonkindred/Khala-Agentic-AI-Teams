@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
+    DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
     CodebaseIndex,
     _build_group_prompt,
@@ -34,6 +35,7 @@ from code_review_agent.false_positive_filter import (
     _render_finding_block,
     _sanitize_finding_field,
     _strip_numbered_prefixes,
+    _verify_max_findings_per_group,
     _verify_timeout_seconds,
     filter_false_positives,
 )
@@ -1233,6 +1235,75 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
     inp = _input(files={"a.py": "SENTINEL_A\n", "b.py": "SENTINEL_B\n"})
     out = filter_false_positives(PerFileStub(), inp, [a, b])
     assert out == [b]
+
+
+def test_verify_max_findings_per_group_default_and_env_override(monkeypatch) -> None:
+    """Per-group finding cap defaults to 40 and honors the env override.
+
+    Preconditions:
+        - ``CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`` is unset for the default
+          assertion, then set for the override assertion (via ``monkeypatch``).
+
+    Postconditions:
+        - Unset env → ``DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP`` (40).
+        - Env ``5`` → ``5``.
+    """
+    monkeypatch.delenv("CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP", raising=False)
+    assert DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP == 40
+    assert _verify_max_findings_per_group() == 40
+
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP", "5")
+    assert _verify_max_findings_per_group() == 5
+
+
+def test_filter_splits_oversized_file_into_multiple_batches(monkeypatch) -> None:
+    """A single file's findings exceeding the cap are split into multiple
+    verification calls, each within the cap, rather than one unbounded call."""
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP", "2")
+    issues = [_issue(description=f"finding-{i}") for i in range(5)]
+    call_sizes: List[int] = []
+    lock = threading.Lock()
+
+    class CountingStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" not in prompt.lower():
+                return super().complete_json(prompt, **kwargs)
+            n = prompt.count("--- Finding index")
+            with lock:
+                call_sizes.append(n)
+            return {
+                "verdicts": [
+                    {"index": i, "is_real_issue": True, "confidence": "high"} for i in range(n)
+                ]
+            }
+
+    out = filter_false_positives(CountingStub(), _input(), issues)
+    assert out == issues  # every finding verified as real, none dropped
+    assert len(call_sizes) == 3  # ceil(5 / 2)
+    assert all(size <= 2 for size in call_sizes)
+    assert sorted(call_sizes) == [1, 2, 2]
+
+
+def test_filter_merges_verdicts_across_split_batches(monkeypatch) -> None:
+    """Verdicts merge back onto the correct *original* findings across a split:
+    a drop confirmed at within-batch index 0 in two different batches removes
+    two distinct original findings, not the same one twice."""
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP", "2")
+    issues = [_issue(description=f"finding-{i}") for i in range(4)]
+
+    class AlwaysDropFirstStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" not in prompt.lower():
+                return super().complete_json(prompt, **kwargs)
+            return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+
+    out = filter_false_positives(AlwaysDropFirstStub(), _input(), issues)
+    # Batch 1 = [issues[0], issues[1]] -> drops issues[0]; batch 2 =
+    # [issues[2], issues[3]] -> drops issues[2]. If the split incorrectly
+    # mapped every batch's index 0 back to the whole list's index 0, this
+    # would instead drop issues[0] twice (a no-op the second time) and keep
+    # issues[2].
+    assert out == [issues[1], issues[3]]
 
 
 def test_verify_timeout_seconds_default_and_env_override(monkeypatch) -> None:

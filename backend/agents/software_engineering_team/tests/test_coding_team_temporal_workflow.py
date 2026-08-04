@@ -14,13 +14,17 @@ signal / wait_condition / re-invoke SHAPE -- including resume_token
 validation and acknowledged_resume_token -- stays isolated from the real
 activity's orchestrator-wiring/job-store dependencies. Buffering an early
 signal (before a pause is active) and applying answers into
-``request["plan_input"]`` are deferred to the sibling reconciliation-loop
-issue (#3988) and are not covered here.
+``request["plan_input"]`` remain open future work (not #3988, whose scope is
+limited to an integration test proving the existing pause/resume cycle) and
+are not covered here. That integration test -- driving the cycle against a
+real ``temporalio.testing.WorkflowEnvironment`` rather than these monkeypatch
+fakes -- lives at the bottom of this file.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
@@ -161,9 +165,9 @@ def test_submit_answers_ignores_signal_with_no_active_pause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A signal arriving before any pause is active (self._active_resume_token is
-    None) is dropped rather than buffered -- buffering early signals is deferred
-    to the sibling reconciliation-loop issue (#3988), which has the real
-    activity-side pause payload to buffer against."""
+    None) is dropped rather than buffered -- buffering early signals remains
+    open future work (not #3988, which only adds an integration test for the
+    existing, intentionally non-buffering cycle)."""
     workflow_obj = CodingTeamWorkflow()
     assert workflow_obj._active_resume_token is None
 
@@ -231,3 +235,151 @@ def test_run_request_declares_acknowledged_resume_token() -> None:
     parsed = RunRequest(repo_path="/repo", acknowledged_resume_token="j1:1")
 
     assert parsed.acknowledged_resume_token == "j1:1"
+
+
+# --------------------------------------------------------------------------- WorkflowEnvironment (#3988)
+
+
+@contextlib.asynccontextmanager
+async def _workflow_environment_worker(activities=None):
+    """Shared ``WorkflowEnvironment`` + ``Worker`` startup/teardown for the
+    ``CodingTeamWorkflow`` integration test below. Mirrors
+    ``test_code_review_temporal.py``'s helper of the same name (the only other
+    place in this repo that drives ``temporalio.testing.WorkflowEnvironment``)
+    -- see that helper's docstring for why this skips (rather than fails) when
+    the ephemeral test-server binary can't be downloaded.
+
+    ``activities`` defaults to the real, production ``ACTIVITIES`` list; pass
+    a substitute (e.g. a fake registered under the same
+    ``"coding_team_run_pipeline"`` name) to drive the workflow without
+    invoking the real orchestrator/job-store/``CodeEngineProvider`` machinery.
+    """
+    import concurrent.futures
+
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_workflow import (
+        ACTIVITIES,
+        CodingTeamWorkflow,
+    )
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[CodingTeamWorkflow],
+                activities=activities if activities is not None else ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            async with worker:
+                yield env
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_pauses_then_resumes_to_completion_via_signal() -> None:
+    """Drive a full pause -> submit_answers signal -> resume -> completion
+    cycle against a real (embedded) Temporal test server -- the acceptance
+    criterion #3988 exists for. The rest of this file proves the loop SHAPE
+    via monkeypatched fakes; this proves the same cycle survives a real
+    Temporal worker/sandbox round-trip.
+
+    Substitutes a fake ``coding_team_run_pipeline`` activity, registered under
+    the SAME name the real one uses (``@activity.defn(name=...)``), so
+    ``CodingTeamWorkflow.run``'s ``workflow.execute_activity(run_pipeline_activity,
+    ...)`` dispatches to it unchanged -- Temporal resolves by registered name,
+    not Python object identity. The fake returns ``{"outcome": "paused", ...}``
+    on its first call and a terminal dict once
+    ``request["acknowledged_resume_token"]`` matches the pause it published,
+    so this exercises exactly the loop production hits without the real,
+    heavy orchestrator.
+
+    Synchronization: ``submit_answers`` deliberately drops (never buffers) a
+    signal arriving before the workflow has processed the paused activity
+    result and set ``self._active_resume_token`` (see that method's
+    docstring) -- a single, precisely-timed signal send would race that
+    window, and there is no query handler to ask "are you paused yet?" (out
+    of scope for #3988). Instead this resends the identical signal on a 50ms
+    interval until the workflow's result future resolves or an overall
+    timeout fires: every resend before the workflow reaches wait_condition is
+    silently dropped by design (harmless, retried); the first to land after
+    is accepted; every later one is a no-op (the already-submitted guard, or
+    the server rejecting a signal to a since-completed workflow, caught and
+    ignored); if nothing ever lands (a real regression), the timeout fails
+    the test with a clear diagnostic instead of hanging. This requires no
+    production change -- it works entirely within the already-merged,
+    intentionally non-buffering ``submit_answers`` semantics.
+    """
+    resume_token = "coding-team-workflow-test:resume-token-1"
+
+    from temporalio import activity
+    from temporalio.worker import Replayer
+
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
+
+    @activity.defn(name="coding_team_run_pipeline")
+    def _fake_pipeline_activity(request: dict) -> dict:
+        if request.get("acknowledged_resume_token") == resume_token:
+            return {"job_id": request.get("job_id", "test-job"), "status": "completed"}
+        return {
+            "outcome": "paused",
+            "job_id": request.get("job_id", "test-job"),
+            "resume_token": resume_token,
+            "pause_kind": "entry",
+            "pause_context": None,
+            "pending_questions": [{"question_id": "q1", "prompt": "Proceed?"}],
+        }
+
+    async def _resend_signal_until_cancelled(
+        handle, payload, *, poll_interval: float = 0.05
+    ) -> None:
+        while True:
+            with contextlib.suppress(Exception):
+                await handle.signal(CodingTeamWorkflow.submit_answers, payload)
+            await asyncio.sleep(poll_interval)
+
+    workflow_id = "coding-team-workflow-pause-resume-test"
+    request = {
+        "job_id": "test-job-1",
+        "repo_path": "/tmp/repo",
+        "plan_input": {"objective": "ship it"},
+    }
+
+    async with _workflow_environment_worker(activities=[_fake_pipeline_activity]) as env:
+        handle = await env.client.start_workflow(
+            CodingTeamWorkflow.run,
+            request,
+            id=workflow_id,
+            task_queue=TASK_QUEUE,
+        )
+
+        resend_payload = {
+            "resume_token": resume_token,
+            "answers": [{"question_id": "q1", "answer": "yes"}],
+        }
+        resender = asyncio.create_task(_resend_signal_until_cancelled(handle, resend_payload))
+        try:
+            result = await asyncio.wait_for(handle.result(), timeout=30)
+        finally:
+            resender.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await resender
+
+        history = await handle.fetch_history()
+
+    assert result == {"job_id": "test-job-1", "status": "completed"}
+
+    # Same determinism guard test_code_review_temporal.py's analogous test applies --
+    # CodingTeamWorkflow is more determinism-sensitive than that simple one-shot
+    # workflow (it mutates/reuses `request` across a signal-driven loop), so this
+    # replay check is worth keeping.
+    await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)

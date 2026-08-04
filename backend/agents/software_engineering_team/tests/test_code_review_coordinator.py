@@ -26,8 +26,10 @@ from code_review_agent.coordinator import (
     _map_parallelism,
     _reconcile_approval,
     _render_architecture_context,
+    _run_tail_passes,
     _segment_range_label,
     _tail_passes_run_sequentially,
+    _TailPassResult,
     _validate_line,
     build_review_chunks,
     cap_chunk_content,
@@ -3501,6 +3503,42 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
 
     assert synth_calls, "synthesis must run so the narrative reflects the side-effect finding"
     assert any(i.description == side_effect_issue.description for i in result.issues)
+
+
+def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:
+    """``input_data.skip_tail_passes=True`` returns the genuine issues unchanged
+    with ``has_additive_findings`` False and no tail-pass LLM calls at all --
+    the raising stand-in below proves neither pass touched the LLM."""
+
+    class _RaisingLLM:
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(
+                f"tail passes must not touch the LLM when skipped (called {name!r})"
+            )
+
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, skip_tail_passes=True)
+    genuine_issues = [
+        CodeReviewIssue(
+            severity="high",
+            category="logic",
+            file_path="a.py",
+            description="bug",
+            suggestion="fix",
+        )
+    ]
+    index = CodebaseIndex.from_input(input_data, repo_reader=None)
+
+    result = _run_tail_passes(
+        llm=_RaisingLLM(),
+        input_data=input_data,
+        genuine_issues=genuine_issues,
+        repo_reader=None,
+        shared_index=index,
+    )
+
+    assert result == _TailPassResult(issues=genuine_issues, has_additive_findings=False)
 
 
 def test_tail_passes_run_sequentially_for_dummy_llm() -> None:

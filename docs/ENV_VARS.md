@@ -157,7 +157,7 @@ Ollama Cloud 429 bodies are classified into `session` / `weekly` / `rate` from p
 
 | Kind | Env | Default | Notes |
 |---|---|---|---|
-| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `18000` (5h) | Fixed from error time; **ignores** `Retry-After` |
+| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `3900` (65m) | Fixed from error time; **ignores** `Retry-After` |
 | `weekly` | `LLM_FAILOVER_WEEKLY_WINDOW_S` | `86400` (24h) | Fixed from error time; **ignores** `Retry-After` (Cloud weekly bodies omit a reset timestamp) |
 | `rate` | `LLM_FAILOVER_RATE_WINDOW_S` | `300` (5m) | Used only when the 429 carries no `Retry-After`; otherwise `Retry-After` wins |
 
@@ -781,6 +781,25 @@ calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
 dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
+### CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP
+Int (default `40`, floor `1`). Cap on how many findings the false-positive
+verification phase inlines into a single per-file LLM call
+(`_build_group_prompt`/`_verify_group`). A cited file whose genuine findings
+exceed this cap is split into multiple same-sized batches — each its own
+verification call, fanned out the same way calls for additional files are
+(subject to `CODE_REVIEW_MAP_PARALLELISM` and
+`CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`, above) — instead of growing one
+prompt/agent turn without bound as a single file's finding count grows.
+Verdicts from every batch are merged back onto the *original* finding list
+via the batch's own slice of original indices, so which batch (and which
+within-batch index) confirmed a false positive does not change which finding
+gets dropped. Lowering this cap increases the number of verification LLM
+calls (and therefore cost/latency) for files with many findings; raising it
+trades that against a larger prompt per call. This is a cap on how many
+*findings* share one verification call — separate from any cap on how much
+*file content* a single tool read can return (out of scope here; tracked in
+a separate sub-issue).
+
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
 `code_review_agent/temporal/config.py::resolve_max_concurrent_activities`, the
@@ -1109,6 +1128,27 @@ Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
 
+### CODE_REVIEW_SPEC_COMPLIANCE_PASS
+Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
+for moving spec/acceptance-criteria compliance checking out of every chunk's
+prompt and into one dedicated post-merge pass. Design decision recorded in
+`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`; not
+yet implemented.
+
+When unset or any value other than `true`/`1`/`yes`/`on`, behavior is
+unchanged from today: `acceptance_criteria` and `spec_excerpt` are rendered
+into every chunk's review prompt, and per-chunk `spec_compliance_notes` are
+synthesized into the final narrative exactly as they are now. When enabled,
+the per-chunk prompt omits the acceptance-criteria/spec-excerpt blocks
+(architecture overview and sibling-surface context are unaffected — out of
+scope for this toggle), and a new once-per-submission tail pass evaluates
+spec/acceptance-criteria compliance against the full changed-code content
+instead, feeding a single consolidated note into the existing narrative
+synthesis step in place of the per-chunk notes. Restricted to the
+`CODE_REVIEW` profile. Any setup or LLM failure is fail-safe: it is logged
+and yields an empty compliance note, never blocking or changing the rest of
+the review.
+
 ---
 
 ## Shared Infrastructure and Storage
@@ -1271,6 +1311,15 @@ Default per-agent execution timeout (`asyncio.wait_for`) inside the sandbox; ove
 with `timeout_hit: true` (default `60`). Per-agent override via `invoke.timeout_seconds` in the
 manifest.
 
+### AGENT_REGISTRY_TOMBSTONE_TTL_S
+How long (seconds) a worker's own `unregister()` of a dynamic agent id masks that id from `get()`
+on the same worker, closing the window where a failed best-effort Postgres delete would otherwise
+resurrect the stale row (default `5.0`; clamped to `>= 0.0`).
+
+### AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES
+Max number of tombstoned ids `AgentRegistry` retains per worker; oldest entries are evicted first
+once the cap is exceeded (default `1000`; clamped to `>= 1`).
+
 ---
 
 ## Agent Cognition and Knowledge Graph
@@ -1310,15 +1359,19 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`).
-Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it), but processes
-that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this unset so
-they skip Graphiti client construction and the background graph sync worker (lifespan no-ops cleanly).
-Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set `NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that
-process into graph sync (extra memory/CPU for the driver + worker). An unset value is also how the
-unit-test suite runs against a faked Graphiti without a live database. When enabled, the graph
-ingests agent memories as temporal episodes partitioned per agent (`group_id = agent_id`) and serves
-recency-ranked related knowledge back for request context and rule-proposal grounding.
+`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`),
+and it is opt-in at zero cost when unset: `unified_api.main`'s lifespan checks `is_neo4j_enabled()`
+before even importing `agent_cognition.graph.sync_worker`, and `shared.neo4j.client.get_graphiti()`
+defers its `graphiti_core` imports to first real use — so leaving `NEO4J_BOLT_URL` unset keeps the
+`graphiti_core` dependency (and its Neo4j driver) out of `sys.modules` entirely, with no import-time
+or memory cost. Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it),
+but processes that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this
+unset for exactly that reason. Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set
+`NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that process into graph sync (extra memory/CPU for the
+driver + worker). An unset value is also how the unit-test suite runs against a faked Graphiti without
+a live database. When enabled, the graph ingests agent memories as temporal episodes partitioned per
+agent (`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
+rule-proposal grounding.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change
@@ -1341,7 +1394,9 @@ agent since a watermark (`agent_cognition_graph_watermarks`). Events keyset on `
 are added as `event:<id>` episodes; summaries keyset on `(updated_at, id)` (the content-write time
 advanced by each accepted `upsert_summary`) and are added as `summary:<id>:<version>` episodes, so a
 recomputed summary — whose `version` advanced — is re-ingested as a fresh per-version episode rather
-than overwriting the prior one. The worker is a no-op when `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
+than overwriting the prior one. Unified-api's lifespan skips importing this worker's module at all when
+`NEO4J_BOLT_URL` is unset; once started (i.e. `NEO4J_BOLT_URL` is set), the worker itself is a further
+no-op when `POSTGRES_HOST` is unset.
 
 ### NEO4J_SLOW_OP_MS
 Slow-call log threshold (ms, default `1000`) for `shared.neo4j.timed_graph_op`.

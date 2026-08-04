@@ -30,7 +30,7 @@ def test_window_defaults_and_overrides(monkeypatch):
     monkeypatch.delenv("LLM_FAILOVER_SESSION_WINDOW_S", raising=False)
     monkeypatch.delenv("LLM_FAILOVER_WEEKLY_WINDOW_S", raising=False)
     assert llm_config.failover_rate_window_seconds() == 300.0
-    assert llm_config.failover_session_window_seconds() == 5 * 3600.0
+    assert llm_config.failover_session_window_seconds() == 65 * 60.0
     assert llm_config.failover_weekly_window_seconds() == 24 * 3600.0
     monkeypatch.setenv("LLM_FAILOVER_RATE_WINDOW_S", "900")
     assert llm_config.failover_rate_window_seconds() == 900.0
@@ -40,7 +40,7 @@ def test_window_defaults_and_overrides(monkeypatch):
     monkeypatch.setenv("LLM_FAILOVER_RATE_WINDOW_S", "-5")
     assert llm_config.failover_rate_window_seconds() == 300.0
     monkeypatch.setenv("LLM_FAILOVER_SESSION_WINDOW_S", "garbage")
-    assert llm_config.failover_session_window_seconds() == 5 * 3600.0
+    assert llm_config.failover_session_window_seconds() == 65 * 60.0
     monkeypatch.setenv("LLM_FAILOVER_WEEKLY_WINDOW_S", "garbage")
     assert llm_config.failover_weekly_window_seconds() == 24 * 3600.0
     monkeypatch.setenv("LLM_FAILOVER_WEEKLY_WINDOW_S", "172800")

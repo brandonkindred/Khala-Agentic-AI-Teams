@@ -151,15 +151,71 @@ def test_create_profile_happy_path_round_trips(api_client) -> None:
 
 
 def test_create_profile_invalid_risk_tolerance(api_client) -> None:
+    from investment_team.models import RiskTolerance
+
     resp = api_client.post("/profiles", json=_profile_payload(risk_tolerance="extreme"))
     assert resp.status_code == 400
-    assert "Invalid risk_tolerance" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "Invalid risk_tolerance" in detail
+    allowed = ", ".join(m.value for m in RiskTolerance)
+    assert allowed in detail
 
 
 def test_create_profile_invalid_default_mode(api_client) -> None:
+    from investment_team.models import WorkflowMode
+
     resp = api_client.post("/profiles", json=_profile_payload(default_mode="wild"))
     assert resp.status_code == 400
-    assert "Invalid default_mode" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "Invalid default_mode" in detail
+    allowed = ", ".join(m.value for m in WorkflowMode)
+    assert allowed in detail
+
+
+def test_create_profile_duplicate_user_id_returns_409(api_client) -> None:
+    first = api_client.post("/profiles", json=_profile_payload())
+    assert first.status_code == 200
+    first_ips = first.json()["ips"]
+
+    second = api_client.post("/profiles", json=_profile_payload())
+    assert second.status_code == 409
+    assert "already exists" in second.json()["detail"]
+
+    # The original profile must survive untouched — no silent overwrite.
+    got = api_client.get("/profiles/u1")
+    assert got.status_code == 200
+    assert got.json()["ips"] == first_ips
+
+
+def test_create_profile_non_dict_goal_rejected(api_client) -> None:
+    # ``CreateProfileRequest.goals`` is typed ``List[Dict[str, Any]]``, so a
+    # non-dict element should already be rejected by FastAPI/Pydantic request
+    # validation before the handler runs — not by handler code.
+    resp = api_client.post("/profiles", json=_profile_payload(goals=["not-a-dict"]))
+    assert resp.status_code == 422
+
+
+def test_create_profile_malformed_goal_field_returns_422(api_client) -> None:
+    # A goal dict that type-checks as Dict[str, Any] at the request boundary
+    # but fails UserGoal's stricter field types (target_amount: float) must
+    # surface as a 422 with Pydantic-shaped detail, not an unhandled 500.
+    resp = api_client.post(
+        "/profiles",
+        json=_profile_payload(
+            goals=[
+                {
+                    "name": "retire",
+                    "target_amount": "not-a-number",
+                    "target_date": "2040-01-01T00:00:00Z",
+                    "priority": "high",
+                }
+            ]
+        ),
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert isinstance(detail, list)
+    assert any("target_amount" in str(err.get("loc", "")) for err in detail)
 
 
 def test_get_profile_not_found_returns_found_false(api_client) -> None:
@@ -678,6 +734,7 @@ def test_list_strategy_lab_jobs_empty(monkeypatch: pytest.MonkeyPatch, api_clien
 
 def test_get_strategy_lab_run_status_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
 
     monkeypatch.setattr(api_main, "_active_runs", {})
 
@@ -688,7 +745,12 @@ def test_get_strategy_lab_run_status_404(monkeypatch: pytest.MonkeyPatch, api_cl
         def get_job(self, job_id: str):
             return None
 
+    # Patch both: the status endpoint's own reconciliation client
+    # (api_main._get_lab_run_job_client) and the job-service fallback
+    # run_state.load_run_from_job_service builds its client from
+    # (run_state.get_lab_run_job_client) -- distinct module-level functions.
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+    monkeypatch.setattr(_run_state, "get_lab_run_job_client", lambda: _Stub())
 
     resp = api_client.get("/strategy-lab/runs/no-such/status")
     assert resp.status_code == 404
@@ -783,13 +845,11 @@ def test_cancel_backtest_job_success_and_failure(
     assert body["success"] is True
     assert body["status"] == "cancelled"
 
-    # When cancel returns False the response is a non-success dict.
+    # When cancel returns False the job cannot be cancelled: 409, not 200.
     monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: False)
     resp_no = api_client.post("/backtests/jobs/j1/cancel")
-    assert resp_no.status_code == 200
-    body_no = resp_no.json()
-    assert body_no["success"] is False
-    assert "Cannot cancel" in body_no["message"]
+    assert resp_no.status_code == 409
+    assert "Cannot cancel" in resp_no.json()["detail"]
 
 
 def test_delete_backtest_job_404_when_missing(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
@@ -808,6 +868,19 @@ def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
+
+
+def test_delete_backtest_job_500_when_delete_fails_after_existing(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Job confirmed to exist, but the delete itself fails: 500, not 404."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
+    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
+    resp = api_client.delete("/backtests/jobs/j1")
+    assert resp.status_code == 500
+    assert "Failed to delete" in resp.json()["detail"]
 
 
 def test_list_backtests_empty(api_client) -> None:

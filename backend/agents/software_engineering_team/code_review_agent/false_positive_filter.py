@@ -91,6 +91,10 @@ _CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 # ``_verify_timeout_seconds`` below.
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 3600
 
+# Default cap on findings inlined into a single per-file verification LLM
+# call; see ``_verify_max_findings_per_group`` below.
+DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP = 40
+
 
 def _verify_timeout_seconds() -> int:
     """Per-group verification call timeout (seconds).
@@ -105,6 +109,27 @@ def _verify_timeout_seconds() -> int:
         - Returns an int >= 1.
     """
     return parse_env_int("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", DEFAULT_VERIFY_TIMEOUT_SECONDS, 1)
+
+
+def _verify_max_findings_per_group() -> int:
+    """Cap on findings verified in a single per-file LLM call.
+
+    Bounds how many findings ``_build_group_prompt`` renders in one
+    verification call for one cited file. A file whose genuine findings
+    exceed this cap is split into multiple same-sized batches by
+    ``_verify_and_filter`` (each its own ``_verify_group`` call, within the
+    cap) instead of growing one prompt/agent turn without bound. Env-
+    overridable via ``CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`` (see
+    docs/ENV_VARS.md).
+
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    return parse_env_int(
+        "CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP",
+        DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
+        1,
+    )
 
 
 def _verify_parallelism() -> int:
@@ -378,8 +403,7 @@ class CodebaseIndex:
               files must not silently resolve to a repository file.
             - Falls through to the repo reader only when the submission has
               zero matches: if the reader can read the cited path, returns it
-              verbatim (so a finding about an existing-but-unchanged repo file
-              is still grouped and verified rather than skipped).
+              verbatim (see ``CodebaseIndex``'s ``repo_reader`` invariant for why).
             - Returns None for a blank, absent, or ambiguous path with no
               eligible reader hit — the verifier would have no single primary
               file to read, so the caller keeps the finding rather than verify it.
@@ -430,11 +454,9 @@ class CodebaseIndex:
                 f"Error: path '{path}' is ambiguous; it matches "
                 f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
             )
-        # Not in the submission — fall through to the repo reader so an
-        # existing-but-unchanged file (absent from the diff) is still readable.
-        # This is what lets the verifier confirm a file a finding calls "missing"
-        # actually exists in the repository. Ambiguous submission hits never
-        # reach here.
+        # Fall through to the repo reader for an existing-but-unchanged file
+        # (see CodebaseIndex's repo_reader invariant for why). Ambiguous
+        # submission hits never reach here.
         if key == self.EXISTING_CODEBASE_PATH:
             return None, "Error: no existing-codebase excerpt available."
 
@@ -826,13 +848,11 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
         - Returns None for any item without a non-negative integer ``index``
           (bool, float, string, negative, or missing — a verdict we cannot map
           back to a finding is ignored, not guessed).
-        - ``is_false_positive`` is True only for ``is_real_issue is False`` with
-          an explicit ``"high"`` or ``"medium"`` confidence; every other shape —
-          real, low/blank/missing confidence, OR any unrecognized confidence
-          value — is kept. The allowlist is deliberate: an off-contract
-          confidence is an ambiguous verdict, and the fail-safe rule keeps
-          ambiguous findings rather than dropping them. Never raises on
-          malformed input.
+        - Builds ``is_false_positive`` from an explicit ``"high"``/``"medium"``
+          confidence allowlist, not a denylist — see ``_Verdict``'s invariant for
+          the exact shape and the module docstring's Fail-safe invariant for why
+          (an off-contract confidence is ambiguous, and ambiguous findings are
+          kept, never dropped). Never raises on malformed input.
     """
     if not isinstance(item, dict):
         return None
@@ -842,10 +862,7 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
     index = raw_index
     confidence = str(item.get("confidence", "") or "").strip().lower()
     is_real = item.get("is_real_issue")
-    # Drop ONLY on an explicit, confident "not a real issue". An allowlist (not a
-    # denylist) so an unrecognized confidence ("none", "unsure", a non-string the
-    # model returned, ...) is treated as not-confident and the finding is kept —
-    # dropping a real issue is far worse than keeping a questionable one.
+    # Allowlist, not a denylist — see module docstring's Fail-safe invariant.
     is_false_positive = is_real is False and confidence in ("high", "medium")
     return index, _Verdict(
         is_false_positive=is_false_positive,
@@ -1076,7 +1093,12 @@ def _verify_group(
     issues: List[CodeReviewIssue],
     input_data: CodeReviewInput,
 ) -> Dict[int, _Verdict]:
-    """Run one verification LLM call over all findings for a single file.
+    """Run one verification LLM call over one batch of a single file's findings.
+
+    ``issues`` is the whole file's findings unless the caller split them into
+    multiple batches under ``CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP``; this
+    function has no notion of "the whole file" and simply verifies whatever
+    slice it is given.
 
     Postconditions:
         - Returns ``{finding_index: _Verdict}`` for the findings the model gave
@@ -1221,7 +1243,31 @@ def _verify_and_filter(
     # single call, not the sum. A per-group failure keeps that group's findings
     # (best-effort), exactly as the sequential path did, and the merge below
     # consumes results in submission order so the outcome stays deterministic.
-    group_items = list(groups.items())
+    #
+    # A file whose finding count exceeds _verify_max_findings_per_group() is
+    # split here into multiple same-sized batches, each becoming its own
+    # group_items entry (its own _verify_group call), so no single prompt
+    # inlines more than the cap. group_items and group_orig_index_batches are
+    # positionally aligned by list index rather than keyed by file_path, since
+    # one file_path can now produce more than one entry.
+    max_per_group = _verify_max_findings_per_group()
+    group_items: List[Tuple[str, List[CodeReviewIssue]]] = []
+    group_orig_index_batches: List[List[int]] = []
+    for file_path, group in groups.items():
+        orig_indices = group_orig_indices[file_path]
+        if len(group) > max_per_group:
+            batch_count = -(-len(group) // max_per_group)
+            logger.info(
+                "FalsePositiveFilter: splitting %s findings for %s into %s batches "
+                "of up to %s (CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP)",
+                len(group),
+                file_path,
+                batch_count,
+                max_per_group,
+            )
+        for start in range(0, len(group), max_per_group):
+            group_items.append((file_path, group[start : start + max_per_group]))
+            group_orig_index_batches.append(orig_indices[start : start + max_per_group])
 
     def _verify_one(item: Tuple[str, List[CodeReviewIssue]]) -> Dict[int, _Verdict]:
         file_path, group = item
@@ -1272,8 +1318,9 @@ def _verify_and_filter(
         group_verdicts = [r if r is not None else {} for r in raw_results]
 
     removed_indices: set[int] = set()
-    for (file_path, group), verdicts in zip(group_items, group_verdicts):
-        orig_indices = group_orig_indices[file_path]
+    for (file_path, group), orig_indices, verdicts in zip(
+        group_items, group_orig_index_batches, group_verdicts
+    ):
         group_len = len(group)
         for idx, verdict in verdicts.items():
             if not isinstance(idx, int) or idx < 0 or idx >= group_len:
