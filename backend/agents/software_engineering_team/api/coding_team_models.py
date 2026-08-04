@@ -90,6 +90,13 @@ class StatusResponse(BaseModel):
         default=False,
         description="True when the job is paused waiting for the user to answer pending questions.",
     )
+    resume_token: Optional[str] = Field(
+        default=None,
+        description='Set only for a Temporal-native (pause_strategy="return") pause; the client '
+        "must echo this back on SubmitAnswersRequest.resume_token. A client discovering the "
+        "pause via polling status (rather than the original pause notification) has no other "
+        "way to obtain it.",
+    )
     current_activity: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Fine-grained activity of the currently running sub-agent "

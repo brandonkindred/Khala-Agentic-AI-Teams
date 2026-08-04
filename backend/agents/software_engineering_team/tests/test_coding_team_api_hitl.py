@@ -69,6 +69,23 @@ def test_status_surfaces_pending_questions(monkeypatch):
     assert body["pending_questions"][0]["options"][0]["is_default"] is True
 
 
+def test_status_surfaces_resume_token(monkeypatch):
+    """A client that discovers a Temporal-native pause by polling status (rather than only
+    from the original pause notification) must be able to read resume_token from here -- it's
+    the only value the client is allowed to echo back on SubmitAnswersRequest."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(resume_token="j1:tok-1"))
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    assert r.json()["resume_token"] == "j1:tok-1"
+
+
+def test_status_resume_token_absent_for_block_mode_pause(monkeypatch):
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())  # no resume_token key
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    assert r.json()["resume_token"] is None
+
+
 def test_status_skips_non_dict_pending_question(monkeypatch):
     # A corrupted (non-dict) pending_questions entry is skipped rather than 500'ing: the status
     # route now materializes via pending_questions_from_raw, which defensively filters non-dicts.
@@ -1769,7 +1786,11 @@ def test_answers_temporal_native_signals_workflow_and_appends_without_clearing(m
     monkeypatch.setattr(api, "_is_run_thread_alive", _must_not_run)
 
     r = client.post(
-        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+        "/run/j1/answers",
+        json={
+            "answers": [{"question_id": "q1", "selected_option_id": "strict"}],
+            "resume_token": "j1:tok-1",
+        },
     )
 
     assert r.status_code == 200
@@ -1779,6 +1800,56 @@ def test_answers_temporal_native_signals_workflow_and_appends_without_clearing(m
     assert signaled["signal"] == "submit_answers"
     assert signaled["payload"]["resume_token"] == "j1:tok-1"
     assert signaled["payload"]["answers"] == appended["answers"]
+
+
+def test_answers_temporal_native_rejects_stale_resume_token(monkeypatch):
+    """A client echoing a resume_token that doesn't match the job's currently persisted one
+    (stale, or answering an already-resolved pause) must get a 409, not a false-confidence 200
+    while the workflow silently drops the mismatched signal -- contract doc §3."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    job = _job(resume_token="j1:tok-current")
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not append/signal/store on a resume_token mismatch")
+
+    monkeypatch.setattr(api, "store_append_submitted_answers", _must_not_run)
+    monkeypatch.setattr(hitl_route, "signal_workflow_sync", _must_not_run)
+    monkeypatch.setattr(api, "store_submit_answers", _must_not_run)
+
+    r = client.post(
+        "/run/j1/answers",
+        json={
+            "answers": [{"question_id": "q1", "selected_option_id": "strict"}],
+            "resume_token": "j1:tok-stale",
+        },
+    )
+
+    assert r.status_code == 409
+
+
+def test_answers_temporal_native_rejects_missing_resume_token(monkeypatch):
+    """A client that omits resume_token entirely for a Temporal-native pause is treated the
+    same as a mismatch -- a legitimate client always has one, from the pause notification or a
+    status poll."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    job = _job(resume_token="j1:tok-current")
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+
+    def _must_not_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not append/signal/store when resume_token is missing")
+
+    monkeypatch.setattr(api, "store_append_submitted_answers", _must_not_run)
+    monkeypatch.setattr(hitl_route, "signal_workflow_sync", _must_not_run)
+    monkeypatch.setattr(api, "store_submit_answers", _must_not_run)
+
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+
+    assert r.status_code == 409
 
 
 def test_answers_thread_mode_unaffected_when_no_resume_token(monkeypatch):

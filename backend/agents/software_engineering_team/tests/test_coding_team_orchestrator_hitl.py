@@ -1134,6 +1134,10 @@ def test_worker_escalation_returns_paused_without_blocking(tmp_path, monkeypatch
     assert sig.pause_context == {"task_ids": ["t1"]}
     assert job.get("resume_token")
     assert job.get("waiting_for_answers") is True
+    # The job-record envelope itself (not just the signal payload) carries pause_kind/
+    # pause_context -- the atomic publish in _run_pause_cycle writes both.
+    assert job.get("pause_kind") == "worker_escalation"
+    assert job.get("pause_context") == {"task_ids": ["t1"]}
     # The task stays IN_PROGRESS (unescalated answer not yet applied) -- it is re-evaluated
     # fresh on the next (Temporal-resumed) orchestrator invocation.
     assert graph.get_task("t1").status == TaskStatus.IN_PROGRESS
@@ -1195,6 +1199,8 @@ def test_reentry_matching_token_consumes_and_continues(tmp_path, monkeypatch):
     assert result is None  # reached a terminal state, not a new pause
     assert job.get("resume_token") is None  # envelope cleared atomically on consume
     assert job.get("waiting_for_answers") is False
+    assert job.get("pause_kind") is None
+    assert job.get("pause_context") is None
     assert plan_calls["count"] == 1  # planning proceeded exactly once
     assert job.get("status") == "completed"
 

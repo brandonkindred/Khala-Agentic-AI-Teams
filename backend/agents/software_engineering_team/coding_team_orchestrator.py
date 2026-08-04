@@ -283,8 +283,8 @@ def run_coding_team_orchestrator(
           owns on the job's overall progress bar); violated by raising ``ValueError``.
         - ``repo_path`` is a git checkout the pipeline can branch/merge in; ``plan_input`` carries
           the plan text (and any already-resolved HITL decisions) the Tech Lead plans from.
-        - ``pause_strategy`` is ``"block"`` or ``"return"``; ``acknowledged_resume_token`` is only
-          meaningful when ``pause_strategy == "return"``.
+        - ``pause_strategy`` is ``"block"`` or ``"return"``; violated by raising ``ValueError``.
+          ``acknowledged_resume_token`` is only meaningful when ``pause_strategy == "return"``.
     Postconditions:
         - ``pause_strategy == "block"``: return value is always ``None`` — unchanged from every
           caller's behavior before this parameter existed. On a normal (non-raising) return, the
@@ -316,6 +316,8 @@ def run_coding_team_orchestrator(
             f"progress_base ({progress_base}) and progress_span ({progress_span}) "
             "must be non-negative and sum to <= 100"
         )
+    if pause_strategy not in ("block", "return"):
+        raise ValueError(f"pause_strategy must be 'block' or 'return', got {pause_strategy!r}")
     # The implementation engines (v2 team leads, quality gates, code review) are injected, not
     # imported: prefer the provider passed explicitly (the software-engineering team supplies one
     # per call) and fall back to the process-wide default the standalone service installs at
@@ -869,6 +871,7 @@ class CodingTeamSwarm(
         Preconditions:
             - The swarm was constructed with a non-empty ``workers``/``agent_ids`` roster and a
               ``graph`` already seeded with the job's tasks (or empty, for a no-op run).
+            - ``pause_strategy`` is ``"block"`` or ``"return"``; violated by raising ``ValueError``.
         Postconditions:
             - Every worker's git worktree (see WorktreeManager) is removed before this method
               returns OR raises, on every exit path (normal completion, cancellation, abort, a
@@ -876,6 +879,8 @@ class CodingTeamSwarm(
               worker-escalation pause propagating out) — the worktree lifecycle is scoped exactly
               to one ``run()`` call.
         """
+        if pause_strategy not in ("block", "return"):
+            raise ValueError(f"pause_strategy must be 'block' or 'return', got {pause_strategy!r}")
         _update = update_fn or (lambda **kw: None)
         _persist = persist_fn or (lambda: None)
         self.pause_for_questions = pause_for_questions

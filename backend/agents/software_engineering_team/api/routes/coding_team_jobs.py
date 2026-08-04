@@ -96,6 +96,7 @@ def get_status(job_id: str) -> StatusResponse:
         review_summary=data.get("review_summary"),
         pending_questions=pending_questions_from_raw(data.get("pending_questions", [])),
         waiting_for_answers=bool(data.get("waiting_for_answers", False)),
+        resume_token=data.get("resume_token"),
         current_activity=data.get("current_activity")
         if isinstance(data.get("current_activity"), dict)
         else None,
