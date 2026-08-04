@@ -291,7 +291,11 @@ class AgentRegistry:
         invisible in the catalog, while a *confirmed* id absent from the store (i.e.
         deleted on another worker) is correctly dropped rather than resurrected.
         Degrades to the local ``_by_id`` view entirely on any store error, so the
-        catalog never breaks when Postgres is down.
+        catalog never breaks when Postgres is down — this fallback still applies
+        :meth:`_drop_tombstoned` (belt-and-braces: ``unregister()`` already pops
+        the id from ``_by_id`` under the same lock that sets its tombstone, so in
+        practice ``_by_id`` never holds a tombstoned id; the explicit call makes
+        that invariant local to this method instead of implicit across two).
 
         Consistency note: ``store.all()`` runs *before* the lock is taken (a slow
         Postgres scan must not serialize the whole registry). A dynamic id
@@ -310,13 +314,17 @@ class AgentRegistry:
         store = self._dynamic_store()
         if store is None:
             with self._lock:
-                return list(self._by_id.values())
+                merged = dict(self._by_id)
+                self._drop_tombstoned(merged)
+                return list(merged.values())
         try:
             merged: dict[str, AgentManifest] = {m.id: m for m in store.all()}
         except Exception:
             logger.warning("dynamic store all() failed; serving local registry", exc_info=True)
             with self._lock:
-                return list(self._by_id.values())
+                merged = dict(self._by_id)
+                self._drop_tombstoned(merged)
+                return list(merged.values())
         with self._lock:
             for agent_id, local in self._by_id.items():
                 if agent_id in self._static_ids:
