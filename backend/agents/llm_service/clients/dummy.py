@@ -1170,11 +1170,16 @@ class DummyLLMClient(LLMClient):
             # includes "Code to review" as a section header.
             return {"issues": [], "summary": "No WCAG 2.2 accessibility issues found (dummy)"}
         elif (
-            "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
+            "code to review" in lowered
+            or "review this code" in lowered
+            or ("chunk" in lowered and "review" in lowered)
         ) and ("approved" not in lowered or len(lowered) > CODE_REVIEW_MIN_PROMPT_LENGTH):
             # Catch-all for code review / chunk review prompts routed through Strands.
             # Long prompts that mention "approved" still match: they carry full review
             # context, unlike short approval-only stubs below the length threshold.
+            # "chunk" alone is too broad (matches unrelated data-processing prompts);
+            # real chunk-review prompts always pair it with "review" (see
+            # CHUNK_REVIEW_NOTE / CODE_TO_REVIEW_HEADER in chunk_reviewer.py).
             return {
                 "approved": True,
                 "issues": [],
