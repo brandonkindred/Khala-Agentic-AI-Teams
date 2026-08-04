@@ -31,6 +31,34 @@ def test_merge_adds_new_docstring_to_function_without_one() -> None:
     assert "return 1" in files["a.py"]
 
 
+def test_merge_one_liner_def_body_rejected_without_corrupting() -> None:
+    """A one-liner def (body on the same physical line as the header) can't be
+    anchored -- rejected explicitly rather than emitted as a line the
+    post-merge syntax check would only catch downstream."""
+    code = "### a.py ###\ndef foo(): return 1\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(symbol="foo", comment="Adds one.")]
+    )
+    assert files == {}
+    assert added == 0
+    assert updated == 0
+    assert len(rejected) == 1
+    assert "one-liner" in rejected[0]
+    assert "def foo(): return 1" in code  # sanity: original untouched by this test
+
+
+def test_merge_one_liner_def_existing_docstring_rejected_without_corrupting() -> None:
+    code = '### a.py ###\ndef foo(): """Old."""\n'
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(symbol="foo", comment="New doc.")]
+    )
+    assert files == {}
+    assert added == 0
+    assert updated == 0
+    assert len(rejected) == 1
+    assert "one-liner" in rejected[0]
+
+
 def test_merge_updates_existing_docstring() -> None:
     code = '### a.py ###\ndef foo():\n    """Old doc."""\n    return 1\n'
     files, added, updated, rejected = apply_dbc_insertions(

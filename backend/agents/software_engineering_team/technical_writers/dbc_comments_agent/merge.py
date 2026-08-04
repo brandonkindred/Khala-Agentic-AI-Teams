@@ -20,10 +20,15 @@ immediately above the given line, matching that line's leading whitespace.
 There is no reliable way to detect an existing comment block without a
 parser, so every accepted non-Python insertion is treated as a fresh
 addition -- a known limitation, not a bug: it can duplicate a comment the
-model intended to replace. Both merge paths reject (skip, without touching
-the file) any insertion that cannot be safely anchored: an unknown file, an
-ambiguous or missing symbol, an out-of-range or missing line, or a duplicate
-target already claimed by an earlier insertion in the same batch.
+model intended to replace.
+
+Both merge paths reject (skip, without touching the file) any insertion
+that cannot be safely anchored, without ever corrupting the file. Rejection
+reasons differ by path since only the Python path has symbols to resolve:
+the Python path rejects an ambiguous or missing symbol; the generic path
+rejects an out-of-range or missing line. Both paths reject an unknown file
+and a duplicate target already claimed by an earlier insertion in the same
+batch.
 """
 
 from __future__ import annotations
@@ -241,11 +246,25 @@ def _merge_python_file(
             continue
 
         first_stmt = body[0]
+        if target is not tree and first_stmt.lineno == target.lineno:
+            # A one-liner def/class (e.g. "def f(): pass") puts the body on the
+            # same physical line as the header. Inserting "before" that line
+            # would land the comment outside the function/class entirely, so
+            # reject explicitly rather than emitting a line the post-merge
+            # syntax check would only reject downstream with a confusing error.
+            rejected.append(
+                f"symbol '{ins.symbol}': its body starts on the same line as the "
+                "def/class header (a one-liner), cannot anchor a comment safely"
+            )
+            continue
         indent = " " * first_stmt.col_offset
         rendered = _render_python_docstring(ins.comment, indent)
         if rendered is None:
+            location = (
+                f"'{ins.symbol}' at line {ins.line}" if ins.line is not None else f"'{ins.symbol}'"
+            )
             rejected.append(
-                f"comment for '{ins.symbol}' contains both quote styles, cannot safely render"
+                f"comment for {location} contains both quote styles, cannot safely render"
             )
             continue
 

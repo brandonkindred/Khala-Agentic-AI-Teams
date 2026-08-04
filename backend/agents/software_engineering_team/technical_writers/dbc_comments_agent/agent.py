@@ -23,7 +23,9 @@ class DbcCommentsAgent:
     complying with Design by Contract principles.
 
     Preconditions:
-        - llm_client must be a valid, non-None LLMClient instance
+        - llm_client may be None, a Strands Model, or an LLMClient; when None,
+          resolve_strands_model constructs the default Strands model for the
+          dbc_comments agent
 
     Postconditions:
         - Agent is ready to review code via the run() method
@@ -52,28 +54,36 @@ class DbcCommentsAgent:
         Review code for Design by Contract compliance and return anchored comment insertions.
 
         Preconditions:
-            - input_data.code is a non-empty string containing code to review
+            - input_data.code is a string; if empty or whitespace-only, the
+              method returns an already_compliant response without calling
+              the LLM
             - input_data.language is one of: python, typescript, java
 
         Postconditions:
-            - Returns DbcCommentsOutput with either:
-              (a) a non-empty insertions list (anchored file/symbol/comment
-                  entries) and already_compliant=False, or
-              (b) an empty insertions list and already_compliant=True
-            - summary field always contains a message for the coding agent
-            - insertions is always the raw, unmerged list the model returned
-              (kept for observability); files holds the deterministic,
-              LLM-free merge of the subset of insertions that could be
-              safely anchored (see merge.apply_dbc_insertions); a file is
-              only present in files when at least one insertion applied
-              cleanly and, for '.py' files, the merge still parses
+            - insertions always contains the raw, unmerged list the model
+              returned (kept for observability), regardless of
+              already_compliant
+            - already_compliant reflects the model's assessment, overridden
+              to True only when the model reported False but returned no
+              insertions
+            - files holds the deterministic, LLM-free merge of the subset of
+              insertions that could be safely anchored (see
+              merge.apply_dbc_insertions); a file is only present when at
+              least one insertion applied cleanly and, for '.py' files, the
+              merge still parses -- files can be empty even when insertions
+              is non-empty, if every insertion was rejected
             - rejected_insertions holds one reason per insertion that could
               not be safely anchored/merged; comments_added/comments_updated
               count only insertions the merge actually applied, never the
               model's self-reported counts
+            - summary contains a message when already_compliant=True
+              (defaulted when the model didn't provide one); otherwise it is
+              the model-provided summary as-is, which may be empty
 
         Raises:
-            Exception: If LLM call fails (caught internally, returns fail-open response)
+            Nothing -- an LLM call failure is caught internally and produces
+            a fail-open DbcCommentsOutput(already_compliant=True, ...)
+            instead of propagating.
         """
 
         def _update(status: DbcCommentsStatus, detail: str = "") -> None:
