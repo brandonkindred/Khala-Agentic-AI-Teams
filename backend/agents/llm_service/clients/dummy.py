@@ -723,6 +723,126 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     return None
 
 
+def _branding_phase4_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Return a Phase 4 agent structured-output stub, or ``None`` if unmatched.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns a dict that validates against the matching Phase 4 agent
+        ``structured_output`` schema, or ``None`` when no Phase 4 agent matches.
+        Covers all four distinct Phase 4 schemas: ``brand_experience_principler``,
+        the six ``_make_channel_guide`` agents (all share ``ChannelGuidelineOutput``,
+        so one stub branch covers all six), ``brand_architecture_builder``, and
+        ``brand_in_action_illustrator``.
+    """
+    if "content_types" in system_lowered and "frequency_guidance" in system_lowered:
+        channel_match = re.search(r"channel:\s*'([a-z_]+)'", system_lowered)
+        channel_value = channel_match.group(1) if channel_match else "channel"
+        return {
+            "channel": channel_value,
+            "strategy": f"Lead with proof points tailored to the {channel_value} audience (dummy).",
+            "dos": [
+                "Match the channel's native format (dummy).",
+                "Lead with the strongest proof point (dummy).",
+                "Keep a consistent voice across posts (dummy).",
+            ],
+            "donts": [
+                "Don't repurpose copy verbatim from other channels (dummy).",
+                "Don't bury the call to action (dummy).",
+                "Don't ignore channel-specific limits (dummy).",
+            ],
+            "content_types": [
+                "Short-form updates (dummy).",
+                "Case study highlights (dummy).",
+                "Behind-the-scenes moments (dummy).",
+            ],
+            "frequency_guidance": "Publish on a predictable weekly cadence (dummy).",
+        }
+    if "brand_experience_principles" in system_lowered and "sensory_elements" in system_lowered:
+        return {
+            "brand_experience_principles": [
+                "Every touchpoint should feel intentional (dummy).",
+                "Consistency builds trust over time (dummy).",
+                "Speed should never break polish (dummy).",
+            ],
+            "signature_moments": [
+                "First login walkthrough (dummy).",
+                "Onboarding welcome email (dummy).",
+                "Renewal confirmation moment (dummy).",
+            ],
+            "sensory_elements": [
+                "Confident, low-pitched notification chime (dummy).",
+                "Matte, tactile packaging texture (dummy).",
+            ],
+        }
+    if "brand_architecture" in system_lowered and "terminology_glossary" in system_lowered:
+        return {
+            "brand_architecture": [
+                {
+                    "entity": "parent brand",
+                    "relationship": "Umbrella over all products (dummy).",
+                    "naming_convention": "Dummy Co. + [Product] (dummy).",
+                    "visual_treatment": "Shared wordmark, distinct accent color (dummy).",
+                }
+            ],
+            "naming_conventions": [
+                "Product names are one word (dummy).",
+                "Avoid internal codenames externally (dummy).",
+                "Always pair sub-brand with parent brand on first mention (dummy).",
+            ],
+            "terminology_glossary": {
+                "brand architecture": "How parent and sub-brands relate (dummy).",
+                "sub-brand": "A named offering under the parent brand (dummy).",
+                "wordmark": "The brand's logotype (dummy).",
+                "boilerplate": "Standard company description (dummy).",
+                "voice": "How the brand sounds in writing (dummy).",
+            },
+        }
+    if "correct_example" in system_lowered and "incorrect_example" in system_lowered:
+        return {
+            "brand_in_action": [
+                {
+                    "context": "Sales deck header (dummy).",
+                    "correct_example": "Uses the approved wordmark and tagline (dummy).",
+                    "incorrect_example": "Stretches the logo and adds a drop shadow (dummy).",
+                    "rationale": "Keeps the mark legible and on-brand (dummy).",
+                },
+                {
+                    "context": "Support email signature (dummy).",
+                    "correct_example": "Plain-text signature with the approved title (dummy).",
+                    "incorrect_example": "Adds an unapproved emoji and banner image (dummy).",
+                    "rationale": "Matches the calm, helpful support tone (dummy).",
+                },
+                {
+                    "context": "Social post header (dummy).",
+                    "correct_example": "Uses the brand accent color and approved crop (dummy).",
+                    "incorrect_example": "Uses an off-palette gradient background (dummy).",
+                    "rationale": "Preserves visual consistency across channels (dummy).",
+                },
+            ]
+        }
+    return None
+
+
+def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Try Phase 3, then Phase 4, branding structured-output stubs; first match wins.
+
+    Preconditions:
+        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
+    Postconditions:
+        Returns the first non-``None`` result from
+        ``_branding_phase3_structured_stub`` / ``_branding_phase4_structured_stub``,
+        or ``None`` when neither matches. Kept as its own helper (rather than
+        inlined in ``complete_json``) so that call site's branching stays
+        unchanged and under the mccabe complexity ceiling.
+    """
+    stub = _branding_phase3_structured_stub(system_lowered)
+    if stub is not None:
+        return stub
+    return _branding_phase4_structured_stub(system_lowered)
+
+
 class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM.
 
@@ -1653,11 +1773,11 @@ class DummyLLMClient(LLMClient):
                     **_BRAND_WRITING_GUIDELINES,
                 }
             )
-        # Branding Phase 3 stubs live in ``_branding_phase3_structured_stub``
-        # so ``complete_json`` stays under the mccabe complexity ceiling.
-        # Only ``None`` means "unmatched" — an intentional empty dict must not
+        # Branding Phase 3 / Phase 4 stubs live in ``_branding_structured_stub``
+        # so ``complete_json`` stays under the mccabe complexity ceiling. Only
+        # ``None`` means "unmatched" — an intentional empty dict must not
         # fall through to the generic default.
-        stub = _branding_phase3_structured_stub(system_lowered)
+        stub = _branding_structured_stub(system_lowered)
         return stub if stub is not None else {"output": "Dummy response", "status": "ok"}
 
     def chat(

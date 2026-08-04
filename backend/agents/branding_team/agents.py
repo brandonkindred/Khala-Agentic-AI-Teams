@@ -13,17 +13,22 @@ import re
 from dataclasses import dataclass
 from typing import List
 
+from pydantic import BaseModel
 from strands import Agent
 
 from .graphs.shared import build_agent
 from .models import (
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
+    BrandArchitectureOutput,
     BrandCheckRequest,
     BrandCheckResult,
     BrandDiscoveryAuditOutput,
+    BrandExperiencePrinciplesOutput,
+    BrandInActionOutput,
     BrandingMission,
     BrandStoryOutput,
+    ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
     CreativeRefinementDecisionOutput,
@@ -580,7 +585,7 @@ def make_design_system_codifier() -> Agent:
 
 
 def make_brand_experience_principler() -> Agent:
-    """Build the Phase 4 Brand Experience Architect agent.
+    """Build the Phase 4 Brand Experience Principler agent.
 
     Postconditions:
         Returns an ``Agent`` named ``brand_experience_principler`` whose
@@ -597,26 +602,34 @@ def make_brand_experience_principler() -> Agent:
             "distinctly on-brand\n"
             "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
         ),
+        structured_output=BrandExperiencePrinciplesOutput,
     )
 
 
-def _make_channel_guide(channel: str, description: str) -> Agent:
+def _make_channel_guide(
+    channel: str, description: str, structured_output: type[BaseModel]
+) -> Agent:
     """Build a channel-specific brand guidelines agent.
 
     Preconditions:
         ``channel`` and ``description`` are non-empty strings; ``channel``
         is a lowercase identifier suitable for use in an agent name
-        (e.g. ``"website"``).
+        (e.g. ``"website"``). ``structured_output`` is the Pydantic model
+        for this channel's guideline output (currently always
+        ``ChannelGuidelineOutput``, passed explicitly by each call site).
 
     Postconditions:
         Returns an ``Agent`` named ``f"{channel}_guide"`` whose prompt
-        embeds ``channel`` and ``description`` and whose output defines
-        that channel's strategy, dos/don'ts, content types, and
-        cadence.
+        embeds ``channel`` and ``description`` and whose structured
+        output defines that channel's strategy, dos/don'ts, content
+        types, and cadence per ``structured_output``.
     """
     assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
     assert isinstance(description, str) and description.strip(), (
         "description must be a non-empty string"
+    )
+    assert isinstance(structured_output, type) and issubclass(structured_output, BaseModel), (
+        "structured_output must be a Pydantic BaseModel subclass"
     )
     return build_agent(
         name=f"{channel}_guide",
@@ -632,6 +645,7 @@ def _make_channel_guide(channel: str, description: str) -> Agent:
             f"- frequency_guidance: recommended cadence\n"
             f"Context: {description}"
         ),
+        structured_output=structured_output,
     )
 
 
@@ -642,7 +656,9 @@ def make_website_guide() -> Agent:
         Returns ``_make_channel_guide("website", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("website", "Company website, landing pages, product pages.")
+    return _make_channel_guide(
+        "website", "Company website, landing pages, product pages.", ChannelGuidelineOutput
+    )
 
 
 def make_social_guide() -> Agent:
@@ -652,7 +668,9 @@ def make_social_guide() -> Agent:
         Returns ``_make_channel_guide("social", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("social", "Social media platforms (LinkedIn, Twitter, Instagram).")
+    return _make_channel_guide(
+        "social", "Social media platforms (LinkedIn, Twitter, Instagram).", ChannelGuidelineOutput
+    )
 
 
 def make_email_guide() -> Agent:
@@ -662,7 +680,9 @@ def make_email_guide() -> Agent:
         Returns ``_make_channel_guide("email", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("email", "Email marketing, newsletters, transactional emails.")
+    return _make_channel_guide(
+        "email", "Email marketing, newsletters, transactional emails.", ChannelGuidelineOutput
+    )
 
 
 def make_events_guide() -> Agent:
@@ -672,7 +692,9 @@ def make_events_guide() -> Agent:
         Returns ``_make_channel_guide("events", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("events", "Conferences, webinars, meetups, trade shows.")
+    return _make_channel_guide(
+        "events", "Conferences, webinars, meetups, trade shows.", ChannelGuidelineOutput
+    )
 
 
 def make_partnerships_guide() -> Agent:
@@ -682,7 +704,9 @@ def make_partnerships_guide() -> Agent:
         Returns ``_make_channel_guide("partnerships", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("partnerships", "Co-branding, sponsorships, partner marketing.")
+    return _make_channel_guide(
+        "partnerships", "Co-branding, sponsorships, partner marketing.", ChannelGuidelineOutput
+    )
 
 
 def make_internal_guide() -> Agent:
@@ -692,7 +716,9 @@ def make_internal_guide() -> Agent:
         Returns ``_make_channel_guide("internal", ...)`` — see that
         function's contract.
     """
-    return _make_channel_guide("internal", "Internal comms, employee branding, onboarding.")
+    return _make_channel_guide(
+        "internal", "Internal comms, employee branding, onboarding.", ChannelGuidelineOutput
+    )
 
 
 def make_brand_architecture_builder() -> Agent:
@@ -712,8 +738,8 @@ def make_brand_architecture_builder() -> Agent:
             "with: entity, relationship, naming_convention, visual_treatment\n"
             "2. naming_conventions — 3-5 naming rules\n"
             "3. terminology_glossary — 5-10 key terms with definitions (dict)\n"
-            "Output valid JSON with these three keys."
         ),
+        structured_output=BrandArchitectureOutput,
     )
 
 
@@ -734,8 +760,8 @@ def make_brand_in_action_illustrator() -> Agent:
             "- correct_example: the on-brand version\n"
             "- incorrect_example: the off-brand version\n"
             "- rationale: why the correct version is better\n"
-            "Output valid JSON as a list of BrandInActionExample objects."
         ),
+        structured_output=BrandInActionOutput,
     )
 
 
