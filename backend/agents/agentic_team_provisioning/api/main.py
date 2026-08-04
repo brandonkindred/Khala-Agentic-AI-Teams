@@ -260,7 +260,17 @@ def health():
 @app.post("/teams", response_model=CreateTeamResponse)
 def create_team(req: CreateTeamRequest):
     team = _store.create_team(name=req.name, description=req.description)
-    provision_team(team.team_id)
+    try:
+        provision_team(team.team_id)
+    except Exception as exc:
+        logger.exception(
+            "Failed to provision infrastructure for team %s; rolling back team row",
+            team.team_id,
+        )
+        _store.delete_team(team.team_id)
+        raise HTTPException(
+            status_code=500, detail="Failed to provision team infrastructure."
+        ) from exc
     return CreateTeamResponse(
         team_id=team.team_id,
         name=team.name,

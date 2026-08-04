@@ -105,6 +105,14 @@ def _dispatch() -> DispatchTable:
         (team_id,) = params
         cur.set_one((team_id,) if team_id in cur.db["teams"] else None)
 
+    def match_delete_team(norm: str) -> bool:
+        return norm.startswith("delete from agentic_teams where team_id")
+
+    def handle_delete_team(cur: FakeCursor, params: tuple) -> None:
+        (team_id,) = params
+        removed = cur.db["teams"].pop(team_id, None)
+        cur.rowcount = 1 if removed else 0
+
     def match_list_teams(norm: str) -> bool:
         return "from agentic_teams t" in norm and "order by t.created_at desc" in norm
 
@@ -800,6 +808,7 @@ def _dispatch() -> DispatchTable:
         (match_update_team_updated_at, handle_update_team_updated_at),
         (match_select_team_by_id, handle_select_team_by_id),
         (match_select_team_id_lock, handle_select_team_id_lock),
+        (match_delete_team, handle_delete_team),
         (match_list_teams, handle_list_teams),
         (match_upsert_process, handle_upsert_process),
         (match_select_process_data, handle_select_process_data),
