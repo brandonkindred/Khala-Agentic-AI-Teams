@@ -132,6 +132,7 @@ from investment_team.strategy_lab.spec_dsl import (
 from investment_team.strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
     normalize_allowed_asset_classes,
+    normalize_asset_class,
 )
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared.app import create_team_app
@@ -1507,8 +1508,6 @@ class StrategyLabResultsResponse(BaseModel):
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
     """Map LLM output to canonical labels used by the simulated ledger."""
-    from investment_team.strategy_lab_context import normalize_asset_class
-
     return normalize_asset_class(raw)
 
 
