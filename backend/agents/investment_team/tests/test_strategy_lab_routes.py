@@ -175,11 +175,22 @@ def lab_job_client(monkeypatch: pytest.MonkeyPatch) -> "_StubLabClient":
     client and don't care about pre-seeded jobs. Tests that need specific
     persisted jobs should construct their own ``_StubLabClient(jobs=[...])``
     and patch it directly instead of using this fixture.
+
+    Also patches ``run_state.get_lab_run_job_client`` (the *same* stub
+    instance) -- ``run_state.load_run_from_job_service`` builds its own
+    client via that module-level function, independent of ``api.main``'s.
+    Since ``load_run_from_job_service`` no longer swallows job-service
+    errors (see run_state.py), leaving that source unpatched would make a
+    route that falls through to it (e.g. resume/restart's 404-when-missing
+    check) attempt a real network call and raise a connection error instead
+    of the empty-store 404 these tests intend to exercise.
     """
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
 
     stub = _StubLabClient()
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(_run_state, "get_lab_run_job_client", lambda: stub)
     return stub
 
 
