@@ -1469,12 +1469,28 @@ class RunStrategyLabRequest(BaseModel):
 
 
 class StrategyLabRunResponse(BaseModel):
+    """Summary of a single completed ideation + backtest + analysis cycle.
+
+    ``count`` is the number of records in ``records`` (0 or 1 for a single
+    cycle). Not currently used as a FastAPI ``response_model``.
+    """
+
     records: List[StrategyLabRecord] = Field(default_factory=list)
     count: int = 0
     message: str = "Strategy ideated, backtested, and analysed successfully."
 
 
 class StrategyLabResultsResponse(BaseModel):
+    """Response body for ``GET /strategy-lab/results``.
+
+    ``items``/``count`` reflect the records after the optional
+    ``?winning=`` filter is applied. ``winning_count``/``losing_count``
+    are computed from the full, unfiltered set of records and represent
+    how many strategies met (``is_winning=True``) or missed
+    (``is_winning=False``) the annualized-return winning threshold —
+    they do not change based on the ``winning`` query filter.
+    """
+
     items: List[StrategyLabRecord] = Field(default_factory=list)
     count: int = 0
     winning_count: int = 0
