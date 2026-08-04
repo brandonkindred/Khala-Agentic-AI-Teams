@@ -2569,35 +2569,41 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     """
     jobs: List[InvestmentJobSummary] = []
 
-    # Active in-memory runs
+    # Single consistent snapshot of in-memory runs, taken under one lock hold.
+    # Deriving both the in-memory `jobs` entries and `in_memory_ids` from this
+    # same snapshot (rather than re-reading `_active_runs` under a second
+    # `with _lock:`) prevents a run added/removed between two separate reads
+    # from being omitted from or duplicated in the merged result.
     with _lock:
-        for state in _active_runs.values():
-            cycle = state.get("current_cycle")
-            phase = cycle.get("phase") if cycle else None
-            hypothesis = ""
-            if cycle and cycle.get("strategy"):
-                hypothesis = cycle["strategy"].get("hypothesis", "")[:60]
-            completed = state.get("completed_cycles", 0)
-            total = state.get("total_cycles", 1)
-            progress = _job_progress_percent(completed, total)
-            label = hypothesis or f"Strategy batch ({completed}/{total})"
-            jobs.append(
-                InvestmentJobSummary(
-                    job_id=state["run_id"],
-                    status=state["status"],
-                    label=label,
-                    progress=progress,
-                    current_phase=phase,
-                    created_at=state.get("started_at"),
-                )
+        active_states = list(_active_runs.values())
+
+    # Active in-memory runs
+    for state in active_states:
+        cycle = state.get("current_cycle")
+        phase = cycle.get("phase") if cycle else None
+        hypothesis = ""
+        if cycle and cycle.get("strategy"):
+            hypothesis = cycle["strategy"].get("hypothesis", "")[:60]
+        completed = state.get("completed_cycles", 0)
+        total = state.get("total_cycles", 1)
+        progress = _job_progress_percent(completed, total)
+        label = hypothesis or f"Strategy batch ({completed}/{total})"
+        jobs.append(
+            InvestmentJobSummary(
+                job_id=state["run_id"],
+                status=state["status"],
+                label=label,
+                progress=progress,
+                current_phase=phase,
+                created_at=state.get("started_at"),
             )
+        )
 
     # Persisted runs from job service (completed runs not in memory)
     try:
         client = _get_lab_run_job_client()
         persisted = client.list_jobs() or []
-        with _lock:
-            in_memory_ids = {s["run_id"] for s in _active_runs.values()}
+        in_memory_ids = {s["run_id"] for s in active_states}
         for job in persisted:
             jid = job.get("job_id", "")
             if jid in in_memory_ids:
