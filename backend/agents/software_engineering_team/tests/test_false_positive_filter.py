@@ -24,7 +24,9 @@ from typing import Any, Dict, List, Optional
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
+    _TOOL_RESULT_TRUNCATION_MARKER,
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
+    DEFAULT_VERIFY_MAX_READ_CHARS,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
     CodebaseIndex,
     _build_group_prompt,
@@ -36,6 +38,7 @@ from code_review_agent.false_positive_filter import (
     _sanitize_finding_field,
     _strip_numbered_prefixes,
     _verify_max_findings_per_group,
+    _verify_max_read_chars,
     _verify_timeout_seconds,
     filter_false_positives,
 )
@@ -363,6 +366,31 @@ def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
     assert read_file("a.py").startswith("Error")
     assert list_files().startswith("Error")
     assert search_codebase("x").startswith("Error")
+
+
+def test_read_file_tool_truncates_oversized_content(monkeypatch) -> None:
+    """The read_file tool truncates an oversized file with a trailing marker,
+    rather than returning it unbounded."""
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_READ_CHARS", "500")
+    idx = CodebaseIndex(files={"big.py": "X" * 5000})
+    read_file, _list_files, _search_codebase, _find = _build_tools(idx)
+    result = read_file("big.py")
+    assert result == "X" * 500 + _TOOL_RESULT_TRUNCATION_MARKER
+    assert "X" * 5000 not in result
+
+
+def test_search_codebase_tool_truncates_oversized_result(monkeypatch) -> None:
+    """The search_codebase tool truncates an oversized combined match result
+    with a trailing marker, even when the match *count* is small."""
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_READ_CHARS", "500")
+    long_line = "needle " + "y" * 300
+    idx = CodebaseIndex(files={"big.py": f"{long_line}\n{long_line}\n"})
+    _read_file, _list_files, search_codebase, _find = _build_tools(idx)
+    uncapped = "\n".join(f"big.py:{n}: {long_line}" for n in (1, 2))
+    assert len(uncapped) > 500  # precondition: the untruncated result exceeds the cap
+    result = search_codebase("needle")
+    assert result == uncapped[:500] + _TOOL_RESULT_TRUNCATION_MARKER
+    assert uncapped not in result
 
 
 # --------------------------------------------------------------------------- find_function_at_line
@@ -1254,6 +1282,25 @@ def test_verify_max_findings_per_group_default_and_env_override(monkeypatch) -> 
 
     monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP", "5")
     assert _verify_max_findings_per_group() == 5
+
+
+def test_verify_max_read_chars_default_and_env_override(monkeypatch) -> None:
+    """Tool-read char cap defaults to 50000 and honors the env override.
+
+    Preconditions:
+        - ``CODE_REVIEW_VERIFY_MAX_READ_CHARS`` is unset for the default
+          assertion, then set for the override assertion (via ``monkeypatch``).
+
+    Postconditions:
+        - Unset env → ``DEFAULT_VERIFY_MAX_READ_CHARS`` (50000).
+        - Env ``1000`` → ``1000``.
+    """
+    monkeypatch.delenv("CODE_REVIEW_VERIFY_MAX_READ_CHARS", raising=False)
+    assert DEFAULT_VERIFY_MAX_READ_CHARS == 50_000
+    assert _verify_max_read_chars() == 50_000
+
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_READ_CHARS", "1000")
+    assert _verify_max_read_chars() == 1000
 
 
 def test_filter_splits_oversized_file_into_multiple_batches(monkeypatch) -> None:
