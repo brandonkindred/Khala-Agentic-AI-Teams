@@ -77,12 +77,19 @@ def run_backtest_activity(
           Temporal retries within the bounded policy). Returns a status dict.
     """
     from investment_team.api.main import (
+        _BT_JOB_STATUS_CANCELLED,
         _BT_JOB_STATUS_COMPLETED,
         _BT_JOB_STATUS_FAILED,
         _backtest_job_status,
         _run_backtest_background,
     )
     from investment_team.models import BacktestConfig, StrategySpec
+
+    current_status = _backtest_job_status(job_id)
+    if current_status == _BT_JOB_STATUS_COMPLETED:
+        return {"job_id": job_id, "status": "completed"}
+    elif current_status == _BT_JOB_STATUS_CANCELLED:
+        return {"job_id": job_id, "status": "cancelled"}
 
     if _backtest_job_status(job_id) == _BT_JOB_STATUS_COMPLETED:
         return {"job_id": job_id, "status": "completed"}
@@ -94,9 +101,12 @@ def run_backtest_activity(
         submitted_by,
         notes,
     )
-
-    if _backtest_job_status(job_id) == _BT_JOB_STATUS_FAILED:
+    final_status = _backtest_job_status(job_id)
+    if final_status == _BT_JOB_STATUS_FAILED:
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
+    elif final_status == _BT_JOB_STATUS_CANCELLED:
+        return {"job_id": job_id, "status": "cancelled"}
+        
     return {"job_id": job_id, "status": "completed"}
 
 
