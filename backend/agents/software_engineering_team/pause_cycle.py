@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional
+import uuid
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from software_engineering_team import hitl
 from software_engineering_team.models import CodingTeamPlanInput
@@ -25,7 +26,155 @@ MAX_TECH_LEAD_QUESTION_ROUNDS = 5
 # Type alias for the bound pause cycle: given questions + a source label, surface them to the user,
 # block until answered, and return (resolved_answers, ok). ok=False means the job went terminal or
 # timed out while waiting (the cycle has already set the failure status) and the caller must stop.
+# In pause_strategy="return" mode (see _run_pause_cycle), a call through this same signature never
+# returns at all -- it raises _ActivityPauseSignal instead. Callers bound to this type only ever see
+# that behavior change if the underlying job actually runs pause_strategy="return"; every existing
+# caller passes exactly (questions, source) and needs no change either way.
 PauseCycle = Callable[[List[Any], str], "tuple[List[Dict[str, Any]], bool]"]
+
+
+class _ActivityPauseSignal(Exception):
+    """Internal control-flow signal: a HITL gate paused while ``pause_strategy="return"``.
+
+    Carries the exact discriminated-result payload ``run_coding_team_orchestrator`` needs
+    to return to a Temporal-activity caller, letting a pause deep inside ``_plan_with_hitl``'s
+    loop or ``swarm_implementation._escalate_decision`` unwind back to that function's own
+    return statement without every intermediate frame needing to learn a new return-value
+    shape (``PauseCycle``'s ``(resolved, ok)`` contract stays completely unchanged).
+
+    Invariants:
+        - Never crosses ``run_coding_team_orchestrator``'s own boundary — caught there and
+          translated into a return value, never propagated to ``run_orchestrator_wired`` or
+          the Temporal activity itself.
+    """
+
+    def __init__(
+        self,
+        *,
+        resume_token: str,
+        pause_kind: str,
+        pause_context: Optional[Dict[str, Any]],
+        pending_questions: List[Dict[str, Any]],
+    ) -> None:
+        self.resume_token = resume_token
+        self.pause_kind = pause_kind
+        self.pause_context = pause_context
+        self.pending_questions = pending_questions
+        super().__init__(f"paused: resume_token={resume_token} pause_kind={pause_kind}")
+
+    @property
+    def payload(self) -> Dict[str, Any]:
+        """The discriminated-result fields this signal carries (excluding ``outcome``/``job_id``,
+        which the catcher in ``run_coding_team_orchestrator`` adds)."""
+        return {
+            "resume_token": self.resume_token,
+            "pause_kind": self.pause_kind,
+            "pause_context": self.pause_context,
+            "pending_questions": self.pending_questions,
+        }
+
+
+def mint_resume_token(job_id: str) -> str:
+    """Mint a fresh ``resume_token``, unique per pause round.
+
+    Preconditions:
+        - ``job_id`` is non-empty; violated by raising ``ValueError``.
+    Postconditions:
+        - Returns ``f"{job_id}:{uuid4().hex[:12]}"`` — unique per call, never reused across
+          pause rounds even for the same ``job_id``. Callers must persist the returned value
+          atomically with the rest of the pause envelope and must not call this again for the
+          same pause round (see ``_run_pause_cycle``: minted only for a genuinely new pause,
+          re-emitted unchanged on a pre-work activity retry — see
+          ``_check_pending_pause_reentry``).
+    """
+    if not job_id:
+        raise ValueError("job_id must be non-empty")
+    return f"{job_id}:{uuid.uuid4().hex[:12]}"
+
+
+def _pause_kind_for_source(source: str) -> str:
+    """Map a ``_run_pause_cycle`` ``source`` label to the contract doc's ``pause_kind``.
+
+    Preconditions:
+        - ``source`` is one of this codebase's three recognized labels: ``"plan_input"``
+          (entry gate), ``"tech_lead"`` (Tech-Lead clarify loop), or a string starting with
+          ``"engineer:"`` (worker escalation — see ``swarm_implementation._escalate_decision``).
+    Postconditions:
+        - Returns ``"entry"`` | ``"tech_lead_clarify"`` | ``"worker_escalation"``. Raises
+          ``ValueError`` on an unrecognized source — fails closed rather than silently
+          mislabeling a pause kind the workflow-side consumer doesn't expect.
+    """
+    if source == "plan_input":
+        return "entry"
+    if source == "tech_lead":
+        return "tech_lead_clarify"
+    if source.startswith("engineer:"):
+        return "worker_escalation"
+    raise ValueError(f"Unrecognized pause source: {source!r}")
+
+
+def _pause_context_for_source(source: str, pause_kind: str) -> Optional[Dict[str, Any]]:
+    """Derive ``pause_context`` from ``source`` for a worker-escalation pause; ``None`` otherwise.
+
+    Preconditions:
+        - ``pause_kind`` is ``_pause_kind_for_source(source)``'s result for this same ``source``;
+          violated by raising ``ValueError`` (also fails closed if ``source`` claims to be a
+          worker escalation but carries no task id after the ``"engineer:"`` prefix).
+    Postconditions:
+        - For ``"worker_escalation"``, returns ``{"task_ids": [<id>]}`` where ``<id>`` is the
+          task id embedded in ``source`` (``f"engineer:{task.id}"`` — the swarm's own
+          convention). ``None`` for every other ``pause_kind``, per the contract's
+          ``pause_context`` shape (set only for worker escalation; entry/tech-lead-clarify
+          carry no per-task context).
+    """
+    if pause_kind != _pause_kind_for_source(source):
+        raise ValueError(
+            f"pause_kind {pause_kind!r} does not match _pause_kind_for_source({source!r})"
+        )
+    if pause_kind != "worker_escalation":
+        return None
+    task_id = source[len("engineer:") :]
+    if not task_id:
+        raise ValueError(f"worker-escalation source must carry a task id: {source!r}")
+    return {"task_ids": [task_id]}
+
+
+def _check_pending_pause_reentry(
+    job_data: Dict[str, Any],
+    acknowledged_resume_token: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Classify a ``pause_strategy="return"`` (re-)entry against a persisted, unresolved pause.
+
+    Preconditions:
+        - ``job_data`` is the job record read at the top of this invocation (may be ``{}``).
+        - Only meaningful under ``pause_strategy="return"``; a block-mode caller must not call
+          this — block-mode pauses never persist ``resume_token``.
+    Postconditions:
+        - Returns ``None`` when ``job_data`` carries no persisted, unresolved pause
+          (``waiting_for_answers`` falsy, or no ``resume_token`` on the record) — the caller
+          should proceed normally (fresh run, or a genuinely resolved-and-continuing run).
+        - Returns ``{"consume": True, "resume_token", "pause_kind", "pause_context",
+          "pending_questions"}`` when ``acknowledged_resume_token`` matches the persisted
+          ``resume_token`` by exact equality — a genuine resume; the caller must atomically
+          clear the pause envelope and continue (the already-appended ``submitted_answers``
+          are picked up by the existing ``_hydrate_resolved_from_record`` call).
+        - Returns ``{"consume": False, ...same fields...}`` when a persisted, unresolved pause
+          exists but ``acknowledged_resume_token`` is missing or does not match — a pre-work
+          activity retry; the caller must re-emit this exact payload as
+          ``{"outcome": "paused", ...}`` without re-running any work.
+    """
+    if not job_data.get("waiting_for_answers"):
+        return None
+    persisted_token = job_data.get("resume_token")
+    if not persisted_token:
+        return None
+    return {
+        "consume": acknowledged_resume_token == persisted_token,
+        "resume_token": persisted_token,
+        "pause_kind": job_data.get("pause_kind"),
+        "pause_context": job_data.get("pause_context"),
+        "pending_questions": job_data.get("pending_questions") or [],
+    }
 
 
 def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
@@ -255,22 +404,36 @@ def _run_pause_cycle(
     get_job_fn: Callable[[str], Optional[Dict[str, Any]]],
     update_fn: Callable[..., None],
     on_pause: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    pause_strategy: Literal["block", "return"] = "block",
 ) -> "tuple[List[Dict[str, Any]], bool]":
-    """Surface open questions, pause the job, block until answered, and return resolved answers.
+    """Surface open questions, pause the job, then either block until answered or return promptly.
 
     This is the single deterministic gate the whole coding team funnels decisions through. It sets
-    the job ``waiting_for_user`` (flag ``waiting_for_answers``), records the structured questions,
-    optionally invokes ``on_pause`` (e.g. to post a GitHub issue comment), then blocks until the
-    answer endpoint clears the flag.
+    the job ``waiting_for_user`` (flag ``waiting_for_answers``) and records the structured questions
+    in the SAME atomic update either way.
 
+    Preconditions:
+        - ``pause_strategy`` is ``"block"`` or ``"return"``; violated by raising ``ValueError`` (this
+          is the sole enforcement point for every caller, including ones that bypass the type
+          annotation — e.g. tests calling this function directly rather than through
+          ``run_coding_team_orchestrator``, which validates its own ``pause_strategy`` parameter
+          before ever reaching here, but cannot enforce what a lower-level direct caller passes).
     Postconditions:
-        - Returns ``([], True)`` immediately when there is nothing to ask.
-        - On answers: returns ``(resolved, True)`` and the job is back to ``running``.
-        - On timeout: sets the job ``failed`` and returns ``([], False)``.
-        - On the job going terminal while waiting (e.g. cancelled): leaves the status as-is and
-          returns ``([], False)``.
-        - Never fabricates or defaults an answer.
+        - Returns ``([], True)`` immediately when there is nothing to ask (both modes, unchanged).
+        - ``pause_strategy="block"`` (unchanged from before ``pause_strategy`` existed): optionally
+          invokes ``on_pause`` (e.g. to post a GitHub issue comment), then blocks until the answer
+          endpoint clears the flag. On answers: returns ``(resolved, True)`` and the job is back to
+          ``running``. On timeout: sets the job ``failed`` and returns ``([], False)``. On the job
+          going terminal while waiting (e.g. cancelled): leaves the status as-is and returns
+          ``([], False)``. Never fabricates or defaults an answer. Never calls
+          ``mint_resume_token``/writes ``resume_token``.
+        - ``pause_strategy="return"``: additionally writes a freshly minted ``resume_token`` and the
+          ``pause_kind``/``pause_context`` derived from ``source`` in that SAME atomic update, then
+          raises ``_ActivityPauseSignal`` carrying that payload — never calls ``on_pause`` or
+          ``hitl.wait_for_answers`` in this mode; this call never returns normally.
     """
+    if pause_strategy not in ("block", "return"):
+        raise ValueError(f"pause_strategy must be 'block' or 'return', got {pause_strategy!r}")
     structured = hitl.convert_to_structured_questions(questions, source=source)
     if not structured:
         return [], True
@@ -280,7 +443,7 @@ def _run_pause_cycle(
     # observing a live heartbeat. Doing the heartbeat after on_pause (which may post a slow GitHub
     # comment) or only on the first wait_for_answers tick would leave a window where another worker
     # sees the flag but no heartbeat, declares the orchestrator dead, and double-drives the job.
-    update_fn(
+    update_kwargs: Dict[str, Any] = dict(
         status=hitl.WAITING_STATUS,
         phase="paused",
         status_text=f"Waiting for {len(structured)} decision(s) from the user",
@@ -291,6 +454,29 @@ def _run_pause_cycle(
         # waiting out the prior lease's TTL (the seq counter is left monotonic).
         resume_claim_at=None,
     )
+    resume_token: Optional[str] = None
+    pause_kind: Optional[str] = None
+    pause_context: Optional[Dict[str, Any]] = None
+    if pause_strategy == "return":
+        pause_kind = _pause_kind_for_source(source)
+        pause_context = _pause_context_for_source(source, pause_kind)
+        resume_token = mint_resume_token(job_id)
+        # resume_token/pause_kind/pause_context are written ONLY in "return" mode: their presence
+        # on the job record is exactly what POST /run/{job_id}/answers uses to decide whether a
+        # submission must signal a Temporal workflow instead of relying on a blocked thread — a
+        # block-mode job must never carry a resume_token, or that route would try to signal a
+        # workflow that does not exist.
+        update_kwargs.update(
+            resume_token=resume_token, pause_kind=pause_kind, pause_context=pause_context
+        )
+    update_fn(**update_kwargs)
+    if pause_strategy == "return":
+        raise _ActivityPauseSignal(
+            resume_token=resume_token,
+            pause_kind=pause_kind,
+            pause_context=pause_context,
+            pending_questions=structured,
+        )
     pinned_activity_at = _pin_last_activity_at(job_id, get_job_fn)
     if on_pause is not None:
         _run_on_pause_with_lease_renewal(

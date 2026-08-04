@@ -6,12 +6,13 @@ and ``temporalio.workflow.wait_condition`` in place -- the same lightweight
 pattern ``agentic_team_provisioning/tests/test_temporal_activity.py`` uses for
 ``AgenticPipelineWorkflow``.
 
-``run_pipeline_activity`` does not emit ``{"outcome": "paused", ...}`` yet --
-that activity-side pause detection is separate, not-yet-implemented work (see
-``system_design/hitl_pause_resume_contract.md``). These tests fake the
-activity's *return value* directly so the signal / wait_condition / re-invoke
-SHAPE -- including resume_token validation and acknowledged_resume_token --
-can be proven now, independent of that future change. Buffering an early
+``run_pipeline_activity`` now emits ``{"outcome": "paused", ...}`` under
+``pause_strategy="return"`` (see ``system_design/hitl_pause_resume_contract.md``
+and ``test_coding_team_temporal_activity.py`` for that activity-side behavior
+directly). These tests fake the activity's *return value* directly so the
+signal / wait_condition / re-invoke SHAPE -- including resume_token
+validation and acknowledged_resume_token -- stays isolated from the real
+activity's orchestrator-wiring/job-store dependencies. Buffering an early
 signal (before a pause is active) and applying answers into
 ``request["plan_input"]`` are deferred to the sibling reconciliation-loop
 issue (#3988) and are not covered here.
@@ -51,9 +52,9 @@ def _patch_execute(monkeypatch: pytest.MonkeyPatch, results: list) -> tuple[list
 
 
 def test_run_returns_immediately_when_not_paused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Today's real activity result (no 'outcome' key) returns on the first
-    iteration without ever touching wait_condition -- the pause loop is dead
-    code until activity-side pause detection lands."""
+    """A terminal (non-'outcome': 'paused') activity result returns on the first
+    iteration without ever touching wait_condition -- the common case when no
+    HITL gate pauses during the run."""
     workflow_obj = CodingTeamWorkflow()
     calls, _ = _patch_execute(monkeypatch, [{"job_id": "j1", "status": "completed"}])
 
@@ -66,6 +67,26 @@ def test_run_returns_immediately_when_not_paused(monkeypatch: pytest.MonkeyPatch
 
     assert result == {"job_id": "j1", "status": "completed"}
     assert len(calls) == 1
+
+
+def test_run_raises_on_paused_result_missing_resume_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paused result without a valid resume_token must fail the workflow task
+    deterministically, not silently assign None and let wait_condition's predicate
+    become permanently unsatisfiable (submit_answers drops every signal while
+    self._active_resume_token is None) -- an unresolvable hang is a much worse
+    failure mode than an immediate, diagnosable error."""
+    workflow_obj = CodingTeamWorkflow()
+    _patch_execute(monkeypatch, [{"outcome": "paused", "job_id": "j1"}])
+
+    async def _no_wait(*_a, **_kw):  # pragma: no cover - must not be called
+        raise AssertionError("wait_condition must not be reached with no resume_token")
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
+
+    with pytest.raises(ValueError, match="missing a valid resume_token"):
+        asyncio.run(workflow_obj.run({"repo_path": "/repo", "plan_input": {}}))
 
 
 def test_submit_answers_signal_wakes_wait_condition_and_reloops(
@@ -163,6 +184,43 @@ def test_submit_answers_sets_state_directly(monkeypatch: pytest.MonkeyPatch) -> 
     workflow_obj.submit_answers({"resume_token": "tok-1", "answers": answers})
 
     assert workflow_obj._submitted_answers == answers
+
+
+def test_submit_answers_ignores_non_dict_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed signal payload (not a dict) must be dropped, not raise -- an
+    unhandled exception here would fail the workflow task and, since Temporal
+    replays history, would fail identically forever, stranding the workflow."""
+    workflow_obj = CodingTeamWorkflow()
+    workflow_obj._active_resume_token = "tok-1"
+
+    workflow_obj.submit_answers("not-a-dict")  # type: ignore[arg-type]
+
+    assert workflow_obj._submitted_answers is None
+
+
+def test_submit_answers_ignores_non_list_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A payload with a matching resume_token but a non-list 'answers' value
+    must be dropped rather than stored -- wait_condition's predicate assumes
+    a list once _submitted_answers is not None."""
+    workflow_obj = CodingTeamWorkflow()
+    workflow_obj._active_resume_token = "tok-1"
+
+    workflow_obj.submit_answers({"resume_token": "tok-1", "answers": "not-a-list"})
+
+    assert workflow_obj._submitted_answers is None
+
+
+def test_submit_answers_ignores_payload_missing_answers_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A payload with a matching resume_token but no 'answers' key at all must
+    be dropped rather than raise KeyError."""
+    workflow_obj = CodingTeamWorkflow()
+    workflow_obj._active_resume_token = "tok-1"
+
+    workflow_obj.submit_answers({"resume_token": "tok-1"})
+
+    assert workflow_obj._submitted_answers is None
 
 
 def test_run_request_declares_acknowledged_resume_token() -> None:

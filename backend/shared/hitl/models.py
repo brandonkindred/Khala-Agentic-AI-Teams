@@ -78,9 +78,22 @@ class AnswerSubmission(BaseModel):
 
 
 class SubmitAnswersRequest(BaseModel):
-    """Request body for submitting answers to a job's pending questions."""
+    """Request body for submitting answers to a job's pending questions.
+
+    ``resume_token`` is optional so this shared model stays backward-compatible for
+    every caller that doesn't have a concept of one (thread-mode routes, SE's
+    product-analysis answers route) — it is enforced (not via Pydantic, but an
+    explicit check) only by a route in its native-Temporal-signal branch, per
+    ``system_design/hitl_pause_resume_contract.md`` §3.
+    """
 
     answers: List[AnswerSubmission] = Field(..., description="List of answers to submit.")
+    resume_token: Optional[str] = Field(
+        default=None,
+        description="Echoes the resume_token from the pause notification/status poll this "
+        "answer batch resolves. Required (and checked against the job record's persisted "
+        "resume_token) only by a native-Temporal-signal-capable route; ignored elsewhere.",
+    )
 
 
 class HumanReview(BaseModel):
