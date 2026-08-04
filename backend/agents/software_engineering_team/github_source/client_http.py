@@ -163,6 +163,7 @@ class _GitHubHttpMixin:
     ) -> httpx.Response:
         url = self._absolute_url(path)
         last_exc: Optional[Exception] = None
+        last_response: Optional[httpx.Response] = None
         for attempt in range(self._max_retries):
             try:
                 response = self._client.request(
@@ -181,6 +182,7 @@ class _GitHubHttpMixin:
                 continue
 
             if response.status_code in (502, 503, 504):
+                last_response = response
                 logger.warning(
                     "GitHub %s %s -> %d (attempt %d)",
                     method,
@@ -210,6 +212,8 @@ class _GitHubHttpMixin:
 
         if last_exc is not None:
             raise GitHubAPIError(0, f"transport error: {last_exc}") from last_exc
+        if last_response is not None:
+            raise GitHubAPIError(last_response.status_code, last_response.text)
         raise GitHubAPIError(0, "exceeded retries")
 
     def _check(self, response: httpx.Response) -> httpx.Response:
