@@ -98,8 +98,8 @@ def test_resolve_model_falls_back_without_runtime(monkeypatch):
     """Without runtime, resolve_model uses the default fallback then global env."""
     monkeypatch.setattr(c, "_runtime", lambda key: "")
     assert c.resolve_model(None) == c.DEFAULT_FALLBACK_MODEL
-    monkeypatch.setenv("LLM_MODEL", "glm-5.2:cloud")
-    assert c.resolve_model(None) == "glm-5.2:cloud"
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-flash:cloud")
+    assert c.resolve_model(None) == "deepseek-v4-flash:cloud"
 
 
 def test_resolve_model_uses_provider_specific_runtime_keys(monkeypatch):
@@ -139,7 +139,7 @@ def test_looks_like_claude_model():
         "my-gateway-anthropic-opus",
     ):
         assert c._looks_like_claude_model(m) is True
-    for m in ("deepseek-v4-pro:cloud", "glm-5.2:cloud", "qwen3-coder:480b-cloud", "", "gpt-4"):
+    for m in ("deepseek-v4-pro:cloud", "deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud", "", "gpt-4"):
         assert c._looks_like_claude_model(m) is False
 
 
@@ -153,7 +153,7 @@ def test_resolve_claude_model_ignores_non_claude_global_env(monkeypatch):
 
 def test_resolve_claude_model_ignores_non_claude_per_agent_env(monkeypatch):
     """A non-Claude per-agent LLM_MODEL_<agent> falls back to the Claude default."""
-    monkeypatch.setenv("LLM_MODEL_backend", "glm-5.2:cloud")
+    monkeypatch.setenv("LLM_MODEL_backend", "deepseek-v4-flash:cloud")
     assert c.resolve_claude_model("backend") == c.DEFAULT_CLAUDE_MODEL
 
 
@@ -180,12 +180,12 @@ def test_resolve_claude_model_warns_once_per_candidate(monkeypatch, caplog):
 def test_resolve_model_for_provider_dispatches(monkeypatch):
     """resolve_model_for_provider dispatches by active provider (ollama vs claude)."""
     # Ollama provider -> resolve_model; Claude provider -> resolve_claude_model.
-    monkeypatch.setenv("LLM_MODEL", "glm-5.2:cloud")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-flash:cloud")
     assert c.resolve_provider() == "ollama"
-    assert c.resolve_model_for_provider(None) == "glm-5.2:cloud"
+    assert c.resolve_model_for_provider(None) == "deepseek-v4-flash:cloud"
 
     monkeypatch.setenv("LLM_PROVIDER", "claude")
-    # glm-5.2:cloud is not a Claude model, so the Claude path falls back to the default.
+    # deepseek-v4-flash:cloud is not a Claude model, so the Claude path falls back to the default.
     assert c.resolve_model_for_provider(None) == c.DEFAULT_CLAUDE_MODEL
     monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-6")
     assert c.resolve_model_for_provider(None) == "claude-sonnet-4-6"

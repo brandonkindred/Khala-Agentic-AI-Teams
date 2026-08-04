@@ -50,12 +50,22 @@ That is the entire contract. Any additional spans can be added with
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `grpc` |
 | `OTEL_METRICS_EXPORTER` | Set to `none` to skip OTLP metric export while still exporting traces — used by the docker stack so metrics stay on Prometheus scraping and aren't pushed at the traces-only Tempo backend. |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | Head sampling. Docker defaults `parentbased_traceidratio` / `0.05`. Honored by `TracerProvider` when no explicit sampler is passed. |
+| `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` / `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` | Bounds span attribute value length / count. `init_otel` defaults these to `2048` / `64` (matching the docker-compose defaults) via `SpanLimits`, applied in every runtime mode — not just under compose. |
 | `OTEL_SERVICE_NAME` | Overrides the service name passed to `init_otel` |
 | `OTEL_RESOURCE_ATTRIBUTES` | Standard OTel resource attributes (e.g. `deployment.environment=prod`) |
 | `OTEL_SDK_DISABLED` | Set to `true` to force no-op mode (useful in tests) |
 
 The SDK honours every standard `OTEL_*` variable in addition to the
 ones above — see the OpenTelemetry specification for the full list.
+
+`init_otel` also enforces a default `SpanLimits(max_attribute_length=2048,
+max_span_attributes=64)` on every `TracerProvider` it builds, regardless of
+runtime mode, so a single oversized attribute (e.g. LLM prompt/response text)
+can't blow past Tempo's ingest cap even outside the docker stack. There is no
+per-call override kwarg — a service that needs different limits sets
+`OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` / `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` in its
+own environment (or overrides the value at the per-service block level in
+`docker-compose.yml`).
 
 ## LLM span emission
 
