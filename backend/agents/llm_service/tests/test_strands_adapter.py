@@ -91,7 +91,7 @@ def _drain(gen) -> List[Dict[str, Any]]:
             out.append(event)
         return out
 
-    return asyncio.get_event_loop().run_until_complete(_run()) if False else asyncio.run(_run())
+    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------

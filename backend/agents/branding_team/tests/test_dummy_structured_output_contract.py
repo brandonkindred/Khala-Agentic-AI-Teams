@@ -154,7 +154,7 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
 _CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
 
 # Model classes DummyLLMClient.complete_json routes by structured_output_model
-# class identity (see _branding_phase2_structured_output_stub in
+# class name (see _branding_phase2_structured_output_stub in
 # llm_service.clients.dummy) rather than by scanning system-prompt text.
 # For these six, an unrouted/misleading prompt no longer prevents a valid
 # payload — that is the point of issue #4252's fix, and is asserted
@@ -182,6 +182,10 @@ _MODEL_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
 _MODEL_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
     case_id for case_id, _factory, _model in _MODEL_ROUTED_CASES
 )
+_MODEL_ROUTED_CLASSES: tuple[type, ...] = tuple(
+    model for _case_id, _factory, model in _MODEL_ROUTED_CASES
+)
+_MODEL_ROUTED_CLASS_NAME_IDS: tuple[str, ...] = tuple(cls.__name__ for cls in _MODEL_ROUTED_CLASSES)
 
 # Factory names covered by ``_CASES``. Parameterized factories appear once here
 # and expand to several table rows, so this is not derivable from ``_CASE_IDS``.
@@ -355,10 +359,13 @@ def test_archetype_stub_matches_the_form_its_prompt_asks_for() -> None:
     assert [a.archetype for a in output.brand_archetypes] == ["The Creator"]
 
 
-def test_real_agent_event_loop_routes_deterministically_despite_misleading_prompt() -> None:
+@pytest.mark.parametrize("output_model", _MODEL_ROUTED_CLASSES, ids=_MODEL_ROUTED_CLASS_NAME_IDS)
+def test_real_agent_event_loop_routes_deterministically_despite_misleading_prompt(
+    output_model: type,
+) -> None:
     """The actual production path — a real Strands event loop, not
     ``DummyLLMClient.structured_output()`` called directly — must also route
-    deterministically.
+    deterministically, for every Phase 2 class the dispatcher covers.
 
     Every other test in this module drives ``DummyLLMClient.structured_output()``
     directly via ``_drive_structured_output``. That method is only reachable
@@ -372,15 +379,18 @@ def test_real_agent_event_loop_routes_deterministically_despite_misleading_promp
     So a passing suite of ``_drive_structured_output``-based tests does not by
     itself prove the real path routes correctly — this test does, by actually
     running the event loop with a system prompt that carries none of the
-    legacy text anchors.
+    legacy text anchors. Parametrized over all six routed classes rather than
+    just ``TaglineOutput``: the dispatcher is a flat name lookup shared by all
+    six, but a class-specific edge case on the event-loop path would
+    otherwise regress silently for the other five.
     """
     agent = build_agent(
         name="RealEventLoopProbe",
         system_prompt=_UNROUTED_SYSTEM_PROMPT,
-        structured_output=TaglineOutput,
+        structured_output=output_model,
     )
     result = agent("Please respond.")
-    assert isinstance(result.structured_output, TaglineOutput)
+    assert isinstance(result.structured_output, output_model)
 
 
 def test_every_agent_factory_is_either_covered_or_explicitly_excluded() -> None:

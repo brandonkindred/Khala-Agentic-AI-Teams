@@ -913,7 +913,13 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
     This is the routing counterpart to the ``system_lowered`` text anchors the
     six Phase 2 ``elif`` branches in ``complete_json`` use: those branches
     delegate to the exact same functions below via a hardcoded class name, so
-    there is one payload per class regardless of which path reaches it.
+    there is one payload per class regardless of which path reaches it. Takes
+    a name string rather than the class object itself because two of this
+    dispatcher's three callers (``chat()``'s and ``stream()``'s tool-call
+    detection) only ever see the Strands tool's ``name`` — which Strands sets
+    to ``model.__name__`` — never the Python class; ``complete_json`` derives
+    the same string from its own ``structured_output_model`` class parameter
+    so all three callers share one dispatch table.
 
     Preconditions:
         ``model_name`` is a string, typically a ``type.__name__``.
@@ -1168,16 +1174,23 @@ class DummyLLMClient(LLMClient):
 
         Preconditions: ``messages`` is a sequence of Strands-shaped message dicts.
         Postconditions: yields a complete assistant stream; attaches Strands
-            ``Model`` to the class MRO when importable.
+            ``Model`` to the class MRO when importable; increments
+            ``self._request_count`` exactly once per call, mirroring ``chat()``.
         """
         ensure_strands_model_registration()
+        self._request_count += 1
         del tool_choice, invocation_state  # accepted for ABC compatibility
         user_text = _last_user_text(messages)
         if system_prompt_content is not None:
             system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
         # Prefer the stable tool name; keep description matching as a fallback
-        # for older Strands StructuredOutputTool metadata shapes.
+        # for older Strands StructuredOutputTool metadata shapes. A name that
+        # matches one of the known Phase 2 classes is also treated as
+        # detection on its own — this is the invariant Strands actually
+        # guarantees (it names the tool after the model's __name__), so it
+        # doesn't depend on description wording a future SDK version could
+        # change.
         structured_tool_name = None
         if tool_specs:
             for spec in tool_specs:
@@ -1187,6 +1200,7 @@ class DummyLLMClient(LLMClient):
                     name == "structured_output"
                     or "structuredoutputtool" in desc
                     or "structured_output" in desc
+                    or _branding_phase2_structured_output_stub(name) is not None
                 ):
                     structured_tool_name = name or "structured_output"
                     break
@@ -1293,6 +1307,28 @@ class DummyLLMClient(LLMClient):
         structured_output_model: Optional[type] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        """Return a JSON-shaped stub for the given prompt.
+
+        Routes the Branding Phase 2 "Narrative & Messaging" cluster
+        deterministically by ``structured_output_model``'s class name when
+        provided (see ``_branding_phase2_structured_output_stub``); otherwise
+        — and for every other prompt shape this dummy stubs — pattern-matches
+        against ``prompt`` (and, for a few teams, ``system_prompt``) for
+        anchor tokens and returns the matching canned dict.
+
+        Preconditions:
+            - ``prompt`` is a string (may be empty).
+            - ``structured_output_model``, if given, is the exact
+              ``structured_output=``/``structured_output_model=`` class the
+              caller's agent was built with.
+
+        Postconditions:
+            - Returns a dict. Every recognized shape validates against its
+              corresponding Pydantic model; an unrecognized prompt returns
+              the generic ``{"output": ..., "status": "ok"}`` fallback.
+            - Increments ``self._request_count`` and the shared
+              ``DummyLLMClient._call_counter`` exactly once per call.
+        """
         # ``objective`` keeps a default here (unlike the required LLMClient
         # contract) on purpose: the dummy records no telemetry, and forcing every
         # test stub call to pass an objective adds churn with no attribution value.
@@ -1307,13 +1343,18 @@ class DummyLLMClient(LLMClient):
         # other teams' prompts that happened to mention those words in persona
         # text.
         #
-        # Branding Phase 1 / Phase 2 / Phase 3 branches are the exception:
-        # they anchor on ``system_prompt`` (via ``system_lowered`` later in
-        # this method) because every agent in those phases receives the same
-        # serialized mission/phase context as its user message, so only each
-        # agent's own system_prompt (its required output field names) can
-        # distinguish which one is asking. Those anchors are multi-token
-        # combinations unique to one agent's prompt.
+        # Branding Phase 1 / Phase 3 branches are the exception: they anchor
+        # on ``system_prompt`` (via ``system_lowered`` later in this method)
+        # because every agent in those phases receives the same serialized
+        # mission/phase context as its user message, so only each agent's own
+        # system_prompt (its required output field names) can distinguish
+        # which one is asking. Those anchors are multi-token combinations
+        # unique to one agent's prompt. Phase 2 used the same system_prompt
+        # anchoring historically, but is now routed deterministically by the
+        # structured_output_model's class name below when a caller supplies
+        # it — see the fast path immediately after this comment block; the
+        # system_prompt anchors in ``_branding_phase2_text_routed_stub``
+        # remain only as a fallback for callers that don't.
         lowered = prompt.lower()
         # Shared across instances so sequential coding stubs can mint distinct
         # module/component names when the task hint alone is not enough.
@@ -1324,11 +1365,16 @@ class DummyLLMClient(LLMClient):
 
         # Deterministic fast path: when the caller hands us the actual
         # structured_output model class (Strands' bridge does, via
-        # LLMClientModel.structured_output), route on its identity instead of
-        # the text-anchor scan below — sidesteps the exact fragility this
-        # scan is prone to (a prompt reword or an incidentally-mentioned
-        # field name silently returning the wrong shape). Only a known subset
-        # of classes are wired up; anything else falls through unchanged.
+        # LLMClientModel.structured_output/chat/stream), route by its class
+        # *name* instead of the text-anchor scan below — sidesteps the exact
+        # fragility this scan is prone to (a prompt reword or an
+        # incidentally-mentioned field name silently returning the wrong
+        # shape). A name string, not the class object itself, because the
+        # production stream()/chat() path only ever has the tool's name
+        # available (Strands sets it to the class's __name__), never the
+        # Python class — see _branding_phase2_structured_output_stub's own
+        # docstring. Only a known subset of classes are wired up; anything
+        # else falls through unchanged.
         if structured_output_model is not None:
             deterministic = _branding_phase2_structured_output_stub(
                 structured_output_model.__name__
@@ -1980,13 +2026,17 @@ class DummyLLMClient(LLMClient):
                 fn = (t or {}).get("function") or {}
                 # Prefer the stable tool name; description substring is a
                 # fallback for StructuredOutputTool metadata that embeds
-                # "StructuredOutputTool" in the human-readable description.
+                # "StructuredOutputTool" in the human-readable description. A
+                # name matching a known Phase 2 class is also treated as
+                # detection on its own, independent of description wording —
+                # see the identical comment in stream().
                 name = fn.get("name") or ""
                 desc = (fn.get("description") or "").lower()
                 if (
                     name == "structured_output"
                     or "structuredoutputtool" in desc
                     or "structured_output" in desc
+                    or _branding_phase2_structured_output_stub(name) is not None
                 ):
                     structured_tool = fn
                     break
