@@ -3416,8 +3416,8 @@ class ClearStrategyLabStorageResponse(BaseModel):
 
 class DeleteStrategyLabRecordResponse(BaseModel):
     lab_record_id: str
-    deleted_strategy_id: str
-    deleted_backtest_id: str
+    deleted_strategy_id: Optional[str] = None
+    deleted_backtest_id: Optional[str] = None
     deleted_paper_trading_sessions: int = 0
 
 
@@ -3610,6 +3610,24 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
     """
     Delete one strategy lab run: lab card, linked lab strategy/backtest jobs, and any paper-trading
     sessions that reference this ``lab_record_id``.
+
+    Preconditions:
+        - ``lab_record_id`` may or may not resolve to a known lab record.
+
+    Postconditions:
+        - ``_strategy_lab_records[lab_record_id]`` is always removed (its
+          existence is the 404 gate above).
+        - ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless
+          the corresponding entry actually existed in ``_strategies``/
+          ``_backtests`` *before* this call — ``_PersistentDict.__delitem__``
+          never raises on a missing key (it discards the underlying
+          ``delete_job`` bool), so an unconditional ``del`` can't be used to
+          infer whether anything was actually removed; existence is checked
+          via ``in`` first instead.
+
+    Raises:
+        - ``HTTPException`` 404: ``lab_record_id`` does not resolve to any
+          known lab record.
     """
     with _lock:
         raw = _strategy_lab_records.get(lab_record_id)
@@ -3623,21 +3641,19 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         backtest_id = record.backtest.backtest_id
 
         del _strategy_lab_records[lab_record_id]
-        try:
+        strategy_deleted = strategy_id in _strategies
+        if strategy_deleted:
             del _strategies[strategy_id]
-        except KeyError:
-            pass
-        try:
+        backtest_deleted = backtest_id in _backtests
+        if backtest_deleted:
             del _backtests[backtest_id]
-        except KeyError:
-            pass
 
     paper_deleted = _delete_paper_sessions_for_lab_record(lab_record_id)
 
     return DeleteStrategyLabRecordResponse(
         lab_record_id=lab_record_id,
-        deleted_strategy_id=strategy_id,
-        deleted_backtest_id=backtest_id,
+        deleted_strategy_id=strategy_id if strategy_deleted else None,
+        deleted_backtest_id=backtest_id if backtest_deleted else None,
         deleted_paper_trading_sessions=paper_deleted,
     )
 
