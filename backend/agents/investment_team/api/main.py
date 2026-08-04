@@ -1071,6 +1071,14 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
 
 @app.get("/backtests/status/{job_id}", response_model=BacktestJobStatus)
 def get_backtest_job_status(job_id: str) -> BacktestJobStatus:
+    """Return the current status of a backtest job.
+
+    Preconditions:
+        ``job_id`` identifies a job previously created by ``run_backtest``.
+    Postconditions:
+        Returns the job's status/result/error snapshot; raises 404 if no job
+        with that ID exists.
+    """
     data = _bt_get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1087,6 +1095,12 @@ def get_backtest_job_status(job_id: str) -> BacktestJobStatus:
 
 @app.get("/backtests/jobs", response_model=BacktestJobListResponse)
 def list_backtest_jobs(running_only: bool = False) -> BacktestJobListResponse:
+    """List backtest jobs, optionally filtered to only pending/running ones.
+
+    Postconditions:
+        Returns every job's summary when ``running_only`` is False; only jobs
+        with status pending or running otherwise.
+    """
     statuses = [_BT_JOB_STATUS_PENDING, _BT_JOB_STATUS_RUNNING] if running_only else None
     items = [
         BacktestJobListItem(
@@ -1103,6 +1117,18 @@ def list_backtest_jobs(running_only: bool = False) -> BacktestJobListResponse:
 
 @app.post("/backtests/jobs/{job_id}/cancel")
 def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
+    """Cancel a pending or running backtest job.
+
+    Preconditions:
+        ``job_id`` identifies a job previously created by ``run_backtest``.
+    Postconditions:
+        Raises 404 if no job with that ID exists. Otherwise returns
+        ``{"job_id", "status", "success", ...}``: ``success`` is True and
+        ``status`` is cancelled when the job was pending/running at the time
+        of the call; ``success`` is False (with an explanatory ``message``)
+        when the job was already in a terminal status and could not be
+        cancelled.
+    """
     data = _bt_get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1118,6 +1144,14 @@ def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
 
 @app.delete("/backtests/jobs/{job_id}")
 def delete_backtest_job(job_id: str) -> Dict[str, Any]:
+    """Delete a backtest job record.
+
+    Preconditions:
+        ``job_id`` identifies a job previously created by ``run_backtest``.
+    Postconditions:
+        Raises 404 if no job with that ID exists. Otherwise returns
+        ``{"job_id", "deleted": True}``.
+    """
     if _bt_get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if not _bt_delete_job(job_id):
