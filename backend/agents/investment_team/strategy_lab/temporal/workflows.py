@@ -651,7 +651,11 @@ class StrategyLabBatchWorkflow:
         ``persist_run_state_activity`` takes ``(run_id, state, create)`` — three
         positional args — so it can't go through :func:`_exec` (single-``params``);
         call ``workflow.execute_activity`` directly with the same retry/timeout.
-        Never raises (the underlying helper swallows job-service failures).
+        Can raise: the underlying helper no longer swallows job-service
+        failures, so a transient error is retried per ``_ACTIVITY_RETRY``
+        (2 attempts), and if that's exhausted this call -- and thus the
+        workflow -- fails rather than silently continuing with a run state
+        that never durably persisted.
         """
         await workflow.execute_activity(
             act.persist_run_state_activity,

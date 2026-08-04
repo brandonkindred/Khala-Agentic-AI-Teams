@@ -2032,16 +2032,42 @@ def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
 
 
 def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = False) -> None:
-    """Write the run state to the job service so it survives restarts."""
-    try:
-        client = _get_lab_run_job_client()
-        fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
-        if create:
-            client.create_job(run_id, status=state.get("status", "running"), **fields)
-        else:
-            client.update_job(run_id, status=state.get("status", "running"), **fields)
-    except Exception as exc:
-        logger.warning("Failed to persist run state for %s: %s", run_id, exc)
+    """Write the run state to the job service so it survives restarts.
+
+    Preconditions:
+        - ``run_id`` is a non-empty ``str``.
+        - ``state`` contains a ``status`` key (else ``"running"`` is assumed).
+
+    Postconditions:
+        - ``create=True``: creates the job via ``client.create_job(...)``.
+        - ``create=False`` (default): updates the existing job via
+          ``client.update_job(...)``.
+        - Every key in ``state`` other than ``run_id``/``status`` is persisted
+          as a field.
+
+    Raises:
+        - Whatever ``create_job``/``update_job`` raises (transport errors,
+          HTTP error statuses, a ``RuntimeError`` for unconfigured
+          ``JOB_SERVICE_URL``, ...) propagates uncaught. A durable-write
+          failure must not be silently absorbed here: run/resume/restart
+          dispatch a Temporal workflow immediately after calling this, and
+          that workflow's own resume-from-restart safety depends on this
+          write having actually landed. ``persist_run_state_activity``
+          (``strategy_lab/temporal/activities.py``) delegates to this
+          verbatim, so propagating also lets that activity's already-
+          configured Temporal retry policy (``_ACTIVITY_RETRY`` in
+          ``strategy_lab/temporal/workflows.py``) retry a transient failure
+          instead of it going unnoticed. A caller with a genuine best-effort/
+          never-raises contract (``_fail_strategy_lab_run``, or restart's
+          rollback-on-collision persist) must catch and log locally instead
+          of relying on this helper to swallow the error.
+    """
+    client = _get_lab_run_job_client()
+    fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
+    if create:
+        client.create_job(run_id, status=state.get("status", "running"), **fields)
+    else:
+        client.update_job(run_id, status=state.get("status", "running"), **fields)
 
 
 # Fields the Temporal workflow's persist-state activity writes as partial
@@ -3180,7 +3206,17 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 # until the stale execution happens to overwrite it on its own.
                 with _lock:
                     _active_runs[run_id] = state
-                _persist_run_state(run_id, state)
+                try:
+                    _persist_run_state(run_id, state)
+                except Exception:
+                    # Best-effort rollback persist: a failure here must not
+                    # replace the more actionable 409 below with an unrelated
+                    # error from this cleanup step.
+                    logger.warning(
+                        "Failed to persist restart-rollback state for run %s",
+                        run_id,
+                        exc_info=True,
+                    )
             raise
     finally:
         run_lock.release()
