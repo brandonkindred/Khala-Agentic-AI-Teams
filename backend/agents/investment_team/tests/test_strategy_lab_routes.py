@@ -184,6 +184,7 @@ class _StubLabClient:
                 record[key] = (record.get(key) or 0) + delta
         if merge_fields:
             record.update(merge_fields)
+        self.jobs = list(self.by_id.values())
         return dict(record)
 
     def update_job(self, jid: str, *, heartbeat: bool = True, **fields: Any) -> None:
@@ -199,6 +200,7 @@ class _StubLabClient:
         """
         record = self.by_id.setdefault(jid, {"job_id": jid})
         record.update(fields)
+        self.jobs = list(self.by_id.values())
 
 
 @pytest.fixture
@@ -1205,6 +1207,38 @@ def test_restart_strategy_lab_run_returns_503_when_mint_response_is_malformed(
     assert "generation" in resp.json()["detail"].lower()
     assert api_main._active_runs["run-mintmalformed"]["status"] == "completed_with_errors"
     assert api_main._active_runs["run-mintmalformed"]["generation"] == 1
+
+
+def test_restart_strategy_lab_run_returns_503_when_mint_response_is_non_positive(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """apply_and_get returning a truthy record whose "generation" field is a
+    well-typed but non-positive int (a corrupt durable record, since the
+    applied increment is always positive) must map to the same documented
+    503 as a missing/non-int value -- a non-positive generation could match
+    a stale/legacy activity's default token and defeat fencing if allowed
+    through."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintnonpositive"] = {
+        "run_id": "run-mintnonpositive",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _NonPositiveMintClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            return {"job_id": jid, "generation": 0}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _NonPositiveMintClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintnonpositive/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintnonpositive"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintnonpositive"]["generation"] == 1
 
 
 def test_restart_generation_fences_stale_activity_from_terminated_incarnation(

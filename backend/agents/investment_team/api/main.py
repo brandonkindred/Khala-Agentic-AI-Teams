@@ -3331,6 +3331,14 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # the same as any other mint failure rather than silently
             # assuming a value that could itself be stale.
             new_generation = int(updated_generation_record["generation"])
+            if new_generation <= 0:
+                # The increment applied is always positive (see
+                # _legacy_generation_bootstrap_increment), so a non-positive
+                # result means the durable record itself was already
+                # corrupt -- treat it the same as a malformed reply rather
+                # than dispatching with a value that could match a stale
+                # activity's default/legacy token and defeat fencing.
+                raise ValueError(f"non-positive generation {new_generation!r}")
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=503,
