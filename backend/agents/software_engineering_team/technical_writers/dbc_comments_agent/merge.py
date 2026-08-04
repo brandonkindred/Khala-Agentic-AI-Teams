@@ -42,7 +42,7 @@ import ast
 import logging
 from typing import Dict, List, Optional, Set, Tuple
 
-from software_engineering_team.code_review_agent.chunking import parse_code_into_file_blocks
+from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 
 from .models import DbcCommentInsertion
@@ -152,11 +152,12 @@ def _find_python_target(tree: ast.AST, symbol: str, line: Optional[int]) -> Opti
     normalized = (symbol or "").strip().lower()
     if normalized in _MODULE_SYMBOL_ALIASES:
         return tree
+    target_name = symbol.strip()
     candidates = [
         node
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        and node.name == symbol.strip()
+        and node.name == target_name
     ]
     if len(candidates) == 1:
         return candidates[0]
