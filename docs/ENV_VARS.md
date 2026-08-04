@@ -1109,6 +1109,27 @@ Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
 
+### CODE_REVIEW_SPEC_COMPLIANCE_PASS
+Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
+for moving spec/acceptance-criteria compliance checking out of every chunk's
+prompt and into one dedicated post-merge pass. Design decision recorded in
+`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`; not
+yet implemented.
+
+When unset or any value other than `true`/`1`/`yes`/`on`, behavior is
+unchanged from today: `acceptance_criteria` and `spec_excerpt` are rendered
+into every chunk's review prompt, and per-chunk `spec_compliance_notes` are
+synthesized into the final narrative exactly as they are now. When enabled,
+the per-chunk prompt omits the acceptance-criteria/spec-excerpt blocks
+(architecture overview and sibling-surface context are unaffected — out of
+scope for this toggle), and a new once-per-submission tail pass evaluates
+spec/acceptance-criteria compliance against the full changed-code content
+instead, feeding a single consolidated note into the existing narrative
+synthesis step in place of the per-chunk notes. Restricted to the
+`CODE_REVIEW` profile. Any setup or LLM failure is fail-safe: it is logged
+and yields an empty compliance note, never blocking or changing the rest of
+the review.
+
 ---
 
 ## Shared Infrastructure and Storage
