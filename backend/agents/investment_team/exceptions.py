@@ -15,10 +15,16 @@ class InvestmentBacktestError(Exception):
 
     Invariants:
         - Raised only by ``_run_real_data_backtest`` and its callees.
+    Preconditions:
+        - ``message`` is a non-empty, human-readable failure string.
     Postconditions:
-        - ``str(exc)`` carries a human-readable failure message suitable for
-          direct display to a caller (job error string, HTTP detail, etc.).
+        - ``str(exc)`` carries ``message``, suitable for direct display to a
+          caller (job error string, HTTP detail, etc.).
     """
+
+    def __init__(self, message: str) -> None:
+        assert message, "InvestmentBacktestError requires a non-empty message"
+        super().__init__(message)
 
 
 class MissingStrategyCodeError(InvestmentBacktestError):

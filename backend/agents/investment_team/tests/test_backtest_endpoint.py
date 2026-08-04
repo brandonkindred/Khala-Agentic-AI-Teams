@@ -1,8 +1,8 @@
-"""Regression tests for ``_run_real_data_backtest`` (PR 3).
+"""Regression tests for ``_run_real_data_backtest``.
 
 Trade decisions can only come from a Strategy-Lab-generated Python script.
-With PR 3 the subprocess SandboxRunner + user-supplied raw-trade dicts are
-gone; execution now flows through the unified ``run_backtest`` event loop
+The subprocess SandboxRunner + user-supplied raw-trade dicts are gone;
+execution now flows through the unified ``run_backtest`` event loop
 that turns strategy ``submit_order`` calls into ``TradeRecord`` objects via
 ``FillSimulator``. These tests lock in the current public behaviour:
 
@@ -46,11 +46,12 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Test helpers
 # ---------------------------------------------------------------------------
 
 
 def _sample_strategy(*, code: str | None) -> StrategySpec:
+    """Return a minimal StrategySpec; ``code=None`` exercises the missing-strategy-code path."""
     return StrategySpec(
         strategy_id="strat-test-1",
         authored_by="ideation",
@@ -70,6 +71,7 @@ def _sample_strategy(*, code: str | None) -> StrategySpec:
 
 
 def _sample_config() -> BacktestConfig:
+    """Return a one-month BacktestConfig with zero cost/slippage, for deterministic assertions."""
     return BacktestConfig(
         start_date="2024-01-01",
         end_date="2024-02-01",
@@ -80,8 +82,8 @@ def _sample_config() -> BacktestConfig:
 
 
 def _sample_bars() -> List[OHLCVBar]:
-    # 8 bars with a clear uptrend then exit — enough for a simple strategy
-    # to enter once and be force-closed at end-of-data.
+    """Return 8 synthetic OHLCV bars with a clear uptrend then exit — enough
+    for a simple strategy to enter once and be force-closed at end-of-data."""
     closes = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 104.0, 103.0]
     return [
         OHLCVBar(
@@ -103,11 +105,13 @@ class _FakeMarketDataService:
         self._market_data = market_data
 
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
+        """Return every symbol this fake has canned data for, ignoring ``strategy``."""
         return list(self._market_data.keys())
 
     def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
-        # Issue #523 — mirror the real ``MarketDataService.resolve_strategy_symbols``
-        # so endpoint tests honour ``spec.target_symbols`` when set.
+        """Mirror the real ``MarketDataService.resolve_strategy_symbols``: honour
+        ``strategy.target_symbols`` when set, else fall back to the first 5
+        canned symbols."""
         if strategy.target_symbols:
             return list(strategy.target_symbols)
         return self.get_symbols_for_strategy(strategy)[:5]
@@ -115,10 +119,12 @@ class _FakeMarketDataService:
     def fetch_multi_symbol_range(
         self, symbols: List[str], asset_class: str, start: str, end: str
     ) -> Dict[str, List[OHLCVBar]]:
+        """Return the canned bars for each requested symbol that has data (others are omitted)."""
         return {s: self._market_data[s] for s in symbols if s in self._market_data}
 
 
 def _install_fake_market_service(monkeypatch, market_data: Dict[str, List[OHLCVBar]]) -> None:
+    """Patch ``MarketDataService`` so ``_run_real_data_backtest`` reads from ``market_data``."""
     import investment_team.market_data_service as mds
 
     monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketDataService(market_data))

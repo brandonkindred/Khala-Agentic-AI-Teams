@@ -1230,7 +1230,7 @@ def _winning_record(strategy_code: str | None = "def x(): pass"):
     )
 
 
-def test_run_paper_trading_rejects_losing_strategy(api_client, monkeypatch) -> None:
+def test_run_paper_trading_rejects_losing_strategy(api_client) -> None:
     from investment_team.api import main as api_main
 
     losing = _winning_record()
@@ -1246,7 +1246,7 @@ def test_run_paper_trading_rejects_losing_strategy(api_client, monkeypatch) -> N
     assert "not a winning strategy" in resp.json()["detail"]
 
 
-def test_run_paper_trading_rejects_non_publishable_strategy(api_client, monkeypatch) -> None:
+def test_run_paper_trading_rejects_non_publishable_strategy(api_client) -> None:
     from investment_team.api import main as api_main
 
     record = _winning_record()
@@ -1264,7 +1264,7 @@ def test_run_paper_trading_rejects_non_publishable_strategy(api_client, monkeypa
     assert "realism_failed" in detail
 
 
-def test_run_paper_trading_rejects_when_no_strategy_code(api_client, monkeypatch) -> None:
+def test_run_paper_trading_rejects_when_no_strategy_code(api_client) -> None:
     from investment_team.api import main as api_main
 
     record = _winning_record(strategy_code=None)

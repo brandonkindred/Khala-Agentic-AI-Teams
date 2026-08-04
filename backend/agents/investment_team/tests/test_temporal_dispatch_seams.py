@@ -347,6 +347,7 @@ def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> N
     from temporalio.exceptions import ActivityError, ApplicationError
 
     import shared.temporal
+    from investment_team.temporal import start_workflow as sw
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
@@ -364,7 +365,7 @@ def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> N
         act_err.__cause__ = app_err
         raise WorkflowFailureError(cause=act_err)
 
-    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+    monkeypatch.setattr(sw, "execute_advisory_workflow", _raise)
 
     with pytest.raises(HTTPException) as ei:
         REAL_EXECUTE_ADVISORY("validate_proposal", {}, key="prop-1")
@@ -420,13 +421,14 @@ def test_execute_advisory_maps_client_not_ready_runtime_error_to_503(monkeypatch
     generic 502 ``_translate_advisory_failure`` defaults to for an unrecognized
     error."""
     import shared.temporal
+    from investment_team.temporal import start_workflow as sw
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _raise(*a, **kw):
         raise RuntimeError("Temporal client not available; is the team's worker running?")
 
-    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+    monkeypatch.setattr(sw, "execute_advisory_workflow", _raise)
 
     with pytest.raises(HTTPException) as ei:
         REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")

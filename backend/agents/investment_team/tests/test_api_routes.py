@@ -228,6 +228,21 @@ def test_create_proposal_502_on_malformed_advisory_result(api_client, monkeypatc
     assert resp.json()["detail"]
 
 
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_create_proposal_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    """A non-dict _execute_advisory return (not just a dict missing keys) must
+    also hit the isinstance guard and surface as a 502, not a 500/AttributeError."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post("/proposals/create", json=_proposal_body())
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_create_proposal_502_on_non_dict_proposal_value(api_client, monkeypatch) -> None:
     """A 'proposal' value that isn't a dict (e.g. None) must not fall through to a
     Pydantic ValidationError / 422 — it's still a malformed advisory result."""
@@ -277,6 +292,22 @@ def test_validate_proposal_502_on_malformed_advisory_result(api_client, monkeypa
     pid = create.json()["proposal_id"]
 
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"valid": True})
+    resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_validate_proposal_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/proposals/create", json=_proposal_body())
+    pid = create.json()["proposal_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
     resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
     assert resp.status_code == 502
     assert resp.json()["detail"]
@@ -410,6 +441,24 @@ def test_validate_strategy_502_on_malformed_advisory_result(api_client, monkeypa
     sid = create.json()["strategy_id"]
 
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"passed": True})
+    resp = api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_validate_strategy_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    from investment_team.api import main as api_main
+
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
     resp = api_client.post(
         f"/strategies/{sid}/validate",
         json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
@@ -562,6 +611,19 @@ def test_promotion_decision_502_on_malformed_advisory_result(api_client, monkeyp
     assert resp.json()["detail"]
 
 
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_promotion_decision_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_promotion_decision_502_on_malformed_escalation_payload(api_client, monkeypatch) -> None:
     """An escalation_enqueued payload missing payload_id/priority surfaces as a 502."""
     from investment_team.api import main as api_main
@@ -682,6 +744,24 @@ def test_create_memo_502_on_malformed_advisory_result(api_client, monkeypatch) -
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": ["bear case"],
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_create_memo_502_on_non_dict_advisory_result(api_client, monkeypatch, bad_result) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
     resp = api_client.post(
         "/memos",
         json={
@@ -1132,4 +1212,4 @@ def test_complete_advisor_session_502_on_malformed_advisory_result(api_client, m
     )
     resp = api_client.post(f"/advisor/sessions/{sid}/complete")
     assert resp.status_code == 502
-    assert resp.json()["detail"]
+    assert resp.json()["detail"] == "Advisor completion returned unexpected response structure"
