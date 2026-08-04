@@ -572,6 +572,19 @@ def test_manifests_with_id_prefix_excludes_tombstoned_id(fake_store: _FakeStore)
     assert "agentic.team-z.tombstoned-1" not in ids
 
 
+def test_manifests_with_id_prefix_excludes_tombstoned_id_when_store_scan_fails(
+    fake_store: _FakeStore,
+) -> None:
+    # Same guarantee as the happy path above, but when the store's prefix scan
+    # itself raises and the method falls back to the local-only view.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("agentic.team-z.tombstoned-2", team="agentic_team_provisioning"))
+    reg.unregister("agentic.team-z.tombstoned-2")
+    fake_store.raise_on = {"manifests_with_prefix"}
+    ids = {m.id for m in reg.manifests_with_id_prefix("agentic.team-z.")}
+    assert "agentic.team-z.tombstoned-2" not in ids
+
+
 def test_tombstones_are_bounded_and_evict_oldest(
     fake_store: _FakeStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
