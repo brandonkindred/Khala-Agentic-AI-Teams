@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from shared.job_event_bus import BusState, ReaperHandle, subscribe
 
@@ -97,6 +98,21 @@ def test_shutdown_is_idempotent_and_restartable() -> None:
     handle.ensure_started()
     try:
         assert handle._reaper is not None and handle._reaper.is_alive()
+    finally:
+        handle.shutdown()
+
+
+def test_ensure_started_evicts_stale_subscription_without_manual_reap_call() -> None:
+    """Regression: the SCHEDULED reaper (its own timer, not a direct .reap_once()
+    call) must actually evict stale state — proving the background thread does
+    real work on its own cadence, not just that it starts and stops cleanly."""
+    state = BusState()
+    subscribe(state, "j1").last_activity -= 1e9  # ancient -> past any TTL
+    handle = _make_handle(state, name="e2e-reaper", interval_seconds=0.01)
+    try:
+        handle.ensure_started()
+        time.sleep(0.06)  # several intervals' worth of real time for the thread to fire
+        assert "j1" not in state.subscribers, "scheduled reaper never evicted the stale job"
     finally:
         handle.shutdown()
 
