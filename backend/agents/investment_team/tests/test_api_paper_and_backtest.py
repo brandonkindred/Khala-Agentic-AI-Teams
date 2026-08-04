@@ -531,6 +531,43 @@ def test_stop_live_paper_trading_happy_path(monkeypatch: pytest.MonkeyPatch, api
     assert updated.user_stop_requested_at is not None
 
 
+def test_stop_does_not_resurrect_session_deleted_during_signal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """If the session is deleted (e.g. its lab record was deleted) in the
+    window between the pre-signal read and the post-signal re-read, the stop
+    route must not write the stale pre-signal snapshot back into the store —
+    that would resurrect a session that should have stayed deleted."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-deleted"] = _live_session(
+        "pt-deleted", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _delete_during_signal(session_id):
+        # Simulate a concurrent delete (e.g. DELETE /strategy-lab/records/{id})
+        # racing with the in-flight stop signal.
+        del api_main._paper_trading_sessions[session_id]
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _delete_during_signal)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-deleted/stop")
+
+    assert resp.status_code == 404
+    assert "pt-deleted" not in api_main._paper_trading_sessions
+
+
 def _live_session(session_id, strategy, status):
     from investment_team.models import PaperTradingSession
 
