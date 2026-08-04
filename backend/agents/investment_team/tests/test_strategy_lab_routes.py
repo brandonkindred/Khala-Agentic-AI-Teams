@@ -28,6 +28,14 @@ import pytest
 
 
 class _InMemoryDict:
+    """Minimal dict-like stand-in used to monkeypatch module-level storage dicts.
+
+    Implements the full mapping protocol (``__iter__``, ``__len__``, ``keys``,
+    ``items``, ``update``, ``setdefault``, ...) so it's a safe substitute
+    anywhere the production code treats ``_profiles``/``_proposals``/etc. as a
+    plain dict, including iteration or ``len()``.
+    """
+
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
 
@@ -44,19 +52,44 @@ class _InMemoryDict:
         return k in self._d
 
     def __delitem__(self, k):
-        self._d.pop(k, None)
+        del self._d[k]
+
+    def __iter__(self):
+        return iter(self._d)
+
+    def __len__(self):
+        return len(self._d)
 
     def pop(self, k, *args):
         if args:
             return self._d.pop(k, args[0])
         return self._d.pop(k)
 
+    def keys(self):
+        return self._d.keys()
+
+    def items(self):
+        return self._d.items()
+
     def values(self):
         return list(self._d.values())
+
+    def update(self, *args, **kwargs):
+        self._d.update(*args, **kwargs)
+
+    def setdefault(self, k, default=None):
+        return self._d.setdefault(k, default)
 
 
 @pytest.fixture
 def api_client(monkeypatch: pytest.MonkeyPatch):
+    """Return a ``TestClient`` wired to a fresh, isolated strategy-lab API state.
+
+    Rebinds every module-level storage dict (``_profiles``, ``_active_runs``,
+    the transition-lock registry, ...) to per-test instances and stubs out
+    Temporal dispatch/termination and job-service persistence, so no test
+    leaks state into another or requires a real Temporal worker / job service.
+    """
     from fastapi.testclient import TestClient
 
     from investment_team.api import main as api_main
@@ -125,7 +158,29 @@ class _StubLabClient:
 
     def delete_job(self, jid: str) -> bool:
         self.deleted.append(jid)
-        return jid in self.by_id
+        if jid not in self.by_id:
+            return False
+        self.by_id.pop(jid)
+        self.jobs = [j for j in self.jobs if j.get("job_id") != jid]
+        return True
+
+
+@pytest.fixture
+def lab_job_client(monkeypatch: pytest.MonkeyPatch) -> "_StubLabClient":
+    """Patch ``_get_lab_run_job_client`` to return a fresh, empty ``_StubLabClient``.
+
+    Centralizes the ``monkeypatch.setattr(api_main, "_get_lab_run_job_client",
+    lambda: _StubLabClient())`` boilerplate repeated across tests that only
+    need Temporal-adjacent code paths to avoid touching a real job-service
+    client and don't care about pre-seeded jobs. Tests that need specific
+    persisted jobs should construct their own ``_StubLabClient(jobs=[...])``
+    and patch it directly instead of using this fixture.
+    """
+    from investment_team.api import main as api_main
+
+    stub = _StubLabClient()
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    return stub
 
 
 # ---------------------------------------------------------------------------
@@ -134,11 +189,13 @@ class _StubLabClient:
 
 
 def test_stub_lab_client_get_job_returns_none_for_unknown_id() -> None:
+    """``get_job`` returns ``None`` for a job_id that was never seeded."""
     stub = _StubLabClient()
     assert stub.get_job("missing-id") is None
 
 
 def test_stub_lab_client_get_job_returns_copy_for_known_id() -> None:
+    """``get_job`` returns an equal but distinct copy, not the stored object itself."""
     job = {"job_id": "run-1", "status": "completed", "data": {"total_cycles": 2}}
     stub = _StubLabClient(jobs=[job])
     got = stub.get_job("run-1")
@@ -152,9 +209,8 @@ def test_stub_lab_client_get_job_returns_copy_for_known_id() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_strategy_lab_returns_409_when_already_running(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_run_strategy_lab_returns_409_when_already_running(api_client) -> None:
+    """Starting a run while another is already active is rejected with 409."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["existing"] = {"run_id": "existing", "status": "running"}
@@ -163,7 +219,8 @@ def test_run_strategy_lab_returns_409_when_already_running(
     assert "already in progress" in resp.json()["detail"]
 
 
-def test_run_strategy_lab_starts_run_when_idle(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+def test_run_strategy_lab_starts_run_when_idle(api_client) -> None:
+    """A run started while idle mints a run_id, registers it, and returns 200."""
     from investment_team.api import main as api_main
 
     resp = api_client.post(
@@ -184,6 +241,12 @@ def test_run_strategy_lab_starts_run_when_idle(monkeypatch: pytest.MonkeyPatch, 
 
 
 def _resumable_state(run_id: str = "run-r1", **overrides: Any) -> Dict[str, Any]:
+    """Return a baseline ``_active_runs`` entry for an interrupted, resumable run.
+
+    The returned dict represents a run interrupted after 2 of 4 cycles, with a
+    complete ``request_payload`` so resume/restart can rebuild dispatch state.
+    Caller-supplied ``overrides`` are shallow-merged on top of the base dict.
+    """
     base = {
         "run_id": run_id,
         "status": "interrupted",
@@ -209,19 +272,14 @@ def _resumable_state(run_id: str = "run-r1", **overrides: Any) -> Dict[str, Any]
     return base
 
 
-def test_resume_strategy_lab_run_404_when_missing(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
-    from investment_team.api import main as api_main
-
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+def test_resume_strategy_lab_run_404_when_missing(lab_job_client, api_client) -> None:
+    """Resuming a run_id with no in-memory or persisted state returns 404."""
     resp = api_client.post("/strategy-lab/runs/nope/resume")
     assert resp.status_code == 404
 
 
-def test_resume_strategy_lab_run_400_when_state_not_resumable(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_resume_strategy_lab_run_400_when_state_not_resumable(lab_job_client, api_client) -> None:
+    """A run whose status isn't in ``RESUMABLE_STATUSES`` (e.g. ``completed``) returns 400."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-a"] = {
@@ -229,39 +287,34 @@ def test_resume_strategy_lab_run_400_when_state_not_resumable(
         "status": "completed",  # not in RESUMABLE_STATUSES
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-a/resume")
     assert resp.status_code == 400
 
 
-def test_resume_strategy_lab_run_400_when_payload_missing(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_resume_strategy_lab_run_400_when_payload_missing(lab_job_client, api_client) -> None:
+    """A resumable run with no stored ``request_payload`` to rebuild dispatch from returns 400."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-b"] = _resumable_state("run-b", request_payload=None)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-b/resume")
     assert resp.status_code == 400
 
 
-def test_resume_strategy_lab_run_409_when_another_active(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_resume_strategy_lab_run_409_when_another_active(lab_job_client, api_client) -> None:
+    """Resuming is rejected with 409 while a different run_id is already active."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-c"] = _resumable_state("run-c")
     api_main._active_runs["other"] = {"run_id": "other", "status": "running"}
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-c/resume")
     assert resp.status_code == 409
 
 
-def test_resume_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+def test_resume_strategy_lab_run_happy_path(lab_job_client, api_client) -> None:
+    """A resumable run with no conflicting active run resumes and reports its cycle offset."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-d"] = _resumable_state("run-d")
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-d/resume")
     assert resp.status_code == 200
     body = resp.json()
@@ -270,7 +323,7 @@ def test_resume_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, api
 
 
 def test_resume_strategy_lab_run_carries_forward_tracker_merge_error_count(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    lab_job_client, api_client
 ) -> None:
     """Regression: resume must not silently reset tracker_merge_error_count to 0
     while errored_cycles/errored_details (which include the same tracker-merge
@@ -284,24 +337,20 @@ def test_resume_strategy_lab_run_carries_forward_tracker_merge_error_count(
         errored_details=[{"cycle_index": 1, "error": "merge boom", "reason": "tracker_merge_failed"}],
         tracker_merge_error_count=3,
     )
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-h/resume")
     assert resp.status_code == 200
     assert api_main._active_runs["run-h"]["tracker_merge_error_count"] == 3
     assert api_main._active_runs["run-h"]["errored_cycles"] == 3
 
 
-def test_restart_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
-    from investment_team.api import main as api_main
-
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+def test_restart_strategy_lab_run_404(lab_job_client, api_client) -> None:
+    """Restarting a run_id with no in-memory or persisted state returns 404."""
     resp = api_client.post("/strategy-lab/runs/nope/restart")
     assert resp.status_code == 404
 
 
-def test_restart_strategy_lab_run_400_when_payload_missing(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_restart_strategy_lab_run_400_when_payload_missing(lab_job_client, api_client) -> None:
+    """A restartable run with no stored ``request_payload`` to rebuild dispatch from returns 400."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-e"] = {
@@ -309,14 +358,12 @@ def test_restart_strategy_lab_run_400_when_payload_missing(
         "status": "completed",
         "request_payload": None,
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-e/restart")
     assert resp.status_code == 400
 
 
-def test_restart_strategy_lab_run_409_when_other_active(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_restart_strategy_lab_run_409_when_other_active(lab_job_client, api_client) -> None:
+    """Restarting is rejected with 409 while a different run_id is already active."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-f"] = {
@@ -325,12 +372,12 @@ def test_restart_strategy_lab_run_409_when_other_active(
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
     api_main._active_runs["other"] = {"run_id": "other", "status": "running"}
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-f/restart")
     assert resp.status_code == 409
 
 
-def test_restart_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+def test_restart_strategy_lab_run_happy_path(lab_job_client, api_client) -> None:
+    """A run in the extended restartable set (``completed_with_errors``) restarts from scratch."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-g"] = {
@@ -338,7 +385,6 @@ def test_restart_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, ap
         "status": "completed_with_errors",  # extended restartable set
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     resp = api_client.post("/strategy-lab/runs/run-g/restart")
     assert resp.status_code == 200
     body = resp.json()
@@ -354,6 +400,9 @@ def test_restart_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, ap
 def test_run_strategy_lab_returns_409_when_transition_lock_held_for_minted_run_id(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """A freshly-minted run_id whose transition lock is already held (a vanishingly
+    unlikely uuid4 collision, forced here) is rejected with 409 and never
+    registered in ``_active_runs``."""
     import uuid as uuid_module
 
     from investment_team.api import main as api_main
@@ -375,14 +424,15 @@ def test_run_strategy_lab_returns_409_when_transition_lock_held_for_minted_run_i
 
 
 def test_resume_strategy_lab_run_returns_409_when_transition_lock_held(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
+    """A resume request for a run_id whose transition lock is already held is
+    rejected with 409 without ever reaching dispatch."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state as _run_state
 
     run_id = "run-lock-held-resume"
     api_main._active_runs[run_id] = _resumable_state(run_id)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
     dispatch_calls: List[Any] = []
     monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", lambda *a, **k: dispatch_calls.append(a))
 
@@ -398,7 +448,7 @@ def test_resume_strategy_lab_run_returns_409_when_transition_lock_held(
 
 
 def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_before(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
     """Regression: resume must derive its dispatched counters/payload from
     state read AFTER acquiring the transition lock, not from a snapshot
@@ -433,7 +483,6 @@ def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_befo
         return _run_state.get_run_state(rid)
 
     monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
     assert resp.status_code == 200
@@ -445,8 +494,10 @@ def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_befo
 
 
 def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
+    """A restart request for a run_id whose transition lock is already held is
+    rejected with 409 without ever reaching Temporal termination."""
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state as _run_state
 
@@ -456,7 +507,6 @@ def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
         "status": "completed",
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     terminate_calls: List[Any] = []
     import shared.temporal
@@ -478,7 +528,7 @@ def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
 
 
 def test_restart_strategy_lab_run_returns_409_not_400_when_racing_transition_wrote_running(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    lab_job_client, api_client
 ) -> None:
     """Regression: status must be read INSIDE the transition lock, not
     before it. "running" is deliberately excluded from RESTARTABLE_STATUSES
@@ -501,7 +551,6 @@ def test_restart_strategy_lab_run_returns_409_not_400_when_racing_transition_wro
         "status": "running",
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     held_lock = _run_state.acquire_run_transition_lock(run_id)
     assert held_lock is not None
@@ -514,17 +563,15 @@ def test_restart_strategy_lab_run_returns_409_not_400_when_racing_transition_wro
 
 
 def test_restart_strategy_lab_run_404_does_not_allocate_transition_lock_entry(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    lab_job_client, api_client
 ) -> None:
     """Regression: a 404 for a nonexistent run_id must be rejected by the
     cheap existence check before the transition lock is ever touched — a
     barrage of restart requests for run_ids that don't exist must not grow
     the (never-evicted) transition-lock registry."""
-    from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state as _run_state
 
     run_id = "run-never-existed"
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
     assert resp.status_code == 404
@@ -532,7 +579,7 @@ def test_restart_strategy_lab_run_404_does_not_allocate_transition_lock_entry(
 
 
 def test_run_strategy_lab_409_when_already_running_does_not_allocate_transition_lock_entry(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    api_client,
 ) -> None:
     """Regression: run_strategy_lab mints a fresh uuid4 run_id every call, so
     if the global 409 guard ran after minting + acquiring the transition
@@ -552,7 +599,7 @@ def test_run_strategy_lab_409_when_already_running_does_not_allocate_transition_
 
 
 def test_resume_strategy_lab_run_returns_409_when_restart_transition_lock_held_for_same_run_id(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    lab_job_client, api_client
 ) -> None:
     """Cross-endpoint case named explicitly in #4028: a resume racing a
     restart for the same run_id must not proceed just because it's a
@@ -562,7 +609,6 @@ def test_resume_strategy_lab_run_returns_409_when_restart_transition_lock_held_f
 
     run_id = "run-cross-endpoint"
     api_main._active_runs[run_id] = _resumable_state(run_id)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     # Simulate a restart already in flight for this run_id.
     held_lock = _run_state.acquire_run_transition_lock(run_id)
@@ -576,7 +622,7 @@ def test_resume_strategy_lab_run_returns_409_when_restart_transition_lock_held_f
 
 
 def test_restart_strategy_lab_run_serializes_concurrent_restarts_for_same_run_id(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
     """The literal #4028 acceptance criterion: two concurrent restart calls
     for the same run_id must not both proceed to terminate/dispatch. Only
@@ -596,7 +642,6 @@ def test_restart_strategy_lab_run_serializes_concurrent_restarts_for_same_run_id
         "status": "completed",
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
 
     entered = threading.Event()
     release = threading.Event()
@@ -660,6 +705,8 @@ def test_restart_strategy_lab_run_serializes_concurrent_restarts_for_same_run_id
 def test_list_strategy_lab_runs_reconciles_terminal_job_service_status(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """An in-memory run marked "running" is reconciled to the job service's
+    terminal status (and its error message) in the listing."""
     from investment_team.api import main as api_main
 
     # In-memory says "running" but job service has the run as "cancelled".
@@ -685,9 +732,63 @@ def test_list_strategy_lab_runs_reconciles_terminal_job_service_status(
     assert "user request" in (runs[0]["error"] or "")
 
 
+def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Mid-run progress must reach the client even while the job service still
+    reports a non-terminal status -- not just status/error at completion."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-prog2"] = {
+        "run_id": "run-prog2",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 0,
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "current_batch": None,
+        "completed_record_ids": [],
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-prog2",
+                "status": "running",
+                "data": {
+                    "completed_cycles": 5,
+                    "skipped_cycles": 2,
+                    "errored_cycles": 1,
+                    "current_batch": 2,
+                    "contiguous_cycles": 5,
+                    "completed_record_ids": ["rec-1", "rec-2"],
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs")
+    assert resp.status_code == 200
+    run = next(r for r in resp.json()["runs"] if r["run_id"] == "run-prog2")
+    # Status stays "running" -- the persisted status is itself non-terminal --
+    # but progress counters are still reconciled from the job service.
+    assert run["status"] == "running"
+    assert run["completed_cycles"] == 5
+    assert run["skipped_cycles"] == 2
+    assert run["errored_cycles"] == 1
+    assert run["current_batch"] == 2
+    assert run["completed_record_ids"] == ["rec-1", "rec-2"]
+    # contiguous_cycles is intentionally absent from the response schema
+    # (internal resume-offset math only); assert it landed in _active_runs.
+    assert api_main._active_runs["run-prog2"]["contiguous_cycles"] == 5
+
+
 def test_list_strategy_lab_runs_merges_persisted_only_runs(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """A run present only in the job service (not in ``_active_runs``) still
+    appears in the listing, merged in from the persisted record."""
     from investment_team.api import main as api_main
 
     api_main._active_runs.clear()
@@ -739,6 +840,8 @@ def test_list_strategy_lab_runs_merged_entry_missing_keys_does_not_500(
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """A job-service outage during reconciliation must not hide in-memory runs
+    from the listing — the endpoint falls back to the in-memory snapshot."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["mem-only"] = {
@@ -767,6 +870,7 @@ def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
 
 
 def test_job_progress_percent_guards_non_positive_total() -> None:
+    """A zero or negative ``total`` returns 0 instead of raising ``ZeroDivisionError``."""
     from investment_team.api import main as api_main
 
     assert api_main._job_progress_percent(0, 0) == 0
@@ -775,6 +879,7 @@ def test_job_progress_percent_guards_non_positive_total() -> None:
 
 
 def test_job_progress_percent_computes_normal_ratio() -> None:
+    """A positive ``total`` computes the expected integer percentage."""
     from investment_team.api import main as api_main
 
     assert api_main._job_progress_percent(0, 4) == 0
@@ -790,6 +895,8 @@ def test_job_progress_percent_computes_normal_ratio() -> None:
 def test_list_strategy_lab_jobs_merges_persisted_completed_runs(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """The jobs listing merges in-memory and persisted-only jobs, and
+    ``running_only=true`` filters out the persisted-completed one."""
     from investment_team.api import main as api_main
 
     # In-memory running run.
@@ -979,6 +1086,8 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
 def test_get_strategy_lab_run_status_reconciles_terminal(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """An in-memory "running" status is reconciled to the job service's
+    terminal status/error in the single-run status response."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-r"] = {
@@ -995,9 +1104,60 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
     assert body["error"] == "boom"
 
 
+def test_get_strategy_lab_run_status_reconciles_progress_while_non_terminal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Mid-run progress must reach the client even while the job service still
+    reports a non-terminal status -- not just status/error at completion."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-prog"] = {
+        "run_id": "run-prog",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 0,
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "current_batch": None,
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-prog",
+                "status": "running",
+                "data": {
+                    "completed_cycles": 4,
+                    "skipped_cycles": 1,
+                    "errored_cycles": 2,
+                    "current_batch": 3,
+                    "contiguous_cycles": 4,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs/run-prog/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    # Status stays "running" -- the persisted status is itself non-terminal --
+    # but progress counters are still reconciled from the job service.
+    assert body["status"] == "running"
+    assert body["completed_cycles"] == 4
+    assert body["skipped_cycles"] == 1
+    assert body["errored_cycles"] == 2
+    assert body["current_batch"] == 3
+    # contiguous_cycles is intentionally absent from the response schema
+    # (internal resume-offset math only); assert it landed in _active_runs.
+    assert api_main._active_runs["run-prog"]["contiguous_cycles"] == 4
+
+
 def test_get_strategy_lab_run_status_logs_reconciliation_failure(
     monkeypatch: pytest.MonkeyPatch, api_client, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A job-service failure during reconciliation is logged (at DEBUG) and the
+    endpoint still returns 200 with the last-known in-memory status."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-broken"] = {
@@ -1024,6 +1184,8 @@ def test_get_strategy_lab_run_status_logs_reconciliation_failure(
 def test_get_strategy_lab_run_status_loads_from_job_service_when_absent(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """A run_id with no in-memory entry falls back to loading the status
+    straight from the persisted job-service record."""
     from investment_team.api import main as api_main
 
     api_main._active_runs.clear()
@@ -1048,6 +1210,7 @@ def test_get_strategy_lab_run_status_loads_from_job_service_when_absent(
 
 
 def test_delete_strategy_lab_run_success(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    """Deleting a run removes it from both the in-memory store and the job service."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["delete-me"] = {"run_id": "delete-me", "status": "completed"}
@@ -1066,6 +1229,7 @@ def test_delete_strategy_lab_run_success(monkeypatch: pytest.MonkeyPatch, api_cl
 
 
 def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    """Streaming a run_id with neither in-memory nor persisted state returns 404."""
     from investment_team.api import main as api_main
 
     api_main._active_runs.clear()
@@ -1077,6 +1241,8 @@ def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client
 def test_stream_strategy_lab_run_terminal_short_circuit(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """A run already terminal in-memory gets an immediate snapshot + done SSE
+    response instead of subscribing to the live event bus."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["done"] = {
@@ -1163,7 +1329,7 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
 
 
 def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
     """Drive the live event_generator path end-to-end.
 
@@ -1231,7 +1397,7 @@ def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
 
 
 def test_stream_strategy_lab_run_terminates_on_error_event(
-    monkeypatch: pytest.MonkeyPatch, api_client
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
     """An ``error`` event must also trigger the terminal ``done`` sentinel."""
     from collections import deque
@@ -1270,3 +1436,69 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
     assert '"type": "snapshot"' in body
     assert '"type": "error"' in body
     assert '"type": "done"' in body
+
+
+def test_stream_strategy_lab_run_snapshot_reconciles_progress(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The initial SSE snapshot must reflect job-service-reconciled progress,
+    not the stale in-memory values that were current at connect time."""
+    import json
+    from collections import deque
+
+    from investment_team.api import job_event_bus
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["stream-prog"] = {
+        "run_id": "stream-prog",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 0,
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "current_batch": None,
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "stream-prog",
+                "status": "running",
+                "data": {
+                    "completed_cycles": 6,
+                    "skipped_cycles": 1,
+                    "errored_cycles": 1,
+                    "current_batch": 4,
+                    "contiguous_cycles": 5,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    pre_events = deque([{"type": "complete", "summary": "ok"}])
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = pre_events
+
+        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
+            pass
+
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
+
+    with api_client.stream("GET", "/strategy-lab/runs/stream-prog/stream", timeout=2.0) as resp:
+        assert resp.status_code == 200
+        body = _wait_for_terminal_sse(resp.iter_text())
+
+    segments = [s for s in body.split("\n\n") if s.strip()]
+    snapshot_seg = next(s for s in segments if '"type": "snapshot"' in s)
+    snapshot = json.loads(snapshot_seg[len("data: ") :])
+    assert snapshot["completed_cycles"] == 6
+    assert snapshot["skipped_cycles"] == 1
+    assert snapshot["errored_cycles"] == 1
+    assert snapshot["current_batch"] == 4
+    # contiguous_cycles is intentionally absent from the response schema
+    # (internal resume-offset math only); assert it landed in _active_runs.
+    assert api_main._active_runs["stream-prog"]["contiguous_cycles"] == 5
