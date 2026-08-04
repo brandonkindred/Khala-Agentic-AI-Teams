@@ -143,16 +143,36 @@ def test_make_channel_guide_rejects_non_basemodel_structured_output() -> None:
         _make_channel_guide("website", "a marketing site", dict)
 
 
-def test_channel_guide_and_brand_experience_prompts_drop_redundant_json_reminder() -> None:
-    """The prompt's field list is the contract; ``output_mode="json"`` already forces the wire format."""
-    from branding_team.agents import _make_channel_guide, make_brand_experience_principler
-    from branding_team.models import ChannelGuidelineOutput
+def test_phase4_prompts_drop_redundant_json_reminder() -> None:
+    """The Pydantic structured-output schema is the contract; the redundant
+    "Output valid JSON" sentence is no longer needed for any of the 9 Phase 4
+    factories migrated to ``build_agent(structured_output=...)``.
+    """
+    from branding_team.agents import (
+        make_brand_architecture_builder,
+        make_brand_experience_principler,
+        make_brand_in_action_illustrator,
+        make_email_guide,
+        make_events_guide,
+        make_internal_guide,
+        make_partnerships_guide,
+        make_social_guide,
+        make_website_guide,
+    )
 
-    channel_agent = _make_channel_guide("website", "a marketing site", ChannelGuidelineOutput)
-    assert "Output valid JSON" not in channel_agent.system_prompt
-
-    principler_agent = make_brand_experience_principler()
-    assert "Output valid JSON" not in principler_agent.system_prompt
+    for factory in (
+        make_website_guide,
+        make_social_guide,
+        make_email_guide,
+        make_events_guide,
+        make_partnerships_guide,
+        make_internal_guide,
+        make_brand_architecture_builder,
+        make_brand_in_action_illustrator,
+        make_brand_experience_principler,
+    ):
+        agent = factory()
+        assert "Output valid JSON" not in agent.system_prompt, factory.__name__
 
 
 def test_build_phase5_graph_is_a_graph() -> None:
