@@ -242,6 +242,47 @@ def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
     schedule_provision_step_agents(team_id, process, _store)
 
 
+def _save_agents_and_process(
+    team_id: str,
+    conversation_id: str,
+    agents_data: list[dict[str, Any]] | None,
+    process: Optional[ProcessDefinition],
+) -> None:
+    """Register a conversation turn's roster/process updates, or fail with a 503.
+
+    Called by ``create_conversation``/``send_message`` after the LLM call and
+    before either message of the turn is persisted, so a failure here still
+    leaves the conversation history untouched (the caller lets this propagate
+    before appending messages).
+
+    Preconditions: ``team_id`` names an existing team; ``conversation_id``
+        names an existing conversation.
+    Postconditions: on success, the roster (if ``agents_data`` is non-empty)
+        is registered and ``process`` (if given) is saved and linked to the
+        conversation. On failure (e.g. a registry outage propagating out of
+        ``_save_agents_from_llm``), raises ``HTTPException(503)`` — not the
+        underlying exception — so the caller gets a clear "try again" signal
+        instead of an opaque 500.
+    """
+    try:
+        _save_agents_from_llm(team_id, agents_data)
+        if process:
+            _store.save_process(team_id, process)
+            _store.set_conversation_process(conversation_id, process.process_id)
+            _after_process_saved(team_id, process)
+    except Exception as exc:
+        logger.exception(
+            "Failed to save roster/process for team %s (conversation %s); "
+            "turn discarded, no messages persisted",
+            team_id,
+            conversation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to update the team roster or process; please try again.",
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -794,6 +835,21 @@ def _build_state_response(
 
 @app.post("/conversations", response_model=ConversationStateResponse)
 def create_conversation(req: CreateConversationRequest):
+    """Create a conversation and, if given, run its first turn.
+
+    The turn's writes (user + assistant messages, roster save, process save)
+    happen in dependency order but are committed to the conversation history
+    only after the LLM call and the roster/process saves have all succeeded.
+
+    Preconditions: ``req.team_id`` names an existing team.
+    Postconditions: on success, the conversation exists with the greeting or
+        the full first turn persisted. On failure (LLM error, or a roster/
+        process save failure — see ``_save_agents_and_process``, which turns
+        that into an ``HTTPException(503)``), no partial turn is left in the
+        conversation history — the exception propagates before either message
+        is appended, so a client retry re-processes a clean conversation
+        instead of duplicating a half-saved turn.
+    """
     # Validate team exists
     team = _store.get_team(req.team_id)
     if not team:
@@ -802,8 +858,6 @@ def create_conversation(req: CreateConversationRequest):
     conversation_id = _store.create_conversation(team_id=req.team_id)
 
     if req.initial_message:
-        _store.append_message(conversation_id, "user", req.initial_message)
-
         existing_agents = [
             {"agent_name": a.agent_name, "role": a.role}
             for a in _store.list_team_agents(req.team_id)
@@ -816,12 +870,12 @@ def create_conversation(req: CreateConversationRequest):
             current_agents=existing_agents,
         )
 
+        _save_agents_and_process(req.team_id, conversation_id, agents_data, process)
+
+        # Persist the turn only now that the LLM call and roster/process saves
+        # have succeeded — see the docstring's failure-mode postcondition.
+        _store.append_message(conversation_id, "user", req.initial_message)
         _store.append_message(conversation_id, "assistant", reply)
-        _save_agents_from_llm(req.team_id, agents_data)
-        if process:
-            _store.save_process(req.team_id, process)
-            _store.set_conversation_process(conversation_id, process.process_id)
-            _after_process_saved(req.team_id, process)
 
         return _build_state_response(conversation_id, req.team_id, process, suggestions)
 
@@ -832,6 +886,18 @@ def create_conversation(req: CreateConversationRequest):
 
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
 def send_message(conversation_id: str, req: SendMessageRequest):
+    """Run one conversation turn and append it to the conversation history.
+
+    Preconditions: ``conversation_id`` names an existing conversation.
+    Postconditions: on success, both the user message and the assistant
+        reply are appended (in that order) and any updated process is saved.
+        On failure (LLM error, or a roster/process save failure — see
+        ``_save_agents_and_process``, which turns that into an
+        ``HTTPException(503)``), neither message is appended — the exception
+        propagates before either write, so the conversation history stays
+        exactly as it was before this call and a client retry cannot
+        duplicate or half-save a turn.
+    """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -846,8 +912,6 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     existing_messages = _store.get_messages(conversation_id)
     history = [(m.role, m.content) for m in existing_messages]
 
-    _store.append_message(conversation_id, "user", req.message)
-
     reply, updated_process, suggestions, agents_data = _agent.respond(
         conversation_history=history,
         current_process=current_process,
@@ -855,15 +919,14 @@ def send_message(conversation_id: str, req: SendMessageRequest):
         current_agents=existing_agents,
     )
 
-    _store.append_message(conversation_id, "assistant", reply)
-    _save_agents_from_llm(team_id, agents_data)
+    _save_agents_and_process(team_id, conversation_id, agents_data, updated_process)
 
-    effective_process = current_process
-    if updated_process:
-        _store.save_process(team_id, updated_process)
-        _store.set_conversation_process(conversation_id, updated_process.process_id)
-        effective_process = updated_process
-        _after_process_saved(team_id, updated_process)
+    effective_process = updated_process or current_process
+
+    # Persist the turn only now that the LLM call and roster/process saves
+    # have succeeded — see the docstring's failure-mode postcondition.
+    _store.append_message(conversation_id, "user", req.message)
+    _store.append_message(conversation_id, "assistant", reply)
 
     return _build_state_response(conversation_id, team_id, effective_process, suggestions)
 
