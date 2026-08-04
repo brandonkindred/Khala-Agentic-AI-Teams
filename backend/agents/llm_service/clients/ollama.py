@@ -578,7 +578,7 @@ class OllamaLLMClient(LLMClient):
 
     def __init__(
         self,
-        model: str = "glm-5.2:cloud",
+        model: str = "deepseek-v4-flash:cloud",
         *,
         base_url: str = "https://ollama.com",
         timeout: float = 3600.0,

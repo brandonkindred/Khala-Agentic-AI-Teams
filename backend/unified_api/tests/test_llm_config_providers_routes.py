@@ -370,6 +370,6 @@ def test_ollama_models_base_url_reflects_resolved_endpoint(app_client, monkeypat
     """The reported base_url tracks the resolved Ollama endpoint (env override here)."""
     client, _state = app_client
     monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
-    monkeypatch.setattr(route, "list_ollama_models", lambda: ["glm-5.2:cloud"])
+    monkeypatch.setattr(route, "list_ollama_models", lambda: ["deepseek-v4-flash:cloud"])
     body = client.get("/api/llm-config/ollama-models").json()
     assert body["base_url"] == "http://localhost:11434"
