@@ -15,48 +15,15 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
-import sys
 from typing import Any, Optional
 
 import pytest
 
-
-def _ensure_real_modules() -> None:
-    """Evict synthetic module stubs other test files may have installed.
-
-    test_coding_team_github_source._stub_heavy_modules() registers a fake
-    shared.git.git_utils in sys.modules with no __file__; this test drives
-    real _prepare_issue_branch git calls through coding_team_main and needs
-    the real implementation, under any test-execution order.
-    """
-    stale = False
-    for name in (
-        "shared.git.git_utils",
-        "software_engineering_team.shared",
-        "software_engineering_team",
-        "software_engineering_team.coding_team_orchestrator",
-    ):
-        mod = sys.modules.get(name)
-        if mod is not None and not getattr(mod, "__file__", None):
-            del sys.modules[name]
-            stale = True
-    if stale:
-        sys.modules.pop("software_engineering_team.api.coding_team_main", None)
-
-
-def _stub_orchestrator_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep api.main importable without the heavy agent stack.
-
-    Installs via ``monkeypatch.setitem`` so pytest automatically reverts this
-    sys.modules entry at the end of the test that requested it -- otherwise
-    the stub outlives this test and can leak into an unrelated test.
-    """
-    import types
-
-    if "software_engineering_team.coding_team_orchestrator" not in sys.modules:
-        stub = types.ModuleType("software_engineering_team.coding_team_orchestrator")
-        stub.run_coding_team_orchestrator = lambda *a, **kw: None  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team_orchestrator", stub)
+from software_engineering_team.tests.conftest import (
+    _ensure_real_modules,
+    _expected_basic_header,
+    _stub_orchestrator_only,
+)
 
 
 @pytest.fixture
@@ -103,18 +70,6 @@ def _init_repo(path: pathlib.Path) -> str:
     # Self-alias as origin so fetch works without a real remote.
     _git(repo, "remote", "add", "origin", repo)
     return repo
-
-
-def _expected_basic_header(token: str) -> str:
-    """Expected git auth header for a fake token, built at runtime so a
-    credential-shaped Base64 literal never appears in source -- secret
-    scanners (GitGuardian etc.) flag the pattern regardless of how fake the
-    values are (same convention as test_coding_team_github_source.py's
-    helper of the same name)."""
-    import base64
-
-    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return f"Authorization: Basic {encoded}"
 
 
 def test_branch_prep_activity_clean_checkout_returns_ok_true(api, tmp_path) -> None:
