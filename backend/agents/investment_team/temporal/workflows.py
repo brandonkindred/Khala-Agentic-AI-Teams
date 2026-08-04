@@ -85,15 +85,13 @@ def run_backtest_activity(
         _run_backtest_background,
     )
     from investment_team.models import BacktestConfig, StrategySpec
+    from temporalio.exceptions import ApplicationError
 
     current_status = _backtest_job_status(job_id)
     if current_status == _BT_JOB_STATUS_COMPLETED:
         return {"job_id": job_id, "status": "completed"}
     elif current_status == _BT_JOB_STATUS_CANCELLED:
         return {"job_id": job_id, "status": "cancelled"}
-
-    if _backtest_job_status(job_id) == _BT_JOB_STATUS_COMPLETED:
-        return {"job_id": job_id, "status": "completed"}
 
     _run_backtest_background(
         job_id,
