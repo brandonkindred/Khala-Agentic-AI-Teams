@@ -1825,12 +1825,17 @@ def _finalize_strategy_lab_cycle_record(
         success, ``failed`` (non-fatal) on a paper-trading error. The record is
         durably persisted via :func:`_persist_strategy_lab_record` before
         returning. Any ``on_phase`` callback fires as a side effect only; it
-        never affects the returned record.
+        never affects the returned record — an exception raised by the
+        callback is caught and logged, never propagated, so a broken
+        callback can't skip persistence or abort finalization.
     """
 
     def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
         if on_phase:
-            on_phase(phase, data or {})
+            try:
+                on_phase(phase, data or {})
+            except Exception:
+                logger.exception("Strategy lab phase callback failed for phase %s", phase)
 
     # Attach signal brief before persisting (PersistentDict serializes at assignment)
     if signal_brief_storage and not record.signal_intelligence_brief:
