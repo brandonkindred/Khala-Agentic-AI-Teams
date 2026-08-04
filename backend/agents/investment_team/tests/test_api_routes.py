@@ -783,13 +783,11 @@ def test_cancel_backtest_job_success_and_failure(
     assert body["success"] is True
     assert body["status"] == "cancelled"
 
-    # When cancel returns False the response is a non-success dict.
+    # When cancel returns False the job cannot be cancelled: 409, not 200.
     monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: False)
     resp_no = api_client.post("/backtests/jobs/j1/cancel")
-    assert resp_no.status_code == 200
-    body_no = resp_no.json()
-    assert body_no["success"] is False
-    assert "Cannot cancel" in body_no["message"]
+    assert resp_no.status_code == 409
+    assert "Cannot cancel" in resp_no.json()["detail"]
 
 
 def test_delete_backtest_job_404_when_missing(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
