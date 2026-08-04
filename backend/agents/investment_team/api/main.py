@@ -915,11 +915,15 @@ def validate_strategy(
 
 
 class BacktestJobSubmission(BaseModel):
+    """Immediate response returned when a backtest job is submitted for background execution."""
+
     job_id: str
     status: str = _BT_JOB_STATUS_PENDING
 
 
 class BacktestJobStatus(BaseModel):
+    """Full status and result payload for a single backtest job."""
+
     job_id: str
     status: str
     strategy_id: Optional[str] = None
@@ -930,6 +934,8 @@ class BacktestJobStatus(BaseModel):
 
 
 class BacktestJobListItem(BaseModel):
+    """Summary of a single backtest job as returned in job-listing responses."""
+
     job_id: str
     status: str
     strategy_id: Optional[str] = None
@@ -938,6 +944,8 @@ class BacktestJobListItem(BaseModel):
 
 
 class BacktestJobListResponse(BaseModel):
+    """Response wrapper containing the list of backtest jobs for the jobs-listing endpoint."""
+
     jobs: List[BacktestJobListItem]
 
 
