@@ -1100,7 +1100,17 @@ class DummyLLMClient(LLMClient):
         the original request — matching ``LLMClientModel.structured_output``.
         Also forwards ``output_model`` itself as ``structured_output_model``,
         so ``complete_json`` can route by class identity instead of relying
-        solely on those text anchors — matching ``LLMClientModel.structured_output``.
+        solely on those text anchors.
+
+        Note: this method is only reached via Strands' deprecated
+        ``Agent.structured_output()``/``structured_output_async()`` (or a
+        direct caller of this method, as in this repo's tests) — nothing in
+        this repo calls those. Agents built with ``structured_output_model=``
+        (the current API, what ``build_agent`` uses) are driven through the
+        normal event loop instead, which calls ``chat()``/``stream()`` with a
+        ``StructuredOutputTool`` in ``tools``/``tool_specs`` — see the
+        matching deterministic-routing logic there, which is what branding
+        traffic actually exercises.
 
         Preconditions:
             - ``output_model`` is a Pydantic model type with ``model_validate``.
@@ -1141,8 +1151,14 @@ class DummyLLMClient(LLMClient):
 
         When ``tool_specs`` contains a StructuredOutputTool (added by Strands
         when ``structured_output_model=...`` is used), yields a tool-use event
-        invoking that tool with data from the ``complete_json`` pattern matcher.
-        Otherwise yields a plain text response.
+        invoking that tool with data from
+        ``_branding_phase2_structured_output_stub`` when the tool's name
+        resolves to a known Phase 2 model class, falling back to the
+        ``complete_json`` pattern matcher otherwise (mirrors ``chat()``, which
+        is the method Strands actually calls for branding traffic via
+        ``LLMClientModel``; this native ``stream()`` matters for a bare
+        ``Agent(model=DummyLLMClient())``). Otherwise yields a plain text
+        response.
 
         When ``system_prompt_content`` is supplied (including an empty list), it
         is treated as authoritative over the legacy ``system_prompt`` string so
@@ -1160,12 +1176,6 @@ class DummyLLMClient(LLMClient):
         if system_prompt_content is not None:
             system_prompt = _flatten_system_prompt_content(system_prompt_content)
 
-        # Route through the existing complete_json pattern matcher for rich responses
-        response_data = self.complete_json(user_text, system_prompt=system_prompt)
-        response_text = (
-            json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
-        )
-
         # Prefer the stable tool name; keep description matching as a fallback
         # for older Strands StructuredOutputTool metadata shapes.
         structured_tool_name = None
@@ -1180,6 +1190,26 @@ class DummyLLMClient(LLMClient):
                 ):
                     structured_tool_name = name or "structured_output"
                     break
+
+        # structured_tool_name is exactly the Pydantic model's __name__ when
+        # Strands set it (see chat()'s identical check), so a recognized name
+        # routes deterministically. Must be resolved before falling back to
+        # complete_json's text-anchor scan, not after — computing the two in
+        # the other order would compute rich-response data that ignores the
+        # tool identity entirely.
+        deterministic = (
+            _branding_phase2_structured_output_stub(structured_tool_name)
+            if structured_tool_name
+            else None
+        )
+        response_data = (
+            deterministic
+            if deterministic is not None
+            else self.complete_json(user_text, system_prompt=system_prompt)
+        )
+        response_text = (
+            json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+        )
 
         yield {"messageStart": {"role": "assistant"}}
 
@@ -1914,7 +1944,14 @@ class DummyLLMClient(LLMClient):
 
         1. **Strands structured output** (``tools`` contains a
            ``StructuredOutputTool``): return a single tool call invoking it
-           with the dict produced by the pattern matcher.
+           with data from ``_branding_phase2_structured_output_stub`` when the
+           tool's name resolves to a known Phase 2 model class (Strands names
+           the tool after ``output_model.__name__``), falling back to the
+           ``complete_json`` pattern matcher otherwise. This is the path real
+           ``build_agent(structured_output=...)`` callers actually take —
+           Strands drives ``structured_output_model=`` agents through the
+           tool-calling event loop, which lands here, not on
+           ``structured_output()``.
         2. **Legacy tool loop** (``tools`` provided, no prior tool result):
            emit a no-op ``git_status`` tool call.
         3. **Follow-up rounds or no tools**: run the user prompt through
@@ -1955,17 +1992,27 @@ class DummyLLMClient(LLMClient):
                     break
 
             if structured_tool is not None:
-                # Produce stub data via the pattern matcher and invoke the
-                # structured output tool with it. Strands will validate the
-                # arguments against the Pydantic schema attached to the tool.
-                data = self.complete_json(
-                    user_prompt,
-                    temperature=temperature,
-                    system_prompt=system_prompt,
-                    tools=None,
-                    think=think,
-                    **kwargs,
-                )
+                # structured_tool["name"] is exactly the Pydantic model's
+                # __name__ (Strands names the StructuredOutputTool after the
+                # model class), so a recognized name routes deterministically
+                # instead of falling through to complete_json's text-anchor
+                # scan — this is the actual production call path for
+                # structured_output= agents (Strands drives them through the
+                # tool-calling loop, not Model.structured_output()), so this
+                # check matters more than the one in complete_json itself.
+                data = _branding_phase2_structured_output_stub(structured_tool.get("name") or "")
+                if data is None:
+                    # Produce stub data via the pattern matcher and invoke the
+                    # structured output tool with it. Strands will validate the
+                    # arguments against the Pydantic schema attached to the tool.
+                    data = self.complete_json(
+                        user_prompt,
+                        temperature=temperature,
+                        system_prompt=system_prompt,
+                        tools=None,
+                        think=think,
+                        **kwargs,
+                    )
                 return {
                     "__tool_calls__": [
                         {

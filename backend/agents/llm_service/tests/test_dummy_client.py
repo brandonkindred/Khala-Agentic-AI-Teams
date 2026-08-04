@@ -502,3 +502,93 @@ def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelin
     for field in ("voice_principles", "style_dos", "style_donts", "editorial_quality_bar"):
         assert len(guidelines[field]) == 3
     assert "editorial_quality_bar" not in j
+
+
+# ---------------------------------------------------------------------------
+# chat() / stream() deterministic routing (issue #4252 round 2): this is the
+# path Strands actually drives structured_output_model= agents through —
+# LLMClientModel.stream() converts tool_specs to OpenAI-style tools and calls
+# chat(); a bare Agent(model=DummyLLMClient()) calls stream() directly with
+# tool_specs. Both must route by the StructuredOutputTool's name (which
+# Strands sets to the model's __name__) rather than depend on complete_json's
+# text-anchor scan, which is what issue #4252 flags as fragile.
+# ---------------------------------------------------------------------------
+
+
+def _openai_structured_output_tools(model_name: str) -> list[dict[str, Any]]:
+    """Build a tools=[...] list shaped like _tool_specs_to_openai's output for
+    a Strands StructuredOutputTool — name is the model's __name__, description
+    carries the literal "StructuredOutputTool" marker Strands always adds.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": model_name,
+                "description": (
+                    "IMPORTANT: This StructuredOutputTool should only be invoked as the "
+                    "last and final tool before returning the completed result to the "
+                    f"caller. <description>{model_name} structured output tool</description>"
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+
+def test_chat_routes_structured_output_tool_by_name_despite_misleading_prompt() -> None:
+    """chat() must route by the tool's name, not by scanning the user prompt."""
+    c = DummyLLMClient()
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Carry forward messaging_framework and audience_message_maps."},
+    ]
+    result = c.chat(messages, tools=_openai_structured_output_tools("TaglineOutput"))
+    args = result["__tool_calls__"][0]["function"]["arguments"]
+    assert "tagline_rationale" in args
+    assert "elevator_pitches" in args
+    assert "messaging_framework" not in args
+
+
+def test_chat_unrecognized_tool_name_falls_back_to_text_scan() -> None:
+    """A tool name outside the six Phase 2 classes must not break detection —
+    falls back to the existing complete_json pattern matcher."""
+    c = DummyLLMClient()
+    messages = [
+        {"role": "system", "content": "irrelevant"},
+        {
+            "role": "user",
+            "content": "Generate architecture_document with components and overview for the system.",
+        },
+    ]
+    result = c.chat(messages, tools=_openai_structured_output_tools("SomeOtherOutput"))
+    args = result["__tool_calls__"][0]["function"]["arguments"]
+    assert "architecture_document" in args
+
+
+@pytest.mark.asyncio
+async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt() -> None:
+    """stream() must route by tool_specs' name, not by scanning the user text."""
+    c = DummyLLMClient()
+    messages = _as_stream_messages(
+        [{"role": "user", "content": [{"text": "You are a helpful assistant."}]}]
+    )
+    tool_specs = cast(
+        Any,
+        [
+            {
+                "name": "MessagingFrameworkOutput",
+                "description": "IMPORTANT: This StructuredOutputTool should only be invoked...",
+                "inputSchema": {"json": {"type": "object", "properties": {}}},
+            }
+        ],
+    )
+    chunks: list[str] = []
+    async for event in c.stream(messages, tool_specs=tool_specs):
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        tool_input = (delta.get("toolUse") or {}).get("input")
+        if tool_input:
+            chunks.append(tool_input)
+    data = json.loads(chunks[0])
+    assert "messaging_framework" in data
+    assert "audience_message_maps" in data

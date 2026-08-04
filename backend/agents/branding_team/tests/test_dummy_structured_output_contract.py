@@ -34,7 +34,7 @@ import pytest
 
 from branding_team import agents as branding_agents
 from branding_team.graphs.phase3_visual import _PHASE3_CONCEPTUALIST_VARIANTS
-from branding_team.graphs.shared import serialize_mission
+from branding_team.graphs.shared import build_agent, serialize_mission
 from branding_team.models import (
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
@@ -353,6 +353,34 @@ def test_archetype_stub_matches_the_form_its_prompt_asks_for() -> None:
 
     output = _drive_structured_output(BrandArchetypesOutput, agent.system_prompt)
     assert [a.archetype for a in output.brand_archetypes] == ["The Creator"]
+
+
+def test_real_agent_event_loop_routes_deterministically_despite_misleading_prompt() -> None:
+    """The actual production path — a real Strands event loop, not
+    ``DummyLLMClient.structured_output()`` called directly — must also route
+    deterministically.
+
+    Every other test in this module drives ``DummyLLMClient.structured_output()``
+    directly via ``_drive_structured_output``. That method is only reachable
+    through Strands' deprecated ``Agent.structured_output()``/
+    ``structured_output_async()``, which nothing in this repo calls. The
+    current API (``structured_output_model=``, what ``build_agent`` uses)
+    drives agents through the tool-calling event loop instead — Strands
+    registers a ``StructuredOutputTool`` and the loop calls
+    ``Model.stream()``, which for a real ``Agent`` always lands on
+    ``LLMClientModel.stream()`` -> ``chat()``, never on ``.structured_output()``.
+    So a passing suite of ``_drive_structured_output``-based tests does not by
+    itself prove the real path routes correctly — this test does, by actually
+    running the event loop with a system prompt that carries none of the
+    legacy text anchors.
+    """
+    agent = build_agent(
+        name="RealEventLoopProbe",
+        system_prompt=_UNROUTED_SYSTEM_PROMPT,
+        structured_output=TaglineOutput,
+    )
+    result = agent("Please respond.")
+    assert isinstance(result.structured_output, TaglineOutput)
 
 
 def test_every_agent_factory_is_either_covered_or_explicitly_excluded() -> None:
