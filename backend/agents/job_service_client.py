@@ -779,6 +779,31 @@ def submit_answers(client: JobServiceClient, job_id: str, answers: List[Dict[str
     )
 
 
+def append_submitted_answers(
+    client: JobServiceClient, job_id: str, answers: List[Dict[str, Any]]
+) -> None:
+    """Append answers to ``submitted_answers`` WITHOUT clearing the pause envelope.
+
+    Used only for a Temporal-native (``pause_strategy="return"``) pause, where the job
+    record's pause envelope (``waiting_for_answers``/``pending_questions``/``resume_token``/
+    ``pause_kind``/``pause_context``) is the orchestrator's sole responsibility to clear —
+    consumed only when the orchestrator atomically matches ``acknowledged_resume_token``
+    against the persisted ``resume_token`` on its next re-entry (see
+    ``coding_team_orchestrator``'s ``_check_pending_pause_reentry``). Unlike ``submit_answers``
+    above (correct for a block-mode pause, where the orchestrator's own blocked wait loop is
+    the only reader/clearer of the flag), clearing the envelope here instead would race a
+    worker crash into silently dropping the human's answer — the workflow could resume
+    thinking there's nothing to apply.
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` names a job with a
+        persisted, unresolved ``resume_token``.
+    Postconditions: ``answers`` are appended to ``submitted_answers`` atomically;
+        ``waiting_for_answers``, ``pending_questions``, ``resume_token``, ``pause_kind``, and
+        ``pause_context`` are left untouched.
+    """
+    client.atomic_update(job_id, append_to={"submitted_answers": answers})
+
+
 def is_waiting_for_answers(client: JobServiceClient, job_id: str) -> bool:
     """True iff the job is currently paused waiting for user answers.
 

@@ -130,10 +130,13 @@ class AgentRegistry:
         Postconditions:
             * Returns ``True`` iff ``unregister(agent_id)`` ran on this worker less
               than :attr:`_TOMBSTONE_TTL_S` ago, ``False`` otherwise (including an
-              expired entry). Read-only — never mutates ``_tombstones``, so a
-              concurrent ``unregister()`` refreshing the same id's stamp can never
-              race an eviction triggered by this check; expiry/size pruning happens
-              only in :meth:`unregister`.
+              expired entry). Read-only — never mutates ``_tombstones``; expiry and
+              size-cap pruning happen only in :meth:`unregister`, not here.
+        Invariants:
+            * Safe to call without holding :attr:`_lock` — ``OrderedDict.get`` is
+              atomic in CPython — but every current caller (:meth:`get`,
+              :meth:`_drop_tombstoned`) already holds the lock for the surrounding
+              read, so this always observes a consistent snapshot in practice.
         """
         stamped_at = self._tombstones.get(agent_id)
         return stamped_at is not None and (time.monotonic() - stamped_at) <= self._TOMBSTONE_TTL_S

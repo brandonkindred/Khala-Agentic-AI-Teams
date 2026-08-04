@@ -30,6 +30,11 @@ x-team-env-base: &team-env-base
   # local Tempo under the 1G cgroup while still leaving useful debug traces.
   OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
   OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.05}
+  # Bound attribute value length and count so oversized LLM prompt/response
+  # attributes don't push spans past Tempo's max_bytes_per_trace ingest cap
+  # (docker/tempo/tempo.yaml) and get refused.
+  OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: ${OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT:-2048}
+  OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT: ${OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT:-64}
   # Harden span export so a slow/unavailable Tempo can't pile spans up in a
   # memory-constrained worker: fail fast (5s vs 10s default) and cap the
   # in-process span queue (512 vs 2048 default), flushing more often.

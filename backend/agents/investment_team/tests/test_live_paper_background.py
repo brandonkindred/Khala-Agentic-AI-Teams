@@ -115,10 +115,21 @@ class _FakeRunResult:
         self.dataset_fingerprint = kwargs.get("dataset_fingerprint")
 
 
-def _install_run_paper_trade(monkeypatch: pytest.MonkeyPatch, result: _FakeRunResult | Exception):
-    """Patch the ``run_paper_trade`` import inside the worker function."""
+def _install_run_paper_trade(
+    monkeypatch: pytest.MonkeyPatch,
+    result: _FakeRunResult | Exception,
+    *,
+    captured: Dict[str, Any] | None = None,
+):
+    """Patch the ``run_paper_trade`` import inside the worker function.
+
+    If ``captured`` is given, the call's ``backtest_config`` is stashed under
+    ``captured["backtest_config"]`` for assertions.
+    """
 
     def _fake_run(*, strategy, backtest_config, paper_config, stop_controller):
+        if captured is not None:
+            captured["backtest_config"] = backtest_config
         if isinstance(result, Exception):
             raise result
         return result
@@ -246,3 +257,50 @@ def test_live_paper_background_raises_when_no_symbols(
 
     session = api_state._paper_trading_sessions.get("pt-4")
     assert session.status == PaperTradingStatus.FAILED
+
+
+def test_live_paper_background_bt_config_start_end_date_match(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """``start_date``/``end_date`` must come from one captured "today", not
+    two separate ``datetime.now()`` calls — two calls straddling midnight
+    would otherwise produce a config spanning two days for what's meant to
+    be a single live trading day."""
+    from datetime import datetime, timezone
+
+    from investment_team.api import main as api_main
+
+    strategy = _seed_running_session(api_state, session_id="pt-midnight")
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+
+    class _SequentialNow:
+        """Returns a fixed sequence of timestamps straddling midnight, then
+        holds at the last one for any further calls (e.g. completed_at)."""
+
+        _timestamps = [
+            datetime(2024, 1, 1, 23, 59, 59, 999999, tzinfo=timezone.utc),
+            datetime(2024, 1, 2, 0, 0, 0, 1, tzinfo=timezone.utc),
+        ]
+        _calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            i = min(cls._calls, len(cls._timestamps) - 1)
+            cls._calls += 1
+            return cls._timestamps[i]
+
+    monkeypatch.setattr(api_main, "datetime", _SequentialNow)
+
+    captured: Dict[str, Any] = {}
+    _install_run_paper_trade(monkeypatch, _FakeRunResult(), captured=captured)
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+    _run_live_paper_trading_background("pt-midnight", "lab-w", strategy, req)
+
+    bt_config = captured["backtest_config"]
+    assert bt_config.start_date == bt_config.end_date == "2024-01-01"
