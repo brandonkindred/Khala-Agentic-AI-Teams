@@ -50,7 +50,10 @@ class DbcCommentInsertion(BaseModel):
     file: str = Field(description="Path of the file this insertion applies to")
     symbol: str = Field(
         description="Name of the function/method/class this comment attaches to, or a short "
-        "anchor description (e.g. 'module docstring') for non-symbol anchors",
+        "anchor description for a module-level (non-symbol) comment -- accepted aliases "
+        "(case-insensitive) are '', 'module docstring', 'module', '<module>', and 'file'; see "
+        "merge._MODULE_SYMBOL_ALIASES, which prompts.DBC_COMMENTS_PROMPT's 'module docstring' "
+        "example is written to elicit",
     )
     line: Optional[int] = Field(
         default=None,

@@ -18,17 +18,22 @@ Non-Python files (typescript, java, ...) have no parser available here, so
 insertions are anchored by line number only: the comment is inserted
 immediately above the given line, matching that line's leading whitespace.
 There is no reliable way to detect an existing comment block without a
-parser, so every accepted non-Python insertion is treated as a fresh
-addition -- a known limitation, not a bug: it can duplicate a comment the
-model intended to replace.
+parser, so accepted insertions are always a fresh addition, never a
+structural replace (unlike the Python path). As a conservative guard against
+duplicating a comment the model meant to replace, an insertion is rejected
+outright when a `*/`-terminated block already ends on the line immediately
+above the target -- this can't distinguish "meant to replace this" from "an
+unrelated comment happens to be adjacent," so it always rejects rather than
+guesses. It's still possible to duplicate a comment that isn't immediately
+adjacent to the target line -- a known limitation, not a bug.
 
 Both merge paths reject (skip, without touching the file) any insertion
 that cannot be safely anchored, without ever corrupting the file. Rejection
 reasons differ by path since only the Python path has symbols to resolve:
 the Python path rejects an ambiguous or missing symbol; the generic path
-rejects an out-of-range or missing line. Both paths reject an unknown file
-and a duplicate target already claimed by an earlier insertion in the same
-batch.
+rejects an out-of-range or missing line, or a line immediately preceded by
+an existing comment block. Both paths reject an unknown file and a
+duplicate target already claimed by an earlier insertion in the same batch.
 """
 
 from __future__ import annotations
@@ -195,6 +200,19 @@ def _strip_outer_quotes(text: str, quotes: Tuple[str, ...]) -> str:
     return text
 
 
+def _split_lines(original: str) -> List[str]:
+    """Split ``original`` into lines, each guaranteed to end with ``\\n``.
+
+    Postconditions:
+        - Every returned line ends with ``\\n``, including the last, so a
+          caller can always safely slice-and-splice without checking.
+    """
+    lines = original.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    return lines
+
+
 def _render_python_docstring(comment: str, indent: str) -> Optional[List[str]]:
     """Render ``comment`` as an indented Python docstring block, or None if unsafe."""
     text = _strip_outer_quotes(comment.strip(), ('"""', "'''"))
@@ -217,9 +235,7 @@ def _merge_python_file(
     except SyntaxError as exc:
         return None, 0, 0, [f"original file has invalid Python syntax, cannot anchor: {exc}"]
 
-    lines = original.splitlines(keepends=True)
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
+    lines = _split_lines(original)
 
     edits: List[Tuple[int, int, List[str]]] = []
     used_targets: Set[int] = set()
@@ -250,17 +266,25 @@ def _merge_python_file(
         # itself still exists -- a docstring can always be inserted at the top.
         first_stmt = body[0] if body else None
 
-        if first_stmt is not None and target is not tree and first_stmt.lineno == target.lineno:
-            # A one-liner def/class (e.g. "def f(): pass") puts the body on the
-            # same physical line as the header. Inserting "before" that line
-            # would land the comment outside the function/class entirely, so
-            # reject explicitly rather than emitting a line the post-merge
-            # syntax check would only reject downstream with a confusing error.
-            rejected.append(
-                f"symbol '{ins.symbol}': its body starts on the same line as the "
-                "def/class header (a one-liner), cannot anchor a comment safely"
-            )
-            continue
+        if first_stmt is not None and target is not tree:
+            # A one-liner def/class (e.g. "def f(): pass", or a multi-line
+            # signature closed by "): pass") puts the body's first statement on
+            # the same physical line as something else from the header --
+            # comparing line *numbers* can't detect this reliably (end_lineno
+            # spans the whole node, so it equals first_stmt.lineno for ANY
+            # single-statement body, one-liner or not); instead check whether
+            # everything before the statement's own column on its source line
+            # is pure whitespace. If not, inserting "before" that line would
+            # land the comment outside the function/class entirely, so reject
+            # explicitly rather than emitting a line the post-merge syntax
+            # check would only reject downstream with a confusing error.
+            header_prefix = lines[first_stmt.lineno - 1][: first_stmt.col_offset]
+            if header_prefix.strip():
+                rejected.append(
+                    f"symbol '{ins.symbol}': its body starts on the same line as its "
+                    "def/class header (a one-liner), cannot anchor a comment safely"
+                )
+                continue
         indent = "" if first_stmt is None else " " * first_stmt.col_offset
         rendered = _render_python_docstring(ins.comment, indent)
         if rendered is None:
@@ -292,6 +316,20 @@ def _merge_python_file(
 
     if not edits:
         return None, 0, 0, rejected
+
+    # Distinct AST targets never share lines in valid Python, so two edits'
+    # ranges should never overlap -- but if that invariant is ever wrong (a
+    # bug here, or an assumption this doesn't yet account for), refuse to
+    # guess which edit should win. Abort the whole merge for this file rather
+    # than risk silently corrupting it by applying overlapping edits.
+    ordered = sorted(edits, key=lambda e: e[0])
+    for (_, end, _), (next_start, _, _) in zip(ordered, ordered[1:]):
+        if end > next_start:
+            rejected.append(
+                "internal error: overlapping edits detected while merging this file; "
+                "aborting its merge entirely rather than risk corrupting it"
+            )
+            return None, 0, 0, rejected
 
     # Apply from the bottom up so an earlier (lower-line) edit's start/end
     # offsets are never invalidated by a later (higher-line) edit shifting
@@ -339,9 +377,7 @@ def _merge_generic_file(
     original: str, insertions: List[DbcCommentInsertion]
 ) -> Tuple[Optional[str], int, int, List[str]]:
     """Apply ``insertions`` to one non-Python file via line-anchored inserts."""
-    lines = original.splitlines(keepends=True)
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
+    lines = _split_lines(original)
     total_lines = len(lines)
 
     edits: List[Tuple[int, List[str]]] = []
@@ -358,6 +394,17 @@ def _merge_generic_file(
             continue
         if ins.line in used_lines:
             rejected.append(f"symbol '{ins.symbol}': duplicate insertion at line {ins.line}")
+            continue
+        preceding_idx = ins.line - 2
+        if preceding_idx >= 0 and lines[preceding_idx].strip().endswith("*/"):
+            # No parser is available for non-Python files (see module docstring),
+            # so there's no reliable way to tell whether this insertion is meant
+            # to replace that existing block or is simply misanchored -- reject
+            # rather than risk duplicating (or corrupting the intent of) it.
+            rejected.append(
+                f"symbol '{ins.symbol}': an existing comment block already ends immediately "
+                f"above line {ins.line}, cannot safely insert without risking a duplicate"
+            )
             continue
         target_line = lines[ins.line - 1]
         indent = target_line[: len(target_line) - len(target_line.lstrip())]

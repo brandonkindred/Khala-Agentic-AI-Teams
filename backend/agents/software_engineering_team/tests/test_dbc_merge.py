@@ -59,6 +59,46 @@ def test_merge_one_liner_def_existing_docstring_rejected_without_corrupting() ->
     assert "one-liner" in rejected[0]
 
 
+def test_merge_multiline_header_one_liner_body_rejected_without_corrupting() -> None:
+    """A multi-line signature closed by a one-liner body (e.g. "def f(\\n x\\n):
+    pass") must still be caught -- comparing line *numbers* alone can't detect
+    this (end_lineno spans the whole node, so it equals the body's line for
+    ANY single-statement function, one-liner or not); the guard instead checks
+    whether the body's own source line has non-whitespace content before it."""
+    code = "### a.py ###\ndef f(\n    x\n): pass\n"
+    files, added, updated, rejected = apply_dbc_insertions(code, [_ins(symbol="f", comment="Doc.")])
+    assert files == {}
+    assert added == 0
+    assert len(rejected) == 1
+    assert "one-liner" in rejected[0]
+
+
+def test_merge_multiline_header_multiline_body_not_flagged_as_one_liner() -> None:
+    """A normal multi-line-signature function with a proper (even single-
+    statement) body on its own line must NOT be rejected -- this is the case
+    the naive `first_stmt.lineno == target.end_lineno` comparison would get
+    wrong, since end_lineno spans the whole function including its body."""
+    code = "### a.py ###\ndef f(\n    x\n):\n    return x\n"
+    files, added, updated, rejected = apply_dbc_insertions(code, [_ins(symbol="f", comment="Doc.")])
+    assert rejected == []
+    assert added == 1
+    merged = files["a.py"]
+    assert "Doc." in merged
+    assert "return x" in merged
+
+
+def test_merge_single_statement_body_not_flagged_as_one_liner() -> None:
+    """The ordinary, extremely common case -- a function whose body is just
+    one statement on its own line -- must not be treated as a one-liner."""
+    code = "### a.py ###\ndef foo():\n    pass\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(symbol="foo", comment="Doc.")]
+    )
+    assert rejected == []
+    assert added == 1
+    assert "Doc." in files["a.py"]
+
+
 def test_merge_updates_existing_docstring() -> None:
     code = '### a.py ###\ndef foo():\n    """Old doc."""\n    return 1\n'
     files, added, updated, rejected = apply_dbc_insertions(
@@ -274,6 +314,21 @@ def test_merge_non_python_preformatted_jsdoc_multiline_preserved() -> None:
     assert "* Line two." in merged
     assert "* * Line one." not in merged
     assert merged.count("/**") == 1
+
+
+def test_merge_non_python_rejects_insertion_adjacent_to_existing_comment() -> None:
+    """No parser is available for non-Python files, so there's no reliable way
+    to tell whether an insertion is meant to replace an existing block comment
+    -- an insertion whose target line is immediately preceded by a `*/`-closed
+    block is rejected rather than risking a duplicate."""
+    code = "### a.ts ###\n/**\n * existing\n */\nexport function add(a, b) {\n  return a + b;\n}\n"
+    files, added, updated, rejected = apply_dbc_insertions(
+        code, [_ins(file="a.ts", symbol="add", line=4, comment="New comment.")]
+    )
+    assert files == {}
+    assert added == 0
+    assert len(rejected) == 1
+    assert "existing comment block" in rejected[0]
 
 
 def test_merge_non_python_out_of_range_line_rejected() -> None:

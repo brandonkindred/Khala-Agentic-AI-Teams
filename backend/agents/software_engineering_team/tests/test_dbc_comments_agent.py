@@ -146,6 +146,33 @@ def test_dbc_run_rejects_invalid_insertion_without_corrupting(monkeypatch) -> No
     assert "does_not_exist" in out.rejected_insertions[0]
 
 
+def test_dbc_run_merge_exception_fails_open(monkeypatch) -> None:
+    """An unexpected exception from the deterministic merge step must not
+    propagate out of run() -- it fails open, same as an LLM call failure,
+    honoring run()'s documented 'Raises: Nothing' contract."""
+    fake = _FakeCompleteJson(
+        {
+            "insertions": [{"file": "a.py", "symbol": "f", "comment": "c"}],
+            "already_compliant": False,
+            "summary": "added comments",
+        }
+    )
+    a = _build_agent(monkeypatch, fake)
+
+    def _boom(code, insertions):
+        raise RuntimeError("merge blew up")
+
+    monkeypatch.setattr(dbc_mod, "apply_dbc_insertions", _boom)
+    statuses = []
+    out = a.run(
+        DbcCommentsInput(code="def f():\n    pass\n", language="python"),
+        on_status=lambda s, d: statuses.append((s, d)),
+    )
+    assert out.already_compliant is True
+    assert "merge error" in out.summary
+    assert any(s == DbcCommentsStatus.FAILED for s, _ in statuses)
+
+
 def test_dbc_run_llm_exception_fails_open(monkeypatch) -> None:
     fake = _FakeCompleteJson(raise_exc=RuntimeError("oops"))
     a = _build_agent(monkeypatch, fake)

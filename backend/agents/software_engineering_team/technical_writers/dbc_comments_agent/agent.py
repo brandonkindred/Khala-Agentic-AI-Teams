@@ -215,9 +215,20 @@ class DbcCommentsAgent:
         comments_updated = 0
         rejected_insertions: list[str] = []
         if insertions:
-            files, comments_added, comments_updated, rejected_insertions = apply_dbc_insertions(
-                code, insertions
-            )
+            try:
+                files, comments_added, comments_updated, rejected_insertions = apply_dbc_insertions(
+                    code, insertions
+                )
+            except Exception as e:
+                # Fail-open, same as an LLM call failure: an unexpected merge
+                # error must not crash the calling pipeline or violate run()'s
+                # documented "never raises" contract.
+                logger.warning("DbcComments: merge failed (%s), returning compliant (fail-open)", e)
+                _update(DbcCommentsStatus.FAILED, str(e))
+                return DbcCommentsOutput(
+                    already_compliant=True,
+                    summary=f"DbC review skipped due to a merge error: {e}",
+                )
             if rejected_insertions:
                 logger.warning(
                     "DbcComments: %d insertion(s) could not be safely merged: %s",
