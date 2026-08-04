@@ -1,4 +1,4 @@
-"""Regression tests for the three Codex-flagged PR 2 issues.
+"""Regression tests for Codex-flagged paper-trading request/response issues.
 
 Covers:
 * ``_resolve_fee_overrides`` preserves explicit zero overrides (``0.0`` is
@@ -7,6 +7,8 @@ Covers:
   the PR 2 active states (OPENING / WARMING_UP / LIVE), not just the
   legacy RUNNING state, so SIGKILL orphans cannot block the new
   per-strategy concurrency guard.
+* ``RunPaperTradingRequest.timeframe`` rejects values outside its
+  documented allowed set at the API boundary instead of only failing later.
 
 The recovery tests run against an in-memory ``FakeJobServiceClient`` swapped
 into the module-level ``_paper_trading_sessions`` ``_PersistentDict`` so the
@@ -18,6 +20,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pydantic import ValidationError
 
 from investment_team.api.main import (
     RunPaperTradingRequest,
@@ -86,6 +89,24 @@ def test_nonzero_override_is_preserved() -> None:
     tx, slip = _resolve_fee_overrides(req)
     assert tx == 1.5
     assert slip == 3.0
+
+
+# ---------------------------------------------------------------------------
+# timeframe validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "timeframe", ["1s", "15s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", None]
+)
+def test_timeframe_accepts_documented_values(timeframe) -> None:
+    req = RunPaperTradingRequest(lab_record_id="x", timeframe=timeframe)
+    assert req.timeframe == timeframe
+
+
+def test_timeframe_rejects_undocumented_value() -> None:
+    with pytest.raises(ValidationError):
+        RunPaperTradingRequest(lab_record_id="x", timeframe="2m")
 
 
 # ---------------------------------------------------------------------------

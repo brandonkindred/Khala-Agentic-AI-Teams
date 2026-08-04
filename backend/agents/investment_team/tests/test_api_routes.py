@@ -615,6 +615,78 @@ def test_paper_trading_results_empty(api_client) -> None:
     assert body["count"] == 0
 
 
+def _paper_trading_session(session_id: str, verdict):
+    from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
+
+    strat = StrategySpec(
+        strategy_id=f"strat-{session_id}",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    return PaperTradingSession(
+        session_id=session_id,
+        lab_record_id=f"lab-{session_id}",
+        strategy=strat,
+        status=PaperTradingStatus.COMPLETED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        verdict=verdict,
+        started_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+    )
+
+
+def test_paper_trading_results_response_counts_are_derived_from_items() -> None:
+    """Constructing the response with mismatched standalone counts must not
+    stick — the model derives them from ``items`` regardless of what's passed.
+    """
+    from investment_team.api.main import PaperTradingResultsResponse
+    from investment_team.models import PaperTradingVerdict
+
+    items = [
+        _paper_trading_session("a", PaperTradingVerdict.READY_FOR_LIVE),
+        _paper_trading_session("b", PaperTradingVerdict.NOT_PERFORMANT),
+        _paper_trading_session("c", PaperTradingVerdict.NOT_PERFORMANT),
+    ]
+    resp = PaperTradingResultsResponse(
+        items=items, count=999, ready_for_live_count=999, not_performant_count=999
+    )
+    assert resp.count == 3
+    assert resp.ready_for_live_count == 1
+    assert resp.not_performant_count == 2
+
+
+def test_paper_trading_results_verdict_filter_counts_match_filtered_items(
+    api_client,
+) -> None:
+    """Filtering by ``verdict`` must return counts consistent with the
+    filtered ``items``, not global totals across all sessions.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingVerdict
+
+    api_main._paper_trading_sessions["a"] = _paper_trading_session(
+        "a", PaperTradingVerdict.READY_FOR_LIVE
+    )
+    api_main._paper_trading_sessions["b"] = _paper_trading_session(
+        "b", PaperTradingVerdict.NOT_PERFORMANT
+    )
+    api_main._paper_trading_sessions["c"] = _paper_trading_session(
+        "c", PaperTradingVerdict.NOT_PERFORMANT
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/results?verdict=ready_for_live")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == ["a"]
+    assert body["count"] == 1
+    assert body["ready_for_live_count"] == 1
+    assert body["not_performant_count"] == 0
+
+
 def test_paper_trading_session_get_404(api_client) -> None:
     resp = api_client.get("/strategy-lab/paper-trade/pt-missing")
     assert resp.status_code == 404
