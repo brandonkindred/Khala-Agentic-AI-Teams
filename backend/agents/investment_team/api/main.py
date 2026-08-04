@@ -746,87 +746,106 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
     Preconditions:
-        ``request.risk_tolerance`` is one of low/medium/high/very_high and
-        ``request.default_mode`` is one of advisory/paper/live/monitor_only
-        (validated below, not by Pydantic, since both arrive as plain
-        strings on the wire).
+        - ``request.risk_tolerance`` must be a valid ``RiskTolerance`` value.
+        - ``request.default_mode`` must be a valid ``WorkflowMode`` value.
+        - No profile may already exist for ``request.user_id`` — this endpoint
+          creates; it does not upsert.
+
     Postconditions:
-        Raises 400 if either enum field is invalid. Otherwise builds and
-        persists an ``IPS`` under ``request.user_id`` — a second call for
-        the same ``user_id`` overwrites the previously stored IPS rather
-        than being rejected as a duplicate.
+        - On success: a new IPS is persisted under ``_profiles[request.user_id]``
+          and returned; no prior profile is overwritten.
+        - Raises ``HTTPException`` 400 if ``risk_tolerance`` or ``default_mode``
+          is invalid (message lists the current enum values).
+        - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
+          ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
+        - Raises ``HTTPException`` 409 if a profile already exists for
+          ``request.user_id``.
     """
     try:
         risk_tol = RiskTolerance(request.risk_tolerance)
     except ValueError:
+        allowed = ", ".join(m.value for m in RiskTolerance)
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: low, medium, high, very_high",
+            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: {allowed}",
         )
 
     try:
         workflow_mode = WorkflowMode(request.default_mode)
     except ValueError:
+        allowed = ", ".join(m.value for m in WorkflowMode)
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: advisory, paper, live, monitor_only",
+            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: {allowed}",
         )
 
-    goals = [
-        UserGoal(
-            name=g.get("name", ""),
-            target_amount=g.get("target_amount", 0),
-            target_date=g.get("target_date", ""),
-            priority=g.get("priority", "medium"),
+    try:
+        goals = [
+            UserGoal(
+                name=g.get("name", ""),
+                target_amount=g.get("target_amount", 0),
+                target_date=g.get("target_date", ""),
+                priority=g.get("priority", "medium"),
+            )
+            for g in request.goals
+        ]
+
+        profile = InvestmentProfile(
+            user_id=request.user_id,
+            created_at=_now(),
+            risk_tolerance=risk_tol,
+            max_drawdown_tolerance_pct=request.max_drawdown_tolerance_pct,
+            time_horizon_years=request.time_horizon_years,
+            liquidity_needs=LiquidityNeeds(emergency_fund_months=request.emergency_fund_months),
+            income=IncomeProfile(
+                annual_gross=request.annual_gross_income, stability=request.income_stability
+            ),
+            net_worth=NetWorth(
+                total=request.total_net_worth, investable_assets=request.investable_assets
+            ),
+            savings_rate=SavingsRate(
+                monthly=request.monthly_savings, annual=request.annual_savings
+            ),
+            tax_profile=TaxProfile(
+                country=request.tax_country,
+                state=request.tax_state,
+                account_types=request.account_types,
+            ),
+            preferences=UserPreferences(
+                excluded_asset_classes=request.excluded_asset_classes,
+                excluded_industries=request.excluded_industries,
+                esg_preference=request.esg_preference,
+                crypto_allowed=request.crypto_allowed,
+                options_allowed=request.options_allowed,
+                leverage_allowed=request.leverage_allowed,
+            ),
+            goals=goals,
+            constraints=PortfolioConstraints(
+                max_single_position_pct=request.max_single_position_pct,
+                max_asset_class_pct=request.max_asset_class_pct,
+            ),
         )
-        for g in request.goals
-    ]
 
-    profile = InvestmentProfile(
-        user_id=request.user_id,
-        created_at=_now(),
-        risk_tolerance=risk_tol,
-        max_drawdown_tolerance_pct=request.max_drawdown_tolerance_pct,
-        time_horizon_years=request.time_horizon_years,
-        liquidity_needs=LiquidityNeeds(emergency_fund_months=request.emergency_fund_months),
-        income=IncomeProfile(
-            annual_gross=request.annual_gross_income, stability=request.income_stability
-        ),
-        net_worth=NetWorth(
-            total=request.total_net_worth, investable_assets=request.investable_assets
-        ),
-        savings_rate=SavingsRate(monthly=request.monthly_savings, annual=request.annual_savings),
-        tax_profile=TaxProfile(
-            country=request.tax_country,
-            state=request.tax_state,
-            account_types=request.account_types,
-        ),
-        preferences=UserPreferences(
-            excluded_asset_classes=request.excluded_asset_classes,
-            excluded_industries=request.excluded_industries,
-            esg_preference=request.esg_preference,
-            crypto_allowed=request.crypto_allowed,
-            options_allowed=request.options_allowed,
-            leverage_allowed=request.leverage_allowed,
-        ),
-        goals=goals,
-        constraints=PortfolioConstraints(
-            max_single_position_pct=request.max_single_position_pct,
-            max_asset_class_pct=request.max_asset_class_pct,
-        ),
-    )
-
-    ips = IPS(
-        profile=profile,
-        live_trading_enabled=request.live_trading_enabled,
-        human_approval_required_for_live=request.human_approval_required_for_live,
-        speculative_sleeve_cap_pct=request.speculative_sleeve_cap_pct,
-        rebalance_frequency=request.rebalance_frequency,
-        default_mode=workflow_mode,
-        notes=request.notes,
-    )
+        ips = IPS(
+            profile=profile,
+            live_trading_enabled=request.live_trading_enabled,
+            human_approval_required_for_live=request.human_approval_required_for_live,
+            speculative_sleeve_cap_pct=request.speculative_sleeve_cap_pct,
+            rebalance_frequency=request.rebalance_frequency,
+            default_mode=workflow_mode,
+            notes=request.notes,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_url=False, include_context=False)
+        ) from exc
 
     with _lock:
+        if request.user_id in _profiles:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Profile already exists for user {request.user_id}",
+            )
         _profiles[request.user_id] = ips
 
     return CreateProfileResponse(user_id=request.user_id, ips=ips)
