@@ -39,17 +39,30 @@ def _discover_manifest_files(root: Path) -> list[Path]:
 def _load_team_display_names() -> dict[str, str]:
     """Best-effort import of TEAM_CONFIGS so we can pretty-print team names.
 
-    Falls back to title-casing the team key if the import fails (e.g. when the
-    registry is used from a test harness that does not have unified_api on the
-    path).
+    Returns an empty dict if the import fails (e.g. when the registry is used
+    from a test harness that does not have unified_api on the path), or if a
+    team key is simply absent from ``TEAM_CONFIGS``. Title-casing the team key
+    as a display-name fallback is the caller's responsibility — see
+    :meth:`AgentRegistry.teams`.
     """
     try:
         from unified_api.config import TEAM_CONFIGS  # type: ignore
-
-        return {key: cfg.name for key, cfg in TEAM_CONFIGS.items()}
-    except Exception:  # pragma: no cover — defensive
+    except ImportError:
+        # Expected outside a full unified_api checkout (e.g. a test harness) —
+        # not worth surfacing above debug.
         logger.debug(
             "Could not import unified_api.config.TEAM_CONFIGS; using key-derived names",
+            exc_info=True,
+        )
+        return {}
+    try:
+        return {key: cfg.name for key, cfg in TEAM_CONFIGS.items()}
+    except Exception:  # pragma: no cover — defensive
+        # unified_api.config imported fine but TEAM_CONFIGS itself is malformed —
+        # an unexpected configuration bug, not the routine "not on path" case, so
+        # operators should see it.
+        logger.warning(
+            "TEAM_CONFIGS imported but could not be read; using key-derived names",
             exc_info=True,
         )
         return {}
@@ -130,10 +143,13 @@ class AgentRegistry:
         Postconditions:
             * Returns ``True`` iff ``unregister(agent_id)`` ran on this worker less
               than :attr:`_TOMBSTONE_TTL_S` ago, ``False`` otherwise (including an
-              expired entry). Read-only — never mutates ``_tombstones``, so a
-              concurrent ``unregister()`` refreshing the same id's stamp can never
-              race an eviction triggered by this check; expiry/size pruning happens
-              only in :meth:`unregister`.
+              expired entry). Read-only — never mutates ``_tombstones``; expiry and
+              size-cap pruning happen only in :meth:`unregister`, not here.
+        Invariants:
+            * Safe to call without holding :attr:`_lock` — ``OrderedDict.get`` is
+              atomic in CPython — but every current caller (:meth:`get`,
+              :meth:`_drop_tombstoned`) already holds the lock for the surrounding
+              read, so this always observes a consistent snapshot in practice.
         """
         stamped_at = self._tombstones.get(agent_id)
         return stamped_at is not None and (time.monotonic() - stamped_at) <= self._TOMBSTONE_TTL_S

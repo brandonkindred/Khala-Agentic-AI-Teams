@@ -162,9 +162,9 @@ class CodingTeamWorkflow:
               persisted ``resume_token`` from the job record and signals
               before this workflow has processed the paused activity result
               and set ``self._active_resume_token`` loses that signal). It
-              is deferred to the sibling reconciliation-loop issue (#3988),
-              which has the real activity-side pause payload to buffer
-              against.
+              remains open future work (not yet filed — #3988's scope is
+              limited to an integration test proving the existing pause/
+              resume cycle; buffering itself is separate, unimplemented work).
         """
         if not isinstance(payload, dict):
             return
@@ -219,10 +219,12 @@ class CodingTeamWorkflow:
               ``request["acknowledged_resume_token"]`` once that call
               returns (its job is done whether or not that call consumed
               it). Repeats until a non-``"paused"`` outcome.
-            - Deliberately NOT implemented here (deferred to #3988, the
-              sibling reconciliation-loop issue): although the activity-side
-              pause payload (``pending_questions``, ``pause_kind``,
-              ``pause_context``) now exists on every paused result, this
+            - Deliberately NOT implemented here (tracked as future work, not
+              #3988 — that issue's scope is limited to an integration test
+              proving the existing pause/resume cycle): although the
+              activity-side pause payload (``pending_questions``,
+              ``pause_kind``, ``pause_context``) now exists on every paused
+              result, this
               method does not yet APPLY resolved answers into
               ``request["plan_input"]["resolved_questions"]`` /
               ``task_decision_overrides`` — resume for the entry/tech-lead

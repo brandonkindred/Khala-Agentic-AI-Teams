@@ -678,6 +678,7 @@ def test_list_strategy_lab_jobs_empty(monkeypatch: pytest.MonkeyPatch, api_clien
 
 def test_get_strategy_lab_run_status_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
 
     monkeypatch.setattr(api_main, "_active_runs", {})
 
@@ -688,7 +689,12 @@ def test_get_strategy_lab_run_status_404(monkeypatch: pytest.MonkeyPatch, api_cl
         def get_job(self, job_id: str):
             return None
 
+    # Patch both: the status endpoint's own reconciliation client
+    # (api_main._get_lab_run_job_client) and the job-service fallback
+    # run_state.load_run_from_job_service builds its client from
+    # (run_state.get_lab_run_job_client) -- distinct module-level functions.
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+    monkeypatch.setattr(_run_state, "get_lab_run_job_client", lambda: _Stub())
 
     resp = api_client.get("/strategy-lab/runs/no-such/status")
     assert resp.status_code == 404
@@ -783,13 +789,11 @@ def test_cancel_backtest_job_success_and_failure(
     assert body["success"] is True
     assert body["status"] == "cancelled"
 
-    # When cancel returns False the response is a non-success dict.
+    # When cancel returns False the job cannot be cancelled: 409, not 200.
     monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: False)
     resp_no = api_client.post("/backtests/jobs/j1/cancel")
-    assert resp_no.status_code == 200
-    body_no = resp_no.json()
-    assert body_no["success"] is False
-    assert "Cannot cancel" in body_no["message"]
+    assert resp_no.status_code == 409
+    assert "Cannot cancel" in resp_no.json()["detail"]
 
 
 def test_delete_backtest_job_404_when_missing(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
@@ -808,6 +812,19 @@ def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
+
+
+def test_delete_backtest_job_500_when_delete_fails_after_existing(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Job confirmed to exist, but the delete itself fails: 500, not 404."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
+    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
+    resp = api_client.delete("/backtests/jobs/j1")
+    assert resp.status_code == 500
+    assert "Failed to delete" in resp.json()["detail"]
 
 
 def test_list_backtests_empty(api_client) -> None:

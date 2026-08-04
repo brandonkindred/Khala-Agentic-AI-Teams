@@ -4,7 +4,9 @@ Builds on ``test_api_routes`` and ``test_investment_team``'s cycle
 fixtures. Targets:
 
 * ``_PersistentDict`` __setitem__/__getitem__/__contains__/pop/values
-  via an in-process FakeJobClient.
+  via an in-process FakeJobClient, including __setitem__'s atomic-upsert
+  contract (no get_job read-before-write), concurrent same-key writes, and
+  pop's lost-delete-race handling (a concurrent pop() already won).
 * ``_env_positive_int`` env-var parsing.
 * ``_normalize_strategy_lab_asset_class`` + ``_build_strategy_from_ideation``
   builders.
@@ -395,6 +397,15 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
     assert len(strategy.exit_rules) == 1
 
 
+def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
+    from investment_team.api.main import _build_strategy_from_ideation
+
+    with pytest.raises(TypeError):
+        _build_strategy_from_ideation(None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        _build_strategy_from_ideation(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # _PersistentDict (in-process FakeJobClient roundtrip)
 # ---------------------------------------------------------------------------
@@ -412,17 +423,23 @@ class _FakeJobClient:
         self.team = team
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self.get_job_calls = 0
+        self.create_job_calls = 0
+        self.update_job_calls = 0
 
     def get_job(self, job_id: str):
         with self._lock:
+            self.get_job_calls += 1
             return dict(self._jobs[job_id]) if job_id in self._jobs else None
 
     def create_job(self, job_id: str, *, status: str = "stored", **fields):
         with self._lock:
+            self.create_job_calls += 1
             self._jobs[job_id] = {"job_id": job_id, "status": status, **fields}
 
     def update_job(self, job_id: str, **fields):
         with self._lock:
+            self.update_job_calls += 1
             if job_id in self._jobs:
                 self._jobs[job_id].update(fields)
 
@@ -481,7 +498,8 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     fetched = pd["u1"]
     assert fetched["profile"]["user_id"] == "u1"
 
-    # Overwrite via __setitem__ — exercises the update_job branch.
+    # Overwrite via __setitem__ — always goes through create_job's atomic
+    # upsert now (see test_persistent_dict_setitem_always_upserts_no_read).
     pd["u1"] = ips
     assert pd.get("u1") is not None
 
@@ -514,6 +532,106 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # get() with default returns the default when key missing.
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
+
+
+class _LostDeleteRaceClient:
+    """Stub JobServiceClient simulating a lost pop() race: get_job still
+    finds the job (read before the race is settled), but delete_job reports
+    no row was removed -- a concurrent pop() for the same key already won.
+    """
+
+    def __init__(self, job: Dict[str, Any], team: str = "x", base_url: str | None = None) -> None:
+        self._job = job
+
+    def get_job(self, job_id: str):
+        return dict(self._job) if job_id == self._job["job_id"] else None
+
+    def delete_job(self, job_id: str) -> bool:
+        return False
+
+
+def test_persistent_dict_pop_treats_lost_delete_race_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If delete_job reports no row was actually removed (a concurrent pop()
+    for the same key already won that race), this call must not hand back
+    the data it read moments earlier as though it had exclusively popped it
+    -- issue #4253."""
+    import job_service_client as jsc_mod
+    from investment_team.api.main import _PersistentDict
+
+    job = {"job_id": "k", "status": "stored", "data": {"value": "x"}}
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda **kwargs: _LostDeleteRaceClient(job, **kwargs)
+    )
+
+    pd = _PersistentDict("race_test")
+
+    assert pd.pop("k", "DEFAULT") == "DEFAULT"
+    with pytest.raises(KeyError):
+        pd.pop("k")
+
+
+def test_persistent_dict_setitem_always_upserts_no_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """__setitem__ must go straight to create_job's atomic upsert, with no
+    get_job read-before-write -- that read was the check-then-act race this
+    fix removes (issue #4213)."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("upsert_test")
+    client: _FakeJobClient = pd._client  # type: ignore[assignment]
+
+    pd["k"] = "first"
+    assert client.get_job_calls == 0
+    assert client.create_job_calls == 1
+    assert client.update_job_calls == 0
+    # Inspect the fake store directly rather than via pd.get(), which itself
+    # calls get_job and would confound the call-count assertions below.
+    assert client._jobs["k"]["data"] == {"value": "first"}
+
+    # Overwriting an existing key still never reads first, and still goes
+    # through create_job (the DB-layer ON CONFLICT DO UPDATE), not update_job.
+    pd["k"] = "second"
+    assert client.get_job_calls == 0
+    assert client.create_job_calls == 2
+    assert client.update_job_calls == 0
+    assert client._jobs["k"]["data"] == {"value": "second"}
+
+
+def test_persistent_dict_setitem_concurrent_writes_same_key_no_corruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many threads writing the same key concurrently must never raise or
+    leave the store split/corrupted -- regression guard for the
+    check-then-act race described in issue #4213 (two writers both
+    observing "no existing job" and both calling create_job)."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("concurrent_test")
+    errors: List[BaseException] = []
+
+    def _write(i: int) -> None:
+        try:
+            pd["shared-key"] = f"value-{i}"
+        except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_write, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert not errors
+    stored = pd.get("shared-key")
+    assert stored is not None
+    assert stored["value"].startswith("value-")
 
 
 def test_persistent_dict_values_return_annotation() -> None:
@@ -838,6 +956,51 @@ def test_clear_strategy_lab_storage_route(monkeypatch: pytest.MonkeyPatch, api_c
     assert body["deleted_paper_trading_sessions"] == 4
 
 
+def test_clear_strategy_lab_storage_does_not_block_on_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The purge runs without holding `_lock`, so a concurrent holder of `_lock`
+    (e.g. an in-flight resume/restart transition) doesn't block this call.
+
+    Calls the endpoint function directly (not through ``api_client``) and
+    bounds the wait with ``thread.join(timeout=...)``, mirroring the
+    established pattern in ``test_restart_strategy_lab_run_serializes_
+    concurrent_restarts_for_same_run_id`` — a real deadlock here would
+    otherwise hang the test indefinitely instead of failing cleanly.
+    """
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_purge_strategy_lab_job_storage",
+        lambda: {
+            "deleted_lab_records": 1,
+            "deleted_lab_strategies": 0,
+            "deleted_lab_backtests": 0,
+            "deleted_paper_trading_sessions": 0,
+        },
+    )
+
+    result: List[Any] = []
+
+    def _call() -> None:
+        try:
+            result.append(api_main.clear_strategy_lab_storage())
+        except BaseException as exc:  # pragma: no cover - surfaced via assertion below
+            result.append(exc)
+
+    api_main._lock.acquire()
+    try:
+        thread = threading.Thread(target=_call, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "clear_strategy_lab_storage blocked while _lock was held"
+    finally:
+        api_main._lock.release()
+
+    assert len(result) == 1
+    assert not isinstance(result[0], BaseException), result[0]
+    assert result[0].deleted_lab_records == 1
+
+
 # ---------------------------------------------------------------------------
 # delete_strategy_lab_record happy path
 # ---------------------------------------------------------------------------
@@ -982,7 +1145,12 @@ def test_recover_orphaned_paper_trading_sessions_marks_running_as_failed(
 # ---------------------------------------------------------------------------
 
 
-def test_load_run_from_job_service_returns_none_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_run_from_job_service_propagates_job_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine job-service failure (transport error, 5xx, ...) must propagate
+    rather than be silently remapped to "not found" -- swallowing it would let
+    a resumed run silently restart from offset 0 instead of failing closed."""
     from investment_team.strategy_lab import run_state
 
     class _Broken:
@@ -990,6 +1158,22 @@ def test_load_run_from_job_service_returns_none_on_error(monkeypatch: pytest.Mon
             raise RuntimeError("backend down")
 
     monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.load_run_from_job_service("run-x")
+
+
+def test_load_run_from_job_service_returns_none_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely missing job (the job service returns job=None, not an error)
+    still cleanly returns None -- the fix above must not regress this path."""
+    from investment_team.strategy_lab import run_state
+
+    class _Empty:
+        def get_job(self, *a, **k):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Empty())
     assert run_state.load_run_from_job_service("run-x") is None
 
 
@@ -1189,3 +1373,39 @@ def test_complete_advisor_session_builds_ips(api_client) -> None:
     body = done.json()
     assert body["user_id"] == "u-complete"
     assert body["ips"]["profile"]["user_id"] == "u-complete"
+
+
+# ---------------------------------------------------------------------------
+# Shutdown hook: event-bus reaper stop + backtest job failure sweep.
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.api import main as api_main
+
+    calls: List[str] = []
+    monkeypatch.setattr(
+        api_main, "_bt_mark_all_running_jobs_failed", lambda reason: calls.append(reason)
+    )
+    monkeypatch.setattr(
+        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
+    )
+
+    api_main._run_investment_service_shutdown()
+
+    assert calls == ["server shutdown"]
+
+
+def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising failure-sweep must NOT abort shutdown teardown."""
+    from investment_team.api import main as api_main
+
+    def _boom(reason: str) -> None:
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", _boom)
+    monkeypatch.setattr(
+        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
+    )
+
+    api_main._run_investment_service_shutdown()  # must not raise
