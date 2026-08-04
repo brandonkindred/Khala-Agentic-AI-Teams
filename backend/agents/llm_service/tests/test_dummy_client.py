@@ -405,3 +405,27 @@ def test_accessibility_branch_not_shadowed_by_code_review_catch_all() -> None:
     assert j["issues"] == []
     assert j["summary"] == "No WCAG 2.2 accessibility issues found (dummy)"
     assert "vulnerabilities" not in j
+
+
+def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelines() -> None:
+    """The VoicePrinciplesDrafter branch must return ``editorial_quality_bar``
+    nested inside ``writing_guidelines`` (matching ``WritingGuidelinesBody``),
+    not as a sibling top-level key.
+    """
+    c = DummyLLMClient()
+    system_prompt = (
+        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs "
+        "from previous nodes and the mission's desired_voice, carry the prior fields forward "
+        "unchanged and produce writing_guidelines:\n"
+        "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
+        "2. style_dos — 3-4 writing best practices\n"
+        "3. style_donts — 3-4 things to avoid\n"
+        "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
+        "This is the final step in narrative development."
+    )
+    j = c.complete_json("go", system_prompt=system_prompt, temperature=0.0)
+    assert isinstance(j["writing_guidelines"], dict)
+    guidelines = j["writing_guidelines"]
+    for field in ("voice_principles", "style_dos", "style_donts", "editorial_quality_bar"):
+        assert len(guidelines[field]) == 3
+    assert "editorial_quality_bar" not in j

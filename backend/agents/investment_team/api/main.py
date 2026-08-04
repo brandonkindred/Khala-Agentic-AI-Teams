@@ -4050,12 +4050,17 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
     # snapshot taken above — the signal call is a real, non-trivial network RPC,
     # and the background worker can independently reach a terminal state (real
     # trades/status=COMPLETED) in that window; overwriting with the stale
-    # snapshot would silently discard that result.
+    # snapshot would silently discard that result. If the session was deleted
+    # entirely in that window (e.g. its lab record was deleted concurrently),
+    # do not resurrect it by writing the stale pre-signal snapshot back —
+    # report it as gone instead.
     with _lock:
         fresh_raw = _paper_trading_sessions.get(session_id)
-        fresh_session = (
-            PaperTradingSession.parse_persisted(fresh_raw) if fresh_raw is not None else session
-        )
+        if fresh_raw is None:
+            raise HTTPException(
+                status_code=404, detail=f"Paper trading session '{session_id}' not found."
+            )
+        fresh_session = PaperTradingSession.parse_persisted(fresh_raw)
         fresh_session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
         _paper_trading_sessions[session_id] = fresh_session
     return PaperTradingResponse(
