@@ -197,6 +197,15 @@ def test_manifests_with_id_prefix_empty_registry_returns_empty() -> None:
     assert reg.manifests_with_id_prefix("anything.") == []
 
 
+def test_manifests_with_id_prefix_excludes_tombstoned_id_with_no_active_store() -> None:
+    # No dynamic store active (the _no_dynamic_store autouse fixture): the
+    # local-only fallback branch must still exclude a recently unregistered id.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("team-a.tombstoned", "A"))
+    reg.unregister("team-a.tombstoned")
+    assert reg.manifests_with_id_prefix("team-a.") == []
+
+
 def test_manifests_with_id_prefix_empty_prefix_matches_all() -> None:
     # Every string startswith("") — an empty prefix returns the whole registry.
     reg = AgentRegistry([], {})
