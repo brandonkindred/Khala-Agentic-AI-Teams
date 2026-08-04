@@ -403,8 +403,7 @@ class CodebaseIndex:
               files must not silently resolve to a repository file.
             - Falls through to the repo reader only when the submission has
               zero matches: if the reader can read the cited path, returns it
-              verbatim (so a finding about an existing-but-unchanged repo file
-              is still grouped and verified rather than skipped).
+              verbatim (see ``CodebaseIndex``'s ``repo_reader`` invariant for why).
             - Returns None for a blank, absent, or ambiguous path with no
               eligible reader hit — the verifier would have no single primary
               file to read, so the caller keeps the finding rather than verify it.
@@ -455,11 +454,9 @@ class CodebaseIndex:
                 f"Error: path '{path}' is ambiguous; it matches "
                 f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
             )
-        # Not in the submission — fall through to the repo reader so an
-        # existing-but-unchanged file (absent from the diff) is still readable.
-        # This is what lets the verifier confirm a file a finding calls "missing"
-        # actually exists in the repository. Ambiguous submission hits never
-        # reach here.
+        # Fall through to the repo reader for an existing-but-unchanged file
+        # (see CodebaseIndex's repo_reader invariant for why). Ambiguous
+        # submission hits never reach here.
         if key == self.EXISTING_CODEBASE_PATH:
             return None, "Error: no existing-codebase excerpt available."
 
@@ -851,13 +848,11 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
         - Returns None for any item without a non-negative integer ``index``
           (bool, float, string, negative, or missing — a verdict we cannot map
           back to a finding is ignored, not guessed).
-        - ``is_false_positive`` is True only for ``is_real_issue is False`` with
-          an explicit ``"high"`` or ``"medium"`` confidence; every other shape —
-          real, low/blank/missing confidence, OR any unrecognized confidence
-          value — is kept. The allowlist is deliberate: an off-contract
-          confidence is an ambiguous verdict, and the fail-safe rule keeps
-          ambiguous findings rather than dropping them. Never raises on
-          malformed input.
+        - Builds ``is_false_positive`` from an explicit ``"high"``/``"medium"``
+          confidence allowlist, not a denylist — see ``_Verdict``'s invariant for
+          the exact shape and the module docstring's Fail-safe invariant for why
+          (an off-contract confidence is ambiguous, and ambiguous findings are
+          kept, never dropped). Never raises on malformed input.
     """
     if not isinstance(item, dict):
         return None
@@ -867,10 +862,7 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
     index = raw_index
     confidence = str(item.get("confidence", "") or "").strip().lower()
     is_real = item.get("is_real_issue")
-    # Drop ONLY on an explicit, confident "not a real issue". An allowlist (not a
-    # denylist) so an unrecognized confidence ("none", "unsure", a non-string the
-    # model returned, ...) is treated as not-confident and the finding is kept —
-    # dropping a real issue is far worse than keeping a questionable one.
+    # Allowlist, not a denylist — see module docstring's Fail-safe invariant.
     is_false_positive = is_real is False and confidence in ("high", "medium")
     return index, _Verdict(
         is_false_positive=is_false_positive,
