@@ -343,5 +343,17 @@ def test_code_review_catch_all_matches_long_prompt_with_approved() -> None:
     assert "issues" in j
 
 
+def test_code_review_catch_all_does_not_match_unrelated_chunk_prompt() -> None:
+    """A long prompt about a "chunk" of data (not a code review) must not be
+    misclassified as a code-review response by the bare "chunk" heuristic.
+    """
+    c = DummyLLMClient()
+    padding = "x" * (CODE_REVIEW_MIN_PROMPT_LENGTH + 50)
+    prompt = f"Please process this chunk of user data and summarize it. {padding}"
+    assert len(prompt.lower()) > CODE_REVIEW_MIN_PROMPT_LENGTH
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j.get("summary") != "Code review passed (dummy)."
+
+
 def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
