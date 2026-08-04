@@ -1007,6 +1007,12 @@ def test_escalate_decision_bounded_by_escalation_cap(tmp_path, monkeypatch):
 
 
 def test_entry_gate_returns_paused_without_blocking(tmp_path, monkeypatch):
+    """Entry-gate HITL pause under pause_strategy="return" must not block.
+
+    When the input plan already carries an unanswered open question, the orchestrator
+    must pause before invoking the Tech Lead or swarm, must never call
+    hitl.wait_for_answers, and must persist a resume_token with pause_kind="entry".
+    """
     job: Dict[str, Any] = {}
 
     def no_wait(*a, **k):  # pragma: no cover
@@ -1057,6 +1063,12 @@ def test_entry_gate_returns_paused_without_blocking(tmp_path, monkeypatch):
 
 
 def test_tech_lead_clarify_returns_paused_without_blocking(tmp_path, monkeypatch):
+    """Tech-Lead-clarify HITL pause under pause_strategy="return" must not block.
+
+    When the Tech Lead's planning call raises an open question, the orchestrator must
+    pause with pause_kind="tech_lead_clarify" without ever calling hitl.wait_for_answers,
+    and planning must run exactly once (no retry-loop re-entry before the pause resolves).
+    """
     job: Dict[str, Any] = {}
     plan_calls = {"count": 0}
 
@@ -1108,6 +1120,13 @@ def test_tech_lead_clarify_returns_paused_without_blocking(tmp_path, monkeypatch
 
 
 def test_worker_escalation_returns_paused_without_blocking(tmp_path, monkeypatch):
+    """Worker-escalation HITL pause under pause_strategy="return" must not block.
+
+    A worker raising a product decision mid-task must raise _ActivityPauseSignal (not
+    block on hitl.wait_for_answers) and must atomically publish resume_token, pause_kind
+    ("worker_escalation"), and pause_context (the escalating task's id) to the job record.
+    The escalated task itself stays IN_PROGRESS, re-evaluated fresh on the next invocation.
+    """
     _patch_git(monkeypatch)
     job: Dict[str, Any] = {}
     worker = _DecisionWorker()
@@ -1144,6 +1163,13 @@ def test_worker_escalation_returns_paused_without_blocking(tmp_path, monkeypatch
 
 
 def test_reentry_matching_token_consumes_and_continues(tmp_path, monkeypatch):
+    """Return-mode re-entry with a matching acknowledged_resume_token consumes the pause.
+
+    When the persisted pause's resume_token matches the token the caller acknowledges, the
+    orchestrator must atomically clear the whole pause envelope (resume_token, pause_kind,
+    pause_context, waiting_for_answers), run planning exactly once, and reach a terminal
+    state instead of emitting a new paused result.
+    """
     job: Dict[str, Any] = {
         "waiting_for_answers": True,
         "pending_questions": [{"id": "q1", "question_text": "Allergen strictness default?"}],
@@ -1206,6 +1232,12 @@ def test_reentry_matching_token_consumes_and_continues(tmp_path, monkeypatch):
 
 
 def test_reentry_stale_token_reemits_without_rerunning_work(tmp_path, monkeypatch):
+    """Return-mode re-entry with a missing/stale acknowledged_resume_token re-emits, unchanged.
+
+    This is the pre-work Temporal activity retry case: the orchestrator must re-emit the
+    exact persisted pause (unchanged) without re-running any planning or swarm work, since
+    the token does not prove this invocation is the one resolving that pause.
+    """
     job: Dict[str, Any] = {
         "waiting_for_answers": True,
         "pending_questions": [{"id": "q1", "question_text": "Allergen strictness default?"}],
@@ -1254,6 +1286,29 @@ def test_reentry_stale_token_reemits_without_rerunning_work(tmp_path, monkeypatc
         "pause_context": None,
         "pending_questions": job["pending_questions"],
     }
+
+
+def test_run_rejects_invalid_pause_strategy(tmp_path):
+    """CodingTeamSwarm.run() validates pause_strategy before any worktree I/O.
+
+    An invalid pause_strategy value must raise ValueError immediately, matching the
+    docstring's documented precondition, without preparing any worker's git worktree.
+    """
+    graph = TaskGraphService(job_id="j1")
+    worker = _DecisionWorker()
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[worker],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=[worker.agent_id],
+        llm_getter=lambda k: None,
+    )
+
+    with pytest.raises(ValueError, match="pause_strategy must be 'block' or 'return'"):
+        swarm.run(pause_strategy="invalid")
+
+    assert swarm._worktrees._prepared is False
 
 
 def test_escalate_decision_defers_when_pause_already_committed_this_round(tmp_path, monkeypatch):

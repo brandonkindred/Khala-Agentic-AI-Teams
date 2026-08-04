@@ -125,11 +125,21 @@ class CodingTeamWorkflow:
         """Deliver a human answer batch for the current pause (wakes ``wait_condition``).
 
         Preconditions:
-            - ``payload`` is a dict shaped ``{"resume_token": str, "answers":
-              list}`` — the wire shape fixed by
-              ``system_design/hitl_pause_resume_contract.md`` §2/§3.
+            - None enforced — ``payload`` arrives from outside the workflow
+              (ultimately from an HTTP caller via ``signal_workflow_sync``), so
+              this handler validates its shape defensively rather than trusting
+              a precondition an external, unvalidated signal cannot guarantee.
+              A well-formed payload is a dict shaped ``{"resume_token": str,
+              "answers": list}`` — the wire shape fixed by
+              ``system_design/hitl_pause_resume_contract.md`` §2/§3 — but a
+              malformed one must not raise: an unhandled exception here fails
+              the workflow task and, since Temporal replays history, would
+              fail identically on every future replay, permanently stranding
+              the workflow.
         Postconditions:
-            - Validates ``payload["resume_token"]`` against
+            - Any payload that is not a dict, or a dict without a list
+              ``"answers"`` value, is ignored (returns without side effects).
+            - Validates ``payload.get("resume_token")`` against
               ``self._active_resume_token`` per the contract's §2 match rules
               2 and 3: a mismatch — including no pause being active yet
               (``self._active_resume_token is None``) — is ignored, not
@@ -138,9 +148,9 @@ class CodingTeamWorkflow:
               racing to answer the same pause) is ignored too — first
               submission per token wins, an unconditional overwrite would
               make which human answer "wins" depend on delivery order. Only
-              a token-matching first submission sets
-              ``self._submitted_answers`` to ``payload["answers"]``,
-              satisfying a ``wait_condition`` predicate of
+              a token-matching first submission with a list ``"answers"``
+              sets ``self._submitted_answers`` to that list, satisfying a
+              ``wait_condition`` predicate of
               ``self._submitted_answers is not None``.
             - Deliberately NOT implemented here: buffering a signal that
               arrives before ``self._active_resume_token`` is set (the
@@ -156,13 +166,18 @@ class CodingTeamWorkflow:
               which has the real activity-side pause payload to buffer
               against.
         """
+        if not isinstance(payload, dict):
+            return
         if self._active_resume_token is None:
             return
         if payload.get("resume_token") != self._active_resume_token:
             return
         if self._submitted_answers is not None:
             return
-        self._submitted_answers = payload["answers"]
+        answers = payload.get("answers")
+        if not isinstance(answers, list):
+            return
+        self._submitted_answers = answers
 
     @workflow.run
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:

@@ -38,9 +38,9 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> Status
       thread to unblock by clearing the job record's pause flag — ``run_pipeline_activity``
       already returned, and ``CodingTeamWorkflow`` is durably waiting on a signal. Answers are
       appended to ``submitted_answers`` WITHOUT clearing the pause envelope (the orchestrator's
-      own re-entry check owns that — see
-      ``coding_team_orchestrator._check_pending_pause_reentry`` — clearing it here would race a
-      worker crash into silently dropping the answer), then ``CodingTeamWorkflow`` is signaled
+      own re-entry check owns that — see ``pause_cycle._check_pending_pause_reentry``, called
+      from ``coding_team_orchestrator.run_coding_team_orchestrator`` — clearing it here would
+      race a worker crash into silently dropping the answer), then ``CodingTeamWorkflow`` is signaled
       directly so it re-invokes the pipeline activity with ``acknowledged_resume_token`` set to
       this same token.
     - **Thread-mode / GitHub-hook pause** (``resume_token`` absent): unchanged from before this

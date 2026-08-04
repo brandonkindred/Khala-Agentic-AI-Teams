@@ -416,10 +416,17 @@ class _ImplementationMixin:
         without answers (terminal/timeout) aborts the swarm.
 
         Postconditions:
-            - On a successful pause the task is IN_PROGRESS with a ``user_decision`` feedback entry
-              and the same engineer, so the answer is implemented next round (revision count
-              unchanged). On an unanswered pause ``self.aborted`` is set. With no answer channel the
-              task is FAILED (fail closed).
+            - Under ``pause_strategy="block"`` (``self._pause_strategy``): on a successful pause
+              the task is IN_PROGRESS with a ``user_decision`` feedback entry and the same
+              engineer, so the answer is implemented next round (revision count unchanged). On an
+              unanswered pause ``self.aborted`` is set. With no answer channel the task is FAILED
+              (fail closed).
+            - Under ``pause_strategy="return"``: ``pause_for_questions`` raises
+              ``pause_cycle._ActivityPauseSignal`` as soon as the pause is published (see
+              Concurrency below), so neither the task update nor ``self.aborted`` happens here —
+              the task is left as-is (IN_PROGRESS, unescalated) and the orchestrator's re-entry
+              check consumes the persisted pause on the next invocation instead. With no answer
+              channel the task is still FAILED in this mode too (fail-closed is unconditional).
 
         Concurrency:
             The pause cycle stores exactly one outstanding batch in job-level

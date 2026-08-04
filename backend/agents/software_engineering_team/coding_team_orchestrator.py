@@ -301,9 +301,9 @@ def run_coding_team_orchestrator(
           match against ``acknowledged_resume_token`` atomically consumes it and proceeds
           normally; a stale/missing token re-emits that exact pause immediately without
           re-running any work (a pre-work Temporal activity retry). Otherwise, if a HITL gate
-          pauses during this invocation, returns
-          ``{"outcome": "paused", "job_id", "resume_token", "pause_kind", "pause_context",
-          "pending_questions"}`` promptly instead of blocking — the pause envelope has already
+          pauses during this invocation, returns a dict with keys ``outcome`` (``"paused"``),
+          ``job_id``, ``resume_token``, ``pause_kind``, ``pause_context``, and
+          ``pending_questions`` promptly instead of blocking — the pause envelope has already
           been durably persisted to the job record before this returns (a notification, not the
           source of truth, per the contract doc). Returns ``None`` when the pipeline instead
           reaches a terminal state (terminal status is still reported via the job record, as in
@@ -366,6 +366,13 @@ def run_coding_team_orchestrator(
         tech_lead = TechLeadAgent(llm)
 
         def _pause_cycle(questions: List[Any], source: str) -> "tuple[List[Dict[str, Any]], bool]":
+            """Thin binding of ``_run_pause_cycle`` to this job's context.
+
+            The return type annotation describes the ``pause_strategy="block"`` contract only:
+            under ``pause_strategy="return"`` (closed over above), ``_run_pause_cycle`` raises
+            ``pause_cycle._ActivityPauseSignal`` instead of returning — see that function's own
+            contract for the discriminating detail this annotation can't express.
+            """
             return _run_pause_cycle(
                 job_id,
                 questions,
@@ -739,6 +746,18 @@ class CodingTeamSwarm(
         - ``aborted`` starts ``False`` and is the sole flag that both stops the ``run()`` loop
           early and tells ``run_coding_team_orchestrator`` not to report the job as completed;
           once set it is never cleared within the instance's lifetime.
+        - ``_pause_strategy`` defaults to ``"block"`` in ``__init__`` and is set from ``run()``'s
+          own ``pause_strategy`` argument (same pattern as ``pause_for_questions``); in this
+          codebase a swarm instance is constructed fresh per orchestrator invocation and
+          ``run()`` is called at most once on it, so it is effectively constant for the
+          instance's lifetime even though nothing prevents a second ``run()`` call from
+          changing it. Read by ``_escalate_decision`` to decide whether the one-shot pause
+          guard below applies.
+        - ``_escalation_pause_committed`` is reset to ``False`` at the start of every round in
+          ``run()`` and is only ever set to ``True`` while ``_pause_lock`` is held; under
+          ``pause_strategy="return"`` it guarantees at most one worker-escalation pause is
+          published per round (see ``_escalate_decision``'s Concurrency note). It is a no-op
+          in block mode.
     """
 
     def __init__(
@@ -807,7 +826,10 @@ class CodingTeamSwarm(
         # pause_strategy="block"|"return" (set in run()); read by _escalate_decision to decide
         # whether the one-shot "pause already committed this round" guard applies (see that
         # guard's own comment — it must be a no-op in block mode to preserve today's behavior of
-        # every escalating worker getting its own full pause-and-resolve cycle in sequence).
+        # every escalating worker getting its own full pause-and-resolve cycle in sequence). In
+        # "return" mode the guard causes a second concurrently-escalating worker to defer its
+        # task to next round (IN_PROGRESS, unescalated) rather than racing to publish a competing
+        # pause; in "block" mode it never fires (see run()'s docstring on _escalation_pause_committed).
         self._pause_strategy = "block"
         # One-shot, _pause_lock-protected guard: True once some worker has published this round's
         # escalation pause under pause_strategy="return". In that mode _pause_lock releases almost
@@ -878,6 +900,16 @@ class CodingTeamSwarm(
               worktree-setup failure, an unexpected exception, or a ``pause_strategy="return"``
               worker-escalation pause propagating out) — the worktree lifecycle is scoped exactly
               to one ``run()`` call.
+        Outcomes:
+            - Returns ``None`` normally: the swarm completed, was cancelled, or aborted because a
+              block-mode pause ended without answers (``self.aborted``).
+            - Raises ``pause_cycle._ActivityPauseSignal`` when ``pause_strategy="return"`` and a
+              worker escalates a HITL decision (from ``swarm_implementation._escalate_decision``,
+              via the bound ``pause_for_questions`` cycle) — the pause envelope is already
+              durably persisted to the job record before this raises; the caller
+              (``run_coding_team_orchestrator``) catches it and returns the discriminated
+              ``{"outcome": "paused", ...}`` result. Worktree cleanup still runs first (see
+              Postconditions above).
         """
         if pause_strategy not in ("block", "return"):
             raise ValueError(f"pause_strategy must be 'block' or 'return', got {pause_strategy!r}")
