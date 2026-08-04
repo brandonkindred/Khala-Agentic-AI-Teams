@@ -2760,7 +2760,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
         request = RunStrategyLabRequest(**payload)
         total_cycles = request.batch_size * request.batch_count
-        completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+        completed_batches = contiguous_cycles // request.batch_size
 
         # Re-initialize in-memory state
         resumed_state = _build_run_state(
