@@ -1067,7 +1067,10 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
     `GET /backtests/status/{job_id}` for the completed ``RunBacktestResponse``
     in the ``result`` field. Strategies with generated ``strategy_code`` run
     in a sandbox (the normal Strategy Lab path); strategies without
-    ``strategy_code`` are rejected with a 422.
+    ``strategy_code`` are accepted here (job created as PENDING) and only
+    rejected once the job runs — ``_run_real_data_backtest`` raises
+    ``MissingStrategyCodeError`` inside ``_run_backtest_background``, which
+    the job store surfaces as a FAILED status, not a live HTTP 422.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1233,7 +1236,7 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     with _lock:
         _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
         escalation = result.get("escalation_enqueued")
-        if escalation:
+        if escalation is not None:
             required_escalation_keys = ("queue", "payload_id", "priority")
             if not isinstance(escalation, dict) or any(
                 key not in escalation for key in required_escalation_keys
@@ -1298,6 +1301,10 @@ def workflow_queues() -> QueuesResponse:
 @app.post("/memos", response_model=CreateMemoResponse)
 def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
     """Generate an investment committee memo (runs as a Temporal workflow).
+
+    Postconditions:
+        - On success, returns a ``CreateMemoResponse`` containing a validated
+          ``InvestmentCommitteeMemo`` produced by the advisory workflow.
 
     Raises:
         - ``HTTPException(502)`` if the advisory workflow returns a result
@@ -2478,7 +2485,7 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
             break
         seen.add(id(cause))
         if isinstance(cause, _AppErr):
-            status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 500)
+            status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 502)
             return HTTPException(status_code=status, detail=cause.message)
         if isinstance(cause, WorkflowAlreadyStartedError):
             return HTTPException(

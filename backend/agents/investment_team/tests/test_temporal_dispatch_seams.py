@@ -371,7 +371,7 @@ def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> N
         ("MissingFields", 400),
         ("NoValidation", 400),
         ("ValueError", 400),
-        ("SomethingUnmapped", 500),
+        ("SomethingUnmapped", 502),
     ],
 )
 def test_translate_advisory_failure_maps_application_error_types(

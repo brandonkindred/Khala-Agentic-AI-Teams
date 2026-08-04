@@ -547,6 +547,23 @@ def test_promotion_decision_502_on_malformed_escalation_payload(api_client, monk
     assert resp.json()["detail"]
 
 
+def test_promotion_decision_502_on_empty_escalation_payload(api_client, monkeypatch) -> None:
+    """An empty (but present) escalation_enqueued dict is falsy in Python — the
+    guard must check ``is not None``, not truthiness, or it silently skips
+    validation instead of raising 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"decision": {}, "escalation_enqueued": {}},
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_promotion_decision_502_on_unknown_escalation_queue(api_client, monkeypatch) -> None:
     """An escalation_enqueued['queue'] not in _workflow_state.queues surfaces as a 502."""
     from investment_team.api import main as api_main

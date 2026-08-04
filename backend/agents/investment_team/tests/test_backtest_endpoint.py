@@ -150,7 +150,7 @@ _BUY_AND_HOLD_CODE = textwrap.dedent('''\
 
 _NO_STRATEGY_CLASS_CODE = textwrap.dedent("""\
     # Deliberately does NOT subclass Strategy — the subprocess harness
-    # should raise and surface as a 422.
+    # should raise and surface as StrategyExecutionError.
     def run_strategy(data, config):
         return []
 """)
@@ -174,7 +174,7 @@ _LOOKAHEAD_CODE = textwrap.dedent('''\
 # ---------------------------------------------------------------------------
 
 
-def test_run_real_data_backtest_returns_422_when_no_strategy_code() -> None:
+def test_run_real_data_backtest_raises_missing_strategy_code_error_when_no_strategy_code() -> None:
     """Strategies without ``strategy_code`` must raise ``MissingStrategyCodeError``.
 
     The LLM-per-bar fallback was removed in PR 1; only Strategy-Lab-generated
@@ -227,7 +227,9 @@ def test_run_real_data_backtest_succeeds_with_well_formed_strategy(monkeypatch) 
         assert isinstance(t, TradeRecord)
 
 
-def test_run_real_data_backtest_422_on_malformed_strategy_module(monkeypatch) -> None:
+def test_run_real_data_backtest_raises_strategy_execution_error_on_malformed_strategy_module(
+    monkeypatch,
+) -> None:
     """Code that doesn't define a Strategy subclass raises ``StrategyExecutionError``."""
     from investment_team.api import main as api_main
 
@@ -242,7 +244,9 @@ def test_run_real_data_backtest_422_on_malformed_strategy_module(monkeypatch) ->
     assert "execution failed" in str(excinfo.value).lower()
 
 
-def test_run_real_data_backtest_422_on_lookahead_violation(monkeypatch) -> None:
+def test_run_real_data_backtest_raises_lookahead_violation_error_on_forward_field_access(
+    monkeypatch,
+) -> None:
     """A strategy that touches a non-existent forward field raises ``LookaheadViolationError``."""
     from investment_team.api import main as api_main
 
