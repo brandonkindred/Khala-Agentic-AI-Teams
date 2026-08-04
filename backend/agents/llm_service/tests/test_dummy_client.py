@@ -359,6 +359,18 @@ def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
 
 
+def test_senior_backend_branch_generates_valid_python_for_quote_laden_hint() -> None:
+    """A task_hint with quotes/triple-quotes must not corrupt the generated source."""
+    c = DummyLLMClient()
+    hint = '''Build user's "profile" module """ oops'''
+    prompt = f"You are a senior backend software engineer. Task: {hint}"
+    j = c.complete_json(prompt, temperature=0.0)
+    compile(j["code"], "<code>", "exec")
+    compile(j["tests"], "<tests>", "exec")
+    for path, content in j["files"].items():
+        compile(content, path, "exec")
+
+
 def test_security_branch_not_shadowed_by_code_review_catch_all() -> None:
     """Security prompts include "Code to review" as an input-section header (see
     security_agent/prompts.py), which also matches the generic code-review

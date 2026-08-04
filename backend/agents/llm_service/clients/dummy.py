@@ -1191,15 +1191,19 @@ class DummyLLMClient(LLMClient):
                 _extract_name_from_hint(task_hint, separator="_", max_length=25)
                 or f"module_{counter}"
             )
+            # task_hint is free-form prompt text and may contain quote characters
+            # or "\"\"\"" sequences; keep the docstring static and put the hint in
+            # a repr()-encoded comment so the generated source stays valid Python
+            # regardless of what it contains.
             return {
-                "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
+                "code": f'"""Backend module."""\n# Task: {task_hint!r}\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
                 "summary": f"Backend implementation for: {task_hint}",
                 "files": {
-                    f"app/routers/{slug}.py": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
-                    f"tests/test_{slug}.py": f'"""Tests for {task_hint}."""\ndef test_{slug}():\n    assert True\n',
+                    f"app/routers/{slug}.py": f'"""Backend module."""\n# Task: {task_hint!r}\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
+                    f"tests/test_{slug}.py": f'"""Tests."""\n# Task: {task_hint!r}\ndef test_{slug}():\n    assert True\n',
                 },
-                "tests": f'"""Tests for {task_hint}."""\ndef test_{slug}():\n    assert True\n',
+                "tests": f'"""Tests."""\n# Task: {task_hint!r}\ndef test_{slug}():\n    assert True\n',
                 "suggested_commit_message": f"feat(api): implement {slug.replace('_', ' ')}",
             }
         elif "senior frontend software engineer" in lowered:
