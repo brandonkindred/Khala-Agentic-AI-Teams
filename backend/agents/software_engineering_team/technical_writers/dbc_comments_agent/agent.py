@@ -9,6 +9,7 @@ from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
+from .merge import apply_dbc_insertions
 from .models import DbcCommentInsertion, DbcCommentsInput, DbcCommentsOutput, DbcCommentsStatus
 from .prompts import DBC_COMMENTS_PROMPT
 
@@ -60,9 +61,16 @@ class DbcCommentsAgent:
                   entries) and already_compliant=False, or
               (b) an empty insertions list and already_compliant=True
             - summary field always contains a message for the coding agent
-            - Applying the returned insertions to source (anchoring/merge) is
-              not performed here -- this method only produces the raw,
-              unmerged insertion list the model returned
+            - insertions is always the raw, unmerged list the model returned
+              (kept for observability); files holds the deterministic,
+              LLM-free merge of the subset of insertions that could be
+              safely anchored (see merge.apply_dbc_insertions); a file is
+              only present in files when at least one insertion applied
+              cleanly and, for '.py' files, the merge still parses
+            - rejected_insertions holds one reason per insertion that could
+              not be safely anchored/merged; comments_added/comments_updated
+              count only insertions the merge actually applied, never the
+              model's self-reported counts
 
         Raises:
             Exception: If LLM call fails (caught internally, returns fail-open response)
@@ -165,8 +173,6 @@ class DbcCommentsAgent:
             except Exception as e:
                 logger.warning("DbcComments: skipping malformed insertion (%s): %s", entry, e)
 
-        comments_added = int(data.get("comments_added", 0))
-        comments_updated = int(data.get("comments_updated", 0))
         already_compliant = bool(data.get("already_compliant", False))
         summary = data.get("summary", "")
         suggested_commit_message = data.get(
@@ -184,6 +190,24 @@ class DbcCommentsAgent:
             if not summary:
                 summary = "Code reviewed for DbC compliance. No changes needed."
 
+        # Deterministically merge the insertions that can be safely anchored onto the
+        # original source; comments_added/comments_updated reflect what was actually
+        # applied, never the model's self-reported counts.
+        files: dict[str, str] = {}
+        comments_added = 0
+        comments_updated = 0
+        rejected_insertions: list[str] = []
+        if insertions:
+            files, comments_added, comments_updated, rejected_insertions = apply_dbc_insertions(
+                code, insertions
+            )
+            if rejected_insertions:
+                logger.warning(
+                    "DbcComments: %d insertion(s) could not be safely merged: %s",
+                    len(rejected_insertions),
+                    rejected_insertions,
+                )
+
         # If compliant and no summary, provide a default praise message
         if already_compliant and not summary:
             summary = (
@@ -192,17 +216,22 @@ class DbcCommentsAgent:
             )
 
         logger.info(
-            "DbcComments: done, compliant=%s, insertions=%s, added=%s, updated=%s",
+            "DbcComments: done, compliant=%s, insertions=%s, files=%s, added=%s, updated=%s, "
+            "rejected=%s",
             already_compliant,
             len(insertions),
+            len(files),
             comments_added,
             comments_updated,
+            len(rejected_insertions),
         )
 
         _update(DbcCommentsStatus.COMPLETE)
 
         return DbcCommentsOutput(
             insertions=insertions,
+            files=files,
+            rejected_insertions=rejected_insertions,
             comments_added=comments_added,
             comments_updated=comments_updated,
             already_compliant=already_compliant,

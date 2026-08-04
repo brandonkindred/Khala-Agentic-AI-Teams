@@ -81,6 +81,10 @@ def test_dbc_run_already_compliant(monkeypatch) -> None:
 
 
 def test_dbc_run_with_insertions_returned(monkeypatch) -> None:
+    """comments_added/comments_updated and files are computed by the real,
+    deterministic merge (merge.apply_dbc_insertions) -- never trusted from the
+    LLM's self-reported counts, which is why the fixture's counts (3/1) are
+    intentionally wrong and must not appear in the result."""
     fake = _FakeCompleteJson(
         {
             "insertions": [
@@ -100,15 +104,46 @@ def test_dbc_run_with_insertions_returned(monkeypatch) -> None:
         }
     )
     a = _build_agent(monkeypatch, fake)
-    out = a.run(DbcCommentsInput(code="def f(): pass", language="python"))
+    out = a.run(DbcCommentsInput(code="def f():\n    pass\n", language="python"))
     assert out.already_compliant is False
     assert len(out.insertions) == 1
     assert out.insertions[0].file == "a.py"
     assert out.insertions[0].symbol == "f"
     assert out.insertions[0].action == "add"
-    assert out.comments_added == 3
-    assert out.comments_updated == 1
+    assert out.comments_added == 1
+    assert out.comments_updated == 0
+    assert out.rejected_insertions == []
+    assert "Does nothing." in out.files["a.py"]
+    assert "pass" in out.files["a.py"]
     assert out.suggested_commit_message == "docs(dbc): comments"
+
+
+def test_dbc_run_rejects_invalid_insertion_without_corrupting(monkeypatch) -> None:
+    """An insertion the merge cannot safely anchor is surfaced via
+    rejected_insertions and simply omitted from files -- never corrupted."""
+    fake = _FakeCompleteJson(
+        {
+            "insertions": [
+                {
+                    "file": "a.py",
+                    "symbol": "does_not_exist",
+                    "comment": "Never anchored.",
+                    "action": "add",
+                }
+            ],
+            "already_compliant": False,
+            "summary": "added comments",
+        }
+    )
+    a = _build_agent(monkeypatch, fake)
+    out = a.run(DbcCommentsInput(code="def f():\n    pass\n", language="python"))
+    assert out.already_compliant is False
+    assert len(out.insertions) == 1  # still visible for observability
+    assert out.files == {}
+    assert out.comments_added == 0
+    assert out.comments_updated == 0
+    assert len(out.rejected_insertions) == 1
+    assert "does_not_exist" in out.rejected_insertions[0]
 
 
 def test_dbc_run_llm_exception_fails_open(monkeypatch) -> None:
