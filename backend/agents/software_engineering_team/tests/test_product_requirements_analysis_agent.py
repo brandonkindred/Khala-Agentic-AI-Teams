@@ -789,6 +789,17 @@ def test_cap_open_questions_preserves_order_and_limit() -> None:
     assert cap_open_questions(questions[:3]) == questions[:3]
 
 
+def test_cap_open_questions_rejects_negative_limit() -> None:
+    """A negative limit is a precondition violation (caller bug), not malformed
+    LLM input: it must raise AssertionError rather than silently returning a
+    wrong slice, per this module's Design by Contract convention."""
+    from product_requirements_analysis_agent.question_processing import cap_open_questions
+
+    questions = [OpenQuestion(id="q0", question_text="Question?", options=[])]
+    with pytest.raises(AssertionError):
+        cap_open_questions(questions, limit=-1)
+
+
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
     llm = MagicMock()
@@ -906,6 +917,38 @@ def test_parse_open_question_preserves_option_order_when_marking_default() -> No
 
     assert [opt.id for opt in parsed.options] == ["opt_a", "opt_b", "opt_c"]
     assert [opt.is_default for opt in parsed.options] == [False, True, False]
+
+
+def test_parse_open_question_marking_default_preserves_every_other_field() -> None:
+    """Marking the highest-confidence option default must only flip is_default,
+    not silently drop other fields (a hazard of manually reconstructing the
+    option instead of copying it with a targeted update)."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-005",
+            "question_text": "Which option should be default?",
+            "options": [
+                {
+                    "id": "opt_a",
+                    "label": "A",
+                    "is_default": False,
+                    "rationale": "Industry standard for this use case.",
+                    "confidence": 0.95,
+                },
+            ],
+        },
+        index=0,
+    )
+
+    default_opt = parsed.options[0]
+    assert default_opt.is_default is True
+    assert default_opt.id == "opt_a"
+    assert default_opt.label == "A"
+    assert default_opt.rationale == "Industry standard for this use case."
+    assert default_opt.confidence == 0.95
 
 
 def test_parse_open_question_treats_explicit_null_optional_fields_as_empty() -> None:
