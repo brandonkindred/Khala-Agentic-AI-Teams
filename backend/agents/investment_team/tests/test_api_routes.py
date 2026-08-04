@@ -659,8 +659,15 @@ def test_paper_trading_results_response_counts_are_derived_from_items() -> None:
     assert resp.not_performant_count == 2
 
 
+@pytest.mark.parametrize(
+    "verdict,expected_ids,expected_ready,expected_not",
+    [
+        ("ready_for_live", ["a"], 1, 0),
+        ("not_performant", ["b", "c"], 0, 2),
+    ],
+)
 def test_paper_trading_results_verdict_filter_counts_match_filtered_items(
-    api_client,
+    api_client, verdict, expected_ids, expected_ready, expected_not
 ) -> None:
     """Filtering by ``verdict`` must return counts consistent with the
     filtered ``items``, not global totals across all sessions.
@@ -678,13 +685,13 @@ def test_paper_trading_results_verdict_filter_counts_match_filtered_items(
         "c", PaperTradingVerdict.NOT_PERFORMANT
     )
 
-    resp = api_client.get("/strategy-lab/paper-trade/results?verdict=ready_for_live")
+    resp = api_client.get(f"/strategy-lab/paper-trade/results?verdict={verdict}")
     assert resp.status_code == 200
     body = resp.json()
-    assert [i["session_id"] for i in body["items"]] == ["a"]
-    assert body["count"] == 1
-    assert body["ready_for_live_count"] == 1
-    assert body["not_performant_count"] == 0
+    assert [i["session_id"] for i in body["items"]] == expected_ids
+    assert body["count"] == len(expected_ids)
+    assert body["ready_for_live_count"] == expected_ready
+    assert body["not_performant_count"] == expected_not
 
 
 def test_paper_trading_results_rejects_unknown_verdict(api_client) -> None:
