@@ -814,6 +814,19 @@ def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client
     assert resp.json()["deleted"] is True
 
 
+def test_delete_backtest_job_500_when_delete_fails_after_existing(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Job confirmed to exist, but the delete itself fails: 500, not 404."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
+    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
+    resp = api_client.delete("/backtests/jobs/j1")
+    assert resp.status_code == 500
+    assert "Failed to delete" in resp.json()["detail"]
+
+
 def test_list_backtests_empty(api_client) -> None:
     resp = api_client.get("/backtests")
     assert resp.status_code == 200

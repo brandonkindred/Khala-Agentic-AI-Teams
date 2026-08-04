@@ -1234,13 +1234,15 @@ def delete_backtest_job(job_id: str) -> Dict[str, Any]:
     Preconditions:
         ``job_id`` identifies a job previously created by ``run_backtest``.
     Postconditions:
-        Raises 404 if no job with that ID exists. Otherwise returns
-        ``{"job_id", "deleted": True}``.
+        Raises 404 if no job with that ID exists. Raises 500 if the job
+        existed but the delete itself failed (race condition or storage
+        error) — distinct from 404, since existence was already confirmed.
+        Otherwise returns ``{"job_id", "deleted": True}``.
     """
     if _bt_get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if not _bt_delete_job(job_id):
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=500, detail="Failed to delete job")
     return {"job_id": job_id, "deleted": True}
 
 
