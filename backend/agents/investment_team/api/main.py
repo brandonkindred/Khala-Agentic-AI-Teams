@@ -4325,7 +4325,17 @@ def send_advisor_message(
 
 @app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
-    """Get the current state of an advisor session."""
+    """Get the current state of an advisor session.
+    Preconditions:
+        - `session_id` must identify a previously started advisor session.
+        
+    Postconditions:
+        - Returns the session if found.
+        - Otherwise, returns `found=False` with `session=None`.
+        
+    Raises:
+        - None (intentionally avoids standard 404 errors for missing sessions).
+    """
     with _lock:
         session = _advisor_sessions.get(session_id)
 
