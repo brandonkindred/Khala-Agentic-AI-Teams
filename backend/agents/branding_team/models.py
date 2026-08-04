@@ -729,7 +729,7 @@ class OwnershipOutput(BaseModel):
     """
 
     ownership_model: str = Field(min_length=1)
-    decision_authority: Dict[str, NonEmptyStr] = Field(min_length=1)
+    decision_authority: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=1)
 
 
 class ApprovalWorkflowsOutput(BaseModel):
