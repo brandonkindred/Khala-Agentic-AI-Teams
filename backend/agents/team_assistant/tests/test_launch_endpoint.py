@@ -253,7 +253,7 @@ def test_social_marketing_launch_injects_llm_model_name(
 ) -> None:
     """Regression: upstream requires llm_model_name; assistant must supply it."""
     _stub_agent(monkeypatch)
-    monkeypatch.setenv("LLM_MODEL", "qwen3.5:9b-mlx")
+    monkeypatch.setenv("LLM_MODEL", "glm-5.2:cloud")
     upstream.response_body = {"job_id": "sm-1", "status": "queued", "message": "ok"}
     client, cid = _seed_conversation(
         "social_marketing",
@@ -266,7 +266,7 @@ def test_social_marketing_launch_injects_llm_model_name(
     sent = json.loads(upstream.requests[0]["body"])
     assert sent["client_id"] == "client-a"
     assert sent["brand_id"] == "brand-b"
-    assert sent["llm_model_name"] == "qwen3.5:9b-mlx"
+    assert sent["llm_model_name"] == "glm-5.2:cloud"
 
 
 def test_no_launch_spec_returns_400(

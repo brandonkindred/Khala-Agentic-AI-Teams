@@ -259,8 +259,13 @@ def _run_phase_fixes_with_tool_agent(
     """Run the generic phase fixes, then let the phase's dedicated tool agent take a pass.
 
     Preconditions: ``phase_name`` is a key of :data:`_PHASE_FIX_TOOL_AGENT`.
-    Postconditions: returns the phase fix result, with the tool agent's file
-    updates merged in when that agent is wired and supports ``problem_solve``.
+    Postconditions: returns the phase fix result from the generic per-issue fix
+    loop, with the tool agent's file updates merged in when that agent is
+    wired, supports ``problem_solve``, and the call succeeds. If the tool
+    agent's ``problem_solve`` raises, the exception is logged (with
+    traceback), the generic loop's file updates already in ``result.files``
+    are preserved unchanged, and ``result.resolved`` is forced to ``False``
+    with a note appended to ``result.summary`` describing the failure.
     """
     result = _run_phase_fixes(
         llm=llm,
@@ -296,9 +301,11 @@ def _run_phase_fixes_with_tool_agent(
                 if out.files:
                     result.files.update(out.files)
             except Exception as exc:
-                logger.warning(
+                logger.exception(
                     "[%s] %s tool agent problem_solve failed: %s", task_id, phase_name, exc
                 )
+                result.resolved = False
+                result.summary += f" (tool-agent fix pass failed: {exc})"
 
     return result
 

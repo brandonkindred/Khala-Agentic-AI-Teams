@@ -34,7 +34,7 @@ This team defines and operationalizes an enterprise brand system through a coord
 
 ## Agent setup and flow
 
-`BrandingTeamOrchestrator.run()` (`orchestrator.py`) drives the pipeline: it resolves the mission, builds `build_branding_graph(target_phase=...)` (`graphs/top_level.py`), serializes the mission into a task string, and invokes the graph. The result is a **single top-level Strands `Graph`** whose 5 nodes are themselves phase sub-graphs or swarms, wired **strictly sequentially** — `phase1_strategic_core → phase2_narrative → phase3_visual → phase4_channel → phase5_governance`. An optional `target_phase` stops the pipeline early; gating happens at graph-build time (later phase nodes/edges are simply never added), not via runtime conditional edges. `run_single_phase()` reuses the same per-phase builders to run one phase in isolation (e.g. from a Temporal activity).
+`BrandingTeamOrchestrator.run()` (`orchestrator.py`) drives the pipeline: it resolves the mission, builds `build_branding_graph(target_phase=...)` (`graphs/top_level.py`), serializes the mission into a task string, and invokes the graph. The result is a **single top-level Strands `Graph`** whose 5 nodes are themselves phase sub-graphs, wired **strictly sequentially** — `phase1_strategic_core → phase2_narrative → phase3_visual → phase4_channel → phase5_governance`. An optional `target_phase` stops the pipeline early; gating happens at graph-build time (later phase nodes/edges are simply never added), not via runtime conditional edges. `run_single_phase()` reuses the same per-phase builders to run one phase in isolation (e.g. from a Temporal activity).
 
 Brand-compliance checks (`BrandComplianceAgent`, a plain keyword-matching dataclass, not a graph node) and the market-research / design-asset integrations run **outside** the graph, after it completes: compliance checks run synchronously first, then the two integrations run concurrently with each other via `asyncio.gather`. The orchestrator then assembles everything into a single `TeamOutput` whose status depends on the per-phase gates and `human_review.approved`.
 
@@ -59,10 +59,10 @@ flowchart TB
 
     P2 --> P3
 
-    subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph-of-Swarm)"]
+    subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph)"]
         direction TB
-        P3swarm["diverge_swarm: CreativeDirector dispatches
-        MoodBoardConceptualist_Editorial/Minimalist/Bold"] --> P3conv[converge_decider]
+        P3diverge["MoodBoardConceptualist_Editorial/Minimalist/Bold
+        → CreativeDirector"] --> P3conv[converge_decider]
         P3conv --> P3fan["logo_specifier, color_system_builder, typography_builder,
         iconography_director, photography_video_director,
         voice_tone_builder, design_system_codifier"]
@@ -108,11 +108,14 @@ flowchart TB
     Complete -->|Yes, reached Governance| Ready[status: READY_FOR_ROLLOUT]
 ```
 
-Phase 3 is the most structurally involved phase — an inner `Swarm` nested as a single node inside the outer `Graph` — so it's worth expanding on its own:
+Phase 3 combines a diverge fan-out with a post-converge specialist fan-out, so it's worth expanding on its own:
 
 ```mermaid
 flowchart LR
-    diverge[diverge_swarm] --> converge[converge_decider]
+    ed[MoodBoardConceptualist_Editorial] --> cd[CreativeDirector]
+    min[MoodBoardConceptualist_Minimalist] --> cd
+    bold[MoodBoardConceptualist_Bold] --> cd
+    cd --> converge[converge_decider]
     converge --> logo[logo_specifier]
     converge --> color[color_system_builder]
     converge --> typo[typography_builder]
@@ -129,15 +132,15 @@ flowchart LR
     design --> compositor
 ```
 
-Where `diverge_swarm` is itself an inner Swarm: `CreativeDirector` dispatches to three style-variant `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents and each hands back to `CreativeDirector` when done.
+Three style-variant `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents run in parallel and fan into `CreativeDirector`, which collects their concepts into `mood_board_candidates`. Agents use `structured_output=`, which stops Strands' agent loop after the structured payload is produced, so this is a Graph (not a Swarm) — the same lesson as Phase 2.
 
-Per-phase participating nodes. For Graph-based phases (1, 2, 4, and 5) and the outer Phase 3 graph, node identifiers are the explicit `node_id` values passed to `builder.add_node(...)`. For Phase 3's inner `diverge_swarm` (the remaining Swarm), Strands has no `node_id` concept — agents are identified by their own `Agent.name`, which the factories in `agents.py` set in PascalCase; those are listed below rather than a normalized/snake_case alias:
+Per-phase participating nodes. Node identifiers are the explicit `node_id` values passed to `builder.add_node(...)`:
 
 | Phase | Construct | Nodes |
 |---|---|---|
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
 | 2 — Narrative & Messaging | `Graph`, linear + carry-forward | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (single-predecessor chain; each `structured_output` inherits upstream fields) |
-| 3 — Visual & Expressive Identity | Graph-of-Swarm | inner `Swarm` (node id `diverge_swarm`): `CreativeDirector` + 3 `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
+| 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `CreativeDirector` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
 | 4 — Channel Activation | `Graph`, fan-out/fan-in | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` → `channel_compositor` |
 | 5 — Governance & Evolution | `Graph`, fan-out/fan-in | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` → `governance_compositor` |
 
@@ -213,13 +216,20 @@ payload in `Inputs from previous nodes`.
 | `PersonaBuilder` | Creates rich persona profiles with psychographic depth | `persona_profiles` |
 | `VoicePrinciplesDrafter` | Defines writing guidelines: voice principles, style dos/don'ts, editorial bar | `writing_guidelines` |
 
-### Phase 3 — Visual & Expressive Identity (Graph-of-Swarm)
+### Phase 3 — Visual & Expressive Identity (Graph: diverge fan-out + converge fan-out)
 
 Output model: `VisualIdentityOutput`
 
+Phase 3 is a Graph (not a Swarm). Agents use `structured_output=`, which stops
+Strands' agent loop after the structured payload is produced, so tool-based
+`handoff_to_agent` cannot sequence the diverge step. Three moodboard
+conceptualists fan out in parallel into `CreativeDirector`, which collects
+`mood_board_candidates`; `converge_decider` then selects a winner before the
+seven specialists fan out into `visual_compositor`.
+
 | Agent | Purpose | Output field(s) |
 |-------|---------|------------------|
-| `CreativeDirector` | Coordinates moodboard ideation, dispatches conceptualists, reviews candidates | `mood_board_candidates` |
+| `CreativeDirector` | Collects moodboard concepts from conceptualists into a unified candidate list | `mood_board_candidates` |
 | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` | Generates one visual-direction moodboard concept per variant | `mood_board_candidates` |
 | `converge_decider` | Scores moodboard candidates and selects a winner | `creative_refinement` |
 | `logo_specifier` | Defines the logo suite with usage rules | `logo_suite` |

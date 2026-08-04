@@ -1,7 +1,7 @@
 """Models for the Design by Contract Comments agent."""
 
 from enum import Enum
-from typing import Dict, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -36,12 +36,45 @@ class DbcCommentsInput(BaseModel):
     architecture: Optional[SystemArchitecture] = None
 
 
+class DbcCommentInsertion(BaseModel):
+    """A single anchored Design by Contract comment to add to (or replace on) a symbol.
+
+    Replaces the previous whole-file-rewrite contract: instead of asking the
+    model to re-emit an entire file, each insertion names exactly one
+    file/symbol and carries only the comment/docstring block text to attach
+    there -- the surrounding code is never re-emitted. Applying an insertion
+    to the original source (the anchoring/merge logic) is out of scope here;
+    this model is the raw shape the LLM is asked to produce.
+    """
+
+    file: str = Field(description="Path of the file this insertion applies to")
+    symbol: str = Field(
+        description="Name of the function/method/class this comment attaches to, or a short "
+        "anchor description (e.g. 'module docstring') for non-symbol anchors",
+    )
+    line: Optional[int] = Field(
+        default=None,
+        description="1-based line number of the symbol's definition in the original file, "
+        "when known; None when the model cannot determine it",
+    )
+    comment: str = Field(
+        description="The complete DbC-compliant comment/docstring block text to insert -- "
+        "only the comment, never surrounding code",
+    )
+    action: Literal["add", "update"] = Field(
+        default="add",
+        description="'add' when the symbol has no existing comment, 'update' when this "
+        "replaces an existing comment that was missing DbC sections",
+    )
+
+
 class DbcCommentsOutput(BaseModel):
     """Output from the DbC Comments agent."""
 
-    files: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Dict of file_path -> updated file content with DbC comments added",
+    insertions: List[DbcCommentInsertion] = Field(
+        default_factory=list,
+        description="Anchored DbC comment insertions to apply to the reviewed files. "
+        "Empty when already_compliant is True.",
     )
     comments_added: int = Field(
         default=0,

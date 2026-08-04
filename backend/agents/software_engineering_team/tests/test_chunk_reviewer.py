@@ -130,6 +130,61 @@ def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
     assert "spec_compliance_notes" in result
 
 
+class _KwargRecorderClient(DummyLLMClient):
+    """Delegates to Dummy but records the prompt and every kwarg passed to
+    ``complete_json`` (notably ``system_prompt`` and ``think``), so a test can
+    assert on what ``complete_validated`` forwarded."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list = []
+        self.kwargs: list = []
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        self.prompts.append(prompt)
+        self.kwargs.append(kwargs)
+        return super().complete_json(prompt, **kwargs)
+
+
+def test_review_chunk_legacy_wrapper_forwards_profile_language_and_context_fields() -> None:
+    """``review_chunk`` must forward ``profile``, ``language``, ``segment_note``,
+    ``user_decisions``, ``sibling_surface``, and ``think`` into the underlying
+    ``ChunkReviewInput``/``_run_chunk_review`` call, not silently drop them to
+    defaults -- this was the gap the legacy wrapper had before it grew these
+    keyword-only parameters."""
+    from code_review_agent.profiles import ReviewProfile
+
+    client = _KwargRecorderClient()
+    review_chunk(
+        llm=client,
+        code_chunk="### app/main.py ###\ndef foo(): pass",
+        file_paths_label="app/main.py",
+        task_description="Add endpoint",
+        task_requirements="",
+        acceptance_criteria=[],
+        spec_excerpt="",
+        architecture_overview="",
+        existing_codebase_excerpt=None,
+        profile=ReviewProfile.SENIOR_ARCHITECTURE,
+        language="python",
+        segment_note="Shown from line 1 to 50 of 200.",
+        user_decisions=["Which auth? → OAuth2 (Google)"],
+        sibling_surface="app/other.py: helper_fn, HelperClass",
+        think=True,
+    )
+    assert len(client.prompts) == 1
+    prompt = client.prompts[0]
+    assert "Shown from line 1 to 50 of 200." in prompt
+    assert "Which auth? → OAuth2 (Google)" in prompt
+    assert "app/other.py: helper_fn, HelperClass" in prompt
+    assert "**Language:** python" in prompt
+
+    system_prompt = client.kwargs[0]["system_prompt"]
+    assert "Senior Software Architect" in system_prompt  # SENIOR_ARCHITECTURE role_line
+
+    assert client.kwargs[0]["think"] is True
+
+
 def test_chunk_review_agent_run_returns_chunk_review_output() -> None:
     """``ChunkReviewAgent.run`` returns a ``ChunkReviewOutput`` — approved with no
     issues — when backed by the default ``DummyLLMClient``."""

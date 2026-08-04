@@ -32,7 +32,7 @@ import logging
 import os
 import threading
 import time
-from typing import Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 
 from .models import AgentManifest
 
@@ -112,6 +112,21 @@ _schema_ensured = False
 _schema_ensure_lock = threading.Lock()
 
 
+def _apply_schema_statements(cur) -> None:
+    """Run this store's idempotent DDL on an open cursor.
+
+    Preconditions: ``cur`` is a live cursor on a writable connection.
+    Postconditions: every ``SCHEMA.statements`` entry has been executed
+        (``CREATE … IF NOT EXISTS`` / equivalent). Does not flip
+        :data:`_schema_ensured` — callers that may still roll back their
+        transaction must leave the guard unset so a later attempt can retry.
+    """
+    from . import postgres as _pg_schema
+
+    for statement in _pg_schema.SCHEMA.statements:
+        cur.execute(statement)
+
+
 def _ensure_schema() -> None:
     """Idempotently create this store's table before a write, once per process.
 
@@ -132,6 +147,12 @@ def _ensure_schema() -> None:
           subsequent writes skip the DDL. A failure leaves the guard unset (the
           next write retries) and propagates, so the caller still degrades to
           local exactly as before.
+
+    Do **not** call this while holding another pooled connection (e.g. the
+    chat-save roster ``conn``): ``register_team_schemas`` opens its own
+    ``get_conn()`` and will deadlock under ``POSTGRES_POOL_MAX_SIZE=1``. Shared-
+    connection writers use :func:`_apply_schema_statements` on that ``conn``
+    instead.
     """
     global _schema_ensured
     if _schema_ensured:
@@ -167,7 +188,7 @@ def upsert(manifest: AgentManifest) -> None:
     """Insert or replace a dynamic manifest by id.
 
     Preconditions:
-        * ``manifest.id`` is non-empty.
+        * ``manifest.id`` is a non-empty string (enforced; raises ``ValueError``).
     Postconditions:
         * ``get(manifest.id)`` returns an equal manifest from any worker. A single
           transient failure is retried once (see :func:`_with_retry`) before
@@ -176,6 +197,9 @@ def upsert(manifest: AgentManifest) -> None:
     """
     from shared.postgres import Json, get_conn
     from shared.postgres.metrics import timed_query
+
+    if not manifest.id:
+        raise ValueError("upsert: manifest.id must be non-empty")
 
     @timed_query(store=_STORE, op="upsert")
     def _do() -> None:
@@ -213,6 +237,92 @@ def delete(agent_id: str) -> None:
             cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
 
     _ensure_schema()
+    _with_retry(_do)
+    clear_cache()
+
+
+def replace_manifests(
+    upserts: list[AgentManifest],
+    delete_ids: list[str],
+    *,
+    conn: Any | None = None,
+) -> None:
+    """Atomically upsert ``upserts`` and delete ``delete_ids``.
+
+    Used by generated-roster replacement so a mid-replace failure cannot leave
+    the shared store with some new rows installed and some stale rows already
+    deleted while the caller's roster DB transaction rolls back.
+
+    When ``conn`` is provided (chat-save path), statements run on that connection
+    and join the caller's open transaction — no nested ``get_conn()`` commit.
+    When ``conn`` is ``None``, opens a dedicated transaction (retried once on
+    transient failure; see :func:`_with_retry`).
+
+    Preconditions:
+        * Every ``manifest.id`` in ``upserts`` is a non-empty string.
+        * ``upserts`` ids and ``delete_ids`` are disjoint.
+    Postconditions:
+        * On success (standalone ``conn is None``): every upserted id is readable
+          via :func:`get` on any worker and every ``delete_ids`` entry is gone;
+          the dedicated transaction has committed.
+        * On success (shared ``conn``): statements are pending on ``conn`` until
+          the caller commits; other connections do not see them yet.
+        * On any statement failure the active transaction rolls back (standalone)
+          or is marked failed for the caller (shared); the exception propagates.
+          Clears the ``all()`` micro-cache on success. Standalone path retries
+          once on transient failure; shared-``conn`` path does not retry (a
+          mid-batch failure would leave the caller's txn aborted). Shared-``conn``
+          path never opens a nested pool connection for DDL (applies
+          ``IF NOT EXISTS`` statements on ``conn`` when the process guard is
+          unset) so ``POSTGRES_POOL_MAX_SIZE=1`` cannot deadlock.
+    """
+    from shared.postgres import Json, get_conn
+    from shared.postgres.metrics import timed_query
+
+    upsert_ids = []
+    for m in upserts:
+        if not m.id:
+            raise ValueError("replace_manifests: every upsert must have a non-empty id")
+        upsert_ids.append(m.id)
+    overlap = set(upsert_ids) & set(delete_ids)
+    if overlap:
+        raise ValueError(
+            f"replace_manifests: upserts and delete_ids must be disjoint; overlap={sorted(overlap)!r}"
+        )
+
+    def _execute(cur) -> None:
+        for manifest in upserts:
+            payload = manifest.model_dump(mode="json")
+            cur.execute(
+                f"INSERT INTO {_TABLE} (id, team, tags, manifest, updated_at) "
+                "VALUES (%s, %s, %s, %s, NOW()) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "team = EXCLUDED.team, tags = EXCLUDED.tags, "
+                "manifest = EXCLUDED.manifest, updated_at = NOW()",
+                (manifest.id, manifest.team, Json(list(manifest.tags)), Json(payload)),
+            )
+        for agent_id in delete_ids:
+            cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
+
+    if conn is not None:
+        # Hold no second pool checkout while the caller already owns ``conn``
+        # (deadlock under pool max size 1). Apply DDL on ``conn`` when needed
+        # without flipping ``_schema_ensured`` — the outer txn may still roll back.
+        if not _schema_ensured:
+            with conn.cursor() as cur:
+                _apply_schema_statements(cur)
+        with conn.cursor() as cur:
+            _execute(cur)
+        clear_cache()
+        return
+
+    _ensure_schema()
+
+    @timed_query(store=_STORE, op="replace_manifests")
+    def _do() -> None:
+        with get_conn() as owned, owned.cursor() as cur:
+            _execute(cur)
+
     _with_retry(_do)
     clear_cache()
 

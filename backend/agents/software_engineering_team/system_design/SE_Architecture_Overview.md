@@ -192,34 +192,14 @@ flowchart LR
 | Frontend | Angular 19, Angular Material, Vitest |
 | Container | Docker, docker-compose |
 
-## 5. Two Execution Paths
+## 5. Execution Path
 
-The orchestrator supports two execution paths. The **Coding Team** path is the current default (`use_coding_team = True`).
+The orchestrator unconditionally hands off to the Coding Team after planning.
 
 ```mermaid
 flowchart TD
     START["run_orchestrator()"] --> PRA["Product Requirements\nAnalysis"]
     PRA --> Planning["Planning\nhandoff workflow"]
-    Planning --> DECISION{use_coding_team?}
-
-    DECISION -->|"True (default)"| CT["Coding Team\nSwarm Orchestrator"]
+    Planning --> CT["Coding Team\nSwarm Orchestrator"]
     CT --> DONE["COMPLETED"]
-
-    DECISION -->|"False (legacy)"| TL["Tech Lead\nTask Assignment"]
-    TL --> AE["Architecture Expert"]
-    AE --> CONSOL["Planning\nConsolidation"]
-    CONSOL --> PREFIX["Prefix Queue\ngit_setup, devops"]
-    PREFIX --> PARALLEL["Parallel Workers"]
-
-    subgraph PARALLEL["Parallel Execution"]
-        BW["Backend-V2 Worker\n(daemon thread)"]
-        FW["Frontend-V2 Worker\n(daemon thread)"]
-    end
-
-    PARALLEL --> JOIN["Thread Join"]
-    JOIN --> INTEG["Integration Agent"]
-    INTEG --> SECR["Security Review"]
-    SECR --> DOCS["Documentation"]
-    DOCS --> DEVOPS["DevOps\nContainerization"]
-    DEVOPS --> DONE2["COMPLETED"]
 ```

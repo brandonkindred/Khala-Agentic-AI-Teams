@@ -27,6 +27,7 @@ at module scope.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, List
 
 import pytest
@@ -841,6 +842,16 @@ def test_advisor_session_lifecycle(api_client) -> None:
     # Complete it without filling required fields → 400.
     done = api_client.post(f"/advisor/sessions/{sid}/complete")
     assert done.status_code == 400
+
+
+def test_start_advisor_session_id_has_full_uuid4_entropy(api_client) -> None:
+    """Session ids must carry the full 128-bit UUID4, not a truncated prefix."""
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+    assert sid.startswith("adv-")
+    suffix = sid[len("adv-") :]
+    assert len(suffix) == 32
+    uuid.UUID(hex=suffix)
 
 
 def test_advisor_session_404_for_missing_ids(api_client) -> None:

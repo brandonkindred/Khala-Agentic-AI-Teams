@@ -73,8 +73,74 @@ def test_build_phase3_graph_is_a_graph() -> None:
     assert isinstance(build_phase3_graph(), Graph)
 
 
+def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
+    """Phase 3 diverge is a Graph fan-out into CreativeDirector (not a Swarm).
+
+    ``structured_output=`` stops the agent loop, so handoff-based Swarm
+    sequencing cannot drive the moodboard conceptualists.
+    """
+    from branding_team.graphs.phase3_visual import (
+        _PHASE3_CONCEPTUALIST_VARIANTS,
+        _PHASE3_SPECIALIST_FACTORIES,
+    )
+
+    graph = build_phase3_graph()
+    edges = {(e.from_node.node_id, e.to_node.node_id) for e in graph.edges}
+    node_ids = set(graph.nodes.keys())
+
+    assert "diverge_swarm" not in node_ids
+
+    conceptualists = {
+        f"MoodBoardConceptualist_{variant}" for variant in _PHASE3_CONCEPTUALIST_VARIANTS
+    }
+    assert {n.node_id for n in graph.entry_points} == conceptualists
+
+    for conceptualist in conceptualists:
+        assert (conceptualist, "CreativeDirector") in edges
+    assert ("CreativeDirector", "converge_decider") in edges
+
+    for specialist in _PHASE3_SPECIALIST_FACTORIES:
+        assert ("converge_decider", specialist) in edges
+        assert (specialist, "visual_compositor") in edges
+
+
+def test_make_moodboard_conceptualist_rejects_blank_variant() -> None:
+    """Documented variant precondition is enforced before agent construction."""
+    from branding_team.agents import make_moodboard_conceptualist
+
+    with pytest.raises(AssertionError, match="variant must be a non-empty string"):
+        make_moodboard_conceptualist("")
+    with pytest.raises(AssertionError, match="variant must be a non-empty string"):
+        make_moodboard_conceptualist("   ")
+
+
 def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
+
+
+def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
+    """Documented channel/description preconditions are enforced before construction."""
+    from branding_team.agents import _make_channel_guide
+
+    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+        _make_channel_guide("", "some description")
+    with pytest.raises(AssertionError, match="channel must be a non-empty string"):
+        _make_channel_guide("   ", "some description")
+    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+        _make_channel_guide("website", "")
+    with pytest.raises(AssertionError, match="description must be a non-empty string"):
+        _make_channel_guide("website", "   ")
+
+
+def test_channel_guide_and_brand_experience_prompts_drop_redundant_json_reminder() -> None:
+    """The prompt's field list is the contract; ``output_mode="json"`` already forces the wire format."""
+    from branding_team.agents import _make_channel_guide, make_brand_experience_principler
+
+    channel_agent = _make_channel_guide("website", "a marketing site")
+    assert "Output valid JSON" not in channel_agent.system_prompt
+
+    principler_agent = make_brand_experience_principler()
+    assert "Output valid JSON" not in principler_agent.system_prompt
 
 
 def test_build_phase5_graph_is_a_graph() -> None:
@@ -193,9 +259,10 @@ def test_phase_order_text_driven_by_phase_order(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_serialize_mission_roundtrips_company_name() -> None:
-    text = serialize_mission(
-        make_mission(
-            company_description="A strategic studio for enterprise product teams",
-        )
+    mission = make_mission(
+        company_name="Acme Rebrand Co",
+        company_description="A strategic studio for enterprise product teams",
     )
-    assert "Northstar Labs" in text
+    text = serialize_mission(mission)
+    assert mission.company_name in text
+    assert mission.company_description in text

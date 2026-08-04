@@ -115,6 +115,61 @@ def test_update_brand() -> None:
     assert updated.status == BrandStatus.active
 
 
+def test_update_brand_mission_clears_latest_output_and_resets_phase() -> None:
+    """A mission edit invalidates prior output, per update_brand's documented contract."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    mission = make_mission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(client.id, mission)
+    assert brand is not None
+    output = TeamOutput(
+        status=WorkflowStatus.READY_FOR_ROLLOUT,
+        mission_summary="Done",
+        current_phase=BrandPhase.COMPLETE,
+    )
+    with_output = store.append_brand_version(client.id, brand.id, output)
+    assert with_output is not None
+    assert with_output.latest_output is not None
+    assert with_output.current_phase == BrandPhase.COMPLETE
+
+    new_mission = mission.model_copy(update={"company_description": "Updated description"})
+    updated = store.update_brand(client.id, brand.id, mission=new_mission)
+
+    assert updated is not None
+    assert updated.latest_output is None
+    assert updated.current_phase == BrandPhase.STRATEGIC_CORE
+
+
+def test_update_brand_without_mission_preserves_latest_output() -> None:
+    """Patching unrelated fields must not trigger the mission-edit invalidation."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    mission = make_mission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(client.id, mission)
+    assert brand is not None
+    output = TeamOutput(
+        status=WorkflowStatus.READY_FOR_ROLLOUT,
+        mission_summary="Done",
+        current_phase=BrandPhase.COMPLETE,
+    )
+    store.append_brand_version(client.id, brand.id, output)
+
+    updated = store.update_brand(client.id, brand.id, status=BrandStatus.active)
+
+    assert updated is not None
+    assert updated.status == BrandStatus.active
+    assert updated.latest_output is not None
+    assert updated.current_phase == BrandPhase.COMPLETE
+
+
 def test_append_brand_version() -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
@@ -418,7 +473,9 @@ def test_attach_conversation_already_attached() -> None:
 
 def test_attach_conversation_reattaching_same_brand_is_ok() -> None:
     """Re-attaching a conversation to the brand it's already on is allowed
-    (not a conflict) and refreshes the mission."""
+    (not a conflict). The conversation's own mission is updated to the new
+    value, but the brand's ``mission`` field is left unchanged — only
+    ``patch_brand`` refreshes a brand's mission."""
     store = BrandingStore()
     conv_store = BrandingConversationStore()
     client = store.create_client("Acme")
@@ -432,6 +489,7 @@ def test_attach_conversation_reattaching_same_brand_is_ok() -> None:
     assert result is AttachConversationResult.OK
     assert updated_brand is not None
     assert updated_brand.conversation_id == cid
+    assert updated_brand.mission.company_name == "Acme Inc"
 
 
 def test_attach_conversation_unknown_brand() -> None:
@@ -450,3 +508,68 @@ def test_attach_conversation_unknown_brand() -> None:
     assert result is AttachConversationResult.BRAND_NOT_FOUND
     assert updated_brand is None
     assert conv_store.get_conversation_brand_id(cid) is None
+
+
+# ---------------------------------------------------------------------------
+# Documented preconditions are enforced, not just documented
+# ---------------------------------------------------------------------------
+
+
+def test_get_client_rejects_empty_client_id() -> None:
+    store = BrandingStore()
+    with pytest.raises(ValueError, match="client_id"):
+        store.get_client("")
+
+
+def test_create_client_rejects_empty_name() -> None:
+    store = BrandingStore()
+    with pytest.raises(ValueError, match="name"):
+        store.create_client("")
+
+
+def test_get_brand_rejects_empty_ids() -> None:
+    store = BrandingStore()
+    with pytest.raises(ValueError, match="client_id"):
+        store.get_brand("", "brand_x")
+    with pytest.raises(ValueError, match="brand_id"):
+        store.get_brand("client_x", "")
+
+
+def test_create_brand_rejects_empty_client_id_and_bad_mission_type() -> None:
+    store = BrandingStore()
+    mission = make_mission(company_name="Acme Inc")
+    with pytest.raises(ValueError, match="client_id"):
+        store.create_brand("", mission)
+    with pytest.raises(ValueError, match="mission"):
+        store.create_brand("client_x", {"company_name": "Acme"})
+
+
+def test_update_brand_rejects_empty_ids_and_bad_types() -> None:
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, make_mission(company_name="Acme Inc"))
+    assert brand is not None
+    with pytest.raises(ValueError, match="client_id"):
+        store.update_brand("", brand.id)
+    with pytest.raises(ValueError, match="brand_id"):
+        store.update_brand(client.id, "")
+    with pytest.raises(ValueError, match="mission"):
+        store.update_brand(client.id, brand.id, mission={"company_name": "Acme"})
+    with pytest.raises(ValueError, match="status"):
+        store.update_brand(client.id, brand.id, status="draft")
+
+
+def test_attach_conversation_rejects_empty_ids_and_bad_mission_type() -> None:
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, make_mission(company_name="Acme Inc"))
+    assert brand is not None
+    mission = make_mission(company_name="Acme Inc")
+    with pytest.raises(ValueError, match="client_id"):
+        store.attach_conversation("", brand.id, "conv_x", mission)
+    with pytest.raises(ValueError, match="brand_id"):
+        store.attach_conversation(client.id, "", "conv_x", mission)
+    with pytest.raises(ValueError, match="conversation_id"):
+        store.attach_conversation(client.id, brand.id, "", mission)
+    with pytest.raises(ValueError, match="mission"):
+        store.attach_conversation(client.id, brand.id, "conv_x", {"company_name": "Acme"})

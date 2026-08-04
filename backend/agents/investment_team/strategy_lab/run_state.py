@@ -78,16 +78,40 @@ def get_lab_run_job_client():
     return JobServiceClient(team="investment_strategy_lab_runs")
 
 
+def normalize_persisted_job(
+    job: Dict[str, Any], *, fallback_status: str, run_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Normalize a job-service record into an ``active_runs``-shaped state dict.
+
+    Centralizes the ``run_id``/``status`` fallback logic repeated across every
+    call site that merges a persisted job-service record into the in-memory
+    run-state shape, so a future change to that shape only needs updating here.
+
+    Preconditions:
+        ``job`` is a job-service record; when its fields are nested under a
+        ``"data"`` key that dict holds the run-state fields, otherwise ``job``
+        itself is treated as the state dict.
+
+    Postconditions:
+        Returns ``job.get("data", job)`` — the same dict object, not a copy —
+        with ``run_id`` set to ``run_id`` when given, else derived from
+        ``job.get("job_id") or job.get("run_id", "")``; and ``status``
+        defaulted (via ``setdefault``, so an existing ``status`` in the
+        returned dict wins) to ``job.get("status", fallback_status)``.
+    """
+    data = job.get("data", job)
+    data["run_id"] = run_id if run_id is not None else (job.get("job_id") or job.get("run_id", ""))
+    data.setdefault("status", job.get("status", fallback_status))
+    return data
+
+
 def load_run_from_job_service(run_id: str) -> Optional[Dict[str, Any]]:
     """Try to load a run state from the job service (fallback when not in ``active_runs``)."""
     try:
         client = get_lab_run_job_client()
         job = client.get_job(run_id)
         if job:
-            data = job.get("data", job)
-            data["run_id"] = run_id
-            data.setdefault("status", job.get("status", "completed"))
-            return data
+            return normalize_persisted_job(job, fallback_status="completed", run_id=run_id)
     except Exception:
         pass
     return None

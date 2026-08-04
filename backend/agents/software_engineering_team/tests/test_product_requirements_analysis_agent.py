@@ -29,8 +29,8 @@ from product_requirements_analysis_agent.models import (
 from product_requirements_analysis_agent.qa_history import extract_answer_from_qa_history
 from product_requirements_analysis_agent.question_data import (
     SOP_PHASE1_QUESTIONS,
-    _context_discovery_fallback_questions,
     _sop_phase1_fallback_questions,
+    context_discovery_fallback_questions,
 )
 from product_requirements_analysis_agent.question_processing import (
     filter_duplicate_questions,
@@ -2245,9 +2245,7 @@ def test_record_answers_different_topic_keeps_existing_qa(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_run_context_constraints_discovery_returns_questions_when_llm_valid(
-    tmp_path: Path,
-) -> None:
+def test_run_context_constraints_discovery_returns_questions_when_llm_valid() -> None:
     """_run_context_constraints_discovery returns non-empty List[OpenQuestion] when LLM returns valid JSON."""
     llm = MagicMock()
     llm.complete_text.return_value = """{
@@ -2269,7 +2267,7 @@ def test_run_context_constraints_discovery_returns_questions_when_llm_valid(
       ]
     }"""
     agent = ProductRequirementsAnalysisAgent(llm)
-    result = agent._run_context_constraints_discovery("# Spec", tmp_path)
+    result = agent._run_context_constraints_discovery("# Spec")
     assert len(result) >= 1
     assert result[0].id == "ctx_project_type"
     assert "organization" in result[0].question_text
@@ -2277,15 +2275,13 @@ def test_run_context_constraints_discovery_returns_questions_when_llm_valid(
     assert len(result[0].options) == 2
 
 
-def test_run_context_constraints_discovery_uses_fallback_on_llm_failure(
-    tmp_path: Path,
-) -> None:
+def test_run_context_constraints_discovery_uses_fallback_on_llm_failure() -> None:
     """_run_context_constraints_discovery uses fixed fallback when LLM raises or returns empty/invalid."""
     llm = MagicMock()
     llm.complete_text.side_effect = Exception("LLM unavailable")
     agent = ProductRequirementsAnalysisAgent(llm)
-    result = agent._run_context_constraints_discovery("# Spec", tmp_path)
-    fallback = _context_discovery_fallback_questions()
+    result = agent._run_context_constraints_discovery("# Spec")
+    fallback = context_discovery_fallback_questions()
     assert len(result) == len(fallback)
     assert all(q.source == "context_discovery" for q in result)
     ids = [q.id for q in result]
@@ -2294,17 +2290,17 @@ def test_run_context_constraints_discovery_uses_fallback_on_llm_failure(
     assert "ctx_sla" in ids
 
 
-def test_run_context_constraints_discovery_uses_fallback_on_empty_json(tmp_path: Path) -> None:
+def test_run_context_constraints_discovery_uses_fallback_on_empty_json() -> None:
     """_run_context_constraints_discovery uses fallback when LLM returns empty open_questions."""
     llm = MagicMock()
     llm.complete_text.return_value = '{"open_questions": []}'
     agent = ProductRequirementsAnalysisAgent(llm)
-    result = agent._run_context_constraints_discovery("# Spec", tmp_path)
-    fallback = _context_discovery_fallback_questions()
+    result = agent._run_context_constraints_discovery("# Spec")
+    fallback = context_discovery_fallback_questions()
     assert len(result) == len(fallback)
 
 
-def test_inject_context_answers_into_spec_prepends_section(tmp_path: Path) -> None:
+def test_inject_context_answers_into_spec_prepends_section() -> None:
     """_inject_context_answers_into_spec returns spec starting with '## Project context and constraints' and containing Q&A."""
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
@@ -2321,7 +2317,7 @@ def test_inject_context_answers_into_spec_prepends_section(tmp_path: Path) -> No
         ),
     ]
     current_spec = "# Original spec\n\nSome content."
-    result = agent._inject_context_answers_into_spec(current_spec, answered, tmp_path)
+    result = agent._inject_context_answers_into_spec(current_spec, answered)
     assert result.startswith("## Project context and constraints")
     assert "What type of organization?" in result
     assert "Startup" in result
