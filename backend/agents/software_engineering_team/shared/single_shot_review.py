@@ -17,24 +17,25 @@ result model by hand from the raw dict with no validation or retry at all.
 both JSON-handling modes so agents not yet migrated to a schema aren't forced
 to define one before they can adopt the resolution half of this helper:
 
-- ``schema=<a BaseModel subclass>``: routes through ``complete_validated`` —
-  the reply is parsed, validated against ``schema``, and self-corrected up to
-  ``correction_attempts`` times on failure. Returns a ``schema`` instance.
+- ``schema=<a BaseModel subclass>``: delegates to
+  ``llm_service.api.generate_structured`` — the reply is parsed, validated
+  against ``schema``, and self-corrected up to ``correction_attempts`` times
+  on failure. Returns a ``schema`` instance.
 - ``schema=None`` (default): routes through ``client.complete_json`` directly
-  — no schema validation or self-correction. Returns the raw JSON dict, for
-  callers that build their own result model by hand.
+  — no schema validation or self-correction, and no canonical entrypoint
+  exists for this mode. Returns the raw JSON dict, for callers that build
+  their own result model by hand.
 
 Architecture note (see ``docs/LLM_CALLING_PATTERN_DECISION.md``): this
 module is documented there as a narrow, justified exception to that
 decision's Pattern 1 (``LlmToolAgentBase``) default for *new agents* — it
 is a plain function, not an agent, and exists to give already-hand-rolled
 (Pattern 5) call sites one shared implementation of the resolve+call
-boilerplate they already duplicate, not a sixth agent-shape choice. It also
-does not delegate to ``llm_service.api.generate_structured`` (which
-overlaps with the schema-validated branch's client-resolution +
-``complete_validated`` happy path) because ``generate_structured`` has no
-injectable-client parameter and no plain-JSON mode — see the decision doc
-for the full rationale.
+boilerplate they already duplicate, not a sixth agent-shape choice. The
+schema-validated branch delegates to ``generate_structured`` (the canonical
+public entrypoint for that resolve+validate happy path) rather than
+re-implementing it; the plain-JSON branch has no canonical entrypoint to
+delegate to, so it resolves a client and calls ``complete_json`` itself.
 
 Usage::
 
@@ -57,14 +58,47 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Any, Optional, TypeVar
+from typing import Any, Optional, TypeVar, overload
 
 from pydantic import BaseModel
 
-from llm_service import LLMClient, get_client
-from llm_service.structured import complete_validated
+from llm_service import LLMClient, generate_structured, get_client
 
 T = TypeVar("T", bound=BaseModel)
+
+
+@overload
+def run_single_shot_review(
+    llm_client: Optional[LLMClient],
+    agent_key: str,
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    *,
+    schema: type[T],
+    objective: Optional[str] = None,
+    temperature: float = 0.0,
+    correction_attempts: int = 1,
+    think: bool | str | None = False,
+    context: Optional[dict[str, Any]] = None,
+    **kwargs: Any,
+) -> T: ...
+
+
+@overload
+def run_single_shot_review(
+    llm_client: Optional[LLMClient],
+    agent_key: str,
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    *,
+    schema: None = None,
+    objective: Optional[str] = None,
+    temperature: float = 0.0,
+    correction_attempts: int = 1,
+    think: bool | str | None = False,
+    context: Optional[dict[str, Any]] = None,
+    **kwargs: Any,
+) -> dict[str, Any]: ...
 
 
 def run_single_shot_review(
@@ -77,15 +111,16 @@ def run_single_shot_review(
     objective: Optional[str] = None,
     temperature: float = 0.0,
     correction_attempts: int = 1,
-    think: "bool | str | None" = False,
+    think: bool | str | None = False,
     context: Optional[dict[str, Any]] = None,
     **kwargs: Any,
-) -> Any:
+) -> T | dict[str, Any]:
     """Resolve a client and make one single-shot review call.
 
     Preconditions:
-        ``agent_key`` and ``prompt`` are non-empty (non-whitespace) strings.
-        ``llm_client`` is a pre-resolved ``LLMClient`` or ``None``.
+        ``agent_key`` and ``prompt`` are non-empty (non-whitespace) strings —
+        violation raises ``ValueError``. ``llm_client`` is a pre-resolved
+        ``LLMClient`` or ``None``.
 
     Postconditions:
         The client used is ``llm_client`` when given, else
@@ -96,35 +131,40 @@ def run_single_shot_review(
         Independent of which branch resolved the client, ``objective``, when
         omitted, defaults to ``f"{agent_key} single-shot review"``. When
         ``schema`` is given, returns a validated instance of ``schema`` (see
-        ``llm_service.structured.complete_validated`` for the
-        self-correction-retry and error semantics on a parse/validation
-        failure). When ``schema`` is ``None``, returns the raw dict from
-        ``client.complete_json`` with no validation or retry.
-        ``correction_attempts`` and ``context`` are forwarded only in
-        schema-validated mode (``complete_json`` has no equivalent
-        parameters). ``**kwargs`` is forwarded to the underlying call in
-        either mode.
-    """
-    assert agent_key and agent_key.strip(), "agent_key must be non-empty"
-    assert prompt and prompt.strip(), "prompt must be non-empty"
+        ``llm_service.api.generate_structured`` for the self-correction-retry
+        and error semantics on a parse/validation failure). When ``schema``
+        is ``None``, returns the raw dict from ``client.complete_json`` with
+        no validation or retry. ``correction_attempts`` and ``context`` are
+        forwarded only in schema-validated mode (``complete_json`` has no
+        equivalent parameters). ``**kwargs`` is forwarded to the underlying
+        call in either mode.
 
-    client = llm_client if llm_client is not None else get_client(agent_key)
+    Raises:
+        ValueError: ``agent_key`` or ``prompt`` is empty/whitespace-only.
+    """
+    if not agent_key or not agent_key.strip():
+        raise ValueError("agent_key must be a non-empty string")
+    if not prompt or not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+
     call_objective = objective if objective is not None else f"{agent_key} single-shot review"
 
     if schema is not None:
-        return complete_validated(
-            client,
+        return generate_structured(
             prompt,
             schema=schema,
             objective=call_objective,
             system_prompt=system_prompt,
             temperature=temperature,
+            agent_key=agent_key,
             correction_attempts=correction_attempts,
-            context=context,
+            llm_client=llm_client,
             think=think,
+            context=context,
             **kwargs,
         )
 
+    client = llm_client if llm_client is not None else get_client(agent_key)
     return client.complete_json(
         prompt,
         objective=call_objective,

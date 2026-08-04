@@ -1,9 +1,9 @@
 """Tests for ``shared.single_shot_review.run_single_shot_review``.
 
 Covers client resolution (injected vs. ``get_client(agent_key)``), the
-schema-validated mode (delegates to ``complete_validated``) vs. the
+schema-validated mode (delegates to ``generate_structured``) vs. the
 plain-JSON mode (delegates to ``client.complete_json`` directly), objective
-defaulting, and the empty-``agent_key``/``prompt`` preconditions.
+defaulting, and the empty-``agent_key``/``prompt`` preconditions (``ValueError``).
 """
 
 from __future__ import annotations
@@ -80,13 +80,13 @@ def _patch_get_client(monkeypatch, client: _StubClient) -> list[str]:
 
 def test_empty_agent_key_raises():
     client = _StubClient({"approved": True, "summary": "ok"})
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="agent_key"):
         run_single_shot_review(client, "", "prompt text")
 
 
 def test_empty_prompt_raises():
     client = _StubClient({"approved": True, "summary": "ok"})
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="prompt"):
         run_single_shot_review(client, "devops", "   ")
 
 
@@ -169,14 +169,11 @@ def test_schema_mode_returns_validated_instance():
     assert result.summary == "clean"
 
 
-def test_schema_mode_does_not_call_complete_json_directly(monkeypatch):
+def test_schema_mode_delegates_to_generate_structured(monkeypatch):
     client = _StubClient({"approved": True, "summary": "clean"})
     recorded = {}
 
-    def fake_complete_validated(
-        client_arg, prompt, *, schema, objective, system_prompt=None, **kwargs
-    ):
-        recorded["client"] = client_arg
+    def fake_generate_structured(prompt, *, schema, objective, system_prompt=None, **kwargs):
         recorded["prompt"] = prompt
         recorded["schema"] = schema
         recorded["objective"] = objective
@@ -184,16 +181,17 @@ def test_schema_mode_does_not_call_complete_json_directly(monkeypatch):
         recorded["kwargs"] = kwargs
         return schema(approved=True, summary="clean")
 
-    monkeypatch.setattr(mod, "complete_validated", fake_complete_validated)
+    monkeypatch.setattr(mod, "generate_structured", fake_generate_structured)
 
     result = run_single_shot_review(client, "devops", "prompt text", "sys prompt", schema=_Result)
 
     assert client.calls == []
     assert isinstance(result, _Result)
-    assert recorded["client"] is client
     assert recorded["schema"] is _Result
     assert recorded["objective"] == "devops single-shot review"
     assert recorded["system_prompt"] == "sys prompt"
+    assert recorded["kwargs"]["agent_key"] == "devops"
+    assert recorded["kwargs"]["llm_client"] is client
     assert recorded["kwargs"]["temperature"] == 0.0
     assert recorded["kwargs"]["correction_attempts"] == 1
     assert recorded["kwargs"]["think"] is False
@@ -203,13 +201,11 @@ def test_schema_mode_forwards_correction_attempts_and_context(monkeypatch):
     client = _StubClient({"approved": True, "summary": "clean"})
     recorded = {}
 
-    def fake_complete_validated(
-        client_arg, prompt, *, schema, objective, system_prompt=None, **kwargs
-    ):
+    def fake_generate_structured(prompt, *, schema, objective, system_prompt=None, **kwargs):
         recorded.update(kwargs)
         return schema(approved=True, summary="clean")
 
-    monkeypatch.setattr(mod, "complete_validated", fake_complete_validated)
+    monkeypatch.setattr(mod, "generate_structured", fake_generate_structured)
 
     ctx = {"allowed": {"a"}}
     run_single_shot_review(
@@ -223,3 +219,21 @@ def test_schema_mode_forwards_correction_attempts_and_context(monkeypatch):
 
     assert recorded["correction_attempts"] == 3
     assert recorded["context"] is ctx
+
+
+def test_schema_mode_passes_none_client_through_when_not_injected(monkeypatch):
+    recorded = {}
+
+    def fake_generate_structured(prompt, *, schema, objective, system_prompt=None, **kwargs):
+        recorded["kwargs"] = kwargs
+        return schema(approved=True, summary="clean")
+
+    monkeypatch.setattr(mod, "generate_structured", fake_generate_structured)
+
+    result = run_single_shot_review(None, "devops", "prompt text", schema=_Result)
+
+    # No client was injected — resolution is delegated to generate_structured
+    # itself (llm_client=None, agent_key="devops"), not performed here.
+    assert recorded["kwargs"]["llm_client"] is None
+    assert recorded["kwargs"]["agent_key"] == "devops"
+    assert isinstance(result, _Result)

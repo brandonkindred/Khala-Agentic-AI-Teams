@@ -139,16 +139,17 @@ instead of N duplicated ones (tracked separately, not part of this
 helper's introduction).
 
 **Relationship to `llm_service.api.generate_structured`.** The
-schema-validated branch's happy path (resolve a client by `agent_key`,
-then `complete_validated`) overlaps with `generate_structured`
-(`llm_service/api.py`). `run_single_shot_review` does not delegate to it
-because `generate_structured` has no injectable-client parameter — it
-cannot serve `run_single_shot_review`'s dependency-injection callers — and
-has no plain-JSON mode or `think`/`context` forwarding, both of which
-`run_single_shot_review` supports for callers not yet migrated to a
-schema. Extending `generate_structured` to close that gap and then
-delegating to it is worth doing but is out of scope for this helper's
-introduction.
+schema-validated branch delegates to `generate_structured`
+(`llm_service/api.py`) rather than calling `complete_validated` itself.
+`generate_structured` was extended with an optional `llm_client` parameter
+(used as-is when given, instead of always resolving one via
+`get_client(agent_key)`) plus `think`/`context`/`**kwargs` forwarding, so
+it can now serve `run_single_shot_review`'s dependency-injection callers
+too — the canonical public entrypoint owns the resolve+validate contract
+in both places instead of two parallel implementations of it. The
+plain-JSON branch still has no canonical entrypoint to delegate to (`schema`
+is a required parameter of `generate_structured`), so it resolves a client
+and calls `complete_json` directly, as documented above.
 
 ## Out of scope
 
