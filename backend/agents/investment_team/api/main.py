@@ -132,6 +132,7 @@ from investment_team.strategy_lab.spec_dsl import (
 from investment_team.strategy_lab_context import (
     PROMPT_ASSET_CLASSES,
     normalize_allowed_asset_classes,
+    normalize_asset_class,
 )
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared.app import create_team_app
@@ -706,7 +707,19 @@ def health() -> dict:
 
 @app.post("/profiles", response_model=CreateProfileResponse)
 def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
-    """Create an Investment Policy Statement (IPS) for a user."""
+    """Create an Investment Policy Statement (IPS) for a user.
+
+    Preconditions:
+        ``request.risk_tolerance`` is one of low/medium/high/very_high and
+        ``request.default_mode`` is one of advisory/paper/live/monitor_only
+        (validated below, not by Pydantic, since both arrive as plain
+        strings on the wire).
+    Postconditions:
+        Raises 400 if either enum field is invalid. Otherwise builds and
+        persists an ``IPS`` under ``request.user_id`` — a second call for
+        the same ``user_id`` overwrites the previously stored IPS rather
+        than being rejected as a duplicate.
+    """
     try:
         risk_tol = RiskTolerance(request.risk_tolerance)
     except ValueError:
@@ -785,7 +798,13 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
 
 @app.get("/profiles/{user_id}", response_model=GetProfileResponse)
 def get_profile(user_id: str) -> GetProfileResponse:
-    """Get the Investment Policy Statement for a user."""
+    """Get the Investment Policy Statement for a user.
+
+    Postconditions:
+        Returns ``found=True`` with the stored ``ips`` when ``user_id`` has
+        a profile; otherwise returns ``found=False`` with ``ips=None``
+        (never raises 404 — missing is a normal, expected outcome here).
+    """
     with _lock:
         ips = _profiles.get(user_id)
     if not ips:
@@ -795,7 +814,16 @@ def get_profile(user_id: str) -> GetProfileResponse:
 
 @app.post("/proposals/create", response_model=CreateProposalResponse)
 def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
-    """Create a new portfolio proposal (runs as a Temporal workflow)."""
+    """Create a new portfolio proposal (runs as a Temporal workflow).
+
+    Preconditions:
+        ``request.user_id`` must already have an IPS created via
+        ``create_profile``.
+    Postconditions:
+        Raises 404 if no IPS exists for ``request.user_id``. Otherwise
+        persists a new ``PortfolioProposal`` under a freshly generated
+        ``proposal_id`` and returns it.
+    """
     with _lock:
         ips = _profiles.get(request.user_id)
 
@@ -815,7 +843,14 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
 
 @app.get("/proposals/{proposal_id}", response_model=GetProposalResponse)
 def get_proposal(proposal_id: str) -> GetProposalResponse:
-    """Get a portfolio proposal by ID."""
+    """Get a portfolio proposal by ID.
+
+    Postconditions:
+        Returns ``found=True`` with the stored ``proposal`` when
+        ``proposal_id`` exists; otherwise returns ``found=False`` with
+        ``proposal=None`` (never raises 404 — missing is a normal, expected
+        outcome here).
+    """
     with _lock:
         proposal = _proposals.get(proposal_id)
     if not proposal:
@@ -827,7 +862,17 @@ def get_proposal(proposal_id: str) -> GetProposalResponse:
 def validate_proposal(
     proposal_id: str, request: ValidateProposalRequest
 ) -> ValidateProposalResponse:
-    """Validate a portfolio proposal against the user's IPS."""
+    """Validate a portfolio proposal against the user's IPS.
+
+    Preconditions:
+        ``proposal_id`` must identify a proposal created via
+        ``create_proposal``; ``request.user_id`` must have an IPS created
+        via ``create_profile``.
+    Postconditions:
+        Raises 404 if the proposal or the user's IPS is missing. Otherwise
+        returns whether the proposal passed IPS validation and any
+        violations found; does not mutate the stored proposal.
+    """
     with _lock:
         proposal = _proposals.get(proposal_id)
         ips = _profiles.get(request.user_id)
@@ -851,7 +896,17 @@ def validate_proposal(
 
 @app.post("/strategies", response_model=CreateStrategyResponse)
 def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
-    """Create a new investment strategy specification."""
+    """Create a new investment strategy specification.
+
+    Preconditions:
+        ``request`` rejects unknown fields (``model_config extra="forbid"``)
+        so stale/legacy client payloads fail fast rather than silently
+        dropping fields.
+    Postconditions:
+        Raises 422 if the constructed ``StrategySpec`` fails its own field
+        validation (e.g. an invalid ``asset_class``). Otherwise persists the
+        strategy under a freshly generated ``strategy_id`` and returns it.
+    """
     strategy_id = f"strat-{uuid.uuid4().hex[:8]}"
 
     # ``StrategySpec`` enforces its field contracts (e.g. the asset_class
@@ -894,7 +949,16 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
 def validate_strategy(
     strategy_id: str, request: ValidateStrategyRequest
 ) -> ValidateStrategyResponse:
-    """Run validation checks on a strategy."""
+    """Run validation checks on a strategy.
+
+    Preconditions:
+        ``strategy_id`` must identify a strategy created via
+        ``create_strategy``.
+    Postconditions:
+        Raises 404 if the strategy is missing. Otherwise returns the
+        ``ValidationReport`` produced by the validation checks, whether the
+        strategy passed, and any failures found.
+    """
     with _lock:
         strategy = _strategies.get(strategy_id)
 
@@ -1026,11 +1090,21 @@ def _run_backtest_background(
 def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
     """Submit a backtest job against real historical market data.
 
-    Returns `{job_id, status}` immediately; poll
-    `GET /backtests/status/{job_id}` for the completed ``RunBacktestResponse``
-    in the ``result`` field. Strategies with generated ``strategy_code`` run
-    in a sandbox (the normal Strategy Lab path); strategies without
-    ``strategy_code`` are rejected with a 422.
+    Preconditions:
+        ``request.strategy_id`` must identify a strategy created via
+        ``create_strategy``.
+    Postconditions:
+        Raises 404 (synchronously) if the strategy is missing. Otherwise
+        creates a job and returns ``{job_id, status}`` immediately without
+        waiting for the backtest to run; poll
+        `GET /backtests/status/{job_id}` for the outcome. Strategies with
+        generated ``strategy_code`` run in a sandbox (the normal Strategy
+        Lab path); strategies without ``strategy_code`` are not rejected
+        synchronously here — the job is created and only fails
+        asynchronously once the background worker (``_run_backtest_background``)
+        reaches ``_run_real_data_backtest``, which raises 422. That failure
+        surfaces as job ``status="failed"`` with the 422 detail in
+        ``error``, not as an HTTP 422 response from this endpoint.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1070,6 +1144,14 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
 
 @app.get("/backtests/status/{job_id}", response_model=BacktestJobStatus)
 def get_backtest_job_status(job_id: str) -> BacktestJobStatus:
+    """Return the current status of a backtest job.
+
+    Preconditions:
+        ``job_id`` identifies a job previously created by ``run_backtest``.
+    Postconditions:
+        Returns the job's status/result/error snapshot; raises 404 if no job
+        with that ID exists.
+    """
     data = _bt_get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1086,6 +1168,12 @@ def get_backtest_job_status(job_id: str) -> BacktestJobStatus:
 
 @app.get("/backtests/jobs", response_model=BacktestJobListResponse)
 def list_backtest_jobs(running_only: bool = False) -> BacktestJobListResponse:
+    """List backtest jobs, optionally filtered to only pending/running ones.
+
+    Postconditions:
+        Returns every job's summary when ``running_only`` is False; only jobs
+        with status pending or running otherwise.
+    """
     statuses = [_BT_JOB_STATUS_PENDING, _BT_JOB_STATUS_RUNNING] if running_only else None
     items = [
         BacktestJobListItem(
@@ -1124,6 +1212,14 @@ def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
 
 @app.delete("/backtests/jobs/{job_id}")
 def delete_backtest_job(job_id: str) -> Dict[str, Any]:
+    """Delete a backtest job record.
+
+    Preconditions:
+        ``job_id`` identifies a job previously created by ``run_backtest``.
+    Postconditions:
+        Raises 404 if no job with that ID exists. Otherwise returns
+        ``{"job_id", "deleted": True}``.
+    """
     if _bt_get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if not _bt_delete_job(job_id):
@@ -1514,8 +1610,6 @@ class StrategyLabResultsResponse(BaseModel):
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
     """Map LLM output to canonical labels used by the simulated ledger."""
-    from investment_team.strategy_lab_context import normalize_asset_class
-
     return normalize_asset_class(raw)
 
 
@@ -2092,8 +2186,8 @@ def _dispatch_strategy_lab_run(
             abort itself.
           On any other failure (Temporal disabled/unavailable, or the start
           RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised
-          — never spawns a thread.
+          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised;
+          a delayed cleanup timer is scheduled by ``_fail_strategy_lab_run``.
     """
     try:
         _require_temporal()
@@ -2622,35 +2716,41 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     """
     jobs: List[InvestmentJobSummary] = []
 
-    # Active in-memory runs
+    # Single consistent snapshot of in-memory runs, taken under one lock hold.
+    # Deriving both the in-memory `jobs` entries and `in_memory_ids` from this
+    # same snapshot (rather than re-reading `_active_runs` under a second
+    # `with _lock:`) prevents a run added/removed between two separate reads
+    # from being omitted from or duplicated in the merged result.
     with _lock:
-        for state in _active_runs.values():
-            cycle = state.get("current_cycle")
-            phase = cycle.get("phase") if cycle else None
-            hypothesis = ""
-            if cycle and cycle.get("strategy"):
-                hypothesis = cycle["strategy"].get("hypothesis", "")[:60]
-            completed = state.get("completed_cycles", 0)
-            total = state.get("total_cycles", 1)
-            progress = _job_progress_percent(completed, total)
-            label = hypothesis or f"Strategy batch ({completed}/{total})"
-            jobs.append(
-                InvestmentJobSummary(
-                    job_id=state["run_id"],
-                    status=state["status"],
-                    label=label,
-                    progress=progress,
-                    current_phase=phase,
-                    created_at=state.get("started_at"),
-                )
+        active_states = list(_active_runs.values())
+
+    # Active in-memory runs
+    for state in active_states:
+        cycle = state.get("current_cycle")
+        phase = cycle.get("phase") if cycle else None
+        hypothesis = ""
+        if cycle and cycle.get("strategy"):
+            hypothesis = cycle["strategy"].get("hypothesis", "")[:60]
+        completed = state.get("completed_cycles", 0)
+        total = state.get("total_cycles", 1)
+        progress = _job_progress_percent(completed, total)
+        label = hypothesis or f"Strategy batch ({completed}/{total})"
+        jobs.append(
+            InvestmentJobSummary(
+                job_id=state["run_id"],
+                status=state["status"],
+                label=label,
+                progress=progress,
+                current_phase=phase,
+                created_at=state.get("started_at"),
             )
+        )
 
     # Persisted runs from job service (completed runs not in memory)
     try:
         client = _get_lab_run_job_client()
         persisted = client.list_jobs() or []
-        with _lock:
-            in_memory_ids = {s["run_id"] for s in _active_runs.values()}
+        in_memory_ids = {s["run_id"] for s in active_states}
         for job in persisted:
             jid = job.get("job_id", "")
             if jid in in_memory_ids:
@@ -2767,7 +2867,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
         request = RunStrategyLabRequest(**payload)
         total_cycles = request.batch_size * request.batch_count
-        completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+        completed_batches = contiguous_cycles // request.batch_size
 
         # Re-initialize in-memory state
         resumed_state = _build_run_state(
@@ -3002,13 +3102,21 @@ def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
     Deletes from the job service before touching in-memory state, so a
     failed or exceptional job-service delete leaves ``_active_runs``
     untouched instead of dropping the entry while the persisted record
-    still exists.
+    still exists. Holds this run_id's transition lock for the whole
+    delete-then-pop sequence so a concurrent run/resume/restart for the
+    SAME run_id can't write a fresh "running" state (and dispatch a
+    workflow) around a delete that's removing the record out from under
+    it — the two would otherwise race to leave an orphaned in-memory
+    "running" entry with no persisted record, or a workflow dispatched for
+    a run_id whose record is already gone.
 
     Preconditions:
         - None on run status — any run can be deleted regardless of its
           current status.
         - The job service must have a record for ``run_id`` for the delete
           to succeed.
+        - No other run/resume/restart/delete transition for this run_id is
+          currently in flight.
 
     Postconditions:
         - The job-service record for ``run_id`` is deleted before
@@ -3020,16 +3128,22 @@ def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
     Raises:
         - ``HTTPException`` 404: ``client.delete_job(run_id)`` returns a
           falsy result (no such run in the job service).
+        - ``HTTPException`` 409: another transition for this run_id is
+          already in flight.
         - An exception raised by ``client.delete_job`` itself is not caught
           and propagates uncaught (surfaces as a 500) — ``_active_runs`` is
           left untouched in that case.
     """
-    client = _get_lab_run_job_client()
-    deleted = client.delete_job(run_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    with _lock:
-        _active_runs.pop(run_id, None)
+    run_lock = _require_run_transition_lock(run_id)
+    try:
+        client = _get_lab_run_job_client()
+        deleted = client.delete_job(run_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        with _lock:
+            _active_runs.pop(run_id, None)
+    finally:
+        run_lock.release()
     return {"job_id": run_id, "deleted": True}
 
 
