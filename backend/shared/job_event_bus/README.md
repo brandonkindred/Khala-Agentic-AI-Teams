@@ -62,6 +62,35 @@ _reaper = ReaperHandle(
 A team with short, explicitly cleaned-up streams can simply never start a reaper
 and get unbounded-until-`cleanup_job` behaviour.
 
+### Asyncio alternative: `schedule_periodic_reap`
+
+`ReaperHandle` drives `reap_once` from a background OS thread — the right fit
+for a team with its own thread budget. A team hosted in-process on a single
+asyncio event loop (e.g. mounted directly into a FastAPI app rather than run
+as its own service) instead wants the reaper as a plain `asyncio.Task` on that
+same loop, with shutdown as ordinary task cancellation:
+
+```python
+from shared.job_event_bus import BusState, schedule_periodic_reap, stop_periodic_reap
+
+_state = BusState()
+_reap_task = schedule_periodic_reap(
+    _state,
+    ttl_seconds=lambda: _SUB_TTL_SECONDS,
+    max_jobs=lambda: _MAX_JOBS_TRACKED,
+    interval_seconds=_REAPER_INTERVAL_SECONDS,
+    label="<team> event-bus",
+)
+# ... at app shutdown:
+await stop_periodic_reap(_reap_task)
+```
+
+Call `schedule_periodic_reap` once at startup (from inside a running event
+loop) and keep the returned task referenced — an unreferenced `asyncio.Task`
+can be garbage-collected mid-sleep and silently stop reaping. Call
+`stop_periodic_reap` once at shutdown; it cancels the task and awaits it so
+none is left dangling past process lifetime.
+
 **Liveness contract:** when reaping is enabled, consumers MUST call
 `Subscription.touch()` at least once per `ttl_seconds` while their stream is
 alive — publish-side activity alone is not a reliable proxy for a
