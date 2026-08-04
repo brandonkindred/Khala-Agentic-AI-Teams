@@ -1052,6 +1052,59 @@ def test_list_strategy_lab_jobs_reconciles_progress_while_non_terminal(
     assert api_main._active_runs[run_id]["completed_cycles"] == 3
 
 
+def test_list_strategy_lab_jobs_tolerates_malformed_current_cycle(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A non-dict ``current_cycle``/``strategy`` reconciled from job-service
+    data doesn't 500 the whole endpoint.
+
+    Regression test for issue #4261: ``current_cycle`` is never populated by
+    any first-party writer, but it does pass through an unvalidated
+    boundary -- ``_reconcile_run_progress`` copies it verbatim from the raw
+    job-service record's ``data`` into a live ``_active_runs`` entry with no
+    shape check. Simulate that by seeding a persisted record whose
+    ``current_cycle`` is a plain string (a stand-in for corrupted/foreign
+    data), and confirm the endpoint degrades to a fallback label/phase
+    instead of raising ``AttributeError``.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "malformed-run"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+        "current_cycle": None,
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": run_id,
+                "status": "running",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 4,
+                    "completed_cycles": 1,
+                    "current_cycle": "not-a-dict",
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == run_id]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["current_phase"] is None
+    assert entry["label"] == "Strategy batch (1/4)"
+
+
 def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
