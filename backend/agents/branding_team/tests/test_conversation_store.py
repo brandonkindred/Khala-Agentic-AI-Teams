@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from branding_team.assistant.store import BrandingConversationStore
@@ -200,8 +201,43 @@ def test_update_mission_and_set_brand() -> None:
     assert store.set_brand("missing", brand_id) is False
     assert store.get_conversation_brand_id(cid) == brand_id
 
+    # None still clears the association; only empty string is rejected.
     assert store.set_brand(cid, None) is True
     assert store.get_conversation_brand_id(cid) is None
+
+
+def test_update_mission_rejects_empty_conversation_id() -> None:
+    """update_mission raises ValueError for an empty conversation_id."""
+    store = BrandingConversationStore()
+    with pytest.raises(ValueError, match="conversation_id must be a non-empty string"):
+        store.update_mission("", _acme_mission())
+
+
+def test_update_output_rejects_empty_conversation_id() -> None:
+    """update_output raises ValueError for an empty conversation_id, but still
+    accepts output=None (the documented "clear the output" call) otherwise."""
+    store = BrandingConversationStore()
+    with pytest.raises(ValueError, match="conversation_id must be a non-empty string"):
+        store.update_output("", None)
+
+    cid = store.create(mission=_acme_mission())
+    assert store.update_output(cid, _output("done")) is True
+    assert store.update_output(cid, None) is True
+    state = store.get_state(cid)
+    assert state is not None
+    assert state.latest_output is None
+
+
+def test_set_brand_rejects_empty_conversation_id_and_empty_brand_id() -> None:
+    """set_brand raises ValueError for an empty conversation_id or an empty-string
+    brand_id, while brand_id=None (detach) stays a valid, non-raising call."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_acme_mission())
+
+    with pytest.raises(ValueError, match="conversation_id must be a non-empty string"):
+        store.set_brand("", _brand_id("empty-cid"))
+    with pytest.raises(ValueError, match="brand_id must be None or a non-empty string"):
+        store.set_brand(cid, "")
 
 
 def test_attach_and_update_mission() -> None:
@@ -225,6 +261,47 @@ def test_attach_and_update_mission() -> None:
     assert store.attach_and_update_mission("missing", brand_id, updated) is False
 
 
+def test_attach_and_update_mission_rejects_empty_conversation_id_and_empty_brand_id() -> None:
+    """attach_and_update_mission raises ValueError for an empty conversation_id or
+    an empty-string brand_id, while brand_id=None remains valid."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_acme_mission())
+    mission = _acme_mission()
+
+    with pytest.raises(ValueError, match="conversation_id must be a non-empty string"):
+        store.attach_and_update_mission("", _brand_id("empty-cid"), mission)
+    with pytest.raises(ValueError, match="brand_id must be None or a non-empty string"):
+        store.attach_and_update_mission(cid, "", mission)
+
+    # None is still accepted (attaches no brand, just updates the mission).
+    assert store.attach_and_update_mission(cid, None, mission) is True
+
+
+def test_get_conversation_brand_id_rejects_empty_conversation_id() -> None:
+    """get_conversation_brand_id raises ValueError for an empty conversation_id."""
+    store = BrandingConversationStore()
+    with pytest.raises(ValueError, match="conversation_id must be a non-empty string"):
+        store.get_conversation_brand_id("")
+
+
+def test_brand_id_uniqueness_enforced_at_schema_level() -> None:
+    """Attaching a second conversation to a brand_id already in use raises a
+    Postgres UniqueViolation — the DB-level invariant get_by_brand_id's
+    docstring documents (``idx_branding_conv_brand_unique``), which is what
+    keeps get_by_brand_id's "single conversation per brand" contract true."""
+    store = BrandingConversationStore()
+    brand_id = _brand_id("dup")
+    store.create(brand_id=brand_id, mission=_acme_mission())
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        store.create(brand_id=brand_id, mission=_acme_mission())
+
+    # set_brand hitting the same constraint on UPDATE, not just INSERT.
+    other = store.create(mission=_acme_mission())
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        store.set_brand(other, brand_id)
+
+
 def test_list_conversations_with_and_without_brand_filter() -> None:
     """list_conversations returns summaries, optionally filtered by brand_id."""
     store = BrandingConversationStore()
@@ -243,3 +320,11 @@ def test_list_conversations_with_and_without_brand_filter() -> None:
     assert by_a[0].brand_id == brand_a
     assert by_a[0].message_count == 1
     assert store.list_conversations(brand_id=_brand_id("absent")) == []
+
+
+def test_list_conversations_rejects_empty_string_brand_id() -> None:
+    """list_conversations raises ValueError for brand_id="" instead of silently
+    treating it as "no filter" (brand_id=None is the only way to mean that)."""
+    store = BrandingConversationStore()
+    with pytest.raises(ValueError, match="brand_id must be None or a non-empty string"):
+        store.list_conversations(brand_id="")

@@ -1,9 +1,10 @@
 """Tests for the branding team orchestrator.
 
 Since all agents are now LLM-backed strands.Agent instances running inside
-Strands SDK Graph/Swarm orchestration, we mock ``graph.invoke_async`` to
-return a canned result and verify the orchestrator correctly assembles
-``TeamOutput`` from it.
+Strands SDK Graph/Swarm orchestration, we patch
+``branding_team.orchestrator.build_branding_graph`` so the returned graph's
+``invoke_async`` yields a canned result, and verify the orchestrator
+correctly assembles ``TeamOutput`` from it.
 """
 
 import asyncio
@@ -297,6 +298,7 @@ def test_requires_human_approval() -> None:
 
     assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION
     assert result.human_feedback == "Need legal review."
+    assert "Governance" in result.mission_summary
     assert result.degraded_phases == []
     assert result.strategic_core is not None
     assert result.narrative_messaging is not None
@@ -560,6 +562,94 @@ def test_approved_partial_run_is_not_rollout_ready() -> None:
             f"Phase {phase.value} with approved=True should not be READY_FOR_ROLLOUT"
         )
         assert result.current_phase != BrandPhase.COMPLETE
+
+
+def test_unapproved_partial_run_labels_current_phase_not_target() -> None:
+    """The unapproved-run summary must name the phase actually reached
+    (current_phase), never a separately-derived target-phase index — the two
+    are coupled today only by an invariant in the extraction gating, and
+    that coupling must not silently break in the future (see #3438)."""
+    phase_sets = {
+        BrandPhase.STRATEGIC_CORE: (["phase1_strategic_core"], "Strategic Core"),
+        BrandPhase.NARRATIVE_MESSAGING: (
+            ["phase1_strategic_core", "phase2_narrative"],
+            "Narrative Messaging",
+        ),
+        BrandPhase.VISUAL_IDENTITY: (
+            ["phase1_strategic_core", "phase2_narrative", "phase3_visual"],
+            "Visual Identity",
+        ),
+        BrandPhase.CHANNEL_ACTIVATION: (
+            ["phase1_strategic_core", "phase2_narrative", "phase3_visual", "phase4_channel"],
+            "Channel Activation",
+        ),
+    }
+    for phase, (phases, expected_label) in phase_sets.items():
+        with _patch_graph_invoke(phases):
+            orchestrator = BrandingTeamOrchestrator()
+            result = orchestrator.run_phase(
+                mission=make_mission(
+                    company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                    values=["clarity", "trust", "momentum"],
+                ),
+                phase=phase,
+                human_review=HumanReview(approved=False),
+            )
+        assert expected_label in result.mission_summary, (
+            f"Phase {phase.value}: expected {expected_label!r} in {result.mission_summary!r}"
+        )
+
+
+def test_default_human_feedback_message_survives_when_feedback_omitted() -> None:
+    """Locks in the current (deliberately unchanged) fallback behavior for
+    #3435: HumanReview.feedback is typed str = "", so omitted feedback must
+    still produce the status-appropriate default message."""
+    with _patch_graph_invoke(ALL_PHASES):
+        orchestrator = BrandingTeamOrchestrator()
+        approved_result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+    assert approved_result.human_feedback == "Approved for rollout."
+
+    with _patch_graph_invoke(ALL_PHASES):
+        orchestrator = BrandingTeamOrchestrator()
+        unapproved_result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=False),
+        )
+    assert unapproved_result.human_feedback == "Awaiting approval from brand leadership."
+
+
+def test_build_status_summary_uses_current_phase_for_unapproved_label() -> None:
+    """Direct unit test of the (now 2-arg) static method — also mechanically
+    locks the signature change: calling with the old 3-required-arg form
+    would raise TypeError."""
+    status, summary = BrandingTeamOrchestrator._build_status_summary(
+        HumanReview(approved=False), BrandPhase.VISUAL_IDENTITY
+    )
+    assert status == WorkflowStatus.NEEDS_HUMAN_DECISION
+    assert "Visual Identity" in summary
+
+
+def test_determine_current_phase_treats_degraded_default_as_reached() -> None:
+    """A default-constructed (degraded) phase output is still non-None, so it
+    still counts as "reached" for phase-advancement purposes — the invariant
+    #3157's docstring now documents explicitly."""
+    phase = BrandingTeamOrchestrator._determine_current_phase(
+        narrative=NarrativeMessagingOutput(),
+        visual_identity=None,
+        channel_activation=None,
+        governance=None,
+        approved=False,
+    )
+    assert phase == BrandPhase.NARRATIVE_MESSAGING
 
 
 def test_phase_gates_are_populated() -> None:

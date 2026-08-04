@@ -290,7 +290,11 @@ class BrandingConversationStore(PostgresHelperMixin):
         Postconditions:
             Returns True iff a matching conversation row was updated; False
             when no such conversation exists.
+        Raises:
+            ValueError: if ``conversation_id`` is empty.
         """
+        if not conversation_id:
+            raise ValueError("conversation_id must be a non-empty string")
         ts = datetime.now(tz=timezone.utc)
         return (
             self._execute(
@@ -314,7 +318,11 @@ class BrandingConversationStore(PostgresHelperMixin):
             Returns True iff a matching conversation row was updated; False
             when no such conversation exists. ``updated_at`` is bumped on
             success.
+        Raises:
+            ValueError: if ``conversation_id`` is empty.
         """
+        if not conversation_id:
+            raise ValueError("conversation_id must be a non-empty string")
         output_dict = output.model_dump(mode="json") if output else None
         ts = datetime.now(tz=timezone.utc)
         return (
@@ -338,12 +346,19 @@ class BrandingConversationStore(PostgresHelperMixin):
 
         Preconditions:
             ``conversation_id`` is a non-empty string; ``brand_id`` is None or
-            a brand id string.
+            a non-empty brand id string.
         Postconditions:
             Returns True iff a matching conversation row was updated; False
             when no such conversation exists. ``updated_at`` is bumped on
             success.
+        Raises:
+            ValueError: if ``conversation_id`` is empty, or ``brand_id`` is
+                an empty string (``None`` is allowed and clears the brand).
         """
+        if not conversation_id:
+            raise ValueError("conversation_id must be a non-empty string")
+        if brand_id is not None and not brand_id:
+            raise ValueError("brand_id must be None or a non-empty string")
         ts = datetime.now(tz=timezone.utc)
         return (
             self._execute(
@@ -367,13 +382,20 @@ class BrandingConversationStore(PostgresHelperMixin):
 
         Preconditions:
             ``conversation_id`` is a non-empty string; ``brand_id`` is None or a
-            brand id string; ``mission`` is a valid :class:`BrandingMission`.
+            non-empty brand id string; ``mission`` is a valid :class:`BrandingMission`.
         Postconditions:
             Returns True iff a matching conversation row was updated with both
             ``brand_id`` and ``mission_json``; False when no such conversation
             exists (the transaction still commits, but affects zero rows).
             ``updated_at`` is bumped once on success.
+        Raises:
+            ValueError: if ``conversation_id`` is empty, or ``brand_id`` is
+                an empty string (``None`` is allowed).
         """
+        if not conversation_id:
+            raise ValueError("conversation_id must be a non-empty string")
+        if brand_id is not None and not brand_id:
+            raise ValueError("brand_id must be None or a non-empty string")
         ts = datetime.now(tz=timezone.utc)
         with self._transaction() as cur:
             cur.execute(
@@ -422,16 +444,21 @@ class BrandingConversationStore(PostgresHelperMixin):
         """List conversations, optionally filtered by brand.
 
         Preconditions:
-            ``brand_id`` is None or a brand id string.
+            ``brand_id`` is None or a non-empty brand id string.
         Postconditions:
             Returns summaries ordered by most recently updated first (empty
             when none match). When ``brand_id`` is set, only conversations
             attached to that brand are included; ``message_count`` is the
             number of rows in ``branding_conv_messages`` for each conversation.
+        Raises:
+            ValueError: if ``brand_id`` is an empty string (``None`` is
+                allowed and means "no filter").
         """
+        if brand_id is not None and not brand_id:
+            raise ValueError("brand_id must be None or a non-empty string")
         params: list[Any] = []
         where_clause = ""
-        if brand_id:
+        if brand_id is not None:
             where_clause = "WHERE c.brand_id = %s"
             params.append(brand_id)
         rows = self._fetch_all(
@@ -466,7 +493,11 @@ class BrandingConversationStore(PostgresHelperMixin):
         Postconditions:
             Returns the associated brand id as a string, or None when the
             conversation does not exist or has no brand attached.
+        Raises:
+            ValueError: if ``conversation_id`` is empty.
         """
+        if not conversation_id:
+            raise ValueError("conversation_id must be a non-empty string")
         row = self._fetch_one(
             "SELECT brand_id FROM branding_conversations WHERE conversation_id = %s",
             (conversation_id,),

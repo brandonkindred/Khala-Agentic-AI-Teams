@@ -53,7 +53,7 @@ from deepthought.reasoning import (
     results_to_dicts,
 )
 from deepthought.result_cache import ResultCache
-from llm_service import complete_json_via_reasoning
+from llm_service import LLMError, complete_json_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -239,10 +239,14 @@ class DeepthoughtAgent:
             * ``max_depth`` is the recursion ceiling already resolved by the
               caller; ``self.spec`` and ``self.original_query`` are populated.
         Postconditions:
-            * Always returns a ``QueryAnalysis`` — never raises. On success it
-              reflects the model's parsed judgement; on any failure of either
-              LLM pass it is a forced-direct-answer fallback at
-              ``confidence=0.3`` with no sub-agent skill requirements.
+            * On success, returns a ``QueryAnalysis`` reflecting the model's
+              parsed judgement. If either LLM pass raises ``LLMError`` (the
+              LLM layer's own failure hierarchy — rate limits, transport
+              errors, malformed responses), returns a forced-direct-answer
+              fallback ``QueryAnalysis`` at ``confidence=0.3`` with no
+              sub-agent skill requirements instead of raising. Any other
+              exception (a programming error, not an LLM failure) propagates
+              to the caller rather than being swallowed.
         """
         strategy_key = self.decomposition_strategy.value
         strategy_instruction = STRATEGY_INSTRUCTIONS.get(
@@ -279,7 +283,7 @@ class DeepthoughtAgent:
                 temperature=0.0,
             )
             return self._parse_analysis(data)
-        except Exception:
+        except LLMError:
             logger.exception("Analysis LLM call failed for agent %s", self.spec.name)
             return QueryAnalysis(
                 summary=self.spec.focus_question,
@@ -454,7 +458,17 @@ class DeepthoughtAgent:
         child_results: list[AgentResult],
         deliberation_notes: str = "",
     ) -> float:
-        """Derive confidence from structural signals (delegates to ``reasoning``)."""
+        """Derive confidence from structural signals (delegates to reasoning.compute_structural_confidence).
+
+        Preconditions:
+            - self_assessed is in [0.0, 1.0].
+            - child_results may be empty.
+        Postconditions:
+            - Returns a float in [0.1, 0.95] when was_decomposed is True, or
+              in [0.4, 0.97] when was_decomposed is False (see
+              reasoning.compute_structural_confidence for the exact
+              blend/weighting of the underlying signals).
+        """
         return compute_structural_confidence(
             was_decomposed=was_decomposed,
             self_assessed=self_assessed,

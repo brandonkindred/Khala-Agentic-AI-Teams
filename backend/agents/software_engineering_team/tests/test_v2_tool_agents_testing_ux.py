@@ -63,8 +63,10 @@ class _StubAgent:
     def __init__(self, response, raise_exc=None):
         self.response = response
         self.raise_exc = raise_exc
+        self.last_prompt = None
 
     def __call__(self, prompt):
+        self.last_prompt = prompt
         if self.raise_exc:
             raise self.raise_exc
         return self.response
@@ -154,6 +156,21 @@ class TestFEUxUsability:
         out = a.plan(_fe_phase_input(task_description="build login"))
         assert "User Journeys" in out.recommendations[0]
         assert "UX defined" in out.summary
+
+    def test_plan_prompt_uses_spec_context_not_task_description(self, monkeypatch):
+        """{spec_content} must come from spec_context, not a second copy of task_description."""
+        a, mod = self._agent()
+        a._model = object()
+        a._model_json = object()
+        stub = _patch(monkeypatch, mod, json.dumps({"summary": "ok"}))
+        a.plan(
+            _fe_phase_input(
+                task_description="build login",
+                spec_context="Users reset password via emailed link.",
+            )
+        )
+        assert "Users reset password via emailed link." in stub.last_prompt
+        assert stub.last_prompt.count("build login") == 1
 
     def test_plan_with_model_llm_failure(self, monkeypatch):
         a, mod = self._agent()

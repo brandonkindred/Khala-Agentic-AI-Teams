@@ -138,8 +138,20 @@ def transfer_funds(self, from_account: str, to_account: str, amount: float) -> b
 - Architecture (optional, for understanding the system)
 
 **Output format:**
-Return a single JSON object with:
-- "files": dict of file_path -> complete updated file content (with DbC comments added). ONLY include files that were changed. If all files are already compliant, this should be an empty dict {}.
+Do NOT re-emit entire files. For each comment you need to add or fix, return a small,
+anchored insertion instead -- just the comment block, pointed at the one symbol it
+belongs to. Return a single JSON object with:
+- "insertions": array of objects, one per comment to add or update. ONLY include symbols
+  that need a new or updated comment. If all code is already compliant, this should be an
+  empty array []. Each object has:
+  - "file": the file path the insertion applies to
+  - "symbol": the function/method/class name the comment attaches to (or a short anchor
+    description, e.g. "module docstring", for non-symbol anchors)
+  - "line": the 1-based line number of the symbol's definition in the original file, if known
+  - "comment": the complete DbC-compliant comment/docstring block text ONLY -- never include
+    the function signature or any surrounding code
+  - "action": "add" if the symbol currently has no comment, or "update" if this replaces an
+    existing comment that was missing DbC sections
 - "comments_added": integer count of new comment blocks added
 - "comments_updated": integer count of existing comment blocks updated
 - "already_compliant": boolean -- true if ALL code already had proper DbC comments and no changes were needed

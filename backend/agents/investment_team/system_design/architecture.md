@@ -49,10 +49,10 @@ flowchart TB
       WS[WorkflowState<br/>6 queues + mode + audit_log]
     end
 
-    subgraph worker[Background Worker — api/main.py]
-      Worker[_strategy_lab_worker<br/>daemon thread per run_id<br/>L1083]
-      Cycle[_run_one_strategy_lab_cycle<br/>L902]
-      EventBus[job_event_bus.py<br/>SSE fan-out<br/>76 lines]
+    subgraph worker[Strategy Lab Dispatch — Temporal-only]
+      Worker[_dispatch_strategy_lab_run<br/>api/main.py — StrategyLabBatchWorkflow<br/>+ child StrategyLabCycleWorkflow per cycle]
+      Cycle[strategy_lab/temporal/activities.py<br/>fine-grained per-side-effect activities]
+      EventBus[job_event_bus.py<br/>SSE fan-out + job-service reconciliation]
     end
 
     subgraph persistence[Persistence]
@@ -245,28 +245,46 @@ Trade-off: the team does **not** publish a `shared.postgres` `SCHEMA` constant
 data query the `jobs` table directly (see
 [`../README.md`](../README.md):77-86) or use `DELETE /strategy-lab/storage`.
 
-### 7. Background worker, not Temporal (yet)
+### 7. Temporal-only dispatch (thread-based worker retired)
 
 A strategy-lab run is a long-running, multi-cycle loop (signal → ideation →
-backtest → analysis → self-review). Today each run spawns a **daemon thread**
-via `_strategy_lab_worker` ([`api/main.py`](../api/main.py):1083). Run state
-lives in an `_active_runs` dict and is also persisted through `_PersistentDict`
-so a restart can reload in-flight runs (`_load_run_from_job_service`).
+backtest → analysis → self-review). The Phase 3 migration tracked in
+[`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) is complete: the old
+in-process daemon-thread worker (`_strategy_lab_worker`) has been removed, and
+`run_strategy_lab` / `resume_strategy_lab_run` / `restart_strategy_lab_run` now
+dispatch exclusively through `_dispatch_strategy_lab_run`
+([`api/main.py`](../api/main.py)), which starts the durable
+`StrategyLabBatchWorkflow` — a parent workflow that fans each batch's cycles
+out as `StrategyLabCycleWorkflow` **child workflows**, reproducing the old
+thread-mode per-wave concurrency on Temporal's `strategy-lab-queue`
+([`strategy_lab/temporal/workflows.py`](../strategy_lab/temporal/workflows.py)).
+Each cycle's side effects (LLM calls, backtests, market-data fetches,
+job-service writes) run as fine-grained activities in
+[`strategy_lab/temporal/activities.py`](../strategy_lab/temporal/activities.py).
 
-Temporal activities are declared in
-[`temporal/__init__.py`](../temporal/__init__.py) but are **not yet wired** to
-the API layer. This is a deliberate staged migration documented in
-[`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) (Phase 3).
+There is **no in-process fallback**: `_require_temporal()` raises `HTTPException(503)`
+for these endpoints when `TEMPORAL_ADDRESS` is unset / no worker is connected.
+`_active_runs` remains the in-memory read cache the API layer serves from, but
+it is now populated at dispatch time and kept in sync with the durable
+job-service record — not written to directly by a worker thread — via
+`_reconcile_run_progress`, which every read surface
+(`list_strategy_lab_runs`, `get_strategy_lab_run_status`,
+`stream_strategy_lab_run`) calls before responding so progress counters never
+go stale while a run is active. A process restart still reloads in-flight runs
+via `_load_run_from_job_service`.
 
 ### 8. SSE fan-out for run progress
 
-Clients don't poll the worker — they subscribe to cycle events. The worker
-publishes to a per-run topic in
-[`api/job_event_bus.py`](../api/job_event_bus.py) (76 lines of queue-per-subscriber
-fan-out), and `GET /strategy-lab/runs/{run_id}/stream`
-([`api/main.py`](../api/main.py):1550) drains the queue as an HTTP SSE stream
-to the Angular UI. A polling fallback (`/strategy-lab/runs/{run_id}/status`,
-line 1534) is also exposed.
+`GET /strategy-lab/runs/{run_id}/stream` ([`api/main.py`](../api/main.py))
+subscribes to a per-run topic in
+[`api/job_event_bus.py`](../api/job_event_bus.py) (queue-per-subscriber
+fan-out) and drains it as an HTTP SSE stream to the Angular UI. Since the
+Temporal migration (§7), the workflow/activities don't push into this bus
+directly — the connect-time snapshot is instead reconciled live from the
+durable job-service record via `_reconcile_run_progress`, so a client always
+sees current progress at connect time and on each subsequent poll. A polling
+fallback (`GET /strategy-lab/runs/{run_id}/status`) exposes the same
+reconciled data and is what the UI relies on for updates mid-stream.
 
 ### 9. Market data is tiered by free vs pay
 

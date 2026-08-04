@@ -911,8 +911,11 @@ def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         cycle in the wave recorded/merged in cycle-index order (reproducible
         across runs), and one ``merge_errors`` entry per record whose
         ``merge_from`` call raised (that record's ``.record(...)`` call still
-        ran). Raises ``ApplicationError`` on an exception outside the isolated
-        ``merge_from`` step (e.g. malformed input).
+        ran). A ``merge_errors`` entry's ``cycle_index`` is ``wr["cycle_index"] +
+        1`` — a 1-based, human-friendly cycle number for error reporting, distinct
+        from the 0-based ``cycle_index`` used in ``wave_results`` above. Raises
+        ``ApplicationError`` on an exception outside the isolated ``merge_from``
+        step (e.g. malformed input).
     """
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker

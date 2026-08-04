@@ -139,7 +139,7 @@ def test_calibration_changes_probabilities_when_engagement_observations_exist() 
 
 
 def test_build_initial_proposal_includes_brand_context_and_model() -> None:
-    orchestrator = SocialMediaMarketingOrchestrator(llm_model_name="qwen3.5:9b-mlx")
+    orchestrator = SocialMediaMarketingOrchestrator(llm_model_name="glm-5.2:cloud")
     goals = BrandGoals(
         brand_name="DocBrand",
         target_audience="professionals",

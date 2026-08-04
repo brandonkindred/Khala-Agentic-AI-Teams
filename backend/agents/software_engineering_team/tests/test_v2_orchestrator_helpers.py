@@ -664,6 +664,32 @@ class TestRunPlanningAndBranchSetup:
         assert failure_reason == "Planning failed: boom"
         git_agent.create_feature_branch.assert_not_called()
 
+    def test_planning_returns_none_short_circuits_without_branch_creation(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+
+        planning_result, feature_branch_name, failure_reason = (
+            BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                task_id="t1",
+                task=_FakeTask(),
+                repo_path=tmp_path,
+                architecture=None,
+                existing_code="",
+                tool_agents={},
+                git_agent=git_agent,
+                feature_branch_name=None,
+                llm=MagicMock(),
+                run_planning=lambda **kw: None,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+            )
+        )
+        assert planning_result is None
+        assert feature_branch_name is None
+        assert failure_reason == "Planning returned no result"
+        git_agent.create_feature_branch.assert_not_called()
+
     def test_existing_branch_name_skips_branch_creation(self, tmp_path: Path):
         from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 

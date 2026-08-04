@@ -160,8 +160,8 @@ class StrategyLabCycleWorkflow:
         ``convergence_tracker_state`` (``dto`` wire dict — the batch-level
         tracker), and optionally ``workflow_config`` (a
         ``resolve_workflow_config_activity`` result; resolved via an activity
-        call when absent — only its ``regime_summary_enabled`` flag is read
-        here).
+        call when absent — its ``regime_summary_enabled`` flag and
+        ``max_design_reentries`` value are read here).
     Postconditions:
         Returns ``{"record": StrategyLabRecord dump, "convergence_tracker_state":
         <updated dto wire dict>}`` on a terminal record, mirroring ``run_cycle``'s
@@ -543,11 +543,26 @@ class StrategyLabBatchWorkflow:
                             # (the domain error _map_exception_to_application_error
                             # produced), so a single ``__cause__`` hop only reaches
                             # ActivityError's generic RPC-boundary type/message, not
-                            # the real failure. Mirrors ``_root_cause_message`` in
-                            # ``market_research_team/temporal/workflows.py``.
+                            # the real failure. Follows explicit ``__cause__``
+                            # chaining first and falls back to implicit
+                            # ``__context__`` chaining (unless suppressed by
+                            # ``raise ... from None``) once ``__cause__`` is
+                            # exhausted — mirroring Python's own traceback
+                            # resolution rule. Broader than ``_root_cause_message``
+                            # in ``market_research_team/temporal/workflows.py``,
+                            # which only follows ``__cause__``. Does not unwrap
+                            # ``BaseExceptionGroup`` sub-exceptions.
                             underlying: BaseException = result
-                            while underlying.__cause__ is not None:
-                                underlying = underlying.__cause__
+                            while True:
+                                if underlying.__cause__ is not None:
+                                    underlying = underlying.__cause__
+                                elif (
+                                    underlying.__context__ is not None
+                                    and not underlying.__suppress_context__
+                                ):
+                                    underlying = underlying.__context__
+                                else:
+                                    break
                             # The terminal cause is usually the ApplicationError
                             # _map_exception_to_application_error produced, whose
                             # actionable classification lives in ``.type`` (e.g.

@@ -6,18 +6,21 @@ Covers:
 * ``_find_gaps_via_llm`` happy + error paths.
 * ``_plan_to_text``.
 * ``conduct_interview`` quick exits (skipped, cancelled, no-experience).
+* ``_is_no_experience`` (exhaustive true/false cases), agent construction,
+  ``_extract_gaps_from_plan``, and ``_generate_friendly_seeds``.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, List
+from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pytest
 
 
 def _content_plan():
+    """Build a minimal 2-section ContentPlan fixture shared by tests in this file."""
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from ._content_plan_test_utils import make_content_plan
@@ -34,6 +37,7 @@ def _content_plan():
 
 
 def _gap():
+    """Build a single StoryGap fixture shared by tests in this file."""
     from agents.blogging.ghost_writer_agent.models import StoryGap
 
     return StoryGap(
@@ -64,6 +68,7 @@ def test_json_retry_suffix_is_shape_agnostic() -> None:
 
 
 def test_ghost_plan_to_text_renders_sections() -> None:
+    """_plan_to_text renders the topic and each section's title/coverage."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     plan = _content_plan()
@@ -71,6 +76,8 @@ def test_ghost_plan_to_text_renders_sections() -> None:
     assert "Topic/thesis: Building scalable APIs" in text
     assert "Section: Intro" in text
     assert "Coverage: hook" in text
+    assert "Section: Body" in text
+    assert "Coverage: depth" in text
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +85,16 @@ def test_ghost_plan_to_text_renders_sections() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _patch_agent(monkeypatch, responses: List[Any]) -> None:
-    """Stub the strands Agent class inside ghost_writer_agent.agent."""
+def _patch_agent(monkeypatch, responses: List[Any]) -> Dict[str, int]:
+    """Stub the strands Agent class inside ghost_writer_agent.agent.
+
+    Returns the shared call-count state dict (key ``"i"``) so callers can assert
+    exactly how many of the configured ``responses`` were consumed. Calling the
+    stub more times than ``len(responses)`` raises ``AssertionError`` rather than
+    silently repeating the last response, so an implementation that calls the
+    agent more times than a test expects fails loudly instead of masking the
+    extra call behind a reused response.
+    """
     import agents.blogging.ghost_writer_agent.agent as gw_agent
 
     state = {"i": 0}
@@ -89,16 +104,22 @@ def _patch_agent(monkeypatch, responses: List[Any]) -> None:
             pass
 
         def __call__(self, prompt: str) -> str:
-            r = responses[min(state["i"], len(responses) - 1)]
+            if state["i"] >= len(responses):
+                raise AssertionError(
+                    f"Agent called {state['i'] + 1} times, but only {len(responses)} responses configured"
+                )
+            r = responses[state["i"]]
             state["i"] += 1
             if isinstance(r, Exception):
                 raise r
             return r
 
     monkeypatch.setattr(gw_agent, "Agent", _StubAgent)
+    return state
 
 
 def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
+    """A single valid JSON response is parsed and returned as-is."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -123,11 +144,12 @@ def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
+    """An unparseable first response is retried once; the second, valid response is used."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
-    _patch_agent(
+    state = _patch_agent(
         monkeypatch,
         [
             "not-json",
@@ -139,14 +161,16 @@ def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out["sufficient"] is True
+    assert state["i"] == 2
 
 
 def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
+    """Two unparseable responses exhaust the retry budget; the default sufficiency dict is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
-    _patch_agent(monkeypatch, ["not-json-1", "not-json-2"])
+    state = _patch_agent(monkeypatch, ["not-json-1", "not-json-2"])
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out == {
@@ -155,9 +179,11 @@ def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
         "story_context": None,
         "missing": None,
     }
+    assert state["i"] == 2
 
 
 def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
+    """A non-transient exception from the agent falls back to the default sufficiency dict."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -173,11 +199,17 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
     monkeypatch.setattr(gw_agent, "Agent", _Boom)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
-    assert out["sufficient"] is False
+    assert out == {
+        "sufficient": False,
+        "no_experience": False,
+        "story_context": None,
+        "missing": None,
+    }
 
 
 def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -> None:
-    """Soft call sites map transient LLM errors to the default dict (planning_stage swallow risk)."""
+    """LLMRateLimitError from the evaluator is caught and the default not-sufficient dict is
+    returned, matching the behavior for other transient failures."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -207,6 +239,7 @@ def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -
 
 
 def test_ghost_generate_follow_up_happy(monkeypatch) -> None:
+    """A single well-formed response is returned verbatim as the follow-up question."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -222,6 +255,7 @@ def test_ghost_generate_follow_up_happy(monkeypatch) -> None:
 
 
 def test_ghost_generate_follow_up_error_returns_none(monkeypatch) -> None:
+    """An agent exception is swallowed; _generate_follow_up returns None instead of raising."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -233,6 +267,7 @@ def test_ghost_generate_follow_up_error_returns_none(monkeypatch) -> None:
 
 
 def test_ghost_generate_follow_up_empty_response(monkeypatch) -> None:
+    """A whitespace-only response is treated as no follow-up question (returns None)."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -247,17 +282,21 @@ def test_ghost_generate_follow_up_empty_response(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ghost_compile_narrative_empty_user_content() -> None:
+def test_ghost_compile_narrative_empty_user_content(monkeypatch) -> None:
+    """No non-empty user turns in the conversation short-circuits to None (no LLM call)."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
+    state = _patch_agent(monkeypatch, [])
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._compile_narrative(_gap(), [{"role": "agent", "content": "hi"}])
     assert out is None
+    assert state["i"] == 0
 
 
 def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
+    """A successful narrator call returns the compiled narrative text unchanged."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -276,6 +315,7 @@ def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
 
 
 def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
+    """The narrator failing on every retry attempt returns None instead of raising."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -305,6 +345,7 @@ def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
+    """A valid JSON array of gap objects is parsed; a blank seed_question gets a generated fallback."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -339,6 +380,7 @@ def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
+    """A response with no JSON array parses to a non-list value, so an empty gap list is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -350,13 +392,15 @@ def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> None:
+    """Two unparseable array responses exhaust the retry budget; an empty gap list is returned."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
-    _patch_agent(monkeypatch, ["[not-json", "[also-not-json"])
+    state = _patch_agent(monkeypatch, ["[not-json", "[also-not-json"])
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     assert agent._find_gaps_via_llm(_content_plan()) == []
+    assert state["i"] == 2
 
 
 def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None:
@@ -394,6 +438,7 @@ def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None
 
 
 def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
+    """Array items that are not dicts are silently dropped; valid dicts are kept."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -420,6 +465,9 @@ def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch) -> None:
+    """Null seed_question triggers a generated fallback question that incorporates the
+    stringified section_context; null section_title is normalized to an empty string,
+    and non-null non-string fields (section_context) are coerced to strings."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -503,7 +551,7 @@ def test_ghost_find_story_gaps_falls_back_to_llm(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _generate_friendly_seeds — dict response forms
+# _generate_friendly_seeds — dict and list response forms
 # ---------------------------------------------------------------------------
 
 
@@ -564,7 +612,7 @@ def test_ghost_generate_friendly_seeds_non_string_items_fallback(monkeypatch) ->
 
 
 # ---------------------------------------------------------------------------
-# conduct_interview — fast-path skipped via cancellation
+# conduct_interview — fast-path skip cases (cancellation, index-advance, no-experience)
 # ---------------------------------------------------------------------------
 
 
@@ -813,3 +861,167 @@ def test_ghost_conduct_interview_notifies_job_updater(monkeypatch) -> None:
     assert result.skipped is True
     assert updates
     assert any("Waiting for your response" in u.get("status_text", "") for u in updates)
+
+
+# ---------------------------------------------------------------------------
+# _is_no_experience (exhaustive), construction, _extract_gaps_from_plan,
+# _generate_friendly_seeds — moved here from test_writer_and_v2_helpers.py to
+# keep ghost_writer_agent coverage in one file.
+# ---------------------------------------------------------------------------
+
+
+def test_ghost_writer_no_experience_phrase() -> None:
+    from agents.blogging.ghost_writer_agent.agent import _is_no_experience
+
+    # Exact short tokens
+    assert _is_no_experience("skip") is True
+    assert _is_no_experience("SKIP.") is True
+    assert _is_no_experience("none") is True
+    assert _is_no_experience("pass") is True
+    assert _is_no_experience("n/a") is True
+
+    # Formerly ambiguous stems — exact message only (not substring)
+    assert _is_no_experience("Nothing comes to mind") is True
+    assert _is_no_experience("nothing comes to mind.") is True
+    assert _is_no_experience("I haven't done that") is True
+    assert _is_no_experience("i haven't") is True
+    assert _is_no_experience("i have no") is True
+    assert _is_no_experience("i can't think of") is True
+
+    # Explicit command-prefixed skips (leading token + trailing text)
+    assert _is_no_experience("skip this one") is True
+    assert _is_no_experience("skip, please") is True
+    assert _is_no_experience("pass on this question") is True
+    assert _is_no_experience("n/a for this section") is True
+
+    # Specific refusal phrases (word-boundary containment)
+    assert _is_no_experience("I don't have any story") is True
+    assert _is_no_experience("I don't have direct experience with that") is True
+    assert _is_no_experience("I don't have any relevant experiences") is True
+    assert _is_no_experience("no relevant experience for this") is True
+    assert _is_no_experience("I have no experience with that") is True
+    assert _is_no_experience("I have no story for this topic") is True
+    assert _is_no_experience("I can't think of a story") is True
+    assert _is_no_experience("Yes I have a great one") is False
+
+    # Qualified experience refusals (optional adjective between "no" and "experience")
+    assert _is_no_experience("I have no direct experience with that") is True
+    assert _is_no_experience("I have no personal experience here") is True
+    assert _is_no_experience("I have no relevant experiences in this area") is True
+    assert _is_no_experience("I have no prior experience") is True
+
+    # Ambiguous substrings / incidental short-word uses must NOT skip
+    assert _is_no_experience("I have no idea what you mean") is False
+    assert _is_no_experience("I haven't thought about it that way") is False
+    assert _is_no_experience("I can't think of anything else right now") is False
+    assert _is_no_experience("Nothing comes to mind immediately") is False
+    assert _is_no_experience("I haven't tried that") is False
+    assert _is_no_experience("nothing comes to mind here") is False
+    assert _is_no_experience("please skip ahead in the draft") is False
+    assert _is_no_experience("I will pass along the details") is False
+    assert _is_no_experience("none of my colleagues knew the answer, but I did") is False
+    assert (
+        _is_no_experience("I don't have the exact dates, but the migration started after launch")
+        is False
+    )
+
+
+def test_ghost_writer_agent_construction() -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    assert agent is not None
+
+
+def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
+    """_extract_gaps_from_plan returns an empty list when no section has a
+    story_opportunity; no LLM call is made."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import DummyLLMClient
+
+    from ._content_plan_test_utils import make_content_plan
+
+    plan = make_content_plan(
+        overarching_topic="X",
+        narrative_flow="flow",
+        sections=[
+            ContentPlanSection(title="A", coverage_description="cov", order=0),
+        ],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    # When no story_opportunity on sections, _extract_gaps_from_plan returns []
+    out = agent._extract_gaps_from_plan(plan)
+    assert out == []
+
+
+def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import DummyLLMClient
+
+    from ._content_plan_test_utils import make_content_plan
+
+    sec_a = ContentPlanSection(
+        title="A", coverage_description="cov", order=0, story_opportunity="A debug story"
+    )
+    sec_b = ContentPlanSection(
+        title="B",
+        coverage_description="cov2",
+        order=1,
+        story_opportunity="A migration story",
+    )
+    plan = make_content_plan(
+        overarching_topic="X",
+        narrative_flow="flow",
+        sections=[sec_a, sec_b],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    # Patch the seed generator to avoid LLM call
+    monkeypatch.setattr(agent, "_generate_friendly_seeds", lambda opps: [f"seed-{o}" for o in opps])
+    out = agent._extract_gaps_from_plan(plan)
+    assert len(out) == 2
+    assert out[0].section_title == "A"
+    assert "seed-A debug story" == out[0].seed_question
+    assert out[1].section_title == "B"
+    assert out[1].seed_question == "seed-A migration story"
+
+
+def test_ghost_writer_generate_friendly_seeds_fallback(monkeypatch) -> None:
+    """When the LLM call raises, _generate_friendly_seeds falls back to generic seeds."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+
+    # Patch the Agent class globally inside ghost_writer_agent.agent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
+
+    class _BoomAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise RuntimeError("nope")
+
+    monkeypatch.setattr(gw_agent, "Agent", _BoomAgent)
+    out = agent._generate_friendly_seeds(["topic A.", "topic B."])
+    assert len(out) == 2
+    assert all("topic" in s.lower() for s in out)
+
+
+def test_ghost_writer_generate_friendly_seeds_empty_input() -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    assert agent._generate_friendly_seeds([]) == []

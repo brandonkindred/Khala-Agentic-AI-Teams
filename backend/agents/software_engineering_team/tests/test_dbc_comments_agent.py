@@ -63,7 +63,7 @@ def test_dbc_run_empty_code_returns_compliant(monkeypatch) -> None:
 def test_dbc_run_already_compliant(monkeypatch) -> None:
     fake = _FakeCompleteJson(
         {
-            "files": {},
+            "insertions": [],
             "already_compliant": True,
             "summary": "perfectly compliant",
         }
@@ -80,10 +80,18 @@ def test_dbc_run_already_compliant(monkeypatch) -> None:
     assert "perfectly" in out.summary
 
 
-def test_dbc_run_with_files_changed(monkeypatch) -> None:
+def test_dbc_run_with_insertions_returned(monkeypatch) -> None:
     fake = _FakeCompleteJson(
         {
-            "files": {"a.py": "# x\ndef f():\n    pass\n"},
+            "insertions": [
+                {
+                    "file": "a.py",
+                    "symbol": "f",
+                    "line": 2,
+                    "comment": '"""Does nothing.\n\nPostconditions:\n    - Returns None.\n"""',
+                    "action": "add",
+                }
+            ],
             "already_compliant": False,
             "comments_added": 3,
             "comments_updated": 1,
@@ -94,7 +102,10 @@ def test_dbc_run_with_files_changed(monkeypatch) -> None:
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="def f(): pass", language="python"))
     assert out.already_compliant is False
-    assert "a.py" in out.files
+    assert len(out.insertions) == 1
+    assert out.insertions[0].file == "a.py"
+    assert out.insertions[0].symbol == "f"
+    assert out.insertions[0].action == "add"
     assert out.comments_added == 3
     assert out.comments_updated == 1
     assert out.suggested_commit_message == "docs(dbc): comments"
@@ -126,51 +137,38 @@ def test_dbc_run_non_dict_top_level_json_fails_open(monkeypatch) -> None:
     assert "DbC review skipped" in out.summary
 
 
-def test_dbc_run_non_dict_files(monkeypatch) -> None:
-    fake = _FakeCompleteJson({"files": "not a dict", "already_compliant": False})
+def test_dbc_run_non_list_insertions(monkeypatch) -> None:
+    fake = _FakeCompleteJson({"insertions": "not a list", "already_compliant": False})
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="def f(): pass"))
-    # Falls back to compliant since no actionable files
+    # Falls back to compliant since no actionable insertions
     assert out.already_compliant is True
-    assert out.files == {}
+    assert out.insertions == []
 
 
-def test_dbc_run_filters_invalid_file_entries(monkeypatch) -> None:
-    """Verifies the post-parse filter strips empty/non-string content directly."""
+def test_dbc_run_filters_invalid_insertion_entries(monkeypatch) -> None:
+    """Verifies malformed insertion entries (missing required fields, wrong
+    type) are skipped rather than failing the whole review."""
     fake = _FakeCompleteJson(
         {
-            "files": {"good.py": "code", "empty.py": "   ", "bad.py": 123},
+            "insertions": [
+                {"file": "good.py", "symbol": "f", "comment": "docstring"},
+                {"file": "missing_comment.py", "symbol": "g"},
+                "not a dict",
+            ],
             "already_compliant": False,
             "summary": "ok",
         }
     )
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="def f(): pass"))
-    assert set(out.files.keys()) == {"good.py"}
-
-
-def test_dbc_run_rejects_unparsable_python(monkeypatch) -> None:
-    """A DbC re-emit that abandons a file mid-rewrite must not be accepted --
-    even though the LLM response is well-formed JSON (not a truncation)."""
-    fake = _FakeCompleteJson(
-        {
-            "files": {
-                "good.py": "# x\ndef f():\n    pass\n",
-                "broken.py": "class Foo:\n    def bar(self):\n        pass\n\n    def baz(",
-            },
-            "already_compliant": False,
-            "comments_added": 2,
-            "summary": "added comments",
-        }
-    )
-    a = _build_agent(monkeypatch, fake)
-    out = a.run(DbcCommentsInput(code="def f(): pass", language="python"))
-    assert set(out.files.keys()) == {"good.py"}
+    assert len(out.insertions) == 1
+    assert out.insertions[0].file == "good.py"
 
 
 def test_dbc_run_safety_override(monkeypatch) -> None:
-    """LLM says not compliant but returned no files -> override to compliant."""
-    fake = _FakeCompleteJson({"files": {}, "already_compliant": False, "summary": ""})
+    """LLM says not compliant but returned no insertions -> override to compliant."""
+    fake = _FakeCompleteJson({"insertions": [], "already_compliant": False, "summary": ""})
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="def f(): pass"))
     assert out.already_compliant is True
@@ -180,7 +178,7 @@ def test_dbc_run_safety_override(monkeypatch) -> None:
 def test_dbc_run_compliant_no_summary_default_praise(monkeypatch) -> None:
     fake = _FakeCompleteJson(
         {
-            "files": {},
+            "insertions": [],
             "already_compliant": True,
             "summary": "",
         }
@@ -193,7 +191,7 @@ def test_dbc_run_compliant_no_summary_default_praise(monkeypatch) -> None:
 def test_dbc_run_with_architecture_context(monkeypatch) -> None:
     from software_engineering_team.shared.models import SystemArchitecture
 
-    fake = _FakeCompleteJson({"files": {}, "already_compliant": True, "summary": "ok"})
+    fake = _FakeCompleteJson({"insertions": [], "already_compliant": True, "summary": "ok"})
     a = _build_agent(monkeypatch, fake)
     arch = SystemArchitecture(overview="big picture")
     out = a.run(
@@ -209,7 +207,7 @@ def test_dbc_run_with_architecture_context(monkeypatch) -> None:
 
 
 def test_dbc_status_callbacks_fire(monkeypatch) -> None:
-    fake = _FakeCompleteJson({"files": {}, "already_compliant": True, "summary": "ok"})
+    fake = _FakeCompleteJson({"insertions": [], "already_compliant": True, "summary": "ok"})
     a = _build_agent(monkeypatch, fake)
     seen = []
     a.run(
@@ -227,7 +225,7 @@ def test_dbc_run_recovers_fenced_json_response(monkeypatch) -> None:
 
     class _FencedAgent:
         def __call__(self, prompt, **kwargs):
-            payload = {"files": {}, "already_compliant": True, "summary": "fenced ok"}
+            payload = {"insertions": [], "already_compliant": True, "summary": "fenced ok"}
             return "```json\n" + json.dumps(payload) + "\n```"
 
     monkeypatch.setattr(llm_mod, "Agent", lambda *a, **kw: _FencedAgent())

@@ -4,8 +4,21 @@ Discovery substrate for the **Agent Console** (UI at `/agent-console`).
 
 Loads declarative per-agent manifests from
 `backend/agents/<team>/agent_console/manifests/*.yaml` and serves them as
-structured metadata at **`/api/agents`**. Read-only; no Postgres, no Temporal,
-no LLM.
+structured metadata at **`/api/agents`**. Disk discovery is the source of truth
+for built-in agents; there is no Temporal or LLM dependency in this package.
+
+## Static vs dynamic manifests
+
+| Kind | Source | Persistence |
+|---|---|---|
+| **Static / disk** | YAML under each team's `agent_console/manifests/` | Loaded into process memory at startup; never written to Postgres |
+| **Dynamic** | Runtime registration (e.g. generated roster agents via `AgentRegistry.register` / `replace_dynamic_manifests`) | Optional Postgres overlay (`dynamic_store.py` / `agent_registry.postgres`) when `POSTGRES_HOST` is set |
+
+When Postgres is unset or the store is unavailable, dynamic registration stays
+**local-only** (same process). Store read failures degrade to the local view for
+catalog/get (except fail-closed callers that set `require_store` /
+`require_persist`). The HTTP catalog routes remain read-only; writers are
+in-process registry APIs used by teams that generate agents.
 
 ## Why it exists
 
@@ -111,7 +124,7 @@ backend/agents/<team>/agent_console/
 Duplicate `id`s across files are deduped (last-wins with a warning log).
 Malformed YAML and manifests that fail validation are skipped with a warning.
 
-## API surface (read-only)
+## API surface (catalog HTTP is read-only)
 
 | Route | Purpose |
 |---|---|

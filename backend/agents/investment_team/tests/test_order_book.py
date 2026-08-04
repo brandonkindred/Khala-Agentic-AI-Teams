@@ -2281,32 +2281,40 @@ def test_cancel_cost_is_constant_under_growing_bucket() -> None:
     sizes = [200, 1000]
     timings: list[float] = []
     for n in sizes:
-        book = OrderBook()
-        ids: list[str] = []
-        for _ in range(n):
-            po = book.submit(
-                _base(qty=1.0),
-                submitted_at="2024-01-02",
-                submitted_equity=1.0,
-            )
-            ids.append(po.order_id)
-        # Cancel the front half: under O(n) list.remove(), this is
-        # O(n²); under O(1) dict pop, it's O(n). We assert the 5×
-        # bucket-size only takes proportionally longer (≤ ~10×) and
-        # nowhere near 25× (the quadratic blow-up).
-        head = ids[: n // 2]
-        t0 = time.perf_counter()
-        for oid in head:
-            book.cancel(oid)
-        timings.append(time.perf_counter() - t0)
+        # Best-of-3: a shared/noisy CI runner can stall any single trial
+        # (scheduler preemption, GC pause) and inflate its timing, but never
+        # makes a trial artificially fast. Taking the min isolates the
+        # algorithm's actual cost from that one-sided noise; a genuine O(n²)
+        # blow-up would still show up on every trial, not just the worst one.
+        best = float("inf")
+        for _ in range(3):
+            book = OrderBook()
+            ids: list[str] = []
+            for _ in range(n):
+                po = book.submit(
+                    _base(qty=1.0),
+                    submitted_at="2024-01-02",
+                    submitted_equity=1.0,
+                )
+                ids.append(po.order_id)
+            # Cancel the front half: under O(n) list.remove(), this is
+            # O(n²); under O(1) dict pop, it's O(n). We assert the 5×
+            # bucket-size only takes proportionally longer (≤ ~15×) and
+            # nowhere near 25× (the quadratic blow-up).
+            head = ids[: n // 2]
+            t0 = time.perf_counter()
+            for oid in head:
+                book.cancel(oid)
+            best = min(best, time.perf_counter() - t0)
+        timings.append(best)
 
     # Allow generous slack for noisy CI machines; a quadratic regression
     # would land at ~25×, far beyond this bound. Floor the smaller-sample
     # timing to 1ms so sub-millisecond timer jitter on fast runners doesn't
     # turn a near-zero baseline into a spurious "regression" — a real O(n²)
-    # blow-up at n=1000 lands far above 10ms regardless.
+    # blow-up at n=1000 lands far above 15ms regardless.
     baseline = max(timings[0], 1e-3)
-    assert timings[1] < baseline * 10, (
+    assert timings[1] < baseline * 15, (
         f"cancel scaling regressed: {sizes[0]} -> {timings[0]:.4f}s, "
         f"{sizes[1]} -> {timings[1]:.4f}s"
     )

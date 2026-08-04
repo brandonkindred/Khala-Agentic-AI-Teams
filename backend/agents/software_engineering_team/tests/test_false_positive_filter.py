@@ -119,10 +119,8 @@ class _RaisingStub(DummyLLMClient):
 
 
 class _BadJsonStub(DummyLLMClient):
-    """Returns non-JSON text on the verification call (unparsable → keep)."""
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:  # type: ignore[override]
-        return "not json at all"
+    """Returns a non-JSON string from complete_json on the verification call
+    (unparsable → keep)."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:  # type: ignore[override]
         if "verdicts" in prompt.lower():
@@ -131,12 +129,9 @@ class _BadJsonStub(DummyLLMClient):
 
 
 class _FencedJsonVerdictStub(DummyLLMClient):
-    """Returns the verdicts JSON wrapped in a ```json fence with leading prose.
-
-    Exercises the recovery ladder (``extract_json_from_response``) rather than a
-    bare ``json.loads``: the verification call site must recover a fenced verdict
-    exactly as it recovers any other LLM response shape.
-    """
+    """Returns a verdicts JSON payload wrapped in a ```json fence with leading
+    prose from complete_json, simulating an LLM response that still contains
+    markdown fencing around its structured output."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:  # type: ignore[override]
         if "verdicts" in prompt.lower():
@@ -301,10 +296,11 @@ def test_search_respects_max_matches() -> None:
     assert len(idx.search("x", max_matches=5)) == 5
 
 
-def test_search_rejects_nonpositive_max() -> None:
-    """``search`` raises ``ValueError`` on a non-positive ``max_matches`` (precondition guard)."""
+@pytest.mark.parametrize("bad_max", [0, -1, -100])
+def test_search_rejects_nonpositive_max(bad_max: int) -> None:
+    """``search`` raises ``ValueError`` on any non-positive ``max_matches`` (precondition guard)."""
     with pytest.raises(ValueError):
-        CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=0)
+        CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=bad_max)
 
 
 # --------------------------------------------------------------------------- tools
@@ -1220,19 +1216,21 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
     b = _issue(file_path="b.py", description="b-real")
 
     # Both groups send index 0; the stub marks index 0 false → both would drop,
-    # but b's verdict says real, so only a drops. Use a per-file stub.
+    # but b's verdict says real, so only a drops. Route on each file's own
+    # inlined body (a stable invariant of _build_group_prompt) rather than the
+    # "Full content of `<path>`" header wording, so rewording that header
+    # can't silently break this.
     class PerFileStub(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
-            low = prompt.lower()
-            # The manifest lists every file in every prompt; the "Full content of
-            # `<path>`" line uniquely names the group's primary file.
-            if "full content of `a.py`" in low:
+            if "verdicts" not in prompt.lower():
+                return super().complete_json(prompt, **kwargs)
+            if "SENTINEL_A" in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if "full content of `b.py`" in low:
+            if "SENTINEL_B" in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 
-    inp = _input(files={"a.py": "x=1\n", "b.py": "y=2\n"})
+    inp = _input(files={"a.py": "SENTINEL_A\n", "b.py": "SENTINEL_B\n"})
     out = filter_false_positives(PerFileStub(), inp, [a, b])
     assert out == [b]
 
@@ -1267,17 +1265,20 @@ def test_filter_timeout_keeps_group_findings_without_hanging(monkeypatch) -> Non
     a = _issue(file_path="a.py", description="a-fp")
     b = _issue(file_path="b.py", description="b-real")
 
+    # Route on each file's own inlined body (see PerFileStub above) rather
+    # than the "Full content of `<path>`" header wording.
     class SlowStub(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
-            low = prompt.lower()
-            if "full content of `a.py`" in low:
+            if "verdicts" not in prompt.lower():
+                return super().complete_json(prompt, **kwargs)
+            if "SENTINEL_A" in prompt:
                 time.sleep(3)  # exceeds the 1s timeout set above
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if "full content of `b.py`" in low:
+            if "SENTINEL_B" in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 
-    inp = _input(files={"a.py": "x=1\n", "b.py": "y=2\n"})
+    inp = _input(files={"a.py": "SENTINEL_A\n", "b.py": "SENTINEL_B\n"})
     start = time.monotonic()
     out = filter_false_positives(SlowStub(), inp, [a, b])
     elapsed = time.monotonic() - start

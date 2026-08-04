@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Dict, List, Optional
 
 from llm_service import DummyLLMClient, LLMClient
@@ -22,12 +23,19 @@ from software_engineering_team.shared.git_utils import (
 from software_engineering_team.shared.repo_writer import write_agent_output
 from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
+from . import debug_patch, tool_dispatch
 from .change_review_agent import ChangeReviewAgent
 from .cicd_pipeline_agent import CICDPipelineAgent
+from .debug_patch import (  # noqa: F401 (re-exported for test_devops_debug_patch.py)
+    MAX_INFRA_FIX_ITERATIONS,
+    _DebugPatchState,
+)
 from .deployment_strategy_agent import DeploymentStrategyAgent
 from .devsecops_review_agent import DevSecOpsReviewAgent
 from .doc_runbook_agent import DocumentationRunbookAgent
 from .iac_agent import InfrastructureAsCodeAgent
+from .infra_debug_agent import InfraDebugAgent
+from .infra_patch_agent import InfraPatchAgent
 from .models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult, SubtaskContract
 from .phases import (
     criterion_traces_from_phase4,  # noqa: F401 (public re-export; test_devops_team.py imports it here)
@@ -36,29 +44,344 @@ from .phases import (
     run_phase4_quality_gate,
     run_phase5_deliver_merge,
 )
+from .task_clarifier import DevOpsTaskClarifierAgent
+from .test_validation_agent import DevOpsTestValidationAgent
+from .tool_agents import (
+    CDKExecutionToolAgent,
+    CICDLintPipelineValidationToolAgent,
+    DeploymentDryRunPlanToolAgent,
+    DockerComposeExecutionToolAgent,
+    HelmExecutionToolAgent,
+    IaCValidationToolAgent,
+    PolicyAsCodeToolAgent,
+    RepoNavigatorToolAgent,
+    TerraformExecutionToolAgent,
+)
 
 # Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
-# Keep list values read-only — do not mutate them in the adapter.
+# Tuples enforce the read-only contract — callers get list(...) copies when needed.
 _DEFAULT_LEGACY_CLOUD = "on-premises"
 _DEFAULT_LEGACY_APP_REPO = "application"
 _DEFAULT_LEGACY_INFRA_REPO = "platform-infra"
 _DEFAULT_LEGACY_SECRETS_SOURCE = "managed_secret_store"
 
-_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = [
+_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = (
     "CI/CD workflow exists and validates",
     "Deployment strategy and rollback documented",
     "Security and policy review executed",
-]
-_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = [
-    "Rollback to previous known good release",
-]
-_DEFAULT_LEGACY_SECURITY_CONSTRAINTS = [
+)
+_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = ("Rollback to previous known good release",)
+_DEFAULT_LEGACY_SECURITY_CONSTRAINTS = (
     "No plaintext credentials",
     "Least privilege IAM",
-]
-_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
-    "Audit trail required",
-]
+)
+_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
+
+MAX_LEGACY_TITLE_LENGTH: int = 120
+
+_NEGATION_TOKENS = frozenset({"not", "no", "non"})
+# Skippable fillers between a negation and a prod token ("not deploy to production",
+# "not in production").
+_NEGATION_INTERVENING_TOKENS = frozenset(
+    {
+        "to",
+        "for",
+        "into",
+        "on",
+        "in",
+        "at",
+        "with",
+        "by",
+        "from",
+        "deploy",
+        "deploying",
+        "deployment",
+        "the",
+        "a",
+        "an",
+    }
+)
+# After a ``no``/``not`` + prod token, these may indicate a production *control*
+# under discussion rather than excluding production as a target.
+_PROD_SAFEGUARD_TOKENS = frozenset(
+    {
+        "approval",
+        "approvals",
+        "gate",
+        "gates",
+        "credential",
+        "credentials",
+        "access",
+        "policy",
+        "policies",
+        "check",
+        "checks",
+        "control",
+        "controls",
+        "requirement",
+        "requirements",
+        "signoff",
+        "authorization",
+        "authorized",
+        "permission",
+        "permissions",
+    }
+)
+# Negative prohibition predicates (``production is forbidden``).
+_PROD_NEGATIVE_PROHIBITION_TOKENS = frozenset(
+    {
+        "forbidden",
+        "denied",
+        "prohibited",
+        "excluded",
+        "exclude",
+    }
+)
+# Positive permission words — exclusion only when negated
+# (``production is not allowed`` vs ``production is allowed``).
+_PROD_POSITIVE_PERMISSION_TOKENS = frozenset(
+    {
+        "allowed",
+        "allow",
+        "permitted",
+        "permit",
+    }
+)
+# Union used by environment-negation safeguard logic.
+_PROD_PROHIBITION_TOKENS = _PROD_NEGATIVE_PROHIBITION_TOKENS | _PROD_POSITIVE_PERMISSION_TOKENS
+# With a safeguard noun, these mark a missing/absent control → production work.
+_PROD_MISSING_CONTROL_TOKENS = frozenset(
+    {
+        "configured",
+        "missing",
+        "absent",
+        "needed",
+        "need",
+        "add",
+        "adds",
+        "require",
+        "requires",
+        "required",
+        "lacking",
+        "lack",
+    }
+)
+# ``no production <attribute>`` negates the attribute, not the environment.
+_PROD_ATTRIBUTE_TOKENS = frozenset(
+    {
+        "downtime",
+        "interruption",
+        "interruptions",
+        "outage",
+        "outages",
+        "latency",
+        "degradation",
+        "impact",
+        "disruption",
+        "traffic",  # only when paired with interruption-style attrs nearby; see helper
+    }
+)
+# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher.
+_LEGACY_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
+# Split so ``No. Deploy to production`` does not let ``No`` govern the next sentence.
+_LEGACY_CLAUSE_SPLIT = re.compile(r"[.!?;]+")
+_PROD_CONTEXT_LOOKAHEAD = 5
+
+
+def _negation_token_before(tokens: List[str], prod_index: int) -> Optional[str]:
+    """Return the negation token governing ``tokens[prod_index]``, if any.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
+        - ``0 <= prod_index < len(tokens)``.
+    Postconditions:
+        - Returns ``non`` / ``no`` / ``not`` when that token immediately
+          precedes the prod token, or when only intervening fillers from
+          ``_NEGATION_INTERVENING_TOKENS`` sit between them
+          (e.g. ``not deploy to production``, ``not for production``).
+        - Returns ``None`` when no such negation governs the prod token.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    j = prod_index - 1
+    while j >= 0 and tokens[j] in _NEGATION_INTERVENING_TOKENS:
+        j -= 1
+    if j >= 0 and tokens[j] in _NEGATION_TOKENS:
+        return tokens[j]
+    return None
+
+
+def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
+    """Return True when ``tokens[prod_index]`` is an excluded-environment phrase.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
+        - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
+          ``prod`` or ``production``.
+    Postconditions:
+        - ``non`` governing the prod token always counts as negation.
+        - ``no`` / ``not`` governing the prod token (allowing intervening
+          fillers) counts as negation unless following context shows:
+          a missing production control, a conditional approval gate
+          (``until`` / ``unless``), or a negated production *attribute*
+          (``downtime``, ``interruption``, …) rather than excluding production.
+        - Explicit prohibitions after a safeguard noun
+          (``no production access is allowed``) remain negation / staging.
+        - Otherwise returns False.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
+    neg = _negation_token_before(tokens, prod_index)
+    if neg is None:
+        return False
+    if neg == "non":
+        return True
+    window = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
+    # Conditional gate: "do not deploy to production until/unless approved"
+    # or "… without/pending authorization".
+    if any(t in ("until", "unless") for t in window):
+        return False
+    if any(t in ("without", "pending") for t in window) and any(
+        t in _PROD_SAFEGUARD_TOKENS for t in window
+    ):
+        return False
+    # Attribute negation: "no production downtime" / "no production traffic interruption".
+    if any(t in _PROD_ATTRIBUTE_TOKENS for t in window) and not any(
+        t in _PROD_PROHIBITION_TOKENS for t in window
+    ):
+        # "no production traffic" alone (exclusion) vs "traffic interruption" (attribute).
+        if window and window[0] == "traffic" and not any(
+            t in {"interruption", "interruptions", "disruption", "impact"} for t in window[1:]
+        ):
+            return True
+        return False
+    has_safeguard = any(t in _PROD_SAFEGUARD_TOKENS for t in window)
+    if not has_safeguard:
+        return True
+    if any(t in _PROD_PROHIBITION_TOKENS for t in window):
+        return True
+    if any(t in _PROD_MISSING_CONTROL_TOKENS for t in window):
+        return False
+    # Safeguard noun without prohibition/missing cue: treat as production concern.
+    return False
+
+
+def _is_post_token_exclusion(tokens: List[str], prod_index: int) -> bool:
+    """Return True when production is excluded by a following prohibition predicate.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
+        - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
+          ``prod`` or ``production``.
+    Postconditions:
+        - True for negative prohibitions (``production is prohibited``,
+          ``prod is forbidden``).
+        - True for positive permission words only when negated
+          (``production is not allowed``); ``production is allowed`` is False.
+        - False when no such post-token prohibition is present.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
+    after = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
+    if not after:
+        return False
+    if any(t in _PROD_NEGATIVE_PROHIBITION_TOKENS for t in after):
+        return True
+    if any(t in _PROD_POSITIVE_PERMISSION_TOKENS for t in after):
+        first_perm_idx = next(
+            i for i, t in enumerate(after) if t in _PROD_POSITIVE_PERMISSION_TOKENS
+        )
+        # Negation must govern the permission word ("is not allowed"), not
+        # appear after it ("is allowed, not required").
+        if any(t in _NEGATION_TOKENS for t in after[:first_perm_idx]):
+            return True
+    return False
+
+
+def _clause_implies_production(clause: str) -> bool:
+    """Return True when a single clause positively implies production.
+
+    Preconditions: ``clause`` is a lowercase str (may be empty).
+    Postconditions: True iff a non-excluded ``prod``/``production`` token appears.
+    """
+    assert isinstance(clause, str), "clause must be a str"
+    tokens = _LEGACY_WORD_TOKEN.findall(clause)
+    for i, token in enumerate(tokens):
+        if token not in ("prod", "production"):
+            continue
+        if _is_environment_negation(tokens, i):
+            continue
+        if _is_post_token_exclusion(tokens, i):
+            continue
+        return True
+    return False
+
+
+def _legacy_environment_from_text(combined_text: str) -> str:
+    """Infer ``production`` vs ``staging`` from legacy free text.
+
+    Preconditions:
+        - ``combined_text`` is a str (may be empty); caller lowercases input.
+    Postconditions:
+        - Splits on clause boundaries (``.`` / ``!`` / ``?`` / ``;``) so a
+          standalone ``No.`` cannot negate a later ``Deploy to production``.
+        - Returns ``\"production\"`` iff any clause positively implies production
+          (see :func:`_clause_implies_production` / :func:`_is_environment_negation`).
+        - Exclusion phrases include ``non-production``, ``not prod``,
+          ``no production traffic``, ``do not deploy to production``,
+          ``not for production``, and ``no production access is allowed``.
+        - Still production: missing-control wording, conditional
+          ``until approved``, and attribute constraints like
+          ``no production downtime``.
+        - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
+    """
+    assert isinstance(combined_text, str), "combined_text must be a str"
+    assert combined_text == combined_text.lower(), "combined_text must be lowercase"
+    for clause in _LEGACY_CLAUSE_SPLIT.split(combined_text):
+        if _clause_implies_production(clause.strip()):
+            return "production"
+    return "staging"
+
+
+# Fillers allowed between a negation and ``approval`` (``no formal approval``).
+_APPROVAL_INTERVENING_TOKENS = frozenset(
+    {
+        "formal",
+        "any",
+        "prior",
+        "explicit",
+        "required",
+        "gate",
+        "gates",
+        "the",
+        "a",
+        "an",
+    }
+)
+
+
+def _scope_item_mentions_approval(item: str) -> bool:
+    """Return True when ``item`` positively mentions an approval gate.
+
+    Preconditions: ``item`` is a str.
+    Postconditions:
+        - True when ``approval`` appears as a word and is not governed by a
+          preceding ``no`` / ``not`` / ``non`` (allowing intervening fillers
+          such as ``formal`` / ``prior``; e.g. ``prod approval``).
+        - False for negated forms (``no approval``, ``no formal approval``,
+          ``non-approval``) or when the word is absent.
+    """
+    assert isinstance(item, str), "item must be a str"
+    tokens = _LEGACY_WORD_TOKEN.findall(item.lower())
+    for i, token in enumerate(tokens):
+        if token != "approval":
+            continue
+        j = i - 1
+        while j >= 0 and tokens[j] in _APPROVAL_INTERVENING_TOKENS:
+            j -= 1
+        if j >= 0 and tokens[j] in _NEGATION_TOKENS:
+            continue
+        return True
+    return False
 
 
 def _git_ops() -> DeliverGitOps:
@@ -86,7 +409,7 @@ def _git_ops() -> DeliverGitOps:
     )
 
 
-DEVOPS_REQUIRED_GATE_NAMES = [
+DEVOPS_REQUIRED_GATE_NAMES = (
     "iac_validate",
     "iac_validate_fmt",
     "policy_checks",
@@ -95,52 +418,38 @@ DEVOPS_REQUIRED_GATE_NAMES = [
     "deployment_dry_run",
     "security_review",
     "change_review",
-]
+)
 
-ENV_POLICY = {
-    "dev": {
-        "auto_deploy_allowed": True,
-        "approval_required": False,
-        "rollback_test_required": False,
-        "policy_strictness": "low",
-    },
-    "staging": {
-        "auto_deploy_allowed": True,
-        "approval_required": False,
-        "rollback_test_required": True,
-        "policy_strictness": "medium",
-    },
-    "production": {
-        "auto_deploy_allowed": False,
-        "approval_required": True,
-        "rollback_test_required": True,
-        "policy_strictness": "high",
-    },
-}
-from . import tool_dispatch  # noqa: E402
-from .infra_debug_agent import InfraDebugAgent  # noqa: E402
-from .infra_patch_agent import InfraPatchAgent  # noqa: E402
-from .task_clarifier import DevOpsTaskClarifierAgent  # noqa: E402
-from .test_validation_agent import DevOpsTestValidationAgent  # noqa: E402
-from .tool_agents import (  # noqa: E402
-    CDKExecutionToolAgent,
-    CICDLintPipelineValidationToolAgent,
-    DeploymentDryRunPlanToolAgent,
-    DockerComposeExecutionToolAgent,
-    HelmExecutionToolAgent,
-    IaCValidationToolAgent,
-    PolicyAsCodeToolAgent,
-    RepoNavigatorToolAgent,
-    TerraformExecutionToolAgent,
+ENV_POLICY = MappingProxyType(
+    {
+        "dev": MappingProxyType(
+            {
+                "auto_deploy_allowed": True,
+                "approval_required": False,
+                "rollback_test_required": False,
+                "policy_strictness": "low",
+            }
+        ),
+        "staging": MappingProxyType(
+            {
+                "auto_deploy_allowed": True,
+                "approval_required": False,
+                "rollback_test_required": True,
+                "policy_strictness": "medium",
+            }
+        ),
+        "production": MappingProxyType(
+            {
+                "auto_deploy_allowed": False,
+                "approval_required": True,
+                "rollback_test_required": True,
+                "policy_strictness": "high",
+            }
+        ),
+    }
 )
 
 logger = logging.getLogger(__name__)
-
-from . import debug_patch  # noqa: E402
-from .debug_patch import (  # noqa: E402,F401 (re-exported for test_devops_debug_patch.py)
-    MAX_INFRA_FIX_ITERATIONS,
-    _DebugPatchState,
-)
 
 
 class DevOpsTeamLeadAgent(BaseTeamLead):
@@ -172,6 +481,16 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
     _debug_patch_once = debug_patch.debug_patch_once
 
     def __init__(self, llm_client: LLMClient) -> None:
+        """Initialize the DevOps team lead and its specialist agents/tools.
+
+        Preconditions:
+            - ``llm_client`` is non-None.
+        Postconditions:
+            - All specialist agents and execution/validation tools are
+              constructed and bound on ``self``.
+            - ``_status_callback`` remains the mixin default (``None``) until
+              a caller assigns it for a run.
+        """
         assert llm_client is not None, "llm_client is required"
         BaseTeamLead.__init__(
             self,
@@ -180,6 +499,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             exclude_dirs=frozenset(),
             max_chars=0,
         )
+        assert self._status_callback is None, "_status_callback must start as None"
         self.task_clarifier = DevOpsTaskClarifierAgent(llm_client)
         self.iac_agent = InfrastructureAsCodeAgent(llm_client)
         self.cicd_agent = CICDPipelineAgent(llm_client)
@@ -241,8 +561,9 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Preconditions: ``phase`` is a non-empty str.
         Postconditions: emits the historical INFO line via ``_log_pipeline_status``;
           then invokes ``TeamLeadSharedState._report_status`` (no-op when callback
-          is None; forwards kwargs when set; swallows callback errors). Never
-          raises when preconditions hold.
+          is None; forwards kwargs when set; errors are logged and swallowed by
+          ``TeamLeadSharedState._report_status``). Never raises when
+          preconditions hold.
         """
         assert isinstance(phase, str) and phase, "phase must be a non-empty str"
         self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
@@ -256,17 +577,41 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         requirements: str,
         target_repo: Optional[Any] = None,
     ) -> DevOpsTaskSpec:
+        """Build a ``DevOpsTaskSpec`` from the legacy free-text workflow args.
+
+        Preconditions:
+            - ``task_id`` is a non-empty string.
+            - ``task_description`` and ``requirements`` are strings (may be empty).
+        Postconditions:
+            - Returns a valid ``DevOpsTaskSpec`` using module-level defaults for
+              all fields not derivable from the arguments.
+            - ``title`` is the stripped ``task_description[:MAX_LEGACY_TITLE_LENGTH]``,
+              or the stripped ``task_id[:MAX_LEGACY_TITLE_LENGTH]`` when that
+              description slice is empty/whitespace-only.
+            - ``environment`` is inferred from the combined text of
+              ``task_description`` and ``requirements`` via
+              ``_legacy_environment_from_text``; defaults to ``\"staging\"``.
+            - Module-level ``_DEFAULT_LEGACY_*`` tuples supply acceptance
+              criteria, rollback requirements, security and compliance
+              constraints, and secret-source defaults; each call receives a
+              fresh ``list(...)`` copy of the mutable fields.
+        """
+        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
+        assert isinstance(task_description, str), "task_description must be a string"
+        assert isinstance(requirements, str), "requirements must be a string"
         repo_name = (
             target_repo.value
             if hasattr(target_repo, "value")
             else (str(target_repo) if target_repo else "")
         )
         combined_text = f"{task_description} {requirements}".lower()
-        # Match explicit production intent; avoid false positives like "produce".
-        env = "production" if re.search(r"\b(prod|production)\b", combined_text) else "staging"
+        env = _legacy_environment_from_text(combined_text)
         return DevOpsTaskSpec(
             task_id=task_id,
-            title=task_description[:120] or task_id,
+            title=(
+                (task_description[:MAX_LEGACY_TITLE_LENGTH]).strip()
+                or (task_id[:MAX_LEGACY_TITLE_LENGTH]).strip()
+            ),
             platform_scope={"cloud": _DEFAULT_LEGACY_CLOUD, "environments": ["dev", env]},
             repo_context={
                 "app_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
@@ -276,10 +621,10 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             goal={"summary": task_description},
             scope={"included": [requirements], "excluded": []},
             constraints={"secrets": {"source": _DEFAULT_LEGACY_SECRETS_SOURCE}},
-            acceptance_criteria=_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA,
-            rollback_requirements=_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS,
-            security_constraints=_DEFAULT_LEGACY_SECURITY_CONSTRAINTS,
-            compliance_constraints=_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS,
+            acceptance_criteria=list(_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA),
+            rollback_requirements=list(_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS),
+            security_constraints=list(_DEFAULT_LEGACY_SECURITY_CONSTRAINTS),
+            compliance_constraints=list(_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS),
             environment=env,
         )
 
@@ -290,7 +635,15 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         commits. Phase 4.5 execution tools (e.g. ``terraform init``, ``cdk synth``,
         ``helm lint``, ``docker-compose config``) may still write under the working
         directory as validation side effects.
+
+        Preconditions:
+            - ``input_data`` is a non-None ``DevOpsTaskSpec``.
+        Postconditions:
+            - Returns a non-None ``DevOpsCompletionPackage`` on success.
+        Raises:
+            ValueError: if the pipeline completes without a completion package.
         """
+        assert input_data is not None, "input_data is required"
         result = self._run_pipeline(
             repo_path=Path("."),
             task_spec=input_data,
@@ -307,24 +660,28 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         repo_path: Path,
         task_description: str,
         requirements: str,
-        architecture: Optional[Any] = None,
-        existing_pipeline: Optional[str] = None,
         target_repo: Optional[Any] = None,
-        tech_stack: Optional[List[str]] = None,
         build_verifier: Optional[Any] = None,
         task_id: str = "devops",
         subdir: str = "",
-        max_iterations: int = 1,
-        devops_review_agent: Optional[Any] = None,
     ) -> DevOpsTeamResult:
-        """Compatibility workflow adapter for existing orchestrator/tech lead calls."""
-        _ = (
-            architecture,
-            existing_pipeline,
-            tech_stack,
-            max_iterations,
-            devops_review_agent,
-        )  # reserved for future routing
+        """Legacy adapter: repo/task free-text → ``_build_legacy_spec`` → ``_run_pipeline`` with ``write_changes=True``.
+
+        Preconditions:
+            - ``repo_path`` is a path to an existing directory initialised as a git repo.
+            - ``task_description`` and ``requirements`` are strings (may be empty).
+            - ``task_id`` is a non-empty string when provided; defaults to ``"devops"``.
+            - ``build_verifier``, when provided, is callable and returns ``(bool, str)``.
+        Postconditions:
+            - Returns a ``DevOpsTeamResult`` reflecting the full pipeline outcome.
+            - Artifacts are written to the repo on a feature branch and merged into
+              ``development`` when the pipeline completes successfully.
+        """
+        repo_path_obj = Path(repo_path).resolve()
+        assert repo_path_obj.is_dir(), f"repo_path must be an existing directory: {repo_path_obj}"
+        if build_verifier is not None:
+            assert callable(build_verifier), "build_verifier must be callable"
+        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
         task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id=task_id,
             task_description=task_description,
@@ -332,7 +689,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             target_repo=target_repo,
         )
         return self._run_pipeline(
-            repo_path=Path(repo_path).resolve(),
+            repo_path=repo_path_obj,
             task_spec=task_spec,
             build_verifier=build_verifier,
             write_changes=True,
@@ -341,6 +698,20 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
 
     @staticmethod
     def _build_subtask_contracts(task_spec: DevOpsTaskSpec) -> List[SubtaskContract]:
+        """Create the IaC, CI/CD, and deployment subtask contracts for a run.
+
+        Preconditions:
+            - ``task_spec`` is not None.
+            - ``task_spec.task_id`` is a non-empty string.
+        Postconditions:
+            - Returns exactly three ``SubtaskContract`` objects owned by
+              ``InfrastructureAsCodeAgent``, ``CICDPipelineAgent``, and
+              ``DeploymentStrategyAgent`` respectively.
+        """
+        assert task_spec is not None, "task_spec is required"
+        assert isinstance(task_spec.task_id, str) and task_spec.task_id, (
+            "task_spec.task_id must be a non-empty string"
+        )
         return [
             SubtaskContract(
                 subtask_id=f"{task_spec.task_id}-T1",
@@ -388,12 +759,34 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         Invariants:
             - The method does not mutate ``task_spec``.
         """
+        assert task_spec is not None, "task_spec is required"
+        assert task_spec.platform_scope is not None, "task_spec.platform_scope must be set"
+        assert task_spec.scope is not None, "task_spec.scope must be set"
+        assert task_spec.platform_scope.environments is not None, (
+            "task_spec.platform_scope.environments must be set"
+        )
+        assert not isinstance(task_spec.platform_scope.environments, str), (
+            "task_spec.platform_scope.environments must be a collection, not a string"
+        )
+        assert hasattr(task_spec.platform_scope.environments, "__iter__"), (
+            "task_spec.platform_scope.environments must be iterable"
+        )
+        assert all(isinstance(env, str) for env in task_spec.platform_scope.environments), (
+            "task_spec.platform_scope.environments must be an iterable of strings"
+        )
+        assert task_spec.scope.included is not None, "task_spec.scope.included must be set"
+        assert not isinstance(task_spec.scope.included, str), (
+            "task_spec.scope.included must be an iterable of strings, not a single string"
+        )
+        assert all(isinstance(item, str) for item in task_spec.scope.included), (
+            "task_spec.scope.included must be an iterable of strings"
+        )
         for env in task_spec.platform_scope.environments:
             policy = ENV_POLICY.get(env)
             if policy is None:
                 continue
             if policy["approval_required"] and not any(
-                "approval" in item.lower() for item in task_spec.scope.included
+                _scope_item_mentions_approval(item) for item in task_spec.scope.included
             ):
                 return (
                     f"Environment '{env}' requires explicit approval gate but none found in scope"
@@ -425,7 +818,25 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         LLM-planning contract, and this team's phases (env-policy gating,
         3-way parallel design fan-out, a debug-patch retry loop, gate-name
         tracking) don't share that shape.
+
+        Preconditions:
+            - ``task_spec`` is a valid ``DevOpsTaskSpec`` with a non-empty ``task_id``.
+            - ``repo_path`` is a ``Path`` (need not exist when ``write_changes=False``).
+        Postconditions:
+            - On success: returns a ``DevOpsTeamResult`` with ``success=True`` and
+              ``completion_package`` set; ``completion_package`` is never ``None``.
+            - On any phase failure: returns a ``DevOpsTeamResult`` with
+              ``success=False`` and ``failure_reason`` set.
+            - Raises ``RuntimeError`` if Phase 5 returns without assigning the
+              completion package (internal contract violation).
+        Invariants:
+            - ``task_spec`` is not mutated by this method or its phase closures.
         """
+        assert isinstance(repo_path, Path), "repo_path must be a pathlib.Path"
+        assert isinstance(task_spec, DevOpsTaskSpec), "task_spec must be a DevOpsTaskSpec"
+        assert isinstance(task_spec.task_id, str) and task_spec.task_id, (
+            "task_spec.task_id must be a non-empty string"
+        )
         self._report_status(
             "start",
             detail=f"DevOps team pipeline: starting task {task_spec.task_id}",
@@ -603,7 +1014,8 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         if early_exit is not None:
             return early_exit
 
-        assert completion is not None  # phase 5 success path always assigns it
+        if completion is None:
+            raise RuntimeError("Phase 5 did not assign a completion package")
         return DevOpsTeamResult(
             success=True, iterations=infra_fix_iterations, completion_package=completion
         )

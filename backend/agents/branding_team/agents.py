@@ -1,7 +1,7 @@
 """Agent factory functions for the branding team Strands SDK pipeline.
 
 Each function returns a configured ``strands.Agent`` instance for use as a
-node in a ``GraphBuilder`` graph or ``Swarm``.  Agents are grouped by phase.
+node in a ``GraphBuilder`` graph.  Agents are grouped by phase.
 
 ``BrandComplianceAgent`` is the only non-Strands class; it runs
 outside the graph as a post-processing utility.
@@ -24,13 +24,23 @@ from .models import (
     BrandDiscoveryAuditOutput,
     BrandingMission,
     BrandStoryOutput,
+    ColorPaletteSystemOutput,
     CoreValuesOutput,
+    CreativeRefinementDecisionOutput,
+    DesignSystemDefinitionOutput,
     DifferentiationPillarsOutput,
+    IconographyOutput,
+    LogoSuiteOutput,
     MessagingFrameworkOutput,
+    MoodBoardCandidatesOutput,
+    MoodBoardConceptOutput,
     PersonaProfilesOutput,
+    PhotographyVideoOutput,
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    TypographySystemOutput,
+    VoiceToneOutput,
     WritingGuidelinesOutput,
 )
 
@@ -40,6 +50,13 @@ from .models import (
 
 
 def make_discovery_auditor() -> Agent:
+    """Build the Phase 1 Discovery Auditor agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``discovery_auditor`` whose structured
+        output is a ``BrandDiscoveryAuditOutput`` covering current brand
+        perception, market position, SWOT, and stakeholder insights.
+    """
     return build_agent(
         name="discovery_auditor",
         description="Analyses current brand perception, SWOT, and stakeholder insights.",
@@ -54,6 +71,13 @@ def make_discovery_auditor() -> Agent:
 
 
 def make_purpose_vision_writer() -> Agent:
+    """Build the Phase 1 Purpose & Vision Writer agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``purpose_vision_writer`` whose
+        structured output is a ``PurposeVisionOutput`` containing the
+        brand purpose, mission statement, and vision statement.
+    """
     return build_agent(
         name="purpose_vision_writer",
         description="Crafts brand purpose, mission statement, and vision statement.",
@@ -69,6 +93,13 @@ def make_purpose_vision_writer() -> Agent:
 
 
 def make_values_articulator() -> Agent:
+    """Build the Phase 1 Values Articulator agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``values_articulator`` whose structured
+        output is a ``CoreValuesOutput`` listing 3-5 core values, each with
+        a behavioral definition and observable behaviors.
+    """
     return build_agent(
         name="values_articulator",
         description="Defines core values with behavioral definitions and observable behaviors.",
@@ -84,6 +115,13 @@ def make_values_articulator() -> Agent:
 
 
 def make_audience_segmenter() -> Agent:
+    """Build the Phase 1 Audience Segmenter agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``audience_segmenter`` whose structured
+        output is an ``AudienceSegmentsOutput`` describing 1-3 target
+        audience segments with pain points, goals, and decision drivers.
+    """
     return build_agent(
         name="audience_segmenter",
         description="Segments target audience with psychographic depth.",
@@ -98,6 +136,14 @@ def make_audience_segmenter() -> Agent:
 
 
 def make_differentiation_mapper() -> Agent:
+    """Build the Phase 1 Differentiation Mapper agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``differentiation_mapper`` whose
+        structured output is a ``DifferentiationPillarsOutput`` listing
+        2-4 differentiation pillars with proof points and competitive
+        context.
+    """
     return build_agent(
         name="differentiation_mapper",
         description="Maps competitive differentiation pillars with proof points.",
@@ -113,6 +159,14 @@ def make_differentiation_mapper() -> Agent:
 
 
 def make_positioning_synthesizer() -> Agent:
+    """Build the Phase 1 Positioning Synthesizer agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``positioning_synthesizer`` whose
+        structured output is a ``PositioningOutput`` synthesizing the
+        other Phase 1 fragments into a positioning statement and brand
+        promise.
+    """
     return build_agent(
         name="positioning_synthesizer",
         description="Synthesises all Phase 1 fragments into positioning statement and brand promise.",
@@ -135,6 +189,13 @@ def make_positioning_synthesizer() -> Agent:
 
 
 def make_storyteller() -> Agent:
+    """Build the Phase 2 Storyteller agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``Storyteller`` whose structured output
+        is a ``BrandStoryOutput`` containing the brand story, hero
+        narrative, and boilerplate variants.
+    """
     return build_agent(
         name="Storyteller",
         description="Crafts the brand story, hero narrative, and boilerplate variants.",
@@ -150,6 +211,14 @@ def make_storyteller() -> Agent:
 
 
 def make_archetype_analyst() -> Agent:
+    """Build the Phase 2 Archetype Analyst agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``ArchetypeAnalyst`` whose structured
+        output is a ``BrandArchetypesOutput`` selecting 1-2 brand
+        archetypes with rationale and personality traits, carrying
+        forward the prior narrative fields unchanged.
+    """
     return build_agent(
         name="ArchetypeAnalyst",
         description="Selects brand archetypes with rationale and personality traits.",
@@ -167,6 +236,13 @@ def make_archetype_analyst() -> Agent:
 
 
 def make_tagline_writer() -> Agent:
+    """Build the Phase 2 Tagline Writer agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``TaglineWriter`` whose structured
+        output is a ``TaglineOutput`` adding a tagline, tagline
+        rationale, and elevator pitches to the prior narrative fields.
+    """
     return build_agent(
         name="TaglineWriter",
         description="Creates tagline, tagline rationale, and elevator pitches.",
@@ -185,6 +261,14 @@ def make_tagline_writer() -> Agent:
 
 
 def make_message_mapper() -> Agent:
+    """Build the Phase 2 Message Mapper agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``MessageMapper`` whose structured
+        output is a ``MessagingFrameworkOutput`` adding a messaging
+        framework and per-segment audience message maps to the prior
+        narrative fields.
+    """
     return build_agent(
         name="MessageMapper",
         description="Builds messaging framework pillars and audience message maps.",
@@ -201,6 +285,13 @@ def make_message_mapper() -> Agent:
 
 
 def make_persona_builder() -> Agent:
+    """Build the Phase 2 Persona Builder agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``PersonaBuilder`` whose structured
+        output is a ``PersonaProfilesOutput`` adding 2-3 persona profiles
+        to the prior narrative fields.
+    """
     return build_agent(
         name="PersonaBuilder",
         description="Creates rich persona profiles with psychographic depth.",
@@ -215,6 +306,14 @@ def make_persona_builder() -> Agent:
 
 
 def make_voice_principles_drafter() -> Agent:
+    """Build the Phase 2 Voice Principles Drafter agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``VoicePrinciplesDrafter`` whose
+        structured output is a ``WritingGuidelinesOutput`` adding voice
+        principles, style dos/don'ts, and an editorial quality bar to the
+        prior narrative fields — the final step in narrative development.
+    """
     return build_agent(
         name="VoicePrinciplesDrafter",
         description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
@@ -233,29 +332,53 @@ def make_voice_principles_drafter() -> Agent:
 
 
 # ===================================================================
-# Phase 3 — Visual & Expressive Identity  (Graph-of-Swarm)
+# Phase 3 — Visual & Expressive Identity  (Graph: diverge fan-out + converge fan-out)
 # ===================================================================
 
-# --- Diverge Swarm agents ---
+# --- Diverge fan-out agents ---
 
 
 def make_creative_director() -> Agent:
+    """Build the Phase 3 Creative Director agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``CreativeDirector`` that collects the
+        moodboard concepts produced by the ``MoodBoardConceptualist_*``
+        Graph fan-out nodes into a unified ``MoodBoardCandidatesOutput``
+        list, preserving each concept's title, visual_direction,
+        color_story, typography_direction, and image_style. The agent does
+        not select a winner; ``converge_decider`` scores the candidates
+        and selects the winning direction.
+    """
     return build_agent(
         name="CreativeDirector",
-        description="Coordinates moodboard ideation, dispatches conceptualists, reviews candidates.",
+        description="Collects moodboard candidates from conceptualists into a unified list.",
         system_prompt=(
-            "You are a Creative Director leading visual identity exploration. Your job:\n"
-            "1. Brief each MoodBoardConceptualist with a distinct visual direction\n"
-            "2. Review their candidate moodboards\n"
-            "3. Request revisions if needed\n"
-            "4. Ensure at least 2-3 distinct candidates are produced\n\n"
-            "Hand off to each conceptualist in turn. Once all candidates are collected, "
-            "summarise the candidates and conclude."
+            "You are a Creative Director reviewing visual identity exploration. Using the three "
+            "moodboard concepts from Inputs from previous nodes, collect them into "
+            "mood_board_candidates. Preserve each concept (title, visual_direction, color_story, "
+            "typography_direction, image_style). Do not pick a winner — converge_decider selects "
+            "the winning direction."
         ),
+        structured_output=MoodBoardCandidatesOutput,
     )
 
 
 def make_moodboard_conceptualist(variant: str) -> Agent:
+    """Build a Phase 3 MoodBoard Conceptualist agent for one visual direction.
+
+    Preconditions:
+        ``variant`` is a non-empty string naming a visual direction
+        (e.g. ``"Minimalist"``).
+
+    Postconditions:
+        Returns an ``Agent`` named ``MoodBoardConceptualist_{variant}``
+        whose prompt is specialized to ``variant`` and whose output is a
+        moodboard concept (title, visual direction, color story,
+        typography direction, image style) for the ``CreativeDirector``
+        node in the Phase 3 Graph.
+    """
+    assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
     return build_agent(
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
@@ -267,16 +390,24 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
             f"- visual_direction: overall aesthetic description\n"
             f"- color_story: 3-4 color names/descriptions\n"
             f"- typography_direction: font style recommendations\n"
-            f"- image_style: 3-4 image style descriptions\n\n"
-            f"Hand back to the CreativeDirector when done."
+            f"- image_style: 3-4 image style descriptions"
         ),
+        structured_output=MoodBoardConceptOutput,
     )
 
 
-# --- Post-swarm Graph nodes ---
+# --- Post-diverge Graph nodes ---
 
 
 def make_converge_decider() -> Agent:
+    """Build the Phase 3 Converge Decider agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``converge_decider`` that scores the
+        diverge-phase moodboard candidates against audience resonance,
+        distinctiveness, cross-channel consistency, and feasibility, and
+        selects a winning candidate.
+    """
     return build_agent(
         name="converge_decider",
         description="Scores moodboard candidates and selects a winner.",
@@ -287,27 +418,43 @@ def make_converge_decider() -> Agent:
             "- Distinctiveness vs competitors\n"
             "- Cross-channel consistency\n"
             "- Execution feasibility\n\n"
-            "Output: winning_candidate_title, scoring_criteria, scores_by_candidate (dict of "
+            "Produce: winning_candidate_title, scoring_criteria, scores_by_candidate (dict of "
             "title→score), rationale, workshop_prompts (3 questions for stakeholders), and "
             "decision_criteria used."
         ),
+        structured_output=CreativeRefinementDecisionOutput,
     )
 
 
 def make_logo_specifier() -> Agent:
+    """Build the Phase 3 Logo Specifier agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``logo_specifier`` whose output
+        defines the logo suite (primary, monochrome, icon-only,
+        reversed variants) with usage rules for the winning moodboard
+        direction.
+    """
     return build_agent(
         name="logo_specifier",
         description="Defines logo suite with usage rules.",
         system_prompt=(
             "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
             "suite. For each variant (primary, monochrome, icon-only, reversed), specify:\n"
-            "- variant, usage_context, minimum_size, clear_space\n"
-            "Output valid JSON as a list of LogoUsageRule objects."
+            "- variant, usage_context, minimum_size, clear_space"
         ),
+        structured_output=LogoSuiteOutput,
     )
 
 
 def make_color_system_builder() -> Agent:
+    """Build the Phase 3 Color System Builder agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``color_system_builder`` whose output
+        defines 5-7 brand colors with hex values, usage, and
+        psychological rationale for the winning moodboard direction.
+    """
     return build_agent(
         name="color_system_builder",
         description="Builds the brand color palette with psychological rationale.",
@@ -315,39 +462,60 @@ def make_color_system_builder() -> Agent:
             "You are a Color System Builder. Based on the winning moodboard direction, define "
             "5-7 colors. For each: name, hex_value, usage (where to use it), and "
             "psychological_rationale (why this color works for the brand). Include primary, "
-            "secondary, accent, surface, and critical colors. Output valid JSON as a list of "
-            "ColorEntry objects."
+            "secondary, accent, surface, and critical colors."
         ),
+        structured_output=ColorPaletteSystemOutput,
     )
 
 
 def make_typography_builder() -> Agent:
+    """Build the Phase 3 Typography Builder agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``typography_builder`` whose output
+        defines a typography system of 3-4 type roles for the winning
+        moodboard direction.
+    """
     return build_agent(
         name="typography_builder",
         description="Defines the typography system.",
         system_prompt=(
             "You are a Typography Builder. Based on the winning moodboard direction, define a "
             "typography system with 3-4 type roles (display, body, caption, code). For each:\n"
-            "- role, font_family, weight_range, usage_notes\n"
-            "Output valid JSON as a list of TypographySpec objects."
+            "- role, font_family, weight_range, usage_notes"
         ),
+        structured_output=TypographySystemOutput,
     )
 
 
 def make_iconography_director() -> Agent:
+    """Build the Phase 3 Iconography Director agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``iconography_director`` whose output
+        defines the iconography and illustration style for the winning
+        moodboard direction.
+    """
     return build_agent(
         name="iconography_director",
         description="Defines iconography and illustration style.",
         system_prompt=(
             "You are an Iconography Director. Based on the winning moodboard, define:\n"
             "1. iconography_style — describe the icon aesthetic (line weight, corner radius, fill)\n"
-            "2. illustration_style — describe the illustration approach (flat, isometric, etc.)\n"
-            "Output valid JSON with these two keys."
+            "2. illustration_style — describe the illustration approach (flat, isometric, etc.)"
         ),
+        structured_output=IconographyOutput,
     )
 
 
 def make_photography_video_director() -> Agent:
+    """Build the Phase 3 Photography & Video Director agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``photography_video_director`` whose
+        output defines photography direction, video direction, and
+        motion principles for the winning moodboard direction.
+    """
     return build_agent(
         name="photography_video_director",
         description="Defines photography direction, video direction, and motion principles.",
@@ -355,13 +523,21 @@ def make_photography_video_director() -> Agent:
             "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
             "1. photography_direction — shooting style, lighting, composition, subjects\n"
             "2. video_direction — pacing, tone, visual style for video content\n"
-            "3. motion_principles — 3-4 principles for animation/motion design\n"
-            "Output valid JSON with these three keys."
+            "3. motion_principles — 3-4 principles for animation/motion design"
         ),
+        structured_output=PhotographyVideoOutput,
     )
 
 
 def make_voice_tone_builder() -> Agent:
+    """Build the Phase 3 Voice & Tone Builder agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``voice_tone_builder`` whose output
+        defines the voice/tone spectrum and language dos/don'ts, drawing
+        on the brand narrative's writing guidelines and the moodboard
+        direction.
+    """
     return build_agent(
         name="voice_tone_builder",
         description="Defines voice/tone spectrum and language dos/donts.",
@@ -371,13 +547,20 @@ def make_voice_tone_builder() -> Agent:
             "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
             "internal), specify the tone and 2-3 examples\n"
             "2. language_dos — 4-5 approved language patterns\n"
-            "3. language_donts — 4-5 language anti-patterns\n"
-            "Output valid JSON with these three keys."
+            "3. language_donts — 4-5 language anti-patterns"
         ),
+        structured_output=VoiceToneOutput,
     )
 
 
 def make_design_system_codifier() -> Agent:
+    """Build the Phase 3 Design System Codifier agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``design_system_codifier`` whose
+        output codifies design principles, foundation tokens, and
+        component standards from the full visual identity work.
+    """
     return build_agent(
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
@@ -385,9 +568,9 @@ def make_design_system_codifier() -> Agent:
             "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
             "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
             "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
-            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)\n"
-            "Output valid JSON matching the DesignSystemDefinition schema."
+            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
         ),
+        structured_output=DesignSystemDefinitionOutput,
     )
 
 
@@ -397,6 +580,13 @@ def make_design_system_codifier() -> Agent:
 
 
 def make_brand_experience_principler() -> Agent:
+    """Build the Phase 4 Brand Experience Architect agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``brand_experience_principler`` whose
+        output defines brand experience principles, signature customer
+        journey moments, and sensory elements.
+    """
     return build_agent(
         name="brand_experience_principler",
         description="Defines brand experience principles, signature moments, and sensory elements.",
@@ -405,13 +595,29 @@ def make_brand_experience_principler() -> Agent:
             "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
             "2. signature_moments — 3-5 key moments in the customer journey that should feel "
             "distinctly on-brand\n"
-            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable\n"
-            "Output valid JSON with these three keys."
+            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
         ),
     )
 
 
 def _make_channel_guide(channel: str, description: str) -> Agent:
+    """Build a channel-specific brand guidelines agent.
+
+    Preconditions:
+        ``channel`` and ``description`` are non-empty strings; ``channel``
+        is a lowercase identifier suitable for use in an agent name
+        (e.g. ``"website"``).
+
+    Postconditions:
+        Returns an ``Agent`` named ``f"{channel}_guide"`` whose prompt
+        embeds ``channel`` and ``description`` and whose output defines
+        that channel's strategy, dos/don'ts, content types, and
+        cadence.
+    """
+    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
+    assert isinstance(description, str) and description.strip(), (
+        "description must be a non-empty string"
+    )
     return build_agent(
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",
@@ -424,37 +630,79 @@ def _make_channel_guide(channel: str, description: str) -> Agent:
             f"- donts: 3-4 things to avoid\n"
             f"- content_types: 3-5 recommended content formats\n"
             f"- frequency_guidance: recommended cadence\n"
-            f"Context: {description}\n"
-            f"Output valid JSON matching the ChannelGuideline schema."
+            f"Context: {description}"
         ),
     )
 
 
 def make_website_guide() -> Agent:
+    """Build the Phase 4 website channel guide agent.
+
+    Postconditions:
+        Returns ``_make_channel_guide("website", ...)`` — see that
+        function's contract.
+    """
     return _make_channel_guide("website", "Company website, landing pages, product pages.")
 
 
 def make_social_guide() -> Agent:
+    """Build the Phase 4 social media channel guide agent.
+
+    Postconditions:
+        Returns ``_make_channel_guide("social", ...)`` — see that
+        function's contract.
+    """
     return _make_channel_guide("social", "Social media platforms (LinkedIn, Twitter, Instagram).")
 
 
 def make_email_guide() -> Agent:
+    """Build the Phase 4 email channel guide agent.
+
+    Postconditions:
+        Returns ``_make_channel_guide("email", ...)`` — see that
+        function's contract.
+    """
     return _make_channel_guide("email", "Email marketing, newsletters, transactional emails.")
 
 
 def make_events_guide() -> Agent:
+    """Build the Phase 4 events channel guide agent.
+
+    Postconditions:
+        Returns ``_make_channel_guide("events", ...)`` — see that
+        function's contract.
+    """
     return _make_channel_guide("events", "Conferences, webinars, meetups, trade shows.")
 
 
 def make_partnerships_guide() -> Agent:
+    """Build the Phase 4 partnerships channel guide agent.
+
+    Postconditions:
+        Returns ``_make_channel_guide("partnerships", ...)`` — see that
+        function's contract.
+    """
     return _make_channel_guide("partnerships", "Co-branding, sponsorships, partner marketing.")
 
 
 def make_internal_guide() -> Agent:
+    """Build the Phase 4 internal comms channel guide agent.
+
+    Postconditions:
+        Returns ``_make_channel_guide("internal", ...)`` — see that
+        function's contract.
+    """
     return _make_channel_guide("internal", "Internal comms, employee branding, onboarding.")
 
 
 def make_brand_architecture_builder() -> Agent:
+    """Build the Phase 4 Brand Architecture Specialist agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``brand_architecture_builder`` whose
+        output defines brand architecture rules, naming conventions,
+        and a terminology glossary.
+    """
     return build_agent(
         name="brand_architecture_builder",
         description="Defines brand architecture rules, naming conventions, and terminology.",
@@ -470,6 +718,12 @@ def make_brand_architecture_builder() -> Agent:
 
 
 def make_brand_in_action_illustrator() -> Agent:
+    """Build the Phase 4 Brand-in-Action Illustrator agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``brand_in_action_illustrator`` whose
+        output produces 3-5 correct-vs-incorrect brand usage examples.
+    """
     return build_agent(
         name="brand_in_action_illustrator",
         description="Creates brand-in-action do/don't examples.",
@@ -491,6 +745,13 @@ def make_brand_in_action_illustrator() -> Agent:
 
 
 def make_ownership_definer() -> Agent:
+    """Build the Phase 5 Brand Ownership Definer agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``ownership_definer`` whose output
+        defines the brand ownership model and a decision authority
+        matrix.
+    """
     return build_agent(
         name="ownership_definer",
         description="Defines brand ownership model and decision authority matrix.",
@@ -505,6 +766,13 @@ def make_ownership_definer() -> Agent:
 
 
 def make_approval_workflow_designer() -> Agent:
+    """Build the Phase 5 Approval Workflow Designer agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``approval_workflow_designer`` whose
+        output defines approval workflows and agency briefing
+        protocols.
+    """
     return build_agent(
         name="approval_workflow_designer",
         description="Designs approval workflows and agency briefing protocols.",
@@ -519,6 +787,12 @@ def make_approval_workflow_designer() -> Agent:
 
 
 def make_asset_wiki_planner() -> Agent:
+    """Build the Phase 5 Asset & Wiki Planner agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``asset_wiki_planner`` whose output
+        defines asset management guidance and the brand wiki backlog.
+    """
     return build_agent(
         name="asset_wiki_planner",
         description="Plans asset management and brand wiki backlog.",
@@ -534,6 +808,12 @@ def make_asset_wiki_planner() -> Agent:
 
 
 def make_training_planner() -> Agent:
+    """Build the Phase 5 Training Planner agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``training_planner`` whose output
+        defines the brand training and onboarding plan.
+    """
     return build_agent(
         name="training_planner",
         description="Plans brand training and onboarding programmes.",
@@ -547,6 +827,13 @@ def make_training_planner() -> Agent:
 
 
 def make_kpi_designer() -> Agent:
+    """Build the Phase 5 Brand KPI Designer agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``kpi_designer`` whose output defines
+        brand health KPIs, tracking methodology, and review trigger
+        points.
+    """
     return build_agent(
         name="kpi_designer",
         description="Designs brand health KPIs with tracking methodology.",
@@ -562,6 +849,13 @@ def make_kpi_designer() -> Agent:
 
 
 def make_evolution_framer() -> Agent:
+    """Build the Phase 5 Brand Evolution Framer agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``evolution_framer`` whose output
+        defines the brand evolution framework and version control
+        cadence.
+    """
     return build_agent(
         name="evolution_framer",
         description="Defines the brand evolution framework and version control cadence.",
@@ -576,6 +870,12 @@ def make_evolution_framer() -> Agent:
 
 
 def make_brand_rules_codifier() -> Agent:
+    """Build the Phase 5 Brand Rules Codifier agent.
+
+    Postconditions:
+        Returns an ``Agent`` named ``brand_rules_codifier`` whose output
+        codifies 5-8 top-level brand governance rules.
+    """
     return build_agent(
         name="brand_rules_codifier",
         description="Codifies top-level brand governance rules.",

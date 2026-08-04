@@ -252,7 +252,6 @@ def finalize_branding_activity(
     from branding_team.orchestrator import orchestrator
     from branding_team.shared.job_store import mark_completed
     from branding_team.store import get_default_store
-    from branding_team.temporal.constants import stop_index
     from shared.temporal import load_checkpoint, save_checkpoint
 
     branding_store = get_default_store()
@@ -262,8 +261,6 @@ def finalize_branding_activity(
     brand_checks = [BrandCheckRequest(**c) for c in payload.get("brand_checks") or []]
     client_id = payload.get("client_id")
     brand_id = payload.get("brand_id")
-
-    stop_idx = stop_index(payload.get("target_phase"))
 
     # The keys below are BrandPhase value strings — the same keys the workflow
     # accumulates in prior_outputs (from PHASE_SEQUENCE) and passes here as
@@ -302,7 +299,6 @@ def finalize_branding_activity(
         checks=checks,
         competitive_snapshot=snapshot,
         design_asset_result=design_result,
-        stop_idx=stop_idx,
         degraded_phases=degraded_phases,
     )
 

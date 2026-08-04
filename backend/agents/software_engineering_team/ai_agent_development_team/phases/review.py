@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
+from ..constants import ARTIFACT_GATE_DESCRIPTION_PREFIX, REQUIRED_ARTIFACT_HINTS
 from ..models import ExecutionResult, MicrotaskStatus, ReviewIssue, ReviewResult
-
-REQUIRED_ARTIFACT_HINTS = ("blueprint", "evaluation", "safety", "runbook", "mcp")
-ARTIFACT_GATE_DESCRIPTION_PREFIX = "Missing expected artifact category: "
 
 
 def _artifact_gate_issue(hint: str) -> ReviewIssue:
@@ -38,10 +36,9 @@ def run_review(*, execution_result: ExecutionResult) -> ReviewResult:
       sourced issue was raised. Does not mutate ``execution_result``.
     """
     issues = []
-    file_names = "\n".join(execution_result.files.keys()).lower()
 
     for hint in REQUIRED_ARTIFACT_HINTS:
-        if hint not in file_names:
+        if not any(hint in name.lower() for name in execution_result.files):
             issues.append(_artifact_gate_issue(hint))
 
     failed_microtasks = [

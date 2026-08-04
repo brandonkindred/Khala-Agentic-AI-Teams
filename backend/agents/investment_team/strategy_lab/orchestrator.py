@@ -25,16 +25,21 @@ extraction of one cohesive pipeline cluster:
   shared by this file and all five mixins above; nothing in it depends on
   ``StrategyLabOrchestrator`` or any mixin.
 
-This file keeps ``StrategyLabOrchestrator.__init__``, the cross-cluster glue
-methods that call into more than one mixin
-(``_orchestrate_refinement_and_alignment``,
-``_orchestrate_verification_and_analysis``,
-``_extract_findings_and_assemble_record``), and whatever else each mixin's
-own module docstring lists as staying on the base class. Every extracted
-module re-exports, in a labeled block near the end of this file, any
-module-level symbol external callers historically imported via
-``investment_team.strategy_lab.orchestrator`` — check those blocks (and the
-mixin's module docstring) before assuming a symbol lives here.
+This file keeps ``StrategyLabOrchestrator.__init__``, ``run_cycle`` (the
+pipeline entrypoint), and any helper consumed by two or more mixins (market
+data fetch, refinement/alignment merge helpers, benchmark/regime
+calculations), plus whatever else each mixin's own module docstring lists
+as staying on the base class. Every extracted module re-exports, in a
+labeled block near the end of this file, any module-level symbol external
+callers historically imported via ``investment_team.strategy_lab.orchestrator``
+— check those blocks (and the mixin's module docstring) before assuming a
+symbol lives here.
+
+Per-design-attempt cross-cluster orchestration lives in
+``orchestrator_design.py``'s ``_orchestrate_refinement_and_alignment`` /
+``_orchestrate_verification_and_analysis`` / ``_extract_findings_and_assemble_record``
+— moved there because their sole caller, ``_run_design_attempt``, already
+lives in that cluster. See ``MIXIN_BOUNDARIES.md`` for the full audit.
 """
 
 from __future__ import annotations
@@ -90,7 +95,6 @@ from .agents._llm_budget import (
 )
 from .agents.alignment import (
     AlignmentAuditError,
-    AlignmentIssue,
     TradeAlignmentAgent,
     TradeAlignmentReport,
     findings_to_issues,
@@ -118,7 +122,7 @@ from .orchestrator_design import DesignMixin
 from .orchestrator_record_assembly import RecordAssemblyMixin
 from .orchestrator_synthesis import SynthesisMixin
 from .orchestrator_verification import VerificationMixin
-from .phases import Phase, hash_code, hash_metrics_and_trades
+from .phases import hash_code, hash_metrics_and_trades
 from .quality_gates.acceptance_gate import AcceptanceGate
 from .quality_gates.alignment_checks import DeterministicAlignmentChecker
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
@@ -211,50 +215,6 @@ MAX_CODE_REFINEMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS", 
 # block. The model already trims to 20; 10 is enough signal for the LLM to
 # spot the failure pattern while keeping the JSON line under ~1 KB.
 _DIAGNOSTICS_LAST_EVENTS_CAP = 10
-
-
-def _resolve_alignment_report_for_analysis(
-    alignment_reports: List[TradeAlignmentReport],
-    *,
-    exit_rule_conformance_passed: bool,
-) -> Optional[TradeAlignmentReport]:
-    """Pick the alignment report fed into the analysis prompts.
-
-    Returns the most recent report from the alignment loop unless the
-    deterministic ``ExitRuleConformanceGate`` then vetoed publication after
-    the LLM audit had cleared the run — in which case a synthetic
-    misaligned report is substituted so the analysis prompt can't narrate
-    "audit clean" over the conformance veto (#532).
-
-    Returns ``None`` when the alignment loop never ran (no reports).
-    """
-    if not alignment_reports:
-        return None
-    latest = alignment_reports[-1]
-    if latest.aligned and not exit_rule_conformance_passed:
-        return TradeAlignmentReport(
-            aligned=False,
-            rationale=(
-                "ExitRuleConformanceGate vetoed publication: the LLM "
-                "alignment audit returned aligned=True, but the "
-                "deterministic conformance check then flagged "
-                "engine-enforced exit-rule violations in the final ledger "
-                "that the audit had missed."
-            ),
-            issues=[
-                AlignmentIssue(
-                    rule_type="exit_rules",
-                    severity="critical",
-                    description=(
-                        "ExitRuleConformanceGate failed: structured exit "
-                        "rules did not fire as required on at least one "
-                        "trade. Treat the executed trades as not a valid "
-                        "test of the spec."
-                    ),
-                )
-            ],
-        )
-    return latest
 
 
 class StrategyLabOrchestrator(
@@ -953,338 +913,6 @@ class StrategyLabOrchestrator(
             config=config,
         )
 
-    def _orchestrate_refinement_and_alignment(
-        self,
-        *,
-        spec: StrategySpec,
-        code: str,
-        config: BacktestConfig,
-        original_spec: StrategySpec,
-        original_code: str,
-        rationale: str,
-        all_gate_results: List[QualityGateResult],
-        refinement_attempts: List[str],
-        zero_trade_attempts: List[str],
-        emit: PhaseCallback,
-        design_attempt: int,
-        phase_back_count: int,
-        drift_collector: _DriftCollector,
-        design_context: _DesignPersistContext,
-    ) -> _RefinementAlignmentResult:
-        """Run pre-synthesis gating, the refinement loop, and trade alignment.
-
-        Pre: ``code`` is the freshly synthesized strategy code; the running
-        lists (``all_gate_results`` / ``refinement_attempts`` /
-        ``zero_trade_attempts``) are mutated in place by the sub-loops.
-        Post: returns a ``_RefinementAlignmentResult``. A critical pre-synthesis
-        spec failure short-circuits via ``record`` (caller returns it).
-        Otherwise ``record`` is ``None`` and the returned ``synthesis`` /
-        ``alignment`` bundles carry every downstream field. Emits the
-        CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION boundary and the
-        backtest-cache telemetry.
-        Raises: ``SpecImplementabilityError`` (from the refinement loop) with
-        this attempt's ``design_context`` attached when the raiser left it unset.
-        """
-        # ── Phase 1b: PRE-SYNTHESIS SPEC GATING (#547 item 1) ─────────
-        # Validate the ideation-time spec ONCE before entering the
-        # refinement loop. Refinement is code-only post-#547 item 2, so
-        # the spec cannot drift between rounds; revalidating per round
-        # was redundant. A critical SPEC failure here short-circuits the
-        # cycle without ever calling run_strategy_code or fetching
-        # market data.
-        #
-        # The "strategy_code is missing" critical is excluded from
-        # short-circuit eligibility AND from the persisted gate history:
-        # that's a code-generation failure (ideation produced an empty /
-        # whitespace strategy_code), and the refinement loop's existing
-        # code-safety + regeneration paths are equipped to repair it.
-        # Short-circuiting on that critical would regress a previously-
-        # recoverable case into an outright failure; persisting it would
-        # leave a permanently-unresolved critical on the record (the
-        # generic refinement loop never re-runs StrategySpecValidator),
-        # which would also reach convergence_tracker.record() as an
-        # unresolved spec failure.
-        pre_synthesis = self._run_pre_synthesis_phase(
-            spec=spec,
-            config=config,
-            all_gate_results=all_gate_results,
-            code=code,
-            original_spec=original_spec,
-            original_code=original_code,
-            rationale=rationale,
-            refinement_attempts=refinement_attempts,
-            emit=emit,
-            phase_back_count=phase_back_count,
-            drift_collector=drift_collector,
-            design_context=design_context,
-        )
-        if pre_synthesis is not None:
-            return _RefinementAlignmentResult(record=pre_synthesis)
-
-        # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
-        # ``_run_synthesis_loop`` iterates up to ``MAX_CODE_REFINEMENT_ROUNDS``
-        # rounds of (validate → fetch → execute → trade-collect → evaluate)
-        # and either converges (``execution_succeeded=True``) or
-        # short-circuits with ``max_rounds_exhausted`` / a fatal-fetch flag.
-        # The loop appends to ``all_gate_results``, ``refinement_attempts``,
-        # and ``zero_trade_attempts`` in-place; the returned outcome carries
-        # the final spec/code/trades/metrics + universe audit.
-        try:
-            synthesis = self._run_synthesis_loop(
-                spec=spec,
-                code=code,
-                config=config,
-                all_gate_results=all_gate_results,
-                refinement_attempts=refinement_attempts,
-                zero_trade_attempts=zero_trade_attempts,
-                emit=emit,
-                drift_collector=drift_collector,
-            )
-        except SpecImplementabilityError as exc:
-            # The synthesis refinement loop tripped re-design. Attach this
-            # attempt's design-loop telemetry to the exception (mirroring the
-            # ``drift_collector`` hand-off) so the outer re-entry-exhaustion
-            # short-circuit in ``run_cycle`` persists the generation-funnel
-            # telemetry of the design loop that actually ran, rather than an
-            # empty default. Only set when a raiser didn't already supply one.
-            if exc.design_context is None:
-                exc.design_context = design_context
-            raise
-        # Synthesis fields needed locally for the phase boundary + alignment
-        # call; the caller reads the remaining fields off the returned bundle.
-        spec = synthesis.spec
-        code = synthesis.code
-        trades = synthesis.trades
-        metrics = synthesis.metrics
-        market_data = synthesis.market_data
-        execution_succeeded = synthesis.execution_succeeded
-
-        # ═══ Phase 3 → 4 transition: CODE_SYNTHESIS → ═════════════════
-        # ═══                         BACKTEST_AND_VERIFICATION ════════
-        # Boundary invariant (AC3): synthesis advancing with
-        # ``execution_succeeded=True`` structurally requires that
-        # ``CodeConformanceGate.check`` passed in the final round (it is
-        # one of the critical gates the refinement loop must clear before
-        # executing). When synthesis short-circuits (max-rounds exhausted
-        # or fatal fetch failure), we still cross into the verification
-        # phase but the boundary event reflects the un-converged code
-        # hash and downstream gates handle the rest.
-        _emit_phase_transition(
-            emit,
-            from_phase=Phase.CODE_SYNTHESIS,
-            to_phase=Phase.BACKTEST_AND_VERIFICATION,
-            spec=spec,
-            code=code,
-            attempt=design_attempt,
-        )
-
-        # ── Phase 2.5: TRADE ALIGNMENT LOOP ───────────────────────────
-        alignment_outcome = self._run_trade_alignment_loop(
-            spec=spec,
-            code=code,
-            trades=trades,
-            metrics=metrics,
-            market_data=market_data,
-            config=config,
-            execution_succeeded=execution_succeeded,
-            all_gate_results=all_gate_results,
-            emit=emit,
-            ran_on_non_conforming_code=synthesis.ran_on_non_conforming_code,
-            drift_collector=drift_collector,
-        )
-        if alignment_outcome.rejection_reason:
-            logger.info(
-                "Alignment loop for %s ended with rejection_reason=%s",
-                alignment_outcome.spec.strategy_id,
-                alignment_outcome.rejection_reason,
-            )
-
-        # Backtest-cache effectiveness for this attempt — emitted so the
-        # synthesis/alignment re-execution savings are observable post hoc.
-        _bt_cache = getattr(self, "_backtest_cache", None)
-        if _bt_cache is not None:
-            emit(
-                "telemetry",
-                {
-                    "kind": "backtest_cache",
-                    "hits": _bt_cache.hits,
-                    "misses": _bt_cache.misses,
-                },
-            )
-            logger.info(
-                "backtest_cache for %s: hits=%d misses=%d",
-                alignment_outcome.spec.strategy_id,
-                _bt_cache.hits,
-                _bt_cache.misses,
-            )
-
-        return _RefinementAlignmentResult(
-            record=None, synthesis=synthesis, alignment=alignment_outcome
-        )
-
-    def _orchestrate_verification_and_analysis(
-        self,
-        *,
-        spec: StrategySpec,
-        trades: List[TradeRecord],
-        metrics: BacktestResult,
-        market_data: Optional[Dict[str, List[OHLCVBar]]],
-        config: BacktestConfig,
-        execution_succeeded: bool,
-        trades_aligned: bool,
-        alignment_reports: List[TradeAlignmentReport],
-        all_gate_results: List[QualityGateResult],
-        runtime_lookahead_violation: bool,
-        open_position_entry_reasons: List[str],
-        refinement_attempts: List[str],
-        rationale: str,
-        emit: PhaseCallback,
-    ) -> Tuple[BacktestResult, bool, bool, Optional[str], str]:
-        """Count the trial, run verification, and generate the analysis.
-
-        Pre: the refinement + alignment loops have settled the run state.
-        Post: returns ``(metrics, is_winning, is_publishable,
-        publishability_skip_reason, narrative)``. Increments the
-        convergence trial counter (one per refinement round, plus the first),
-        runs ``_run_verification_phase`` (which mutates ``metrics`` /
-        ``all_gate_results`` and resolves ``is_winning`` / ``is_publishable``),
-        and produces the analysis narrative off the conformance-resolved
-        alignment report.
-        """
-        # ── Phase 2.6: TRIAL COUNTING (issue #247) ────────────────────
-        # Every refinement round on the same window contributes to the
-        # multiple-testing burden the Deflated Sharpe Ratio corrects for.
-        # Increment by ``len(refinement_attempts) + 1`` so the first
-        # round (which has no recorded "attempt") still counts.
-        self.convergence_tracker.increment_trials(max(1, len(refinement_attempts) + 1))
-
-        # ── Phase 2.7: WALK-FORWARD + ACCEPTANCE + CONFORMANCE + is_winning ────
-        verification = self._run_verification_phase(
-            spec=spec,
-            trades=trades,
-            metrics=metrics,
-            market_data=market_data,
-            config=config,
-            execution_succeeded=execution_succeeded,
-            trades_aligned=trades_aligned,
-            alignment_reports=alignment_reports,
-            all_gate_results=all_gate_results,
-            runtime_lookahead_violation=runtime_lookahead_violation,
-            emit=emit,
-            open_position_entry_reasons=open_position_entry_reasons,
-        )
-        metrics = verification.metrics
-        is_winning = verification.is_winning
-        is_publishable = verification.is_publishable
-        publishability_skip = verification.publishability_skip_reason
-        # The other ``_VerificationOutcome`` fields (acceptance_results,
-        # walk_forward_failed, upstream_admitted) are unused beyond this
-        # point — the verification phase already extended
-        # ``all_gate_results`` and mutated ``metrics.acceptance_reason`` to
-        # carry every downstream-visible signal. ``exit_rule_conformance_passed``
-        # is consumed inside ``_resolve_alignment_report_for_analysis`` to
-        # override the alignment report when the deterministic conformance
-        # gate vetoes a clean LLM audit (#532).
-        # ── Phase 3: ANALYSIS ─────────────────────────────────────────
-        latest_alignment_report = _resolve_alignment_report_for_analysis(
-            alignment_reports,
-            exit_rule_conformance_passed=verification.exit_rule_conformance_passed,
-        )
-        narrative = self._run_analysis_phase(
-            spec=spec,
-            metrics=metrics,
-            trades=trades,
-            rationale=rationale,
-            is_winning=is_winning,
-            execution_succeeded=execution_succeeded,
-            refinement_attempts=refinement_attempts,
-            all_gate_results=all_gate_results,
-            alignment_report=latest_alignment_report,
-            emit=emit,
-        )
-        return metrics, is_winning, is_publishable, publishability_skip, narrative
-
-    def _extract_findings_and_assemble_record(
-        self,
-        *,
-        spec: StrategySpec,
-        code: str,
-        config: BacktestConfig,
-        metrics: BacktestResult,
-        trades: List[TradeRecord],
-        narrative: str,
-        original_spec: StrategySpec,
-        original_code: str,
-        rationale: str,
-        requested_symbols: List[str],
-        fetched_symbols: List[str],
-        provider_used: Dict[str, str],
-        max_rounds_exhausted: bool,
-        refinement_stalled: bool,
-        execution_succeeded: bool,
-        is_winning: bool,
-        is_publishable: bool,
-        publishability_skip_reason: Optional[str],  # noqa: F811 — param, not the imported function
-        trades_aligned: bool,
-        refinement_attempts: List[str],
-        alignment_rounds: int,
-        all_gate_results: List[QualityGateResult],
-        ran_on_non_conforming_code: bool,
-        design_context: _DesignPersistContext,
-        alignment_reports: List[TradeAlignmentReport],
-        phase_back_count: int,
-        drift_collector: _DriftCollector,
-        emit: PhaseCallback,
-    ) -> StrategyLabRecord:
-        """Extract the final alignment findings and assemble the record.
-
-        Pre: all phases have completed; ``alignment_reports`` holds one report
-        per alignment iteration (empty when the loop never ran).
-        Post: returns the persisted ``StrategyLabRecord`` built by
-        ``_assemble_record``, carrying the last report's per-rule findings (or
-        an empty list) and ``refinement_rounds = len(refinement_attempts)``.
-        """
-        # Final-iteration per-rule findings from the deterministic
-        # alignment gate. The orchestrator's loop produces one report
-        # per iteration; the last one carries the ledger as it stood
-        # against the known-good code/trades that ``trades_aligned``
-        # was computed from. When the alignment loop never ran (no
-        # market_data, no trades) the list is empty.
-        alignment_findings: List[AlignmentFinding] = (
-            list(alignment_reports[-1].alignment_findings) if alignment_reports else []
-        )
-
-        return self._assemble_record(
-            spec=spec,
-            code=code,
-            config=config,
-            metrics=metrics,
-            trades=trades,
-            narrative=narrative,
-            original_spec=original_spec,
-            original_code=original_code,
-            rationale=rationale,
-            requested_symbols=requested_symbols,
-            fetched_symbols=fetched_symbols,
-            provider_used=provider_used,
-            max_rounds_exhausted=max_rounds_exhausted,
-            refinement_stalled=refinement_stalled,
-            execution_succeeded=execution_succeeded,
-            is_winning=is_winning,
-            is_publishable=is_publishable,
-            publishability_skip_reason=publishability_skip_reason,
-            trades_aligned=trades_aligned,
-            refinement_rounds=len(refinement_attempts),
-            alignment_rounds=alignment_rounds,
-            all_gate_results=all_gate_results,
-            emit=emit,
-            ran_on_non_conforming_code=ran_on_non_conforming_code,
-            design_context=design_context,
-            alignment_findings=alignment_findings,
-            phase_back_count=phase_back_count,
-            drift_collector=drift_collector,
-        )
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -1980,27 +1608,24 @@ class StrategyLabOrchestrator(
 # from ``investment_team.strategy_lab.orchestrator`` keep working without
 # the helpers cluttering this file.
 #
-# ``publishability_skip_reason`` shares its name with two unrelated
-# record-assembly parameters below (``publishability_skip_reason:
-# Optional[str] = None``), which trips ruff's F811 "redefinition of unused
-# import" check on those parameter definitions even though they're in a
-# different scope. Each of those two parameters carries a suppression
-# comment with the explanation.
+# ``publishability_skip_reason`` shares its name with unrelated
+# ``publishability_skip_reason: Optional[str] = None`` parameters on
+# ``_extract_findings_and_assemble_record`` (``orchestrator_design.py``) and
+# ``_assemble_record`` (``orchestrator_record_assembly.py``), which trips
+# ruff's F811 "redefinition of unused import" check on those parameter
+# definitions even though they're in a different scope and file. Each
+# carries a suppression comment with the explanation.
 # ──────────────────────────────────────────────────────────────────────────
 from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     RefinementStallTracker,
     _AlignmentLoopOutcome,
-    _AlignmentRoundOutcome,
-    _AnomalyRecoveryOutcome,
     _apply_veto_to_acceptance_reason,
     _attach_execution_diagnostics,
     _build_rule_implementation_map,
     _closes_to_equity,
     _CodeSynthesisPhaseResult,
     _daily_returns_from_trades,
-    _DesignLoopOutcome,
     _DesignPersistContext,
-    _DesignPhaseResult,
     _DriftCollector,
     _emit_phase_transition,
     _env_flag,
@@ -2013,8 +1638,6 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     _RefinementAlignmentResult,
     _resolve_vix_provider,
     _round_demoted_conformance,
-    _SynthesisEvaluateResult,
-    _SynthesisFetchResult,
     _SynthesisLoopOutcome,
     _VerificationOutcome,
     publishability_skip_reason,
@@ -2026,7 +1649,10 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
 # from ``investment_team.strategy_lab.orchestrator`` keep working without
 # the alignment-loop cluster cluttering this file.
 # ──────────────────────────────────────────────────────────────────────────
-from .orchestrator_alignment import MAX_ALIGNMENT_ROUNDS  # noqa: E402,F401  — keep at file end
+from .orchestrator_alignment import (  # noqa: E402,F401  — keep at file end
+    MAX_ALIGNMENT_ROUNDS,
+    _AlignmentRoundOutcome,
+)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Re-exports — these symbols live in :mod:`orchestrator_design`. The
@@ -2042,9 +1668,12 @@ from .orchestrator_design import (  # noqa: E402,F401  — keep at file end
     _design_loop_telemetry_summary,
     _design_review_rounds,
     _design_review_stall_rounds,
+    _DesignLoopOutcome,
+    _DesignPhaseResult,
     _emit_design_review_telemetry,
     _format_regression_notice,
     _mechanical_repair_enabled,
+    _resolve_alignment_report_for_analysis,
     _spec_readiness_signature,
     build_spec_from_dict,
 )
@@ -2057,4 +1686,15 @@ from .orchestrator_design import (  # noqa: E402,F401  — keep at file end
 # ──────────────────────────────────────────────────────────────────────────
 from .orchestrator_record_assembly import (  # noqa: E402,F401  — keep at file end
     _finalize_loop_telemetry,
+)
+
+# ──────────────────────────────────────────────────────────────────────────
+# Re-exports — these symbols live in :mod:`orchestrator_synthesis`. The
+# orchestrator module re-exports them so existing call sites that import
+# from ``investment_team.strategy_lab.orchestrator`` keep working without
+# the synthesis-loop cluster cluttering this file.
+# ──────────────────────────────────────────────────────────────────────────
+from .orchestrator_synthesis import (  # noqa: E402,F401  — keep at file end
+    _AnomalyRecoveryOutcome,
+    _SynthesisEvaluateResult,
 )

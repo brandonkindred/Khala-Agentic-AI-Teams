@@ -10,7 +10,6 @@ Usage from an implementation worker, orchestrator, or Temporal activity::
         run_build_verification,
         run_code_review,
         run_linting,
-        run_dbc_comments,
     )
     build_ok, build_err = run_build_verification(repo_path, "backend", task_id)
     review = run_code_review(code, spec, task_desc, language="python")
@@ -19,7 +18,6 @@ Usage from an implementation worker, orchestrator, or Temporal activity::
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -76,31 +74,6 @@ class BuildResult:
 class LintResult:
     passed: bool = True
     issues: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class DbcResult:
-    compliant: bool = True
-    comments_added: int = 0
-    comments_updated: int = 0
-
-
-@dataclass
-class QAResult:
-    passed: bool = True
-    bugs: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class SecurityResult:
-    passed: bool = True
-    vulnerabilities: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class AcceptanceResult:
-    accepted: bool = True
-    reasoning: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -238,181 +211,3 @@ def run_linting(
     except Exception as e:
         logger.warning("[%s] Linting tool failed: %s", task_id, e)
         return LintResult(passed=True)  # non-blocking
-
-
-# Directories pruned from the DbC-comments LLM-context file collection. Kept as
-# an explicit frozenset so the collection preserves the exact pre-refactor
-# ``rglob`` post-filter exclusion semantics (``node_modules`` / ``.git`` /
-# ``__pycache__`` / ``venv``). The win over ``rglob("*")`` is that ``os.walk``
-# prunes these in place — the traversal never descends into them — instead of
-# enumerating every entry under them and discarding after the fact, the same
-# redundant I/O the streamed repo-walk refactor removed elsewhere.
-_DBC_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "__pycache__", "venv"})
-
-# Code-file suffixes the DbC-comments agent is fed.
-_DBC_CODE_SUFFIXES = frozenset({".py", ".ts", ".js", ".java"})
-
-
-def run_dbc_comments(
-    repo_path: Path,
-    task_id: str,
-    language: str,
-    task_description: str,
-    architecture: Any = None,
-    *,
-    llm_getter: Callable[[str], Any] = _default_llm_getter,
-) -> DbcResult:
-    """Run the Design by Contract comments agent. Non-blocking on failure."""
-    try:
-        from software_engineering_team.shared.git_utils import write_files_and_commit
-        from software_engineering_team.technical_writers.dbc_comments_agent import (
-            DbcCommentsAgent,
-        )
-        from software_engineering_team.technical_writers.dbc_comments_agent.models import (
-            DbcCommentsInput,
-        )
-
-        # Streamed os.walk with in-place dir pruning so the traversal never
-        # descends into node_modules/.git/__pycache__/venv — the prior
-        # ``sorted(rglob("*"))`` materialized every entry under those subtrees
-        # before the post-filter discarded them. Sorting dirnames/filenames keeps
-        # the file order deterministic. ``is_file()`` guards against special
-        # files (fifos/sockets) that ``rglob`` would also have skipped and that
-        # would otherwise block ``read_text``. Stops once the 100k-char prompt
-        # budget is filled.
-        code_parts: list[str] = []
-        total_chars = 0
-        for dirpath, dirnames, filenames in os.walk(repo_path):
-            dirnames[:] = sorted(d for d in dirnames if d not in _DBC_EXCLUDE_DIRS)
-            for name in sorted(filenames):
-                f = Path(dirpath) / name
-                if f.suffix not in _DBC_CODE_SUFFIXES or not f.is_file():
-                    continue
-                try:
-                    content = f.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    continue
-                part = f"--- {f.relative_to(repo_path)} ---\n{content}"
-                code_parts.append(part)
-                total_chars += len(part) + 1  # +1 for the join separator
-                if total_chars >= 100_000:
-                    break
-            if total_chars >= 100_000:
-                break
-        code = "\n".join(code_parts)[:100_000]
-        if not code:
-            return DbcResult(compliant=True)
-
-        llm = llm_getter("dbc_comments")
-        agent = DbcCommentsAgent(llm)
-        result = agent.run(
-            DbcCommentsInput(
-                code=code,
-                language=language,
-                task_description=task_description,
-                architecture=architecture,
-            )
-        )
-
-        if not result.already_compliant and result.files:
-            write_files_and_commit(repo_path, result.files, result.suggested_commit_message)
-            return DbcResult(
-                compliant=False,
-                comments_added=result.comments_added,
-                comments_updated=result.comments_updated,
-            )
-        return DbcResult(compliant=True)
-    except Exception as e:
-        logger.warning("[%s] DbC comments tool failed (non-blocking): %s", task_id, e)
-        return DbcResult(compliant=True)
-
-
-def run_qa_check(
-    code: str,
-    task_description: str,
-    language: str,
-    *,
-    architecture: Any = None,
-    llm_getter: Callable[[str], Any] = _default_llm_getter,
-) -> QAResult:
-    """Run the QA expert agent."""
-    try:
-        from software_engineering_team.qa_agent import QAExpertAgent
-
-        llm = llm_getter("qa")
-        agent = QAExpertAgent(llm)
-        result = agent.run(
-            code=code,
-            task_description=task_description,
-            language=language,
-            architecture=architecture,
-        )
-        bugs = []
-        if hasattr(result, "bugs"):
-            bugs = [
-                b.model_dump() if hasattr(b, "model_dump") else vars(b) for b in (result.bugs or [])
-            ]
-        passed = not bugs
-        return QAResult(passed=passed, bugs=bugs)
-    except Exception as e:
-        logger.warning("QA check tool failed: %s", e)
-        return QAResult(passed=True)
-
-
-def run_security_scan(
-    code: str,
-    task_description: str,
-    language: str,
-    *,
-    architecture: Any = None,
-    llm_getter: Callable[[str], Any] = _default_llm_getter,
-) -> SecurityResult:
-    """Run the cybersecurity expert agent."""
-    try:
-        from software_engineering_team.security_agent import CybersecurityExpertAgent
-
-        llm = llm_getter("security")
-        agent = CybersecurityExpertAgent(llm)
-        result = agent.run(
-            code=code,
-            task_description=task_description,
-            language=language,
-            architecture=architecture,
-        )
-        vulns = []
-        if hasattr(result, "vulnerabilities"):
-            vulns = [
-                v.model_dump() if hasattr(v, "model_dump") else vars(v)
-                for v in (result.vulnerabilities or [])
-            ]
-        passed = not vulns
-        return SecurityResult(passed=passed, vulnerabilities=vulns)
-    except Exception as e:
-        logger.warning("Security scan tool failed: %s", e)
-        return SecurityResult(passed=True)
-
-
-def run_acceptance_verification(
-    code: str,
-    task_description: str,
-    acceptance_criteria: List[str],
-    *,
-    llm_getter: Callable[[str], Any] = _default_llm_getter,
-) -> AcceptanceResult:
-    """Run the acceptance verifier agent."""
-    try:
-        from software_engineering_team.acceptance_verifier_agent import AcceptanceVerifierAgent
-
-        llm = llm_getter("acceptance_verifier")
-        agent = AcceptanceVerifierAgent(llm)
-        result = agent.run(
-            code=code,
-            task_description=task_description,
-            acceptance_criteria=acceptance_criteria,
-        )
-        accepted = getattr(result, "accepted", False)
-        reasoning = getattr(result, "reasoning", "")
-        return AcceptanceResult(accepted=accepted, reasoning=reasoning)
-    except Exception as e:
-        logger.warning("Acceptance verification tool failed: %s", e)
-        return AcceptanceResult(accepted=False, reasoning=str(e))

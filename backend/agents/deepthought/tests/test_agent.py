@@ -10,6 +10,7 @@ from deepthought.agent import MAX_CHILDREN_PER_AGENT, DeepthoughtAgent
 from deepthought.knowledge_base import SharedKnowledgeBase
 from deepthought.models import AgentEvent, AgentSpec
 from deepthought.result_cache import ResultCache
+from llm_service import LLMError
 
 
 def _complete_side_effect(*deliberation_and_synthesis_values):
@@ -584,11 +585,11 @@ def test_max_children_capped(root_spec, mock_llm):
 
 @pytest.mark.parametrize("failing_call", ["reasoning", "formatting"])
 def test_analysis_llm_error_fallback(root_spec, mock_llm, failing_call):
-    """If either analysis LLM call raises, agent falls back to a direct answer."""
+    """If either analysis LLM call raises LLMError, agent falls back to a direct answer."""
     if failing_call == "reasoning":
-        mock_llm.complete.side_effect = RuntimeError("LLM unavailable")
+        mock_llm.complete.side_effect = LLMError("LLM unavailable")
     else:
-        mock_llm.complete_json.side_effect = RuntimeError("LLM unavailable")
+        mock_llm.complete_json.side_effect = LLMError("LLM unavailable")
         # Distinct values for the analysis reasoning call vs. the
         # _force_direct_answer fallback's own .complete() call, so the
         # assertion below can only pass if the fallback call actually ran —
@@ -609,6 +610,21 @@ def test_analysis_llm_error_fallback(root_spec, mock_llm, failing_call):
         # own .complete() call fail, so the agent falls back to its final,
         # LLM-free placeholder.
         assert result.answer == f"Unable to provide analysis for: {root_spec.focus_question}"
+
+
+def test_analysis_non_llm_error_propagates(root_spec, mock_llm):
+    """A non-LLMError failure (a programming bug) is not swallowed as a fallback.
+
+    ``_analyse`` only catches ``LLMError`` — the LLM layer's own failure
+    hierarchy — so a defect surfacing as e.g. ``TypeError`` must propagate
+    instead of masquerading as a low-confidence fallback ``QueryAnalysis``.
+    """
+    mock_llm.complete_json.side_effect = TypeError("malformed response shape")
+
+    agent = _make_agent(root_spec, mock_llm)
+
+    with pytest.raises(TypeError, match="malformed response shape"):
+        agent.execute(max_depth=10)
 
 
 # ------------------------------------------------------------------

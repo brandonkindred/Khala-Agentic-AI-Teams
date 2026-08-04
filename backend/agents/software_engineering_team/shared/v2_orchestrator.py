@@ -290,6 +290,11 @@ class BaseV2DevelopmentAgent:
             logger.error("[%s] %s", task_id, failure_reason)
             return None, feature_branch_name, failure_reason
 
+        if planning_result is None:
+            failure_reason = "Planning returned no result"
+            logger.error("[%s] %s", task_id, failure_reason)
+            return None, feature_branch_name, failure_reason
+
         total_microtasks = len(planning_result.microtasks)
         update_job(
             current_phase="planning",
@@ -736,10 +741,13 @@ class BaseV2DevelopmentAgent:
           same keywords as ``ReviewDependencies`` in either team's
           ``phases.execution`` module. ``review_config_cls`` is callable with
           no arguments when ``review_config`` is falsy.
-        Postconditions: returns a ``result_cls`` instance. On a pre-flight,
-          planning, or execution failure (including an empty
-          ``exec_result.files``), returns early with ``result.failure_reason``
-          set and later phases not run — identical short-circuiting to the
+        Postconditions: returns a ``result_cls`` instance. On a pre-flight or
+          planning failure, returns early with ``result.failure_reason`` set
+          locally and later phases not run. On an execution failure
+          (including an empty ``exec_result.files``), ``_run_execution_phase``
+          has already set ``result.failure_reason`` before returning
+          ``None``; this method returns ``result`` immediately in that case
+          with later phases not run — identical short-circuiting to the
           former per-team ``run_workflow`` bodies. On success, threads through
           bookkeeping, documentation, and deliver exactly as
           ``_run_deliver_and_finalize`` documents, and returns ``result``.

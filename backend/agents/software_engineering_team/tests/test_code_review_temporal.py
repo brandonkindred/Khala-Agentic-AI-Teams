@@ -987,6 +987,44 @@ def test_run_dispatches_to_temporal_when_enabled(monkeypatch: pytest.MonkeyPatch
     assert out.approved is True
 
 
+def test_run_via_temporal_forwards_repo_root_in_dispatch_payload(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run()``'s Temporal dispatch must carry ``input_data.repo_root`` in the
+    serialized payload it sends to ``execute_code_review_workflow_sync`` -- that
+    field is the only channel the tail-pass activities have to reconstruct a
+    ``DiskRepoReader`` worker-side (``_repo_reader_from_input``), since a live
+    ``repo_reader`` object cannot cross the Temporal boundary. This is
+    distinct from (and a prerequisite for) the activity-side reconstruction
+    tests above, which start from a payload dict that already has
+    ``repo_root`` set.
+    """
+    monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
+    monkeypatch.setattr(
+        "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
+        lambda: True,
+    )
+    captured: Dict[str, Any] = {}
+
+    def _capture(payload, **kw):  # noqa: ANN001
+        captured["payload"] = payload
+        return {
+            "approved": True,
+            "issues": [],
+            "summary": "durable",
+            "spec_compliance_notes": "",
+            "suggested_commit_message": "",
+        }
+
+    monkeypatch.setattr(
+        "code_review_agent.temporal.start_workflow.execute_code_review_workflow_sync",
+        _capture,
+    )
+    repo_root = str(tmp_path)
+    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input(repo_root=repo_root))
+    assert captured["payload"]["repo_root"] == repo_root
+
+
 def test_run_force_in_process_skips_temporal_even_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -999,6 +1037,13 @@ def test_run_force_in_process_skips_temporal_even_when_enabled(
     """
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
     monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
+    # Matches every other Temporal-enabled test in this file: if run() ever starts
+    # the worker thread before the force_in_process bypass, this stubs it out
+    # instead of attempting a real gRPC connection to temporal:7233.
+    monkeypatch.setattr(
+        "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
+        lambda: True,
+    )
 
     temporal_calls: list[object] = []
 
@@ -1020,6 +1065,9 @@ def test_run_force_in_process_skips_temporal_even_when_enabled(
 def test_run_falls_back_to_coordinator_when_worker_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """When Temporal dispatch reports no worker/client available, run() must
+    fall back to the in-process coordinator and still return a valid verdict.
+    """
     monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
     monkeypatch.setattr(
         "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
@@ -1090,6 +1138,11 @@ def test_run_falls_back_when_worker_loop_closes_mid_dispatch(
 
 
 def test_run_maps_workflow_unavailable_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``CodeReviewUnavailableError`` marker nested inside a
+    ``WorkflowFailureError``'s activity-error cause chain must still be
+    recognized and re-raised as ``CodeReviewUnavailableError`` -- not
+    misclassified as dispatch-unavailable and silently downgraded.
+    """
     from temporalio.client import WorkflowFailureError
     from temporalio.exceptions import ApplicationError
 
@@ -1115,6 +1168,11 @@ def test_run_maps_workflow_unavailable_marker(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_run_via_temporal_enriches_bare_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare ``TimeoutError()`` from the client-side wait carries no message;
+    ``_run_via_temporal`` must attach real context (the configured duration and
+    a hint this is a wait timeout, not a reviewer content failure) before it
+    propagates.
+    """
     monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
     monkeypatch.setattr(
         "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
@@ -1139,6 +1197,9 @@ def test_run_via_temporal_enriches_bare_timeout_error(monkeypatch: pytest.Monkey
 
 
 def test_reports_review_unavailable_walks_cause_chain() -> None:
+    """``_reports_review_unavailable`` finds the marker both at the top level
+    and nested via ``__cause__``, and returns False for an unrelated failure.
+    """
     from code_review_agent.agent import _reports_review_unavailable
     from temporalio.exceptions import ApplicationError
 
@@ -1223,6 +1284,10 @@ def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
 
 
 def test_workflow_and_activities_are_registered() -> None:
+    """``CodeReviewWorkflow`` and every activity it may schedule or replay --
+    including the superseded-but-still-registered pre-merge activities -- are
+    present in the Temporal worker's ``WORKFLOWS``/``ACTIVITIES`` tables.
+    """
     assert CodeReviewWorkflow in WORKFLOWS
     # 9 = the pre-existing 8 plus find_architecture_and_side_effect_activity.
     # find_architecture_and_redundancy_activity / find_side_effect_impact_activity
@@ -1257,6 +1322,11 @@ _MAX_CONCURRENT_CASES = [
 def test_worker_max_concurrent_activities_env_parsing(
     monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
 ) -> None:
+    """``worker._max_concurrent_activities()`` parses
+    ``CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`` defensively: unset, a valid
+    value, zero, a negative value, and non-numeric garbage must each resolve
+    to the documented default or clamped floor rather than raising.
+    """
     from code_review_agent.temporal import worker as worker_mod
 
     if env_value is None:
@@ -1308,6 +1378,11 @@ def test_worker_max_concurrent_activities_delegates_to_config(
 def test_resolve_temporal_fanout_width_scales_with_chunk_count(
     monkeypatch: pytest.MonkeyPatch, env_value: str | None, chunk_count: int, expected: int
 ) -> None:
+    """``resolve_temporal_fanout_width`` never requests more workers than a
+    review has chunks, never returns less than 1, scales up to an operator's
+    raised concurrency ceiling, and falls back to the default ceiling when the
+    env override is missing or non-numeric.
+    """
     if env_value is None:
         monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
     else:
@@ -1360,6 +1435,9 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch: pytest.MonkeyP
 
 
 def test_worker_start_returns_false_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker boot hook returns False without starting anything when
+    Temporal is disabled for the code review agent.
+    """
     from code_review_agent.temporal import worker as worker_mod
 
     monkeypatch.setattr(worker_mod, "code_review_temporal_enabled", lambda: False)

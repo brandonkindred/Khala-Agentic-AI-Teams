@@ -28,6 +28,7 @@ from .prompts import (
     GENERATE_QUESTION_RECOMMENDATIONS_PROMPT,
     REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
 )
+from .qa_history import content_words
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +71,68 @@ ORGANIZATIONAL_PHRASES = [
 ]
 
 
+def _stem_candidates(w: str) -> set[str]:
+    """Return plausible root forms of ``w`` for keyword-coverage matching.
+
+    A single-guess suffix strip is ambiguous for silent-e roots (e.g. "based"
+    is "base" + d, "stored" is "store" + d) versus regular roots (e.g.
+    "documented" is "document" + ed), for "-es" plurals (e.g. "phases" is
+    "phase" + s, "classes" is "class" + es), and for "-y"/"-ied" verbs (e.g.
+    "studied" is "study" with "y" replaced by "ied") — the surface form alone
+    doesn't say which rule applies. Guessing a single stem silently drops the
+    correct one (e.g. stemming "based" to "bas" alone would never match
+    "base"). Instead this returns every plausible root and lets the caller
+    accept a match against any of them. This is a small suffix map covering
+    common regular English plural/past-tense inflections, not a linguistically
+    complete stemmer/lemmatizer: irregular forms (e.g. "geese" -> "goose")
+    are not handled, and it only strips one layer of suffix.
+
+    Preconditions: ``w`` is a lowercase string with no whitespace.
+    Postconditions: returns a non-empty set of candidate stems that always
+        includes ``w`` itself; a word ending in "ss" (e.g. "address",
+        "process") is returned unchanged, since a doubled-s ending is never
+        itself a plural/past-tense suffix here; never raises.
+    """
+    candidates = {w}
+    if w.endswith("ss"):
+        return candidates
+    if w.endswith("ied") and len(w) > 4:
+        candidates.add(w[:-3] + "y")  # studied -> study, tried -> try
+    if w.endswith("ed") and len(w) > 4:
+        candidates.add(w[:-1])  # based -> base, stored -> store
+        candidates.add(w[:-2])  # documented -> document
+    elif w.endswith("ies") and len(w) > 4:
+        candidates.add(w[:-3] + "y")  # policies -> policy
+    elif w.endswith("es") and len(w) > 4:
+        candidates.add(w[:-1])  # phases -> phase
+        candidates.add(w[:-2])  # classes -> class
+    elif w.endswith("s") and len(w) > 4:
+        candidates.add(w[:-1])  # tokens -> token
+    return candidates
+
+
 def filter_duplicate_questions(
     new_questions: List[OpenQuestion],
     qa_history: str,
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Filters out questions whose keyword stems (plus simple plural/past-tense
-    variants) appear verbatim in the Q&A history. A question is considered a
-    duplicate when at least 90% of its keyword stems are found in the history.
-    Below-90% coverage is kept for possible consolidation elsewhere. This is
-    keyword coverage, not a similarity ratio between the question and history.
+    Filters out questions whose keywords share a common stem candidate (see
+    :func:`_stem_candidates`) with a word tokenized out of the Q&A history —
+    both sides are stemmed the same way so a root-form keyword matches an
+    inflected history word and vice versa (e.g. keyword "class" matches
+    history "classes", and keyword "classes" matches history "class"). A
+    question is considered a duplicate when at least 90% of its keywords have
+    such a match. Below-90% coverage is kept for possible consolidation
+    elsewhere. This is keyword coverage, not a similarity ratio between the
+    question and history.
+
+    Uses :func:`content_words` (stopword-based, not length-based) for the same
+    keyword-admission rule as :func:`qa_history.extract_answer_from_qa_history`,
+    so a short-keyword question (e.g. one about an acronym) that the extractor
+    can now match isn't excluded from ``duplicates`` here first — otherwise it
+    would never reach the extractor at all and would be re-asked regardless of
+    the extractor's own behavior.
 
     Returns:
         Tuple of (filtered_questions, duplicate_questions).
@@ -96,36 +148,28 @@ def filter_duplicate_questions(
     filtered = []
     duplicates = []
 
-    def _clean_token(w: str) -> str:
-        """Strip punctuation so tokens like 'store?' match their bare form."""
-        return re.sub(r"[^a-z0-9]", "", w.strip())
-
-    def _stem(w: str) -> str:
-        """Normalize word for matching (e.g. tokens->token, stored->store)."""
-        w = w.strip()
-        if w.endswith("ed") and len(w) > 4:
-            return w[:-2]  # stored -> store
-        if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
-            return w[:-1]  # tokens -> token
-        return w
-
     for q in new_questions:
         q_text_lower = (q.question_text or "").lower()
-        # Key words: length > 3, normalized to stems for plural/tense
-        words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
-        key_stems = set(_stem(_clean_token(w)) for w in words)
-        if not key_stems:
+        key_words = content_words(q_text_lower)
+        if not key_words:
             filtered.append(q)
             continue
-        # Count how many stems (or their plural) appear in qa_history
-        matches = sum(
-            1
-            for stem in key_stems
-            if stem in qa_history_lower
-            or (stem + "s") in qa_history_lower
-            or (stem + "ed") in qa_history_lower
-        )
-        match_ratio = matches / len(key_stems)
+        # Tokenize qa_history the same way content_words does (so punctuation
+        # can't glue two words together), then expand every history token to
+        # its own stem candidates. A keyword matches history when the two
+        # candidate sets intersect — stemming both sides identically is what
+        # makes the match symmetric: a root-form keyword (e.g. "class")
+        # matches an inflected history word ("classes") exactly as readily as
+        # an inflected keyword ("classes") matches a root-form history word
+        # ("class"). Whole-word only (not substring containment), so a short
+        # stem can't false-match inside an unrelated longer word (e.g. "api"
+        # inside "capitalizing") now that short content words are admitted as
+        # keywords.
+        history_stem_pool: set[str] = set()
+        for history_word in re.sub(r"[^\w\s]", " ", qa_history_lower).split():
+            history_stem_pool |= _stem_candidates(history_word)
+        matches = sum(1 for w in key_words if _stem_candidates(w) & history_stem_pool)
+        match_ratio = matches / len(key_words)
         # Only treat as duplicate of an answered question when match >= 90%.
         # Below-90% coverage may be consolidated but should not be filtered out.
         if match_ratio >= 0.90:
@@ -255,6 +299,32 @@ def _safe_constraint_layer(value: Any) -> int:
         return 0
 
 
+def _safe_bool(value: Any, default: bool) -> bool:
+    """Coerce LLM-provided boolean output to bool, defaulting to ``default``.
+
+    A real JSON boolean already decodes to a Python ``bool`` via ``json.loads``;
+    this exists for when the LLM stringifies it instead (e.g. ``"false"``),
+    since ``bool("false")`` is ``True`` and would silently invert the intended
+    value.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns ``value`` unchanged when it is already a ``bool``;
+        for a string, returns ``True``/``False`` for a case-insensitive
+        (surrounding-whitespace-stripped) ``"true"``/``"false"`` and
+        ``default`` for any other string; returns ``default`` for every other
+        type; never raises.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    return default
+
+
 def _coerce_list(value: Any) -> list:
     """Coerce LLM-provided list-valued output to a list.
 
@@ -321,14 +391,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             context=_str_or_default(q_data.get("context")),
             recommendation=_str_or_default(q_data.get("recommendation")),
             options=options,
-            allow_multiple=bool(q_data.get("allow_multiple", False)),
+            allow_multiple=_safe_bool(q_data.get("allow_multiple"), False),
             source=_str_or_default(q_data.get("source"), "spec_review"),
             category=_str_or_default(q_data.get("category"), "general"),
             priority=_str_or_default(q_data.get("priority"), "medium"),
             constraint_domain=_str_or_default(q_data.get("constraint_domain")),
             constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
-            blocking=bool(q_data.get("blocking", True)),
+            blocking=_safe_bool(q_data.get("blocking"), True),
             owner=_str_or_default(q_data.get("owner"), "user"),
             section_impact=section_impact,
             due_date=_str_or_default(q_data.get("due_date")),
@@ -385,7 +455,7 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
         return QuestionOption(
             id=_str_or_default(opt_data.get("id"), f"opt{index}"),
             label=_str_or_default(opt_data.get("label")),
-            is_default=bool(opt_data.get("is_default", False)),
+            is_default=_safe_bool(opt_data.get("is_default"), False),
             rationale=_str_or_default(opt_data.get("rationale")),
             confidence=_safe_confidence(opt_data.get("confidence", 0.5)),
         )
@@ -416,19 +486,19 @@ def dedupe_questions_by_answer_similarity(
     if not open_questions:
         return list(open_questions)
 
-    def norm(t: str) -> str:
+    def norm(t: str | None) -> str:
         return " ".join((t or "").lower().split()).strip()
 
     # Build set of existing answers (normalized) we already have
-    existing_answers: List[str] = []
+    existing_answers: set[str] = set()
     for aq in answered_questions:
         s = norm(aq.selected_answer)
         if s:
-            existing_answers.append(s)
+            existing_answers.add(s)
         if getattr(aq, "other_text", None) and aq.other_text.strip():
             o = norm(aq.other_text)
-            if o and o not in existing_answers:
-                existing_answers.append(o)
+            if o:
+                existing_answers.add(o)
 
     if not existing_answers:
         return list(open_questions)
@@ -556,6 +626,7 @@ def consolidate_open_questions(
             for q in open_questions
         ],
         indent=2,
+        default=str,
     )
     prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
     consolidated = _fetch_llm_list(
@@ -632,7 +703,7 @@ def review_question_answer_alignment(
         }
         for q in open_questions
     ]
-    questions_json = json.dumps(questions_payload, indent=2)
+    questions_json = json.dumps(questions_payload, indent=2, default=str)
     prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
     aligned = _fetch_llm_list(
         model, prompt, "aligned_questions", "Question-answer alignment review"
@@ -707,7 +778,7 @@ def add_recommendations(
         }
         for q in open_questions
     ]
-    questions_json = json.dumps(questions_payload, indent=2)
+    questions_json = json.dumps(questions_payload, indent=2, default=str)
     spec_content_str = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
         spec_content=spec_content_str,

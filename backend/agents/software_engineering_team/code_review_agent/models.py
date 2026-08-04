@@ -427,7 +427,11 @@ class CodeReviewIssue(BaseModel):
     )
 
 
-_ChunkReviewIssueSeverity = Literal["critical", "high", "medium", "low", "info"]
+# Public: the canonical severity vocabulary for this engine. Other agents that
+# delegate review work here (e.g. devops_team.change_review_agent) reference
+# this type directly rather than hand-copying its values, so a change here is
+# never silently missed downstream.
+CodeReviewIssueSeverity = Literal["critical", "high", "medium", "low", "info"]
 _ChunkReviewIssueCategory = Literal[
     "naming",
     "structure",
@@ -477,7 +481,7 @@ class ChunkReviewIssueLLM(BaseModel):
     silently coercing it before it ever reaches that downstream check.
     """
 
-    severity: _ChunkReviewIssueSeverity = Field(
+    severity: CodeReviewIssueSeverity = Field(
         default="high",
         description="Severity: critical, high, medium, low, or info",
     )
@@ -632,7 +636,7 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
     directly.
     """
 
-    severity: _ChunkReviewIssueSeverity = Field(
+    severity: CodeReviewIssueSeverity = Field(
         default="medium",
         description="Severity: critical, high, medium, low, or info",
     )
@@ -682,7 +686,7 @@ class SideEffectImpactFindingLLM(BaseModel):
     and validate per-half findings, rather than model-validating this class directly.
     """
 
-    severity: _ChunkReviewIssueSeverity = Field(
+    severity: CodeReviewIssueSeverity = Field(
         default="medium",
         description="Severity: critical, high, medium, low, or info",
     )

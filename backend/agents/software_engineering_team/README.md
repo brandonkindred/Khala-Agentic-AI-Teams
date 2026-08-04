@@ -67,7 +67,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Implementation** | backend_code_v2_team | Backend v2 worker (Java/Python/Node, DBs, APIs, infra-adjacent); phase pipeline: planning → setup → execution → review → problem-solving → documentation → deliver. Driven by the coding-team engine's Tech Lead |
 | **Implementation** | frontend_code_v2_team | Frontend v2 worker (Angular/React/TypeScript, CSS/SCSS, UI/UX, accessibility, state); same phase pipeline with frontend tool agents. Driven by the coding-team engine's Tech Lead |
 | **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |
-| **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert, Acceptance Verifier, DbC Comments |
+| **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert |
 | **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
 
 **Coding Team:** the coding-team execution engine (Tech Lead + Task Graph, living as direct children of `software_engineering_team/`) is the **Software Engineering sub-team** responsible for task-graph execution (see [§ Coding Team](#coding-team) below). The SE orchestrator calls `run_coding_team_orchestrator` in-process after planning; the same engine's routers are also mounted on this app for direct/standalone runs at `/api/coding-team`.
@@ -106,8 +106,6 @@ flowchart LR
     QA
     Security
     Accessibility
-    AcceptanceVerifier
-    DbcComments
   end
 
   subgraph integration [Integration and release]
@@ -136,7 +134,7 @@ These are the gates run by the default v2 execution path (`backend_code_v2_team`
 Build verification (lint + build) is a single CI-owned gate that runs once, before
 Code Review; the Code Review phase itself does not re-run lint or build checks.
 
-There is no separate acceptance-verifier, DbC, or Tech-Lead-review gate inside this per-microtask loop. Those agents (`acceptance_verifier`, `dbc_comments`, `tech_lead`, and standalone `security`/`qa`/`code_review`) are registered in the separate legacy top-level orchestrator's agent factory, which is not exercised by the default `use_coding_team=True` execution path — see the higher-level Tech Lead review step in [Flow](#flow) below.
+There is no separate acceptance-verifier or DbC gate inside this per-microtask loop; `AcceptanceVerifierAgent`/`DbcCommentsAgent` have no production caller anywhere in the pipeline today. The per-task review gate above this loop is `TechLeadAgent.run_code_review` (the coding-team swarm's sole merge-gate) — see the higher-level Tech Lead review step in [Flow](#flow) below.
 
 Data and control-flow dependencies among the build/code-review/security/QA
 gates specifically, and which of them are safe to parallelize vs. require a
@@ -162,7 +160,7 @@ All planning artifacts are written to a `plan/` folder at the project root (work
 5. **Planning agents** (API Contract, Data Architecture, UI/UX, Infrastructure, Frontend Architecture, DevOps, QA Test Strategy, Security, Observability, Performance) produce additional artifacts in `plan/`.
 6. **Planning consolidation** produces `plan/master_plan.md` with risk register and ship checklist.
 7. **Tech Lead** generates a complete build plan and assigns tasks (git_setup, devops, backend, frontend).
-5. **Backend and Frontend workers** run in parallel. Each task follows a unified workflow:
+8. **Backend and Frontend workers** run in parallel. Each task follows a unified workflow:
    - Create feature branch
    - **Per-task planning** – Review codebase, produce implementation plan (feature intent, what to change, algorithms/data structures, tests needed). The plan drives the implementation; code generation must realize the plan's what_changes and tests_needed.
    - Generate code (with clarification loop via Tech Lead if needed)
@@ -220,7 +218,7 @@ Defaults (`AGENT_DEFAULT_MODELS` in `llm_service/config.py`) when no overrides a
 | Model | Agents |
 |-------|--------|
 | `kimi-k2.7-code:cloud` | backend, frontend, code_review |
-| `qwen3.5:9b-mlx` | code_review_verify |
+| `glm-5.2:cloud` | code_review_verify |
 | `deepseek-v4-pro:cloud` | repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility (also the fallback for any agent key not listed above) |
 
 Example: `export LLM_MODEL_tech_lead=<model-id>` overrides only the Tech Lead; other agents use their defaults or `LLM_MODEL`.
@@ -458,10 +456,12 @@ software_engineering_team/
 
 The Tech Lead invokes planning agents (backend, frontend, data, test, performance, documentation, quality gates) internally when creating task details and aligning with Architecture.
 
-Each agent has:
+Leaf agents (direct children of `software_engineering_team/`, e.g. `qa_agent/`, `security_agent/`, `accessibility_agent/`) typically follow a three-file convention:
 - `agent.py` – Core logic
 - `models.py` – Input/output Pydantic models
 - `prompts.py` – LLM prompt templates
+
+Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`, `devops_team/`, `ai_agent_development_team/`, etc.) instead use `orchestrator.py`, `phases/`, and `tool_agents/`.
 
 ## DevOps Engineering Team (`devops_team/`)
 

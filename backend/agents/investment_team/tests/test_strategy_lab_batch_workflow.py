@@ -482,6 +482,72 @@ def test_errored_details_walks_full_cause_chain_to_terminal_failure():
     ]
 
 
+def test_errored_details_falls_back_to_context_when_no_cause():
+    """When a failure has no explicit ``__cause__`` chain but does have an
+    implicit ``__context__`` chain (raised while handling another exception,
+    without ``from``), the walk must still reach the terminal cause instead
+    of stopping at the outer wrapper — mirroring Python's own traceback
+    resolution rule of falling back to ``__context__`` once ``__cause__`` is
+    exhausted."""
+
+    class _OuterChildWorkflowError(Exception):
+        pass
+
+    class _DomainValueError(Exception):
+        pass
+
+    terminal = _DomainValueError("root cause")
+    outer = _OuterChildWorkflowError("child workflow execution failed")
+    outer.__context__ = terminal
+    outer.__suppress_context__ = False
+
+    harness = _Harness(
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 1,
+            "batch_index": 1,
+            "error": "root cause",
+            "exception_type": "_DomainValueError",
+        }
+    ]
+
+
+def test_errored_details_does_not_follow_suppressed_context():
+    """``raise ... from None`` sets ``__suppress_context__`` to signal the
+    implicit ``__context__`` chain is deliberately not the real cause — the
+    walk must stop at the outer exception rather than reporting the
+    suppressed context as the terminal failure."""
+
+    class _OuterChildWorkflowError(Exception):
+        pass
+
+    class _UnrelatedContext(Exception):
+        pass
+
+    context = _UnrelatedContext("unrelated exception being handled")
+    outer = _OuterChildWorkflowError("child workflow execution failed")
+    outer.__context__ = context
+    outer.__suppress_context__ = True
+
+    harness = _Harness(
+        child_results={"run-1-c0": outer, "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(),
+    )
+    result = _run(_batch_input(), harness)
+    assert result["errored_details"] == [
+        {
+            "cycle_index": 1,
+            "batch_index": 1,
+            "error": "child workflow execution failed",
+            "exception_type": "_OuterChildWorkflowError",
+        }
+    ]
+
+
 def test_errored_details_uses_application_error_type_not_class_name():
     """The real terminal cause is usually the ApplicationError
     ``_map_exception_to_application_error`` produced, whose actionable

@@ -4,7 +4,7 @@ Extracted verbatim from ``agent.py`` to keep that module focused on workflow
 logic. This module holds only pure static data plus the two helpers that build
 fallback :class:`OpenQuestion` lists from it:
 
-- ``_context_discovery_fallback_questions`` -- fixed context/constraint questions.
+- ``context_discovery_fallback_questions`` -- fixed context/constraint questions.
 - ``SOP_PHASE1_QUESTIONS`` -- the structured SOP Phase 1 question registry.
 - ``_sop_phase1_fallback_questions`` -- root-question fallback built from the registry.
 """
@@ -16,7 +16,7 @@ from typing import Any, Dict, List
 from .models import OpenQuestion, QuestionOption, SOPSubPhase
 
 
-def _context_discovery_fallback_questions() -> List[OpenQuestion]:
+def context_discovery_fallback_questions() -> List[OpenQuestion]:
     """Fixed list of context/constraint questions used when LLM returns empty or invalid.
 
     Preconditions: none — takes no arguments and reads no external state.

@@ -28,6 +28,8 @@ DEFAULT_BASE_URL = "https://api.github.com"
 DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_MAX_RETRIES = 3
 RATE_LIMIT_CAP_S = 60
+SECONDARY_RATE_LIMIT_MAX_RETRIES = 5
+SECONDARY_RATE_LIMIT_CAP_S = 120
 MAX_ISSUES_TRAVERSED = 1000
 MAX_REVIEW_THREADS_TRAVERSED = 2000
 MAX_REVIEW_COMMENTS_TRAVERSED = 5000
@@ -41,6 +43,22 @@ def _parse_next_link(header_value: Optional[str]) -> Optional[str]:
         return None
     m = _LINK_NEXT_RE.search(header_value)
     return m.group(1) if m else None
+
+
+def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
+    """Parse a ``Retry-After`` header's integer-seconds value.
+
+    Postconditions:
+        - Returns ``None`` when the header is absent or not a base-10 integer
+          (GitHub's secondary-rate-limit ``Retry-After`` is always integer
+          seconds, never an HTTP-date, but a malformed value must not raise).
+    """
+    if not header_value:
+        return None
+    try:
+        return float(int(header_value))
+    except ValueError:
+        return None
 
 
 class GitHubAPIError(RuntimeError):
@@ -89,6 +107,52 @@ class _GitHubHttpMixin:
             path_or_url = "/" + path_or_url
         return f"{self._base_url}{path_or_url}"
 
+    def _retry_secondary_rate_limit(
+        self,
+        method: str,
+        url: str,
+        params: Optional[dict[str, Any]],
+        json: Optional[dict[str, Any]],
+        response: httpx.Response,
+    ) -> httpx.Response:
+        """Retry a GitHub secondary-rate-limit (429) response, honoring ``Retry-After``.
+
+        Preconditions:
+            - ``response.status_code == 429``.
+        Postconditions:
+            - Returns the first non-429 response obtained from re-issuing the same
+              request, or, if every retry is still 429, the final 429 response after
+              exactly ``SECONDARY_RATE_LIMIT_MAX_RETRIES`` retries. Does not raise
+              ``GitHubAPIError`` itself -- the caller's ``_check`` turns a persisting
+              429 into ``GitHubAPIError`` only once this budget is exhausted. The
+              underlying ``self._client.request(...)`` / ``self._sleep(...)`` calls
+              may still raise their own exceptions (e.g. ``httpx.TransportError``).
+        """
+        for attempt in range(SECONDARY_RATE_LIMIT_MAX_RETRIES):
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            wait = retry_delay(
+                attempt, 1.0, SECONDARY_RATE_LIMIT_CAP_S, retry_after_seconds=retry_after
+            )
+            logger.warning(
+                "GitHub %s %s -> 429 (secondary rate limit); sleeping %.1fs (retry %d/%d)",
+                method,
+                url,
+                wait,
+                attempt + 1,
+                SECONDARY_RATE_LIMIT_MAX_RETRIES,
+            )
+            self._sleep(wait)
+            response = self._client.request(
+                method,
+                url,
+                headers=self._headers(),
+                params=params,
+                json=json,
+            )
+            if response.status_code != 429:
+                return response
+        return response
+
     def _request(
         self,
         method: str,
@@ -127,11 +191,7 @@ class _GitHubHttpMixin:
                 self._sleep(retry_delay(attempt, 1.0, RATE_LIMIT_CAP_S))
                 continue
 
-            if (
-                response.status_code == 403
-                and response.headers.get("X-RateLimit-Remaining") == "0"
-                and attempt == 0
-            ):
+            if response.status_code == 403 and response.headers.get("X-RateLimit-Remaining") == "0":
                 reset = response.headers.get("X-RateLimit-Reset")
                 wait = 1.0
                 if reset:
@@ -142,6 +202,9 @@ class _GitHubHttpMixin:
                 logger.warning("GitHub rate-limited; sleeping %.1fs", wait)
                 self._sleep(wait)
                 continue
+
+            if response.status_code == 429:
+                return self._retry_secondary_rate_limit(method, url, params, json, response)
 
             return response
 

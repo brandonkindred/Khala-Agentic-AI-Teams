@@ -107,33 +107,84 @@ def _good_design_payload() -> Dict[str, Any]:
 
 
 class _ScriptedAgent:
-    """Strands ``Agent`` replacement returning a scripted payload per call."""
+    """Strands ``Agent`` replacement returning a scripted payload per call.
+
+    Invariants:
+        ``self._payloads`` is non-empty for the lifetime of the instance —
+        enforced by ``__init__``, so ``__call__`` never indexes an empty list.
+    """
 
     def __init__(self, payloads: List[str]) -> None:
+        """Preconditions: ``payloads`` is non-empty (an empty list would make
+        ``__call__``'s ``len(self._payloads) - 1`` clamp negative and raise
+        an unhelpful ``IndexError`` on first use).
+
+        Postconditions: ``self._payloads is payloads`` and ``self.calls == 0``.
+        """
         if not payloads:
             raise AssertionError("_ScriptedAgent requires a non-empty payloads list")
         self._payloads = payloads
         self.calls = 0
 
     def __call__(self, _prompt: str) -> str:
+        """Postconditions: returns ``self._payloads[idx]``, where ``idx``
+        advances with each call and then clamps to the final payload once
+        ``self.calls`` reaches ``len(self._payloads)``; ``self.calls`` is
+        incremented by one.
+        """
         idx = min(self.calls, len(self._payloads) - 1)
         self.calls += 1
         return self._payloads[idx]
 
 
 class _RecordingAgent:
-    """Strands ``Agent`` replacement that records every prompt it receives."""
+    """Strands ``Agent`` replacement that records every prompt it receives.
+
+    Invariants:
+        ``self._payloads`` is non-empty for the lifetime of the instance —
+        enforced by ``__init__``, so ``__call__`` never indexes an empty list.
+    """
 
     def __init__(self, payloads: List[str]) -> None:
+        """Preconditions: ``payloads`` is non-empty (an empty list would make
+        ``__call__``'s ``len(self._payloads) - 1`` clamp negative and raise
+        an unhelpful ``IndexError`` on first use).
+
+        Postconditions: ``self._payloads is payloads`` and ``self.seen == []``.
+        """
         if not payloads:
             raise AssertionError("_RecordingAgent requires a non-empty payloads list")
         self._payloads = payloads
         self.seen: List[str] = []
 
     def __call__(self, prompt: str) -> str:
+        """Postconditions: ``prompt`` is appended to ``self.seen``, and the
+        method returns ``self._payloads[idx]``, where ``idx`` tracks
+        ``len(self.seen)`` and then clamps to the final payload once that
+        exceeds ``len(self._payloads)``.
+        """
         idx = min(len(self.seen), len(self._payloads) - 1)
         self.seen.append(prompt)
         return self._payloads[idx]
+
+
+# ---------------------------------------------------------------------------
+# Precondition guards — empty payloads rejected
+# ---------------------------------------------------------------------------
+
+
+def test_scripted_agent_rejects_empty_payloads() -> None:
+    """Construction fails fast on an empty payloads list instead of deferring
+    to an ``IndexError`` from ``__call__``'s negative clamp on first use."""
+    with pytest.raises(AssertionError, match="non-empty"):
+        _ScriptedAgent([])
+
+
+def test_recording_agent_rejects_empty_payloads() -> None:
+    """Construction fails fast on an empty payloads list instead of deferring
+    to an ``IndexError`` from ``__call__``'s negative clamp on first use."""
+    with pytest.raises(AssertionError, match="non-empty"):
+        _RecordingAgent([])
 
 
 class _StubClient:

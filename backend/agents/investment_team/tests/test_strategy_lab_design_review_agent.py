@@ -262,6 +262,39 @@ def test_format_prior_critiques_renders_per_issue_detail() -> None:
     assert "no stop (fix:" not in rendered
 
 
+def test_format_prior_critiques_truncates_long_text() -> None:
+    """Rationale, description, and suggested_fix are each truncated to the
+    same shared preview length so a future change to the preview window
+    can't update one site and drift from the others."""
+    long_rationale = "R" * 200
+    long_description = "D" * 200
+    long_fix = "F" * 200
+    prior = [
+        SpecCritique(
+            ready=False,
+            rationale=long_rationale,
+            round=0,
+            issues=[
+                CritiqueIssue(
+                    field="sizing",
+                    severity="warning",
+                    description=long_description,
+                    suggested_fix=long_fix,
+                ),
+            ],
+        )
+    ]
+
+    rendered = format_prior_critiques(prior)
+
+    assert ("R" * 160) in rendered
+    assert ("R" * 161) not in rendered
+    assert ("D" * 160) in rendered
+    assert ("D" * 161) not in rendered
+    assert ("F" * 160) in rendered
+    assert ("F" * 161) not in rendered
+
+
 def test_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     """The review prompt carries the JSON Schema so the wire model, the
     hand-written skeleton, and the downstream coercer cannot drift apart."""
@@ -404,6 +437,44 @@ def test_non_dict_issues_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert critique.issues[0].field == "exit_rules"
 
 
+def test_non_iterable_issues_value_falls_back_to_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-list ``issues`` value (e.g. schema drift emitting a bare
+    scalar) must not crash the coercion — it's treated as no issues, same
+    as an explicit ``[]``, so the not-ready placeholder path still fires."""
+    payload = json.dumps({"ready": False, "rationale": "vibes", "issues": 42})
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is False
+    assert critique.issues
+    assert "vibes" in critique.issues[0].description
+
+
+def test_dict_shaped_issues_value_falls_back_to_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single issue dict passed directly as ``issues`` (not wrapped in a
+    list) is schema drift, not a list of issues — treated as no issues
+    rather than silently iterating the dict's keys."""
+    payload = json.dumps(
+        {
+            "ready": False,
+            "rationale": "vibes",
+            "issues": {"field": "hypothesis", "description": "not a list"},
+        }
+    )
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is False
+    assert critique.issues
+    assert "vibes" in critique.issues[0].description
+
+
 def test_issue_with_missing_fields_is_tolerated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,6 +493,60 @@ def test_issue_with_missing_fields_is_tolerated(
     assert critique.issues[0].field == "hypothesis"
     assert critique.issues[0].severity == "warning"
     assert critique.issues[0].description == "thesis too thin"
+
+
+class _ExplodingStr:
+    """A value whose ``str()`` raises, to trigger a construction failure."""
+
+    def __str__(self) -> str:
+        raise ValueError("cannot stringify")
+
+
+def test_one_bad_item_construction_failure_is_skipped() -> None:
+    """A single item that fails ``CritiqueIssue`` construction (here, a
+    description that can't stringify) is still best-effort-skipped by the
+    narrowed exception clause, preserving the rest of the batch."""
+    parsed = {
+        "ready": False,
+        "rationale": "mixed",
+        "issues": [
+            {"field": "hypothesis", "description": _ExplodingStr()},
+            {
+                "field": "exit_rules",
+                "severity": "warning",
+                "description": "no take_profit alongside stop_loss",
+            },
+        ],
+    }
+
+    critique = _coerce_critique(parsed, readiness_findings=[])
+
+    assert len(critique.issues) == 1
+    assert critique.issues[0].field == "exit_rules"
+
+
+def test_unexpected_construction_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Narrowing ``except Exception`` to ``(TypeError, ValueError,
+    ValidationError)`` means a genuine programming error inside
+    ``CritiqueIssue`` construction is no longer silently swallowed — it
+    must propagate so regressions are visible instead of vanishing."""
+    import investment_team.strategy_lab.agents.design_review as design_review_mod
+
+    def _boom(**_kwargs: Any) -> None:
+        raise RuntimeError("unexpected bug")
+
+    monkeypatch.setattr(design_review_mod, "CritiqueIssue", _boom)
+
+    parsed = {
+        "ready": False,
+        "rationale": "mixed",
+        "issues": [{"field": "hypothesis", "description": "x"}],
+    }
+
+    with pytest.raises(RuntimeError, match="unexpected bug"):
+        _coerce_critique(parsed, readiness_findings=[])
 
 
 # ---------------------------------------------------------------------------

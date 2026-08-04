@@ -1014,20 +1014,17 @@ class ProductRequirementsAnalysisAgent:
         """Delegates to :func:`sop_engine.format_architecture_document`."""
         return format_architecture_document(arch_result)
 
-    def _run_context_constraints_discovery(
-        self, spec_content: str, repo_path: Path
-    ) -> List[OpenQuestion]:
+    def _run_context_constraints_discovery(self, spec_content: str) -> List[OpenQuestion]:
         """Delegates to :func:`context_discovery.run_context_constraints_discovery`."""
-        return run_context_constraints_discovery(self._model, spec_content, repo_path)
+        return run_context_constraints_discovery(self._model, spec_content)
 
     def _inject_context_answers_into_spec(
         self,
         current_spec: str,
         answered_questions: List[AnsweredQuestion],
-        repo_path: Path,
     ) -> str:
         """Delegates to :func:`context_discovery.inject_context_answers_into_spec`."""
-        return inject_context_answers_into_spec(current_spec, answered_questions, repo_path)
+        return inject_context_answers_into_spec(current_spec, answered_questions)
 
     def _parse_question_option(self, opt_data: Any, index: int) -> QuestionOption:
         """Delegates to :func:`question_processing.parse_question_option`."""

@@ -480,7 +480,7 @@ class VisualIdentityOutput(BaseModel):
     voice_tone_spectrum: List[VoiceToneEntry] = Field(default_factory=list)
     language_dos: List[str] = Field(default_factory=list)
     language_donts: List[str] = Field(default_factory=list)
-    # Mood board candidates (from the MoodBoardConceptualist swarm, dispatched by CreativeDirector)
+    # Mood board candidates (from CreativeDirector collecting MoodBoardConceptualist outputs)
     mood_board_candidates: List["MoodBoardConcept"] = Field(default_factory=list)
     # Creative refinement decision (from converge_decider)
     creative_refinement: "CreativeRefinementDecision" = Field(
@@ -601,11 +601,15 @@ class PhaseGate(BaseModel):
 
 
 class BrandCheckRequest(BaseModel):
+    """Request to evaluate a marketing asset against a brand's guidelines."""
+
     asset_name: str
     asset_description: str
 
 
 class BrandCheckResult(BaseModel):
+    """Verdict from :class:`BrandComplianceAgent` on-brand evaluation of a single asset."""
+
     asset_name: str
     is_on_brand: bool
     confidence: float = Field(ge=0, le=1)
@@ -643,6 +647,8 @@ class BrandBook(BaseModel):
 
 
 class MoodBoardConcept(BaseModel):
+    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``."""
+
     title: str
     visual_direction: str
     color_story: List[str] = Field(default_factory=list)
@@ -662,6 +668,8 @@ class CreativeRefinementDecision(BaseModel):
 
 
 class WritingGuidelines(BaseModel):
+    """Voice/tone and editorial rules; merge target for ``WritingGuidelinesOutput``."""
+
     voice_principles: List[str] = Field(default_factory=list)
     style_dos: List[str] = Field(default_factory=list)
     style_donts: List[str] = Field(default_factory=list)
@@ -669,12 +677,160 @@ class WritingGuidelines(BaseModel):
 
 
 class DesignSystemDefinition(BaseModel):
+    """Codified design system; merge target for ``DesignSystemDefinitionOutput``."""
+
     design_principles: List[str] = Field(default_factory=list)
     foundation_tokens: List[str] = Field(default_factory=list)
     component_standards: List[str] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 agent-facing structured_output schemas
+# ---------------------------------------------------------------------------
+# Merge targets above keep empty defaults so partial fragments validate.
+# Agent schemas below require content so Strands retries blank output.
+
+
+class MoodBoardConceptOutput(BaseModel):
+    """Agent-facing moodboard concept schema for MoodBoardConceptualist_*."""
+
+    title: str = Field(min_length=1)
+    visual_direction: str = Field(min_length=1)
+    color_story: List[str] = Field(min_length=1)
+    typography_direction: str = Field(min_length=1)
+    image_style: List[str] = Field(min_length=1)
+
+
+class MoodBoardCandidatesOutput(BaseModel):
+    """Agent-facing CreativeDirector schema: collected moodboard candidates.
+
+    ``min_length``/``max_length`` encode the diverge fan-out of 2–3 concepts.
+    Nested entries use ``MoodBoardConceptOutput`` so blank concepts fail validation.
+    """
+
+    mood_board_candidates: List[MoodBoardConceptOutput] = Field(min_length=2, max_length=3)
+
+
+class CreativeRefinementDecisionOutput(BaseModel):
+    """Agent-facing converge_decider schema.
+
+    Field-for-field twin of ``CreativeRefinementDecision`` with required content.
+    """
+
+    winning_candidate_title: str = Field(min_length=1)
+    scoring_criteria: List[str] = Field(min_length=1)
+    scores_by_candidate: Dict[str, float] = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    workshop_prompts: List[str] = Field(min_length=1)
+    decision_criteria: List[str] = Field(min_length=1)
+
+
+class LogoUsageRuleOutput(BaseModel):
+    """Agent-facing logo usage rule; requires non-empty fields."""
+
+    variant: str = Field(min_length=1)
+    usage_context: str = Field(min_length=1)
+    minimum_size: str = Field(min_length=1)
+    clear_space: str = Field(min_length=1)
+
+
+class LogoSuiteOutput(BaseModel):
+    """Agent-facing logo_specifier schema.
+
+    ``min_length``/``max_length`` encode the prompt's four logo variants.
+    """
+
+    logo_suite: List[LogoUsageRuleOutput] = Field(min_length=4, max_length=4)
+
+
+class ColorEntryOutput(BaseModel):
+    """Agent-facing color entry; requires non-empty fields."""
+
+    name: str = Field(min_length=1)
+    hex_value: str = Field(min_length=1)
+    usage: str = Field(min_length=1)
+    psychological_rationale: str = Field(min_length=1)
+
+
+class ColorPaletteSystemOutput(BaseModel):
+    """Agent-facing color_system_builder schema.
+
+    Named to avoid colliding with mission ``ColorPalette``.
+    ``min_length``/``max_length`` encode the prompt's stated "5-7 colors".
+    """
+
+    color_palette: List[ColorEntryOutput] = Field(min_length=5, max_length=7)
+
+
+class TypographySpecOutput(BaseModel):
+    """Agent-facing typography spec; requires non-empty fields."""
+
+    role: str = Field(min_length=1)
+    font_family: str = Field(min_length=1)
+    weight_range: str = Field(min_length=1)
+    usage_notes: str = Field(min_length=1)
+
+
+class TypographySystemOutput(BaseModel):
+    """Agent-facing typography_builder schema.
+
+    ``min_length``/``max_length`` encode the prompt's stated "3-4 type roles".
+    """
+
+    typography_system: List[TypographySpecOutput] = Field(min_length=3, max_length=4)
+
+
+class IconographyOutput(BaseModel):
+    """Agent-facing iconography_director schema."""
+
+    iconography_style: str = Field(min_length=1)
+    illustration_style: str = Field(min_length=1)
+
+
+class PhotographyVideoOutput(BaseModel):
+    """Agent-facing photography_video_director schema.
+
+    ``motion_principles`` cardinality matches the prompt's stated "3-4 principles".
+    """
+
+    photography_direction: str = Field(min_length=1)
+    video_direction: str = Field(min_length=1)
+    motion_principles: List[str] = Field(min_length=3, max_length=4)
+
+
+class VoiceToneEntryOutput(BaseModel):
+    """Agent-facing voice/tone entry; requires non-empty fields."""
+
+    context: str = Field(min_length=1)
+    tone: str = Field(min_length=1)
+    examples: List[str] = Field(min_length=1)
+
+
+class VoiceToneOutput(BaseModel):
+    """Agent-facing voice_tone_builder schema.
+
+    ``language_dos``/``language_donts`` match the prompt's stated "4-5" items.
+    """
+
+    voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(min_length=1)
+    language_dos: List[str] = Field(min_length=4, max_length=5)
+    language_donts: List[str] = Field(min_length=4, max_length=5)
+
+
+class DesignSystemDefinitionOutput(BaseModel):
+    """Agent-facing design_system_codifier schema.
+
+    Field-for-field twin of ``DesignSystemDefinition`` with required content.
+    """
+
+    design_principles: List[str] = Field(min_length=1)
+    foundation_tokens: List[str] = Field(min_length=1)
+    component_standards: List[str] = Field(min_length=1)
+
+
 class WikiEntry(BaseModel):
+    """A single entry in the brand's living wiki/knowledge base."""
+
     title: str
     summary: str
     owners: List[str] = Field(default_factory=list)

@@ -171,9 +171,14 @@ def format_answered_questions_for_prompt(answered_questions: List[AnsweredQuesti
 
     Handles empty list and optional fields (rationale, other_text, was_auto_answered, was_default).
 
-    Preconditions: ``answered_questions`` is a list of :class:`AnsweredQuestion`.
+    Preconditions: ``answered_questions`` is a list of :class:`AnsweredQuestion`
+        with ``confidence`` numeric on every entry (guaranteed by normal Pydantic
+        construction; violated only if a caller bypasses validation, e.g. via
+        ``AnsweredQuestion.model_construct``).
     Postconditions: returns an empty string for an empty list, otherwise a Markdown
-        block; never raises.
+        block. Raises ``TypeError``/``ValueError`` if any ``was_auto_answered=True``
+        entry's ``confidence`` cannot be formatted as a percentage — a precondition
+        violation, not normal operation.
     """
     if not answered_questions:
         return ""
@@ -366,9 +371,9 @@ def extract_answer_from_qa_history(
 
     Returns:
         AnsweredQuestion if a matching answer was found, None otherwise.
-        Also returns ``None`` when ``question.question_text`` contains no keyword
-        longer than 4 characters (the matcher cannot score short questions such
-        as ``"Use X?"``).
+        Also returns ``None`` when ``question.question_text`` has no
+        content-bearing keyword (every word is a stopword, or the text is
+        blank) — see :func:`content_words`.
 
     Preconditions: ``question`` is an :class:`OpenQuestion` (``question_text`` a
         string); ``qa_history`` is a string (possibly empty).
@@ -376,15 +381,14 @@ def extract_answer_from_qa_history(
         :class:`AnsweredQuestion` (including ``was_auto_answered`` /
         ``was_default`` / ``confidence`` / ``other_text`` parsed from the block's
         status markers when present), or ``None`` when no block matches or the
-        question has no keyword longer than 4 characters; when multiple blocks
-        share the same match ratio, the later (more recent) block wins; never
-        raises for input satisfying the preconditions above.
+        question has no content-bearing keyword; when multiple blocks share the
+        same match ratio, the later (more recent) block wins; never raises for
+        input satisfying the preconditions above.
     """
     if not qa_history:
         return None
 
-    q_text_lower = question.question_text.lower()
-    key_words = [w for w in q_text_lower.split() if len(w) > 4]
+    key_words = list(content_words(question.question_text))
 
     if not key_words:
         return None
@@ -406,10 +410,14 @@ def extract_answer_from_qa_history(
     for _iteration, recorded_question, _answer, full_block_text in parse_qa_history_blocks(
         qa_history
     ):
-        recorded_question_lower = recorded_question.lower()
+        recorded_words = content_words(recorded_question)
 
-        # Calculate match score
-        matches = sum(1 for w in key_words if w in recorded_question_lower)
+        # Calculate match score by whole-token overlap, not substring containment:
+        # a short key word (e.g. "api") must match a whole word in the recorded
+        # question, not merely appear inside an unrelated longer word (e.g.
+        # "capitalizing") — a false-positive risk once short words are eligible
+        # key words (see content_words).
+        matches = sum(1 for w in key_words if w in recorded_words)
         match_ratio = matches / len(key_words)
 
         if (
@@ -506,12 +514,16 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
     return blocks_out
 
 
-def _content_words(text: str) -> set[str]:
-    """Return the content-bearing word set of ``text`` for decision matching.
+def content_words(text: str) -> set[str]:
+    """Return the content-bearing word set of ``text`` for decision/duplicate matching.
 
     Strips punctuation, lowercases, and drops :data:`_DECISION_STOPWORDS` so
     interrogative/boilerplate words cannot dominate the overlap score used by
-    :func:`is_same_decision`.
+    :func:`is_same_decision` and the keyword matching in
+    :func:`extract_answer_from_qa_history`. Public (no leading underscore)
+    because :mod:`question_processing`'s ``filter_duplicate_questions`` reuses
+    it too, so the upstream duplicate-candidate filter and this module's
+    answer extractor agree on which short words carry meaning.
 
     Preconditions: ``text`` is a string.
     Postconditions: returns a (possibly empty) set of lowercase tokens; never raises.
@@ -538,8 +550,8 @@ def is_same_decision(existing_question: str, new_question: str) -> bool:
     if existing_norm in new_norm or new_norm in existing_norm:
         return True
 
-    existing_w = _content_words(existing_question)
-    new_w = _content_words(new_question)
+    existing_w = content_words(existing_question)
+    new_w = content_words(new_question)
     if not existing_w or not new_w:
         return False
     overlap = len(existing_w & new_w) / len(existing_w | new_w)
@@ -569,19 +581,20 @@ def record_answers(
     qa_file = plan_dir / "qa_history.md"
 
     # New iteration section (same format as before)
-    new_section = f"\n## Iteration {iteration}\n\n"
+    section_lines: List[str] = [f"\n## Iteration {iteration}\n\n"]
     for aq in answered_questions:
-        new_section += f"### {aq.question_text}\n"
-        new_section += _format_field_value(_ANSWER_MARKER, aq.selected_answer)
+        section_lines.append(f"### {aq.question_text}\n")
+        section_lines.append(_format_field_value(_ANSWER_MARKER, aq.selected_answer))
         if aq.rationale:
-            new_section += _format_field_value(_RATIONALE_MARKER, aq.rationale)
+            section_lines.append(_format_field_value(_RATIONALE_MARKER, aq.rationale))
         if aq.was_auto_answered:
-            new_section += f"{_AUTO_ANSWERED_MARKER} with {aq.confidence:.0%} confidence*\n"
+            section_lines.append(f"{_AUTO_ANSWERED_MARKER} with {aq.confidence:.0%} confidence*\n")
         elif aq.was_default:
-            new_section += f"{_DEFAULT_APPLIED_MARKER}\n"
+            section_lines.append(f"{_DEFAULT_APPLIED_MARKER}\n")
         if aq.other_text:
-            new_section += _format_field_value(_CUSTOM_TEXT_MARKER, aq.other_text)
-        new_section += "\n"
+            section_lines.append(_format_field_value(_CUSTOM_TEXT_MARKER, aq.other_text))
+        section_lines.append("\n")
+    new_section = "".join(section_lines)
 
     if not qa_file.exists():
         content = (

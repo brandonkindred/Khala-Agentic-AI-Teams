@@ -65,7 +65,7 @@ def test_load_context_empty_directory(tmp_path: Path) -> None:
 
 
 def test_audit_criterion_returns_typed_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_llm(
+    llm = _patch_llm(
         monkeypatch,
         {
             "summary": "Reviewed",
@@ -78,6 +78,11 @@ def test_audit_criterion_returns_typed_result(monkeypatch: pytest.MonkeyPatch) -
     assert out.category is TSCCategory.SECURITY
     assert out.compliant is False
     assert out.findings[0].severity is FindingSeverity.HIGH
+    # Locks in the documented "exactly two sequential LLM calls" postcondition
+    # (one think=True reasoning call, one think=False formatting call) at the
+    # pipeline entry point both drivers actually call.
+    assert len(llm.reasoning_calls) == 1
+    assert len(llm.calls) == 1
 
 
 def test_audit_criterion_rejects_unknown_category(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,7 +150,7 @@ def _result(category: TSCCategory, *, compliant: bool, severity: FindingSeverity
 def test_write_report_produces_compliance_report_when_findings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_llm(
+    llm = _patch_llm(
         monkeypatch,
         {
             "executive_summary": "summary",
@@ -158,10 +163,14 @@ def test_write_report_produces_compliance_report_when_findings(
     report, next_steps = pipeline.write_report("/repo", tsc)
     assert isinstance(report, SOC2ComplianceReport)
     assert next_steps is None
+    # Locks in the documented "exactly two sequential LLM calls" postcondition
+    # at the pipeline entry point both drivers actually call.
+    assert len(llm.reasoning_calls) == 1
+    assert len(llm.calls) == 1
 
 
 def test_write_report_produces_next_steps_when_clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_llm(
+    llm = _patch_llm(
         monkeypatch,
         {
             "title": "Next Steps",
@@ -176,6 +185,10 @@ def test_write_report_produces_next_steps_when_clean(monkeypatch: pytest.MonkeyP
     assert report is None
     assert next_steps is not None
     assert next_steps.title == "Next Steps"
+    # Locks in the documented "exactly two sequential LLM calls" postcondition
+    # at the pipeline entry point both drivers actually call.
+    assert len(llm.reasoning_calls) == 1
+    assert len(llm.calls) == 1
 
 
 def test_write_report_handles_malformed_llm_response(monkeypatch: pytest.MonkeyPatch) -> None:

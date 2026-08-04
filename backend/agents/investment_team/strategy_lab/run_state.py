@@ -169,6 +169,38 @@ def get_lab_run_job_client() -> "JobServiceClient":
     return JobServiceClient(team="investment_strategy_lab_runs")
 
 
+def normalize_persisted_job(
+    job: Dict[str, Any], *, fallback_status: str, run_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Normalize a job-service record into an ``active_runs``-shaped state dict.
+
+    Centralizes the ``run_id``/``status`` fallback logic repeated across every
+    call site that merges a persisted job-service record into the in-memory
+    run-state shape, so a future change to that shape only needs updating here.
+
+    Preconditions:
+        ``job`` is a job-service record; when its fields are nested under a
+        ``"data"`` key that dict holds the run-state fields, otherwise ``job``
+        itself is treated as the state dict.
+
+    Postconditions:
+        Returns a COPY of ``job.get("data", job)`` -- not the same object --
+        with ``run_id`` set to ``run_id`` when given, else derived from
+        ``job.get("job_id") or job.get("run_id", "")``; and ``status``
+        defaulted (via ``setdefault``, so an existing ``status`` in the
+        returned dict wins) to ``job.get("status", fallback_status)``. A copy
+        is returned rather than mutating ``job.get("data", job)`` in place:
+        when the job has no ``"data"`` key, that expression aliases the exact
+        object ``client.get_job`` returned, and mutating it could leak those
+        mutations back into the client's response if it ever caches or
+        reuses that object.
+    """
+    data = dict(job.get("data", job))
+    data["run_id"] = run_id if run_id is not None else (job.get("job_id") or job.get("run_id", ""))
+    data.setdefault("status", job.get("status", fallback_status))
+    return data
+
+
 def _load_run_from_job_service_strict(run_id: str) -> Optional[Dict[str, Any]]:
     """Load a run's durable state, propagating job-service read failures.
 
@@ -182,23 +214,16 @@ def _load_run_from_job_service_strict(run_id: str) -> Optional[Dict[str, Any]]:
     Preconditions:
         - ``run_id`` names a strategy-lab run (may not exist).
     Postconditions:
-        - Returns the persisted state, or ``None`` when the job genuinely
-          does not exist. Raises whatever the underlying job-service client
-          raises on a transport failure. The returned dict is always a copy
-          -- when the job has no ``"data"`` key, ``job.get("data", job)``
-          would otherwise alias the exact object ``client.get_job`` returned,
-          and mutating it in place (setting ``run_id``/``status`` below)
-          could leak those mutations back into the client's response if it
-          ever caches or reuses that object.
+        - Returns the persisted state (via ``normalize_persisted_job``,
+          already a copy -- see its own docstring for why that matters), or
+          ``None`` when the job genuinely does not exist. Raises whatever the
+          underlying job-service client raises on a transport failure.
     """
     client = get_lab_run_job_client()
     job = client.get_job(run_id)
     if not job:
         return None
-    data = dict(job.get("data", job))
-    data["run_id"] = run_id
-    data.setdefault("status", job.get("status", "completed"))
-    return data
+    return normalize_persisted_job(job, fallback_status="completed", run_id=run_id)
 
 
 def load_run_from_job_service(run_id: str) -> Optional[Dict[str, Any]]:

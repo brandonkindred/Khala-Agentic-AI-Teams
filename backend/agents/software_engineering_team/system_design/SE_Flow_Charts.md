@@ -13,26 +13,9 @@ flowchart TD
 
     Planning["Phase 2: Planning\nintake → discovery → requirements →\nsynthesis → document_production →\nsub_agent_provisioning"]
     ADAPT["adapt_planning_result()\n→ CodingTeamPlanInput"]
-    CANCEL3{"Cancelled?"}
-
-    DECISION{"use_coding_team?\n(default: True)"}
 
     CT["Phase 3: Coding Team\nrun_coding_team_orchestrator()"]
     DONE["status = COMPLETED"]
-
-    TL["Tech Lead\ngenerate TaskAssignment"]
-    AE["Architecture Expert\ngenerate SystemArchitecture"]
-    CONSOL["Planning Consolidation\nmaster_plan.md"]
-    PREFIX["Prefix Queue\ngit_setup → devops"]
-    SPAWN["Spawn parallel workers"]
-    BACKEND["backend_code_v2_worker\n(daemon thread)"]
-    FRONTEND["frontend_code_v2_worker\n(daemon thread)"]
-    JOIN["thread.join()"]
-    INTEG["Integration Agent"]
-    SEC["Security Review"]
-    DOCS["Documentation Agent"]
-    DEVOPS["DevOps Containerization"]
-    DONE2["status = COMPLETED"]
 
     ERR_LLM["status =\npaused_llm_connectivity"]
     ERR_LIMIT["status =\npaused_llm_limit"]
@@ -44,18 +27,7 @@ flowchart TD
     CANCEL1 -->|No| Planning
     Planning --> ADAPT --> CANCEL2
     CANCEL2 -->|Yes| ERR_FAIL
-    CANCEL2 -->|No| DECISION
-
-    DECISION -->|True| CT --> DONE
-    DECISION -->|False| TL --> AE --> CONSOL --> PREFIX
-    PREFIX --> SPAWN
-    SPAWN --> BACKEND
-    SPAWN --> FRONTEND
-    BACKEND --> JOIN
-    FRONTEND --> JOIN
-    JOIN --> CANCEL3
-    CANCEL3 -->|Yes| ERR_FAIL
-    CANCEL3 -->|No| INTEG --> SEC --> DOCS --> DEVOPS --> DONE2
+    CANCEL2 -->|No| CT --> DONE
 
     PRA -.->|LLMUnreachable| ERR_LLM
     Planning -.->|LLMRateLimit| ERR_LIMIT

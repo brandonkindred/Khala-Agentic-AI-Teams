@@ -99,7 +99,7 @@ LLM_BASE_URL=http://127.0.0.1:11434
 
 # SOC2 (optional)
 SOC2_LLM_PROVIDER=ollama
-SOC2_LLM_MODEL=qwen3.5:9b-mlx
+SOC2_LLM_MODEL=glm-5.2:cloud
 ```
 
 ### 4. Verify Setup

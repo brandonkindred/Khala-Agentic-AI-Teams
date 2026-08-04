@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -461,7 +462,11 @@ def test_run_problem_solving_tool_agent_raises(monkeypatch):
     tool_agent = MagicMock()
     tool_agent.problem_solve.side_effect = RuntimeError("crash")
 
-    # Should not raise
+    # Should not raise -- the exception is caught inside
+    # _apply_tool_agents_problem_solve and logged, so the tool agent's
+    # (nonexistent) file updates never reach the merge and the single-issue
+    # fix result -- already resolved via RESOLVED=yes with no FILE section --
+    # stands unchanged.
     out = run_problem_solving(
         llm=MagicMock(),
         task=_task(),
@@ -469,7 +474,9 @@ def test_run_problem_solving_tool_agent_raises(monkeypatch):
         current_files={"a.py": "old"},
         tool_agents={ToolAgentKind.DOCUMENTATION: tool_agent},
     )
-    assert out is not None
+    tool_agent.problem_solve.assert_called_once()
+    assert out.resolved is True
+    assert out.files == {"a.py": "old"}
 
 
 def test_run_problem_solving_for_microtask_no_actionable():
@@ -484,6 +491,8 @@ def test_run_problem_solving_for_microtask_no_actionable():
         current_files={"a.py": "code"},
     )
     assert out.resolved is True
+    assert out.files == {"a.py": "code"}
+    assert out.summary == "No actionable issues."
 
 
 def test_run_problem_solving_for_microtask_success(monkeypatch):
@@ -508,7 +517,12 @@ def test_run_problem_solving_for_microtask_success(monkeypatch):
         current_files={"a.py": "old"},
         detail_callback=msgs.append,
     )
-    assert out is not None
+    assert out.resolved is True
+    assert out.files["a.py"] == "fixed"
+    assert out.unresolved_issues == []
+    assert "applied 1 fix" in out.summary
+    assert msgs  # callback was invoked
+    assert any("issue" in m.lower() for m in msgs)
 
 
 def _phase_result(issues, phase_name="code_review"):
@@ -518,7 +532,11 @@ def _phase_result(issues, phase_name="code_review"):
 
 
 def test_run_phase_fixes_via_code_review():
-    """run_code_review_fixes routes through internal _run_phase_fixes."""
+    """run_code_review_fixes routes through internal _run_phase_fixes, which
+    short-circuits on its no-actionable-issue path here: the supplied
+    severity='info' issue is filtered out before the per-issue fix loop runs.
+    See test_run_code_review_fixes_with_actionable for the actionable path.
+    """
     from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
         run_code_review_fixes,
     )
@@ -530,6 +548,8 @@ def test_run_phase_fixes_via_code_review():
         current_files={"a.py": "code"},
     )
     assert out.resolved is True
+    assert out.files == {"a.py": "code"}
+    assert out.summary == "No actionable code_review issues."
 
 
 def test_run_qa_fixes():
@@ -666,3 +686,87 @@ def test_run_code_review_fixes_with_actionable(monkeypatch):
         current_files={"a.py": "old"},
     )
     assert isinstance(out.summary, str)
+
+
+def test_run_code_review_fixes_tool_agent_raises(monkeypatch, caplog):
+    """A BUILD_SPECIALIST problem_solve failure must mark the result
+    unresolved and note the failure in the summary, without discarding the
+    generic fix loop's already-applied file changes."""
+    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_code_review_fixes,
+    )
+
+    resp = (
+        "## FILE a.py ##\nfixed\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    tool_agent = MagicMock()
+    tool_agent.problem_solve.side_effect = RuntimeError("build specialist crash")
+
+    with caplog.at_level(logging.ERROR, logger=ps_mod.logger.name):
+        out = run_code_review_fixes(
+            llm=MagicMock(),
+            microtask=_microtask(),
+            phase_result=_phase_result([_issue(severity="high")]),
+            current_files={"a.py": "old"},
+            tool_agents={ToolAgentKind.BUILD_SPECIALIST: tool_agent},
+            task_id="t-1",
+        )
+
+    # Generic fix loop's own progress must survive the tool-agent failure.
+    assert out.files["a.py"] == "fixed"
+    # But the overall phase result must now be reported as unresolved.
+    assert out.resolved is False
+    assert "tool-agent fix pass failed" in out.summary
+    assert "build specialist crash" in out.summary
+    assert any(
+        "code_review" in r.getMessage() and "build specialist crash" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_run_documentation_fixes_tool_agent_raises(monkeypatch, caplog):
+    """Same contract as the code_review case, for the DOCUMENTATION tool agent."""
+    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_documentation_fixes,
+    )
+
+    resp = (
+        "## FILE a.py ##\nfixed\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    tool_agent = MagicMock()
+    tool_agent.problem_solve.side_effect = RuntimeError("doc agent crash")
+
+    with caplog.at_level(logging.ERROR, logger=ps_mod.logger.name):
+        out = run_documentation_fixes(
+            llm=MagicMock(),
+            microtask=_microtask(),
+            phase_result=_phase_result(
+                [_issue(severity="high", source="documentation")], phase_name="documentation"
+            ),
+            current_files={"a.py": "old"},
+            tool_agents={ToolAgentKind.DOCUMENTATION: tool_agent},
+            task_id="t-2",
+        )
+
+    assert out.files["a.py"] == "fixed"
+    assert out.resolved is False
+    assert "tool-agent fix pass failed" in out.summary
+    assert "doc agent crash" in out.summary
+    assert any(
+        "documentation" in r.getMessage() and "doc agent crash" in r.getMessage()
+        for r in caplog.records
+    )
