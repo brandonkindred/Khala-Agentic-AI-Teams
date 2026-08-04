@@ -1721,16 +1721,11 @@ def _run_one_strategy_lab_cycle(
     """Single ideation → validate → execute → refine → analyze (+ paper-trading) cycle via the v2 orchestrator.
 
     The orchestrator handles the full code-generation + sandboxed-execution pipeline
-    internally, including up to 10 refinement rounds.
-
-    After the orchestrator returns a complete ``StrategyLabRecord``, the paper-trading
-    step runs only when the record is flagged as publishable
-    (``record.is_publishable``). Losing strategies record
-    ``paper_trading_status = "skipped"`` with reason ``"not_winning"``; winning
-    but non-publishable strategies skip with the joined gate codes from
-    ``publishability_skip_reason``. Paper-trading failures are non-fatal: the
-    cycle still persists the record with ``paper_trading_status = "failed"``
-    and the error message.
+    internally, including up to 10 refinement rounds. Once it returns a complete
+    ``StrategyLabRecord``, this function delegates paper-trading finalization and
+    persistence to :func:`_finalize_strategy_lab_cycle_record` — see that function's
+    docstring for the winning/publishable/disabled/failure semantics; this function
+    does not implement any of that logic itself.
 
     Args:
         prior_records: Precomputed prior-record snapshot, supplied by the wave
@@ -1738,10 +1733,12 @@ def _run_one_strategy_lab_cycle(
             cycle. Precondition: it must reflect pre-wave state (the caller reads
             it once before launching the wave). When None, this cycle reads and
             parses the snapshot itself (the path direct/test callers take).
-        paper_trading_enabled: Opt-out flag; when False, every winning strategy
-            records ``paper_trading_status = "skipped"`` with reason ``"disabled"``.
-        paper_trading_lookback_days: Forwarded to ``MarketDataService.fetch_multi_symbol``
-            when the paper-trading step runs.
+        paper_trading_enabled: Forwarded to :func:`_finalize_strategy_lab_cycle_record`.
+        paper_trading_lookback_days: Forwarded to :func:`_finalize_strategy_lab_cycle_record`.
+
+    Returns:
+        The finalized ``StrategyLabRecord``, already durably persisted by
+        :func:`_finalize_strategy_lab_cycle_record`.
     """
 
     # When the caller (the wave driver) precomputes the prior records once per
