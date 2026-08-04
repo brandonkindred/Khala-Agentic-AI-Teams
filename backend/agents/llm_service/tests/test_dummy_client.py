@@ -359,6 +359,99 @@ def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
 
 
+_BRANDING_PHASE2_SYSTEM_PROMPTS = [
+    (
+        "brand_story and boilerplate_variants for the brand story specialist",
+        {"brand_story", "hero_narrative", "boilerplate_variants"},
+    ),
+    (
+        "personality_traits — carry forward brand_story for the archetype specialist",
+        {"brand_story", "hero_narrative", "boilerplate_variants", "brand_archetypes"},
+    ),
+    (
+        "tagline_rationale and elevator_pitches for the tagline specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+        },
+    ),
+    (
+        "messaging_framework and audience_message_maps for the messaging specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+            "messaging_framework",
+            "audience_message_maps",
+        },
+    ),
+    (
+        "jobs_to_be_done and media_habits for the persona specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+            "messaging_framework",
+            "audience_message_maps",
+            "persona_profiles",
+        },
+    ),
+    (
+        "writing_guidelines and editorial_quality_bar for the voice specialist",
+        {
+            "brand_story",
+            "hero_narrative",
+            "boilerplate_variants",
+            "brand_archetypes",
+            "tagline",
+            "tagline_rationale",
+            "elevator_pitches",
+            "messaging_framework",
+            "audience_message_maps",
+            "persona_profiles",
+            "writing_guidelines",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("system_prompt,expected_keys", _BRANDING_PHASE2_SYSTEM_PROMPTS)
+def test_branding_phase2_branches_return_cumulative_keys(
+    system_prompt: str, expected_keys: set[str]
+) -> None:
+    """Each Phase 2 branding specialist must carry forward exactly the keys
+    its predecessors introduced, plus its own — pinning the DRY'd-up
+    _BRAND_* composition against silent branch desync."""
+    c = DummyLLMClient()
+    j = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    assert set(j.keys()) == expected_keys
+
+
+def test_branding_phase2_branch_results_do_not_share_mutable_state() -> None:
+    """Nested list/dict values are drawn from shared module-level constants;
+    each call must still hand back independent objects so mutating one
+    response can't leak into another (or into the constant itself)."""
+    c = DummyLLMClient()
+    system_prompt = _BRANDING_PHASE2_SYSTEM_PROMPTS[0][0]
+    first = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    second = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    first["boilerplate_variants"].append("mutated")
+    assert "mutated" not in second["boilerplate_variants"]
+
+
 def test_senior_backend_branch_generates_valid_python_for_quote_laden_hint() -> None:
     """A task_hint with quotes/triple-quotes must not corrupt the generated source."""
     c = DummyLLMClient()
