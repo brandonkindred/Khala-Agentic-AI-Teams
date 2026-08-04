@@ -137,7 +137,13 @@ from investment_team.strategy_lab_context import (
     normalize_allowed_asset_classes,
     normalize_asset_class,
 )
-from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+from job_service_client import (
+    RESTARTABLE_STATUSES,
+    RESUMABLE_STATUSES,
+    JobNotFoundError,
+    JobStateError,
+    validate_job_for_action,
+)
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
 
@@ -2954,9 +2960,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         state = _get_run_state(run_id)
         try:
             validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
-        except ValueError as exc:
-            code = 404 if "not found" in str(exc) else 400
-            raise HTTPException(status_code=code, detail=str(exc)) from exc
+        except JobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except JobStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         payload = state.get("request_payload")
         if not isinstance(payload, dict):
@@ -3108,9 +3115,10 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
         try:
             validate_job_for_action(state, run_id, _lab_restartable, "restarted")
-        except ValueError as exc:
-            code = 404 if "not found" in str(exc) else 400
-            raise HTTPException(status_code=code, detail=str(exc)) from exc
+        except JobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except JobStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         payload = state.get("request_payload")
         if not isinstance(payload, dict):
