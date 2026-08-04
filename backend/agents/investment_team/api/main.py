@@ -2751,11 +2751,14 @@ def _job_progress_percent(completed: int, total: int) -> int:
     Postconditions:
         - Returns ``0`` when ``total <= 0`` (never divides by a non-positive
           total, so this can never raise ``ZeroDivisionError``).
-        - Otherwise returns ``int((completed / total) * 100)``.
+        - Otherwise returns ``int((completed / total) * 100)``, clamped to
+          ``0..100`` -- ``completed`` exceeding ``total`` or being negative
+          (both possible from malformed persisted state) can never produce
+          an out-of-range percentage.
     """
     if total <= 0:
         return 0
-    return int((completed / total) * 100)
+    return max(0, min(100, int((completed / total) * 100)))
 
 
 @app.get(
