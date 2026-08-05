@@ -49,6 +49,9 @@ import type {
 
 let _stepCounter = 0;
 
+/** Chat prompt seeded by the roster panel's "Suggest via chat" action. */
+const SUGGEST_AGENT_PROMPT = 'Suggest an additional agent for this team.';
+
 /** A roster agent's fields, editable via the inline "Edit" affordance. */
 interface AgentEditDraft {
   role: string;
@@ -132,7 +135,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   private conversationId: string | null = null;
 
   form = this.fb.nonNullable.group({
-    message: ['', [Validators.required, Validators.minLength(1)]],
+    message: ['', [Validators.required]],
   });
 
   ngOnInit(): void {
@@ -224,6 +227,19 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     }
   }
 
+  /**
+   * Reload the roster and its staffing validation from the backend.
+   *
+   * Preconditions: `this.team.team_id` is set.
+   * Postconditions: on success, `rosterAgents` and `rosterValidation` reflect
+   * the latest backend state and `rosterChanged` has been emitted with the
+   * new validation result. On failure, `rosterActionError` carries a message
+   * and `rosterChanged` is emitted with `null` so an embedding stage's
+   * "fully staffed" gate can't act on stale staffing.
+   * Invariant: only the most recently issued refresh (via `rosterRefreshGuard`)
+   * is allowed to apply its result, so an in-flight refresh superseded by a
+   * newer one is dropped rather than overwriting fresher state.
+   */
   refreshRoster(): void {
     // Sequence token: a roster mutation (add/delete/edit) can trigger a new
     // refresh while an older one is still in flight. Stamp each refresh and drop
@@ -318,7 +334,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
 
   /** "Suggest via chat": seed the chat input with a prompt asking for a new agent. */
   suggestAgentViaChat(): void {
-    this.form.patchValue({ message: 'Suggest an additional agent for this team.' });
+    this.form.patchValue({ message: SUGGEST_AGENT_PROMPT });
   }
 
   deleteAgent(agent: AgenticTeamAgent, event: Event): void {

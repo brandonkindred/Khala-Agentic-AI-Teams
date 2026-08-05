@@ -844,6 +844,18 @@ def _build_state_response(
     process: Optional[ProcessDefinition],
     suggested_questions: list[str],
 ) -> ConversationStateResponse:
+    """Assemble a conversation route's response from the store's current state.
+
+    Called by ``create_conversation``/``send_message``/``get_conversation``
+    after any writes for the request have completed, so the returned message
+    list reflects what was actually persisted rather than the caller's
+    in-memory view of the turn.
+
+    Preconditions: ``conversation_id`` names an existing conversation;
+        ``team_id`` is that conversation's team id.
+    Postconditions: returns a ``ConversationStateResponse`` whose ``messages``
+        is read fresh from ``_store.get_messages(conversation_id)``.
+    """
     messages = _store.get_messages(conversation_id)
     return ConversationStateResponse(
         conversation_id=conversation_id,
@@ -867,14 +879,18 @@ def create_conversation(req: CreateConversationRequest):
 
     Preconditions: ``req.team_id`` names an existing team.
     Postconditions: on success, the conversation exists with the greeting or
-        the full first turn persisted. When an initial message is given and
-        the turn fails, no partial turn is left in the conversation history —
-        neither message is appended, so a client retry re-processes a clean
-        conversation instead of duplicating a half-saved turn. Two distinct
-        failure modes precede the appends: an ``_agent.respond`` (LLM) error
-        propagates as-is; a roster/process save failure is raised by
-        ``_save_agents_and_process`` as ``HTTPException(503)`` (see its
-        docstring for the non-retryable-error exceptions to that).
+        the full first turn persisted. When an initial message is given: a
+        failure in ``_agent.respond`` (LLM error, propagates as-is) or
+        ``_save_agents_and_process`` (roster/process save failure, raised as
+        ``HTTPException(503)`` — see its docstring for the non-retryable-error
+        exceptions to that) happens before either append, so no partial turn
+        is left and a client retry re-processes a clean conversation. That
+        guarantee narrows once the two ``_store.append_message`` calls begin:
+        each is its own committed write, so a failure between them (e.g. a
+        store outage on the second call) can leave the user message persisted
+        without the assistant reply — callers should not assume every error
+        from this route leaves the conversation untouched, only errors raised
+        before the appends start.
     """
     # Validate team exists
     team = _store.get_team(req.team_id)
@@ -917,12 +933,17 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     Preconditions: ``conversation_id`` names an existing conversation.
     Postconditions: on success, both the user message and the assistant
         reply are appended (in that order) and any updated process is saved.
-        On failure, neither message is appended — the conversation history
-        stays exactly as it was before this call, so a client retry cannot
-        duplicate or half-save a turn. Two distinct failure modes precede the
-        appends: an ``_agent.respond`` (LLM) error propagates as-is; a
-        roster/process save failure is raised by ``_save_agents_and_process``
-        as ``HTTPException(503)``.
+        A failure in ``_agent.respond`` (LLM error, propagates as-is) or
+        ``_save_agents_and_process`` (roster/process save failure, raised as
+        ``HTTPException(503)``) happens before either append, so the
+        conversation history stays exactly as it was and a client retry
+        cannot duplicate or half-save a turn from *those* failures. That
+        guarantee narrows once the two ``_store.append_message`` calls begin:
+        each is its own committed write, so a failure between them (e.g. a
+        store outage on the second call) can leave the user message persisted
+        without the assistant reply — callers should not assume every error
+        from this route leaves the conversation untouched, only errors raised
+        before the appends start.
     """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
