@@ -311,6 +311,23 @@ class MessagingPillar(BaseModel):
     proof_points: List[str] = Field(default_factory=list)
 
 
+class MessagingPillarOutput(BaseModel):
+    """Agent-facing messaging pillar; requires non-empty fields.
+
+    Field-for-field twin of ``MessagingPillar`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) —
+    ``MessagingPillar`` itself must stay soft (only ``pillar`` required) since
+    it also backs ``NarrativeMessagingOutput.messaging_framework``'s merge
+    target.
+    """
+
+    pillar: str = Field(min_length=1)
+    key_message: str = Field(min_length=1)
+    proof_points: List[NonEmptyStr] = Field(min_length=1)
+
+
 class AudienceMessageMap(BaseModel):
     """Message map tailored to a specific audience segment."""
 
@@ -318,6 +335,22 @@ class AudienceMessageMap(BaseModel):
     primary_message: str = ""
     supporting_messages: List[str] = Field(default_factory=list)
     tone_adjustments: str = ""
+
+
+class AudienceMessageMapOutput(BaseModel):
+    """Agent-facing audience message map; requires non-empty fields.
+
+    Field-for-field twin of ``AudienceMessageMap`` with required content,
+    matching this file's other Phase 2/3 strict-twin pairs —
+    ``AudienceMessageMap`` itself must stay soft (only ``audience_segment``
+    required) since it also backs
+    ``NarrativeMessagingOutput.audience_message_maps``'s merge target.
+    """
+
+    audience_segment: str = Field(min_length=1)
+    primary_message: str = Field(min_length=1)
+    supporting_messages: List[NonEmptyStr] = Field(min_length=1)
+    tone_adjustments: str = Field(min_length=1)
 
 
 class ElevatorPitch(BaseModel):
@@ -415,10 +448,16 @@ class TaglineOutput(BrandArchetypesOutput):
 
 
 class MessagingFrameworkOutput(TaglineOutput):
-    """Prior narrative carry-forward plus messaging framework / audience maps."""
+    """Prior narrative carry-forward plus messaging framework / audience maps.
 
-    messaging_framework: List[MessagingPillar] = Field(min_length=3, max_length=4)
-    audience_message_maps: List[AudienceMessageMap] = Field(min_length=1)
+    Uses ``MessagingPillarOutput``/``AudienceMessageMapOutput`` (not the soft
+    ``MessagingPillar``/``AudienceMessageMap``) so each nested item's fields
+    are individually required — a blank pillar or audience segment must fail
+    validation instead of silently producing empty output.
+    """
+
+    messaging_framework: List[MessagingPillarOutput] = Field(min_length=3, max_length=4)
+    audience_message_maps: List[AudienceMessageMapOutput] = Field(min_length=1)
 
 
 class PersonaProfilesOutput(MessagingFrameworkOutput):
