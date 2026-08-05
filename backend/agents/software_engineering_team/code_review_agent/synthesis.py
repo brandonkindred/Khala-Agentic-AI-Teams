@@ -1,18 +1,24 @@
-"""Reduce-phase synthesis: one findings-only LLM pass over a map-reduce review.
+"""Reduce-phase synthesis: findings-only LLM passes over a map-reduce review.
 
 Stage 1 (the map-reduce coordinator) reviews a large submission in several
 independent passes and then merges the results. The deterministic merge —
 issue dedupe and the critical/high approval gate — is authoritative and lives
-in ``coordinator.py``. This module owns only the *narrative*: a single cheap
-LLM call that rewrites the per-pass summaries and spec notes into one coherent
-report.
+in ``coordinator.py``. This module owns only *narrative*, additive passes over
+that merged result:
+
+    - :func:`synthesize_review_findings` — a single cheap LLM call that
+      rewrites the per-pass summaries and spec notes into one coherent report.
+    - :func:`synthesize_spec_compliance` — a single dedicated LLM call that
+      checks the merged findings against the FULL spec/acceptance-criteria
+      text in one pass, instead of that text being repeated in every chunk's
+      prompt. Not yet wired into the coordinator (see its own docstring).
 
 Two invariants hold for everything here:
-    - The digest is built from findings only — issue metadata and per-pass
-      summaries. Source code is never included.
-    - Synthesis is best-effort and never authoritative. It cannot change the
-      verdict or the issue list, and any failure returns ``None`` so the caller
-      falls back to the deterministic concatenation behavior.
+    - Every digest is built from findings only — issue metadata and per-pass
+      summaries/notes. Source code is never included.
+    - Every pass here is best-effort and never authoritative. None can change
+      the verdict or the issue list, and any failure returns ``None`` so the
+      caller can fall back to whatever it used before that pass existed.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from llm_service import LLMClient
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
-from .prompts import REVIEW_SYNTHESIS_PROMPT
+from .prompts import REVIEW_SYNTHESIS_PROMPT, SPEC_COMPLIANCE_PASS_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -210,3 +216,84 @@ def _build_framing(input_data: CodeReviewInput, approved: bool) -> str:
         lines.append("Acceptance criteria:")
         lines.extend(f"- {c}" for c in input_data.acceptance_criteria)
     return "\n".join(lines)
+
+
+def _build_spec_compliance_framing(input_data: CodeReviewInput) -> str:
+    """Render the non-code context lines for the dedicated spec-compliance pass.
+
+    Unlike :func:`_build_framing`, this includes the FULL, uncompacted
+    ``spec_content`` in addition to the acceptance criteria: this pass runs
+    exactly once per submission, so the fidelity a per-chunk prompt could not
+    afford (without repeating the same text once per chunk) is affordable here.
+
+    Postconditions:
+        - The returned text carries the task description, the full acceptance
+          criteria, and the full spec content (each only when non-blank), and
+          never includes any source code or findings.
+    """
+    lines: List[str] = []
+    if input_data.task_description.strip():
+        lines.append(f"Task: {input_data.task_description.strip()}")
+    if input_data.acceptance_criteria:
+        lines.append("Acceptance criteria (code MUST meet all of these):")
+        lines.extend(f"- {c}" for c in input_data.acceptance_criteria)
+    if input_data.spec_content.strip():
+        lines.extend(["", "Project specification (full):", "---", input_data.spec_content, "---"])
+    return "\n".join(lines)
+
+
+def synthesize_spec_compliance(
+    llm: LLMClient,
+    *,
+    input_data: CodeReviewInput,
+    issues: List[CodeReviewIssue],
+) -> Optional[str]:
+    """Run exactly one LLM pass to check spec/acceptance-criteria compliance.
+
+    Paired with :func:`synthesize_review_findings`: the same single-call,
+    findings-only, fail-safe shape, but scoped purely to spec/acceptance-
+    criteria compliance and given the FULL spec/acceptance-criteria text
+    (never compacted, and read once here rather than once per chunk) instead
+    of per-chunk-sourced spec notes.
+
+    Preconditions:
+        - ``llm`` is an ``LLMClient`` (and may also implement the strands
+          ``Model`` interface, in which case it is used as the model directly).
+        - ``issues`` is the final merged/deduped issue list for this
+          submission (post map-reduce, post any tail passes) — never raw,
+          unmerged per-chunk output.
+
+    Postconditions:
+        - Returns a string on success: ``""`` when no gaps were found, or the
+          consolidated spec/acceptance-criteria gaps otherwise — the same
+          shape as ``CodeReviewOutput.spec_compliance_notes``.
+        - Returns ``None`` on ANY failure — exception, malformed JSON, a
+          non-object response, or a response missing the
+          ``spec_compliance_notes`` key entirely — so the caller can treat
+          this pass as unavailable and fall back accordingly.
+        - Never raises, and never mutates ``issues``.
+    """
+    try:
+        digest = build_findings_digest(issues, [])
+        framing = _build_spec_compliance_framing(input_data)
+        prompt = f"{framing}\n\n{digest}"
+
+        _model = resolve_code_review_model(llm)
+        agent = Agent(model=_model, system_prompt=SPEC_COMPLIANCE_PASS_PROMPT)
+        result = agent(prompt)
+        data = json.loads(str(result).strip())
+
+        if not isinstance(data, dict):
+            logger.warning("SpecCompliancePass: model returned non-object JSON; skipping")
+            return None
+        if "spec_compliance_notes" not in data:
+            logger.warning("SpecCompliancePass: missing spec_compliance_notes key; skipping")
+            return None
+
+        return str(data.get("spec_compliance_notes", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001 - best-effort pass; never fail the review
+        # This pass is purely additive narrative, same contract as
+        # synthesize_review_findings: any failure must leave the caller free
+        # to fall back rather than break an otherwise valid review.
+        logger.warning("SpecCompliancePass: pass failed (%s); skipping", exc)
+        return None
