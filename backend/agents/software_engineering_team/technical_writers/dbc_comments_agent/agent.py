@@ -109,7 +109,11 @@ class DbcCommentsAgent:
 
         def _update(status: DbcCommentsStatus, detail: str = "") -> None:
             if on_status:
-                on_status(status, detail)
+                try:
+                    on_status(status, detail)
+                except Exception as e:  # noqa: BLE001 -- a status hook is observability
+                    # and must never abort the review it's reporting on.
+                    logger.warning("DbcComments: on_status callback failed (ignored): %s", e)
             logger.info(
                 "DbcComments: %s %s",
                 status.value,

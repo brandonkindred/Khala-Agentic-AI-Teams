@@ -309,3 +309,17 @@ def test_dbc_status_callbacks_fire() -> None:
     )
     assert DbcCommentsStatus.STARTING in seen
     assert DbcCommentsStatus.COMPLETE in seen
+
+
+def test_dbc_run_survives_misbehaving_on_status_callback() -> None:
+    """A raising on_status callback must not propagate out of run() -- it is
+    an observability hook, not part of the review's control flow, so run()'s
+    documented 'Raises: Nothing' contract holds even when the caller's own
+    callback is broken."""
+    client = _StubClient(canned={"insertions": [], "already_compliant": True, "summary": "ok"})
+
+    def _boom(status, detail):
+        raise RuntimeError("callback exploded")
+
+    out = _agent(client).run(DbcCommentsInput(code="def f(): pass"), on_status=_boom)
+    assert out.already_compliant is True

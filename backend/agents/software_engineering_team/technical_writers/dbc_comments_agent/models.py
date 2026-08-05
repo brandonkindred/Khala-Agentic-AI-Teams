@@ -9,13 +9,17 @@ from software_engineering_team.shared.models import SystemArchitecture
 
 
 class DbcCommentsStatus(str, Enum):
-    """Progress tracking status for the DbC Comments agent workflow."""
+    """Progress tracking status for the DbC Comments agent workflow.
+
+    Every member here is actually emitted by ``DbcCommentsAgent.run()`` --
+    there is no ``COMMITTING``/persistence-phase status because ``run()``
+    never persists anything itself; it only returns the merged result.
+    """
 
     STARTING = "starting"
     ANALYZING_CODE = "analyzing_code"
     ADDING_COMMENTS = "adding_comments"
     NEEDS_RETRY = "needs_retry"
-    COMMITTING = "committing"
     COMPLETE = "complete"
     FAILED = "failed"
 
