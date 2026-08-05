@@ -1113,8 +1113,12 @@ def _run_backtest_background(
 
     Postconditions:
         - On the success path: job status becomes RUNNING then COMPLETED with a
-          serialized ``RunBacktestResponse``; a new ``BacktestRecord`` is stored
-          under ``_backtests[backtest_id]``
+          serialized ``RunBacktestResponse``; a ``BacktestRecord`` is stored under
+          ``_backtests[backtest_id]``, where ``backtest_id`` is derived
+          deterministically from ``job_id``. A second invocation for the same
+          ``job_id`` (e.g. a Temporal activity retry that lands after a worker
+          crash left the job at RUNNING) therefore overwrites the same record
+          instead of orphaning a duplicate.
         - On ``BacktestExecutionError`` or other exceptions: job status becomes
           FAILED with an error string, unless a cancel check already returned
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
@@ -1130,7 +1134,10 @@ def _run_backtest_background(
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
             return
-        backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
+        # Deterministic (not random) so a retry of the same job_id — e.g. a
+        # Temporal activity retry after a worker crash left the job RUNNING —
+        # overwrites the same record instead of minting a duplicate.
+        backtest_id = f"bt-{hashlib.sha256(job_id.encode()).hexdigest()[:8]}"
         now = _now()
         record = BacktestRecord(
             backtest_id=backtest_id,

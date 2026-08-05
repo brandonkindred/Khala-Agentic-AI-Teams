@@ -810,6 +810,62 @@ def test_run_backtest_background_early_cancellation(
     assert state == {}
 
 
+def test_run_backtest_background_retry_reuses_backtest_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A second run for the same job_id (e.g. a Temporal activity retry after a
+    worker crash left the job RUNNING) must overwrite the same backtest record
+    instead of minting a duplicate — the defect reported for retries."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    first_backtest_id = state["backtest_id"]
+
+    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    second_backtest_id = state["backtest_id"]
+
+    assert first_backtest_id == second_backtest_id
+    # The second run overwrote the same record rather than adding a duplicate.
+    assert len(api_main._backtests.values()) == 1
+
+
 # ---------------------------------------------------------------------------
 # _purge_strategy_lab_job_storage + _delete_paper_sessions_for_lab_record
 # ---------------------------------------------------------------------------
