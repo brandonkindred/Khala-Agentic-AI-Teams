@@ -191,12 +191,9 @@ __all__ = [
     "_symbol_surface",
 ]
 
-# Process-global submission-level short-circuit cache (see module docstring).
-# Bounded LRU mapping a whole-submission fingerprint -> the approved
-# ``CodeReviewOutput`` it produced, so an identical, previously-approved
-# submission returns without any LLM call. Guarded by a lock because reviews run
-# concurrently across jobs in one process. ``0`` disables it (every run is a
-# guaranteed miss). Coarser and independent of the per-chunk cache in ``mapping``.
+# Process-global submission-level short-circuit cache (see module docstring's
+# "Submission-level short-circuit" section). ``0`` disables it (every run is a
+# guaranteed miss).
 DEFAULT_SUBMISSION_CACHE_SIZE = 256  # CODE_REVIEW_SUBMISSION_CACHE_SIZE, floor 0
 
 # Progress-bar checkpoints (0.0-1.0), in the order the review actually reaches them:
@@ -251,11 +248,8 @@ def _block_on_unreviewed() -> bool:
     Postconditions:
         - Returns ``True`` only when ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` is an
           explicit truthy value (``true``/``1``/``yes``/``on``); unset or
-          anything else is ``False``. Default off: an unreviewable chunk degrades
-          gracefully (no posted "could not be reviewed" finding, no block) and is
-          surfaced only as non-blocking ``CodeReviewOutput.not_reviewed_ranges``.
-          Set it to restore the legacy fail-closed behavior where the chunk's code
-          is named by a blocking ``high`` finding that rejects the review.
+          anything else is ``False`` (the default — see module docstring for
+          why default-off is preferred and what setting it restores).
     """
     return env_bool("CODE_REVIEW_BLOCK_ON_UNREVIEWED", default=False)
 
@@ -611,23 +605,16 @@ def run_coordinator(
           so unreviewed code cannot pass the gate as approved.
         - ``approved is False`` implies at least one critical/high issue.
         - Every genuine reviewer finding is re-checked against the whole
-          submission and dropped only when the verifier confirms it is a false
-          positive; when that removes the last critical/high finding the gate
-          approves (a chunk-local false positive never blocks the merge). The
-          check is fail-safe — any verifier failure keeps the findings — and
-          never touches the not-reviewed coverage findings. This pass and the
-          merged architecture/side-effect pass below it run
-          concurrently via ``shared.concurrency.parallel_map`` when safe to do
-          so, falling back to the sequential order (false-positive filter,
-          then the merged architecture/side-effect pass) otherwise; either way the
-          merged ``issues`` order and content are identical (see
-          ``_run_tail_passes``). The merged pass's response is partitioned into
-          architecture-consistency and side-effect-impact finding lists before
-          deduplication and approval, preserving the downstream behavior of the
-          former separate passes. When ``input_data.skip_tail_passes`` is set,
-          neither tail pass runs at all — a lightweight mode for a fallback
-          caller that wants speed over full tail-pass rigor (see
-          ``_run_tail_passes``).
+          submission (see ``false_positive_filter``'s module docstring for why)
+          and dropped only when the verifier confirms it is a false positive;
+          when that removes the last critical/high finding the gate approves (a
+          chunk-local false positive never blocks the merge). The check is
+          fail-safe — any verifier failure keeps the findings — and never
+          touches the not-reviewed coverage findings. This pass and the merged
+          architecture/side-effect pass below it — their concurrency/fallback
+          scheduling, finding-list order, and ``skip_tail_passes`` behavior —
+          are exactly as documented on ``_run_tail_passes``, which this
+          function calls unchanged.
         - After the false-positive filter and the merged additive pass, related
           ``side-effects`` findings may be optionally consolidated (gated by
           ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
@@ -640,14 +627,14 @@ def run_coordinator(
           toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; no
           unreviewed ranges) returns the recorded approved output with no LLM
           call at all — unless a ``repo_reader`` is given, in which case this
-          short-circuit never fires (a verdict that reads the rest of the
-          repository cannot be safely reproduced from an input-only cache key).
-          The cache-hit check, its LRU touch, and the deep clone of the served
-          output all happen under a single ``_SUBMISSION_OUTCOME_CACHE_LOCK``
-          acquisition, so a concurrent write-back (see below) can never
-          interleave with a hit being read; the lock is released before
-          ``progress_callback`` runs, since caller-supplied code must never
-          execute while this process-global, non-reentrant lock is held.
+          short-circuit never fires (see module docstring's "Submission-level
+          short-circuit" section for why). The cache-hit check, its LRU touch,
+          and the deep clone of the served output all happen under a single
+          ``_SUBMISSION_OUTCOME_CACHE_LOCK`` acquisition, so a concurrent
+          write-back (see below) can never interleave with a hit being read;
+          the lock is released before ``progress_callback`` runs, since
+          caller-supplied code must never execute while this process-global,
+          non-reentrant lock is held.
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -682,16 +669,9 @@ def run_coordinator(
     # is identical throughout (best-effort identity, never raises).
     model_fingerprint = _review_model_fingerprint(llm)
 
-    # Submission-level short-circuit: an identical submission that was already
-    # approved reproduces the same verdict, so return its cached output before any
-    # LLM work (map, false-positive verification, and merge all skipped). Keyed on
-    # the raw input + model + output-affecting toggles (including
-    # ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``) — no compaction — so the check
-    # itself costs no model call. Skipped entirely when disabled (size 0) or when
-    # a ``repo_reader`` is given: the verdict can then also depend on the rest of
-    # the repository, which the key cannot see, so a hit could mask a since-added
-    # architecture/redundancy finding or a since-resolved false positive. On a
-    # miss the run proceeds and stores its verdict below if approved.
+    # Submission-level short-circuit (see module docstring's "Submission-level
+    # short-circuit" section for the full rationale). On a miss the run proceeds
+    # and stores its verdict below if approved.
     submission_size = _submission_cache_size()
     submission_key: Optional[str] = None
     cached: Optional[CodeReviewOutput] = None
@@ -793,30 +773,16 @@ def run_coordinator(
     # here (not per chunk) because it is identical for every chunk in this run.
     context_fp = _context_fingerprint(base_input, model_fingerprint)
 
-    # Top-level symbol surface of every changed file, so each chunk's reviewer can
-    # see what its *siblings* define/export and flag references to a symbol a
-    # sibling renamed or removed — a cross-file break a bounded single-chunk view
-    # would otherwise miss. Folded into each chunk's cache key so a sibling's
-    # surface change re-runs the dependent chunk while body-only edits stay cached.
+    # Cross-file sibling surface (see module docstring's "Cross-file surface"
+    # section).
     surface_by_path = _surface_by_path(blocks)
 
     chunk_reviewer = ChunkReviewAgent(llm)
     outcome = _ChunkOutcome()
-    # Review-run-scoped concurrency ceiling: one semaphore, created once for this
-    # call and shared by every chunk, sized to this run's ``_map_parallelism()``
-    # budget. Threaded through ``_map_chunks`` -> ``_cached_review_chunk`` ->
-    # ``_review_chunk_with_recovery`` down to every actual ``reviewer.run()``
-    # call, so it caps the TOTAL number of concurrent chunk-review LLM calls for
-    # this run -- the top-level per-chunk fan-out *and* every concurrently
-    # in-flight bisection-recovery half together -- rather than only the outer
-    # map-phase fan-out width. Without this, each top-level worker that bisects
-    # would add its own independent 2-worker pool on top of whatever else is
-    # already running, letting the true concurrency exceed the configured
-    # ceiling when multiple chunks bisect at the same time (see
-    # ``_review_chunk_with_recovery``'s bisection branch). Thread-mode only: see
-    # ``docs/ENV_VARS.md``'s ``CODE_REVIEW_MAP_PARALLELISM`` entry for why
-    # Temporal mode cannot share this object across per-chunk activities and is
-    # bounded differently instead.
+    # Review-run-scoped concurrency ceiling (see this function's docstring's
+    # "total number of concurrent chunk-review calls" postcondition, and
+    # mapping.py's ``_run_reviewer_call``/``_map_chunks`` docstrings for how
+    # it's honored down the call chain).
     run_limiter = threading.Semaphore(_map_parallelism())
     for per_chunk in _map_chunks(
         chunk_reviewer,
@@ -840,14 +806,10 @@ def run_coordinator(
             unreviewed=[i.description for i in outcome.not_reviewed_issues],
         )
 
-    # False-positive verification: re-check each genuine reviewer finding against
-    # the *whole* submission. Each chunk review saw only a bounded slice, so a
-    # finding can be wrong because the resolving code lived in a part of the file
-    # (or another file) it never saw. The filter reads the real code and drops
-    # only the findings it confirms are false positives. Coverage/safety findings
+    # False-positive verification (see ``false_positive_filter``'s module
+    # docstring for the full rationale). Coverage/safety findings
     # (``not_reviewed_issues``, empty-file notices) are never passed in, so the
-    # gate's anti-loop nets stay intact; on any verifier failure the findings are
-    # kept (fail-safe).
+    # gate's anti-loop nets stay intact.
     genuine_issues = _dedupe_issues(outcome.issues)
     notify_review_progress(
         progress_callback,
@@ -864,23 +826,16 @@ def run_coordinator(
     # concurrently in worker threads (see ``_run_tail_passes``).
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
-    # False-positive verification remains its own once-per-submission pass
-    # (skipped when the calling gate opted out via ``skip_false_positive_filter``
-    # -- e.g. a gate whose findings must never be silently dropped; skipping
-    # only removes the drop-false-positives step, so it can only ever keep more
-    # findings). Architecture-consistency and side-effect-impact are produced by
-    # a single merged LLM call (architecture contradictions + cross-codebase
-    # redundancy, plus caller-impact / documentation mismatches) and then split
-    # back into the two finding lists for downstream dedupe/gate/synthesis.
-    # Neither reads the other's output, so they run concurrently when safe (see
-    # ``_run_tail_passes``). After those passes, related ``side-effects`` findings
-    # may optionally be consolidated (gated by
+    # See ``_run_tail_passes`` for the false-positive filter / merged
+    # architecture-side-effect pass split, scheduling, and skip behavior.
+    # ``skip_false_positive_filter`` is for a gate whose findings must never be
+    # silently dropped; skipping only removes the drop-false-positives step, so
+    # it can only ever keep more findings. After those passes, related
+    # ``side-effects`` findings may optionally be consolidated (gated by
     # ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error) before the
     # same dedupe/severity-gate/merge machinery below. The merged halves are
     # restricted internally to the default CODE_REVIEW profile -- see their own
     # docstrings for why the other profiles must never receive these findings.
-    # ``input_data.skip_tail_passes`` skips both passes entirely (no LLM calls),
-    # a lightweight mode for a fallback caller that wants speed over rigor.
     tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,
@@ -909,13 +864,9 @@ def run_coordinator(
         "deduplicating findings and applying approval rules",
         _PROGRESS_FINALIZING,
     )
-    # A chunk that could not be reviewed after recovery degrades gracefully: by
-    # default its "not reviewed" coverage findings are NOT posted and do NOT block
-    # (they would otherwise surface as an alarming "[HIGH] ... could not be
-    # reviewed automatically" PR comment for a reviewer-side hiccup, not a code
-    # defect). They are still surfaced non-blockingly via ``not_reviewed_ranges``
-    # below and in the telemetry log. Set CODE_REVIEW_BLOCK_ON_UNREVIEWED to
-    # restore the legacy fail-closed behavior where they block the merge.
+    # Degrade gracefully for an unreviewable chunk (see module docstring and
+    # ``_block_on_unreviewed``); surfaced non-blockingly below and in the
+    # telemetry log by default.
     not_reviewed_ranges: List[str] = [
         _not_reviewed_range_label(i) for i in outcome.not_reviewed_issues
     ]
@@ -963,15 +914,12 @@ def run_coordinator(
         summary=merged_summary,
         spec_compliance_notes=spec_notes,
     )
-    # Record only approved verdicts for the submission-level short-circuit: an
-    # identical resubmission returns this output with no LLM work. A rejection is
-    # not stored — the fix that follows changes the submission, and if the same
-    # rejected bytes reappear the (mostly cached) map phase still surfaces the
-    # findings the coding agent needs. A run that left any range unreviewed is
-    # also not stored: freezing it would keep serving a partial verdict on later
-    # identical cycles instead of re-attempting the chunk that could not be
-    # reviewed (a semantic-exhaustion/truncation hiccup may not recur), matching
-    # the map-phase rule that degraded chunk outcomes are never cached. Store a
+    # Record only approved verdicts for the submission-level short-circuit (see
+    # module docstring). A run that left any range unreviewed is also not
+    # stored: freezing it would keep serving a partial verdict on later identical
+    # cycles instead of re-attempting the chunk that could not be reviewed (a
+    # semantic-exhaustion/truncation hiccup may not recur), matching the
+    # map-phase rule that degraded chunk outcomes are never cached. Store a
     # clone so a later hit can be mutated freely without corrupting the entry.
     if submission_key is not None and result.approved and len(not_reviewed_ranges) == 0:
         with _SUBMISSION_OUTCOME_CACHE_LOCK:

@@ -1797,6 +1797,37 @@ def test_list_strategy_lab_runs_merged_entry_missing_keys_does_not_500(
     assert run["total_cycles"] == 0
 
 
+def test_list_strategy_lab_runs_merged_entry_null_data_does_not_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted job whose ``"data"`` key is present but ``None`` must not
+    500 -- regression test for issue #4325. Before the fix,
+    ``normalize_persisted_job`` did ``data = job.get("data", job)``, which
+    only falls back to ``job`` when the key is *absent*; a present-but-null
+    value passed straight through and crashed on the next line's
+    ``data["run_id"] = ...``. That ``TypeError`` was swallowed by the outer
+    ``except Exception`` around the whole reconcile+merge block, silently
+    dropping every persisted running/pending job from the response (not just
+    this malformed one) and falling back to the in-memory-only snapshot.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs.clear()
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-null-data",
+                "status": "running",
+                "data": None,
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    resp = api_client.get("/strategy-lab/runs")
+    assert resp.status_code == 200
+    assert any(r["run_id"] == "run-null-data" for r in resp.json()["runs"])
+
+
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

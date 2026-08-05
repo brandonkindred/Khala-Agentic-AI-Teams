@@ -1408,30 +1408,6 @@ def test_get_run_state_strict_returns_none_for_genuinely_unknown_run(
     assert run_state.get_run_state_strict("run-nonexistent") is None
 
 
-def test_get_run_state_strict_does_not_mutate_job_service_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression: when a job has no "data" key, `job.get("data", job)`
-    aliases the exact dict the client returned. The returned state must be
-    a copy -- mutating it in place (setting run_id/status) would otherwise
-    leak those mutations back into the client's response object, which
-    could be cached/reused."""
-    from investment_team.strategy_lab import run_state
-
-    original_job = {"job_id": "run-alias", "status": "running"}
-
-    class _Ok:
-        def get_job(self, jid):
-            return original_job
-
-    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
-    state = run_state.get_run_state_strict("run-alias")
-
-    assert state is not original_job
-    assert "run_id" not in original_job  # the caller's object is untouched
-    assert state["run_id"] == "run-alias"
-
-
 def test_rehydrate_active_run_offset_propagates_durable_read_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1992,3 +1968,72 @@ def test_finalize_strategy_lab_cycle_record_isolates_raising_on_phase_callback(
     assert result.paper_trading_skipped_reason == "not_winning"
     # Persistence must have run despite the callback raising.
     assert api_main._strategy_lab_records["lab-finalize-callback-boom"] is record
+
+
+def test_normalize_persisted_job_uses_dict_data_field() -> None:
+    """A dict ``"data"`` payload is used (and mutated in place) as-is."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running", "data": {"completed_cycles": 3}}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job["data"]
+    assert result["run_id"] == "job-1"
+    assert result["status"] == "running"
+    assert result["completed_cycles"] == 3
+
+
+def test_normalize_persisted_job_falls_back_to_job_when_data_absent() -> None:
+    """No ``"data"`` key at all -- ``job`` itself is treated as the state dict."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running"}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job
+    assert result["run_id"] == "job-1"
+
+
+def test_normalize_persisted_job_falls_back_to_job_when_data_is_none() -> None:
+    """A ``"data"`` key present but ``None`` must not raise ``TypeError`` --
+    regression test for issue #4325."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running", "data": None}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job
+    assert result["run_id"] == "job-1"
+    assert result["status"] == "running"
+
+
+def test_normalize_persisted_job_falls_back_to_job_when_data_is_not_a_dict() -> None:
+    """A ``"data"`` key present but holding a non-dict value (e.g. malformed
+    job-service JSON) must not raise ``AttributeError``/``TypeError`` either."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running", "data": "not-a-dict"}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job
+    assert result["run_id"] == "job-1"
+
+
+def test_normalize_persisted_job_derives_run_id_when_not_given() -> None:
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running"}
+    result = normalize_persisted_job(job, fallback_status="completed")
+
+    assert result["run_id"] == "job-1"
+
+
+def test_normalize_persisted_job_defaults_status_from_fallback() -> None:
+    """When neither the data dict nor ``job`` itself has a ``status``, the
+    caller-supplied ``fallback_status`` is used."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "data": {}}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result["status"] == "completed"

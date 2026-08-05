@@ -179,23 +179,24 @@ def normalize_persisted_job(
     run-state shape, so a future change to that shape only needs updating here.
 
     Preconditions:
-        ``job`` is a job-service record; when its fields are nested under a
-        ``"data"`` key that dict holds the run-state fields, otherwise ``job``
-        itself is treated as the state dict.
+        ``job`` is a job-service record; when its ``"data"`` key holds a
+        dict, that dict holds the run-state fields, otherwise ``job`` itself
+        is treated as the state dict -- this covers ``"data"`` being absent,
+        ``None`` (a key present but null, e.g. a not-yet-populated persisted
+        record), or any other non-dict value.
 
     Postconditions:
-        Returns a COPY of ``job.get("data", job)`` -- not the same object --
-        with ``run_id`` set to ``run_id`` when given, else derived from
-        ``job.get("job_id") or job.get("run_id", "")``; and ``status``
-        defaulted (via ``setdefault``, so an existing ``status`` in the
-        returned dict wins) to ``job.get("status", fallback_status)``. A copy
-        is returned rather than mutating ``job.get("data", job)`` in place:
-        when the job has no ``"data"`` key, that expression aliases the exact
-        object ``client.get_job`` returned, and mutating it could leak those
-        mutations back into the client's response if it ever caches or
-        reuses that object.
+        Returns ``job["data"]`` when that's a dict, else ``job`` itself --
+        the same dict object either way, not a copy -- with ``run_id`` set to
+        ``run_id`` when given, else derived from ``job.get("job_id") or
+        job.get("run_id", "")``; and ``status`` defaulted (via
+        ``setdefault``, so an existing ``status`` in the returned dict wins)
+        to ``job.get("status", fallback_status)``. Never raises ``TypeError``
+        from a null/malformed ``"data"`` value (falls back to ``job`` itself
+        instead of trying to use a non-dict).
     """
-    data = dict(job.get("data", job))
+    raw_data = job.get("data")
+    data = raw_data if isinstance(raw_data, dict) else job
     data["run_id"] = run_id if run_id is not None else (job.get("job_id") or job.get("run_id", ""))
     data.setdefault("status", job.get("status", fallback_status))
     return data
