@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -102,10 +102,16 @@ class _ScriptedClient(DummyLLMClient):
     ``complete_json`` call. Replaces the Wave 1/2/3 pre-migration pattern of
     ``mock.complete_json.side_effect = [...]`` for scripted DevOps pipelines."""
 
-    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        responses: List[Dict[str, Any]],
+        *,
+        default_factory: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
         super().__init__()
         self._responses = list(responses)
         self._idx = 0
+        self._default_factory = default_factory
 
     def complete_json(
         self,
@@ -121,8 +127,13 @@ class _ScriptedClient(DummyLLMClient):
             resp = self._responses[self._idx]
             self._idx += 1
             return resp
-        # After the scripted list is exhausted, fall back to the last entry
-        # so extra pipeline steps don't crash the test.
+        # After the scripted list is exhausted, use the caller-supplied
+        # neutral default when given (so drift onto this fallback is an
+        # obviously-generic response, not a real step's payload silently
+        # overloaded with extra fields); otherwise fall back to the last
+        # entry so extra pipeline steps don't crash the test.
+        if self._default_factory is not None:
+            return self._default_factory()
         return self._responses[-1] if self._responses else {}
 
 
@@ -218,20 +229,17 @@ def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _Script
                 ],
                 "summary": "validation ok",
             },
-            # Also carries "approved"/"findings" (unused by the doc_runbook
-            # agent) so that an unrelated upstream retry drift (e.g. a
-            # chunk-review corrective retry consuming an extra script slot)
-            # landing this same entry on a *later* step -- most notably
-            # DevSecOpsReviewAgent, which now schema-validates its reply --
-            # still parses as a clean "approved, no findings" result instead
-            # of failing validation and blocking the pipeline.
-            {
-                "files": {"docs/runbook.md": "# Runbook"},
-                "summary": "doc ok",
-                "approved": True,
-                "findings": [],
-            },
-        ]
+            {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
+        ],
+        # Once the scripted list is exhausted, any further call (e.g. an
+        # unrelated upstream corrective retry -- a chunk-review bisection,
+        # say -- consuming an extra slot and shifting a later named step,
+        # most notably DevSecOpsReviewAgent, onto an overrun call) gets this
+        # explicit, schema-neutral "clean, no opinion" response instead of
+        # the real (and now schema-validated) doc_runbook payload silently
+        # overloaded with extra fields. Keeps drift visible as a deliberate,
+        # obviously-generic fallback rather than a masked ordering bug.
+        default_factory=lambda: {"approved": True, "findings": [], "summary": "fallback"},
     )
 
 
@@ -1519,9 +1527,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         # Without this, hosts with a working terraform CLI skip debug and consume
         # 8 LLM calls while hosts without it consume 9 — which desynchronizes a
         # chained two-run script. Use the full 9-response happy-path script twice.
-        per_run = list(_scripted_llm_for_happy_path()._responses)
+        happy_path = _scripted_llm_for_happy_path()
+        per_run = list(happy_path._responses)
         assert len(per_run) == 9
-        chained = _ScriptedClient(per_run + per_run)
+        chained = _ScriptedClient(per_run + per_run, default_factory=happy_path._default_factory)
         agent = DevOpsTeamLeadAgent(chained)
 
         def _failing_exec(_repo: str, _artifacts: dict) -> list:
@@ -2760,7 +2769,8 @@ _FENCED_RECOVERY_CASES = [
 
 
 class TestDevOpsAgentsRecoverFencedJson:
-    """Markdown-fenced LLM JSON must recover for every DevOps LLM agent."""
+    """Markdown-fenced LLM JSON must recover for each DevOps LLM agent that
+    still uses ``complete_json_with_continuation``."""
 
     @pytest.mark.parametrize(
         "build,payload,check",
@@ -2768,7 +2778,7 @@ class TestDevOpsAgentsRecoverFencedJson:
         ids=[case[0] for case in _FENCED_RECOVERY_CASES],
     )
     def test_recovers_fenced_json(self, monkeypatch, build, payload, check) -> None:
-        """Each DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
+        """Each remaining DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
         _patch_fenced_response(monkeypatch, payload)
         agent, inp = build()
         check(agent.run(inp))

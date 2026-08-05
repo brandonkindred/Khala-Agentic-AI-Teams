@@ -26,8 +26,8 @@ class DevSecOpsReviewAgent:
         """Store the review client.
 
         Preconditions: ``llm_client`` is not None (an ``LLMClient``).
-        Postconditions: ``self.llm`` is the stored client, resolved fresh on
-        every ``run`` call by ``run_single_shot_review``.
+        Postconditions: ``self.llm`` is the stored client, passed to
+        ``run_single_shot_review`` verbatim on every ``run`` call.
         """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
