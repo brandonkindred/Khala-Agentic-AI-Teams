@@ -81,6 +81,10 @@ def test_dbc_run_already_compliant(monkeypatch) -> None:
 
 
 def test_dbc_run_with_insertions_returned(monkeypatch) -> None:
+    """comments_added/comments_updated and files are computed by the real,
+    deterministic merge (merge.apply_dbc_insertions) -- never trusted from the
+    LLM's self-reported counts, which is why the fixture's counts (3/1) are
+    intentionally wrong and must not appear in the result."""
     fake = _FakeCompleteJson(
         {
             "insertions": [
@@ -100,15 +104,73 @@ def test_dbc_run_with_insertions_returned(monkeypatch) -> None:
         }
     )
     a = _build_agent(monkeypatch, fake)
-    out = a.run(DbcCommentsInput(code="def f(): pass", language="python"))
+    out = a.run(DbcCommentsInput(code="def f():\n    pass\n", language="python"))
     assert out.already_compliant is False
     assert len(out.insertions) == 1
     assert out.insertions[0].file == "a.py"
     assert out.insertions[0].symbol == "f"
     assert out.insertions[0].action == "add"
-    assert out.comments_added == 3
-    assert out.comments_updated == 1
+    assert out.comments_added == 1
+    assert out.comments_updated == 0
+    assert out.rejected_insertions == []
+    assert "Does nothing." in out.files["a.py"]
+    assert "pass" in out.files["a.py"]
     assert out.suggested_commit_message == "docs(dbc): comments"
+
+
+def test_dbc_run_rejects_invalid_insertion_without_corrupting(monkeypatch) -> None:
+    """An insertion the merge cannot safely anchor is surfaced via
+    rejected_insertions and simply omitted from files -- never corrupted."""
+    fake = _FakeCompleteJson(
+        {
+            "insertions": [
+                {
+                    "file": "a.py",
+                    "symbol": "does_not_exist",
+                    "comment": "Never anchored.",
+                    "action": "add",
+                }
+            ],
+            "already_compliant": False,
+            "summary": "added comments",
+        }
+    )
+    a = _build_agent(monkeypatch, fake)
+    out = a.run(DbcCommentsInput(code="def f():\n    pass\n", language="python"))
+    assert out.already_compliant is False
+    assert len(out.insertions) == 1  # still visible for observability
+    assert out.files == {}
+    assert out.comments_added == 0
+    assert out.comments_updated == 0
+    assert len(out.rejected_insertions) == 1
+    assert "does_not_exist" in out.rejected_insertions[0]
+
+
+def test_dbc_run_merge_exception_fails_open(monkeypatch) -> None:
+    """An unexpected exception from the deterministic merge step must not
+    propagate out of run() -- it fails open, same as an LLM call failure,
+    honoring run()'s documented 'Raises: Nothing' contract."""
+    fake = _FakeCompleteJson(
+        {
+            "insertions": [{"file": "a.py", "symbol": "f", "comment": "c"}],
+            "already_compliant": False,
+            "summary": "added comments",
+        }
+    )
+    a = _build_agent(monkeypatch, fake)
+
+    def _boom(code, insertions):
+        raise RuntimeError("merge blew up")
+
+    monkeypatch.setattr(dbc_mod, "apply_dbc_insertions", _boom)
+    statuses = []
+    out = a.run(
+        DbcCommentsInput(code="def f():\n    pass\n", language="python"),
+        on_status=lambda s, d: statuses.append((s, d)),
+    )
+    assert out.already_compliant is True
+    assert "merge error" in out.summary
+    assert any(s == DbcCommentsStatus.FAILED for s, _ in statuses)
 
 
 def test_dbc_run_llm_exception_fails_open(monkeypatch) -> None:
@@ -146,9 +208,10 @@ def test_dbc_run_non_list_insertions(monkeypatch) -> None:
     assert out.insertions == []
 
 
-def test_dbc_run_filters_invalid_insertion_entries(monkeypatch) -> None:
+def test_dbc_run_filters_invalid_insertion_entries(monkeypatch, caplog) -> None:
     """Verifies malformed insertion entries (missing required fields, wrong
-    type) are skipped rather than failing the whole review."""
+    type) are skipped -- and logged, per the run() docstring's guarantee --
+    rather than failing the whole review."""
     fake = _FakeCompleteJson(
         {
             "insertions": [
@@ -161,9 +224,12 @@ def test_dbc_run_filters_invalid_insertion_entries(monkeypatch) -> None:
         }
     )
     a = _build_agent(monkeypatch, fake)
-    out = a.run(DbcCommentsInput(code="def f(): pass"))
+    with caplog.at_level("WARNING"):
+        out = a.run(DbcCommentsInput(code="def f(): pass"))
     assert len(out.insertions) == 1
     assert out.insertions[0].file == "good.py"
+    assert "skipping non-object insertion entry" in caplog.text
+    assert "skipping malformed insertion" in caplog.text
 
 
 def test_dbc_run_safety_override(monkeypatch) -> None:

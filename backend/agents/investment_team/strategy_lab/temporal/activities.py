@@ -156,8 +156,12 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False) -
         dict of run-state fields.
     Postconditions:
         Delegates to ``investment_team.api.main._persist_run_state``
-        verbatim, which never raises (it logs and swallows any job-service
-        failure internally) — so this activity likewise never raises.
+        verbatim, which now propagates any job-service failure rather than
+        swallowing it -- letting this activity raise too, so its caller's
+        Temporal retry policy (``_ACTIVITY_RETRY`` in
+        ``strategy_lab/temporal/workflows.py``) can retry the durable write.
+        If retries are exhausted, the workflow fails visibly instead of
+        silently continuing with an unpersisted run state.
     """
     from investment_team.api.main import _persist_run_state
 

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from llm_service import LLMClient
 from software_engineering_team.devops_team.models import ReviewFinding
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.shared.llm import DEFAULT_JSON_SYSTEM_PROMPT
 from software_engineering_team.shared.security_service import derive_approved
+from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
 from .models import DevSecOpsReviewInput, DevSecOpsReviewOutput
 from .prompts import DEVSECOPS_REVIEW_PROMPT
@@ -15,23 +15,18 @@ from .prompts import DEVSECOPS_REVIEW_PROMPT
 class DevSecOpsReviewAgent:
     """Infra security reviewer for DevOps artifacts (IAM/secrets/network).
 
-    Invariants: instance state is limited to ``llm`` and the resolved Strands
-    ``_model``; ``run`` is stateless across calls (a fresh ``Agent`` per call).
+    Invariants: instance state is limited to ``llm``; ``run`` is stateless
+    across calls.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
-        """Resolve the review model.
+        """Store the injected client for ``run()``.
 
-        Preconditions: ``llm_client`` is not None (an ``LLMClient`` or a Strands
-        ``Model``).
-        Postconditions: ``self._model`` is a usable Strands model — the passed
-        client when it is already a Strands ``Model``, else the ``devops`` model.
+        Preconditions: ``llm_client`` is not None.
+        Postconditions: ``self.llm`` is ``llm_client``, unchanged.
         """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
 
     def run(self, input_data: DevSecOpsReviewInput) -> DevSecOpsReviewOutput:
         """Review DevOps artifacts and derive a blocking decision.
@@ -53,9 +48,11 @@ class DevSecOpsReviewAgent:
             f"requirements={input_data.requirements}\n"
             f"artifacts={list(input_data.artifacts.keys())}\n"
         )
-        data = complete_json_with_continuation(
-            self._model,
+        data = run_single_shot_review(
+            self.llm,
+            "devops",
             DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context,
+            DEFAULT_JSON_SYSTEM_PROMPT,
             temperature=0.0,
             think=True,
         )

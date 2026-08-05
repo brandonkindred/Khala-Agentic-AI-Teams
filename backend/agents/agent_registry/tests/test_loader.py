@@ -197,6 +197,15 @@ def test_manifests_with_id_prefix_empty_registry_returns_empty() -> None:
     assert reg.manifests_with_id_prefix("anything.") == []
 
 
+def test_manifests_with_id_prefix_excludes_tombstoned_id_with_no_active_store() -> None:
+    # No dynamic store active (the _no_dynamic_store autouse fixture): the
+    # local-only fallback branch must still exclude a recently unregistered id.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("team-a.tombstoned", "A"))
+    reg.unregister("team-a.tombstoned")
+    assert reg.manifests_with_id_prefix("team-a.") == []
+
+
 def test_manifests_with_id_prefix_empty_prefix_matches_all() -> None:
     # Every string startswith("") — an empty prefix returns the whole registry.
     reg = AgentRegistry([], {})
@@ -651,3 +660,35 @@ def test_cognition_example_manifest_is_valid() -> None:
     assert manifest.cognition.knowledge_graph.ingest_events is True
     assert manifest.cognition.knowledge_graph.ingest_summaries is True
     assert manifest.cognition.knowledge_graph.ground_rule_proposals is True
+
+
+def test_tombstone_ttl_defaults_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    reg = AgentRegistry([], {})
+    assert reg._TOMBSTONE_TTL_S == AgentRegistry._DEFAULT_TOMBSTONE_TTL_S
+
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_TTL_S", "12.5")
+    assert reg._TOMBSTONE_TTL_S == 12.5
+
+    # Negative values clamp to 0.0 rather than producing a negative TTL.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_TTL_S", "-3")
+    assert reg._TOMBSTONE_TTL_S == 0.0
+
+    # Unparseable values fall back to the default rather than raising.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_TTL_S", "not-a-number")
+    assert reg._TOMBSTONE_TTL_S == AgentRegistry._DEFAULT_TOMBSTONE_TTL_S
+
+
+def test_tombstone_max_entries_defaults_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    reg = AgentRegistry([], {})
+    assert reg._TOMBSTONE_MAX_ENTRIES == AgentRegistry._DEFAULT_TOMBSTONE_MAX_ENTRIES
+
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES", "50")
+    assert reg._TOMBSTONE_MAX_ENTRIES == 50
+
+    # Zero/negative values clamp to 1 rather than a non-positive cap.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES", "0")
+    assert reg._TOMBSTONE_MAX_ENTRIES == 1
+
+    # Unparseable values fall back to the default rather than raising.
+    monkeypatch.setenv("AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES", "not-a-number")
+    assert reg._TOMBSTONE_MAX_ENTRIES == AgentRegistry._DEFAULT_TOMBSTONE_MAX_ENTRIES

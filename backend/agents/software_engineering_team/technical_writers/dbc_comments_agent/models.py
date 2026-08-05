@@ -1,7 +1,7 @@
 """Models for the Design by Contract Comments agent."""
 
 from enum import Enum
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,15 +42,18 @@ class DbcCommentInsertion(BaseModel):
     Replaces the previous whole-file-rewrite contract: instead of asking the
     model to re-emit an entire file, each insertion names exactly one
     file/symbol and carries only the comment/docstring block text to attach
-    there -- the surrounding code is never re-emitted. Applying an insertion
-    to the original source (the anchoring/merge logic) is out of scope here;
-    this model is the raw shape the LLM is asked to produce.
+    there -- the surrounding code is never re-emitted. This model is the raw
+    shape the LLM is asked to produce; applying it to the original source is
+    deterministic, LLM-free logic in :mod:`.merge`.
     """
 
     file: str = Field(description="Path of the file this insertion applies to")
     symbol: str = Field(
         description="Name of the function/method/class this comment attaches to, or a short "
-        "anchor description (e.g. 'module docstring') for non-symbol anchors",
+        "anchor description for a module-level (non-symbol) comment -- accepted aliases "
+        "(case-insensitive) are '', 'module docstring', 'module', '<module>', and 'file'; see "
+        "merge._MODULE_SYMBOL_ALIASES, which prompts.DBC_COMMENTS_PROMPT's 'module docstring' "
+        "example is written to elicit",
     )
     line: Optional[int] = Field(
         default=None,
@@ -73,8 +76,27 @@ class DbcCommentsOutput(BaseModel):
 
     insertions: List[DbcCommentInsertion] = Field(
         default_factory=list,
-        description="Anchored DbC comment insertions to apply to the reviewed files. "
-        "Empty when already_compliant is True.",
+        description="Validated, unmerged DbC comment insertions the LLM proposed, regardless "
+        "of already_compliant -- the two are not mutually exclusive, since the caller trusts "
+        "already_compliant as the model's overall assessment even when it also returned "
+        "insertions. Kept for observability even when a given insertion could not be safely "
+        "merged into `files` (see `files`' description).",
+    )
+    files: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Dict of file_path -> merged file content with the accepted insertions "
+        "applied. Deterministically assembled from `insertions` by this agent's own merge "
+        "logic -- never re-emitted by the LLM. Only includes a file when at least one of its "
+        "insertions was safely anchored and applied and, for '.py' files, the merged result "
+        "still parses; a file with no successfully applied insertion is omitted (its pre-DbC "
+        "content is simply not returned, never corrupted).",
+    )
+    rejected_insertions: List[str] = Field(
+        default_factory=list,
+        description="One human-readable reason per insertion that could not be safely anchored "
+        "or merged (unknown file, ambiguous/missing symbol, out-of-range line, duplicate "
+        "target, or a merged result that failed the post-merge syntax check). Surfaced rather "
+        "than dropped silently, so a rejected insertion is always visible to callers.",
     )
     comments_added: int = Field(
         default=0,

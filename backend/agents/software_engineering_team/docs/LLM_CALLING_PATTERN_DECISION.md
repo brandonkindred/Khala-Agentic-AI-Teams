@@ -75,7 +75,7 @@ is not exhaustive:
 
 ### Pattern 2 — `run_structured_persona`
 
-Justified for the four existing top-level persona agents (security, QA,
+Justified for the three existing top-level persona agents (QA,
 accessibility, integration): Strands' `structured_output_model` forced
 tool-choice mechanism and a caller-authored, safe-by-default typed
 fallback are a good fit for a single top-level agent producing one typed
@@ -84,6 +84,15 @@ reasonably choose this pattern instead of Pattern 1 if its shape — one
 agent, one structured output type, one caller-owned fallback value — fits
 it better. See the audit's Pattern 2 section for the exact
 construction-vs-call exception boundary.
+
+`security_agent` (`CybersecurityExpertAgent`) was originally a fourth
+Pattern 2 caller but has since migrated to `run_single_shot_review`
+(below, schema-validated mode) to gain a bounded corrective retry on a
+malformed reply, which Pattern 2 does not offer. That migration is a
+change to an *existing* agent, not a new agent's pattern choice, so it
+falls under this document's own "migrating any existing agent between
+patterns" out-of-scope carve-out rather than the "no new hand-rolled call
+sites" rule below (Pattern 5), which is scoped to new agents.
 
 ### Pattern 3 — `DevOpsSingleShotAgent`
 
@@ -118,6 +127,44 @@ them is explicitly out of scope (see below).
 **New agents should not add new hand-rolled call sites.** Pattern 5 is not
 an option going forward — it exists as a record of pre-decision code, not
 as a menu choice for new work.
+
+### `run_single_shot_review` — shared single-shot `LLMClient` helper
+
+`shared/single_shot_review.py`'s `run_single_shot_review(llm_client,
+agent_key, prompt, system_prompt, *, schema=..., ...)` is justified as a
+narrow exception distinct from Patterns 1-5 above: it is a plain function,
+not an agent, so it has no review/generate/plan-specific shape to subclass
+into any of Patterns 1-4's recipes. It exists to give already-hand-rolled
+(Pattern 5) call sites — and any narrowly-scoped future ones with the same
+shape — one shared implementation of the "resolve an `LLMClient` for
+`agent_key` unless one is already injected, then make one single-shot call"
+boilerplate they currently duplicate by hand, rather than each repeating
+it. **It is not a sixth menu option for a new agent's overall calling
+shape** — new agents still default to Pattern 1 (or its justified
+exceptions 2-4) exactly as stated above; this helper is for call sites that
+need the underlying single-shot `LLMClient` call itself, e.g. a future
+migration of existing Pattern 5 sites onto one shared implementation
+instead of N duplicated ones (tracked separately, not part of this
+helper's introduction).
+
+**Relationship to `llm_service.api.generate_structured`.** The
+schema-validated branch delegates to `generate_structured`
+(`llm_service/api.py`) rather than calling `complete_validated` itself.
+`generate_structured` was extended with an optional `llm_client` parameter
+(used as-is when given, instead of always resolving one via
+`get_client(agent_key)`) plus `think`/`context`/`**kwargs` forwarding, so
+it can now serve `run_single_shot_review`'s dependency-injection callers
+too — the canonical public entrypoint owns the resolve+validate contract
+in both places instead of two parallel implementations of it. The
+plain-JSON branch still has no canonical entrypoint to delegate to (`schema`
+is a required parameter of `generate_structured`), so it resolves a client
+and calls `complete_json` directly, as documented above.
+
+`security_agent/agent.py` (`CybersecurityExpertAgent`) is the first such
+migration: it now calls `run_single_shot_review` in schema-validated mode
+(`schema=SecurityLLMResponse`) in place of its former Pattern 2
+(`run_structured_persona`) call, gaining the bounded corrective retry
+Pattern 2 doesn't offer.
 
 ## Out of scope
 

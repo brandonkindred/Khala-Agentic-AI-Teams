@@ -148,12 +148,18 @@ message history), call it with `structured_output_model=<Output type>`, and
 supply a `fallback_factory` that turns any exception into a safe, final
 instance of that output type.
 
-**Call sites:** the four top-level persona agents —
-`security_agent/agent.py` (`CybersecurityExpertAgent`), `qa_agent/agent.py`,
+**Call sites:** three top-level persona agents — `qa_agent/agent.py`,
 `accessibility_agent/agent.py`, `integration_team/agent.py`. Each keeps its
 own log messages, system prompt, and fallback field values as call-site
 data; `run_structured_persona` is the shared "build → call → coerce-or-fallback"
-scaffold, previously duplicated verbatim four times.
+scaffold, previously duplicated verbatim four times across these three plus
+`security_agent/agent.py`. `security_agent` (`CybersecurityExpertAgent`) has
+since moved off this pattern onto `run_single_shot_review`
+(`shared/single_shot_review.py`, schema-validated mode) — the same
+schema-validated corrective-retry semantics `code_review_agent/
+chunk_reviewer.py`'s direct `complete_validated` call uses, it gets a
+bounded retry on a malformed reply instead of falling back on the first
+bad response.
 
 **Failure handling.**
 
@@ -181,10 +187,9 @@ scaffold, previously duplicated verbatim four times.
   (which its precondition assumes); it is not a runtime guarantee against a
   broken factory.
 - The fallback is **type-specific and caller-authored**, not a generic empty
-  shape: e.g. `security_agent`'s `_fallback` returns a
-  `SecurityOutput(vulnerabilities=[], approved=False, summary=f"Security
-  analysis failed: {exc}", ...)` — a deliberately unapproved, safe-by-default
-  result.
+  shape: e.g. `qa_agent`'s `_fallback` returns a `QAOutput(bugs_found=[],
+  approved=False, summary=f"QA could not parse model response: {exc}",
+  ...)` — a deliberately unapproved, safe-by-default result.
 - **No retry** — one call, one catch. (Retry, if any, would have to happen
   at a layer above the persona agent's `run`.)
 - **Fallback bypasses `on_success`** — this is a deliberate, documented

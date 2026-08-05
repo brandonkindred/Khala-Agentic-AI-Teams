@@ -5,7 +5,8 @@ fixtures. Targets:
 
 * ``_PersistentDict`` __setitem__/__getitem__/__contains__/pop/values
   via an in-process FakeJobClient, including __setitem__'s atomic-upsert
-  contract (no get_job read-before-write) and concurrent same-key writes.
+  contract (no get_job read-before-write), concurrent same-key writes, and
+  pop's lost-delete-race handling (a concurrent pop() already won).
 * ``_env_positive_int`` env-var parsing.
 * ``_normalize_strategy_lab_asset_class`` + ``_build_strategy_from_ideation``
   builders.
@@ -14,7 +15,9 @@ fixtures. Targets:
 * ``_purge_strategy_lab_job_storage`` + ``_delete_paper_sessions_for_lab_record``.
 * ``_resolve_fee_overrides`` (0.0 sentinel handling).
 * ``_recover_orphaned_paper_trading_sessions`` startup hook.
-* ``_load_run_from_job_service`` fallback + ``_persist_run_state`` swallowing.
+* ``_load_run_from_job_service`` fallback + ``_persist_run_state``
+  propagating job-service errors and not clobbering status on a
+  status-less update.
 * ``_strategy_lab_signal_expert_enabled`` env-var toggle.
 * ``run_paper_trading`` validation branches (not-winning / no strategy_code)
   + happy path with patched background worker.
@@ -538,6 +541,44 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
 
 
+class _LostDeleteRaceClient:
+    """Stub JobServiceClient simulating a lost pop() race: get_job still
+    finds the job (read before the race is settled), but delete_job reports
+    no row was removed -- a concurrent pop() for the same key already won.
+    """
+
+    def __init__(self, job: Dict[str, Any], team: str = "x", base_url: str | None = None) -> None:
+        self._job = job
+
+    def get_job(self, job_id: str):
+        return dict(self._job) if job_id == self._job["job_id"] else None
+
+    def delete_job(self, job_id: str) -> bool:
+        return False
+
+
+def test_persistent_dict_pop_treats_lost_delete_race_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If delete_job reports no row was actually removed (a concurrent pop()
+    for the same key already won that race), this call must not hand back
+    the data it read moments earlier as though it had exclusively popped it
+    -- issue #4253."""
+    import job_service_client as jsc_mod
+    from investment_team.api.main import _PersistentDict
+
+    job = {"job_id": "k", "status": "stored", "data": {"value": "x"}}
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda **kwargs: _LostDeleteRaceClient(job, **kwargs)
+    )
+
+    pd = _PersistentDict("race_test")
+
+    assert pd.pop("k", "DEFAULT") == "DEFAULT"
+    with pytest.raises(KeyError):
+        pd.pop("k")
+
+
 def test_persistent_dict_setitem_always_upserts_no_read(monkeypatch: pytest.MonkeyPatch) -> None:
     """__setitem__ must go straight to create_job's atomic upsert, with no
     get_job read-before-write -- that read was the check-then-act race this
@@ -898,6 +939,49 @@ def test_purge_strategy_lab_job_storage_many_jobs_concurrent(
     assert {j["job_id"] for j in bt.list_jobs()} == {f"bt-keep-{i}" for i in range(7)}
 
 
+def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A unit that doesn't finish within the shared deadline is reported as
+    None (unknown, still in flight) rather than a misleadingly-confirmed 0."""
+    import job_service_client as jsc_mod
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_PURGE_TIMEOUT_S", 0.2)
+
+    release = threading.Event()
+
+    class _SlowLabRecordsClient(_FakeJobClient):
+        """Blocks list_jobs past the (shrunk) shared deadline for one team only,
+        so its unit is still "in flight" when the collector's deadline elapses."""
+
+        def list_jobs(self, *, statuses=None):
+            if self.team == "investment_strategy_lab_records":
+                assert release.wait(timeout=5.0), "test never released the slow unit"
+            return super().list_jobs(statuses=statuses)
+
+    clients_by_team: Dict[str, _SlowLabRecordsClient] = {}
+
+    def _factory(team: str = "x"):
+        if team not in clients_by_team:
+            clients_by_team[team] = _SlowLabRecordsClient(team=team)
+        return clients_by_team[team]
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _factory)
+
+    try:
+        counts = api_main._purge_strategy_lab_job_storage()
+    finally:
+        # Unblock the slow unit's background thread regardless of outcome, so
+        # it doesn't keep running past the end of the test.
+        release.set()
+
+    assert counts["deleted_lab_records"] is None
+    assert counts["deleted_lab_strategies"] == 0
+    assert counts["deleted_lab_backtests"] == 0
+    assert counts["deleted_paper_trading_sessions"] == 0
+
+
 def test_clear_strategy_lab_storage_route(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """The DELETE /strategy-lab/storage route forwards purge counts."""
     from investment_team.api import main as api_main
@@ -1041,6 +1125,76 @@ def test_delete_strategy_lab_record_success(monkeypatch: pytest.MonkeyPatch, api
     assert api_main._backtests.get("bt-lab-X") is None
 
 
+def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backtest(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """When the linked strategy/backtest are already absent from their stores,
+    the response must not claim they were deleted."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Y",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Y",
+        strategy_id="strat-lab-Y",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Y",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Y"] = record
+    # Deliberately do NOT seed _strategies/_backtests, simulating a lab record
+    # whose linked strategy/backtest were already removed by an earlier call.
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", lambda lab_id: 0)
+
+    resp = api_client.delete("/strategy-lab/records/lab-Y")
+    body = resp.json()
+    assert body["lab_record_id"] == "lab-Y"
+    assert body["deleted_strategy_id"] is None
+    assert body["deleted_backtest_id"] is None
+    assert body["deleted_paper_trading_sessions"] == 0
+    assert api_main._strategy_lab_records.get("lab-Y") is None
+
+
 # ---------------------------------------------------------------------------
 # _recover_orphaned_paper_trading_sessions startup hook
 # ---------------------------------------------------------------------------
@@ -1157,9 +1311,13 @@ def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch)
     assert out["status"] == "completed"
 
 
-def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A job-service backend that raises on every call must not propagate —
-    ``_persist_run_state`` is a best-effort write, not a hard dependency."""
+def test_persist_run_state_propagates_job_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine job-service failure must propagate, not be silently logged
+    and swallowed -- callers (run/resume/restart dispatch, and the Temporal
+    persist activity's retry policy) need to detect a durable-write failure
+    instead of continuing as if it succeeded."""
     from investment_team.api import main as api_main
 
     class _Broken:
@@ -1170,9 +1328,39 @@ def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -
             raise RuntimeError("backend down")
 
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
-    # Must not raise.
-    api_main._persist_run_state("run-z", {"status": "running"}, create=True)
-    api_main._persist_run_state("run-z", {"status": "running"}, create=False)
+    with pytest.raises(RuntimeError, match="backend down"):
+        api_main._persist_run_state("run-z", {"status": "running"}, create=True)
+    with pytest.raises(RuntimeError, match="backend down"):
+        api_main._persist_run_state("run-z", {"status": "running"}, create=False)
+
+
+def test_persist_run_state_status_less_update_does_not_clobber_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A progress-only update (state without a "status" key -- exactly what
+    the Temporal batch workflow's per-cycle/per-batch persists send) must not
+    reset the job's status to "running". Previously it defaulted the missing
+    status to "running" unconditionally, clobbering a cancelled/failed/
+    completed status a concurrent path had already persisted (issue #4185)."""
+    from investment_team.api import main as api_main
+
+    client = _FakeJobClient()
+    client.create_job("run-cancelled", status="cancelled", completed_cycles=2)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: client)
+
+    # A progress-only delta, no "status" key -- must not touch status at all.
+    api_main._persist_run_state("run-cancelled", {"completed_cycles": 3}, create=False)
+
+    job = client.get_job("run-cancelled")
+    assert job["status"] == "cancelled"
+    assert job["completed_cycles"] == 3
+
+    # When state DOES carry a status, it's still written through as before.
+    api_main._persist_run_state(
+        "run-cancelled", {"status": "failed", "error": "boom"}, create=False
+    )
+    job = client.get_job("run-cancelled")
+    assert job["status"] == "failed"
 
 
 def test_run_state_to_response_tolerates_non_dict_current_cycle() -> None:
@@ -1397,3 +1585,158 @@ def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch)
     )
 
     api_main._run_investment_service_shutdown()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# _finalize_strategy_lab_cycle_record: on_phase callback isolation
+# ---------------------------------------------------------------------------
+
+
+def _make_finalize_test_record(lab_record_id: str) -> Any:
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id=f"strat-{lab_record_id}",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=1.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=40.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id=f"bt-{lab_record_id}",
+        strategy_id=strat.strategy_id,
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    return StrategyLabRecord(
+        lab_record_id=lab_record_id,
+        strategy=strat,
+        backtest=bt,
+        # is_winning=False takes the earliest skip branch, so the finalize
+        # call only needs to exercise the on_phase callback + persistence —
+        # no paper-trading infra required.
+        is_winning=False,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+
+
+def test_finalize_strategy_lab_cycle_record_isolates_raising_on_phase_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising on_phase callback must not abort finalization: the callback's
+    exception is caught/logged, persistence still runs, and the record is
+    still returned — matching the documented postcondition."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    record = _make_finalize_test_record("lab-finalize-callback-boom")
+
+    def _boom_on_phase(phase: str, data: Dict[str, Any]) -> None:
+        raise RuntimeError("callback exploded")
+
+    result = api_main._finalize_strategy_lab_cycle_record(record, on_phase=_boom_on_phase)
+
+    assert result is record
+    assert result.paper_trading_status == "skipped"
+    assert result.paper_trading_skipped_reason == "not_winning"
+    # Persistence must have run despite the callback raising.
+    assert api_main._strategy_lab_records["lab-finalize-callback-boom"] is record
+
+
+def test_normalize_persisted_job_uses_dict_data_field() -> None:
+    """A dict ``"data"`` payload is used (and mutated in place) as-is."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running", "data": {"completed_cycles": 3}}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job["data"]
+    assert result["run_id"] == "job-1"
+    assert result["status"] == "running"
+    assert result["completed_cycles"] == 3
+
+
+def test_normalize_persisted_job_falls_back_to_job_when_data_absent() -> None:
+    """No ``"data"`` key at all -- ``job`` itself is treated as the state dict."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running"}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job
+    assert result["run_id"] == "job-1"
+
+
+def test_normalize_persisted_job_falls_back_to_job_when_data_is_none() -> None:
+    """A ``"data"`` key present but ``None`` must not raise ``TypeError`` --
+    regression test for issue #4325."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running", "data": None}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job
+    assert result["run_id"] == "job-1"
+    assert result["status"] == "running"
+
+
+def test_normalize_persisted_job_falls_back_to_job_when_data_is_not_a_dict() -> None:
+    """A ``"data"`` key present but holding a non-dict value (e.g. malformed
+    job-service JSON) must not raise ``AttributeError``/``TypeError`` either."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running", "data": "not-a-dict"}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result is job
+    assert result["run_id"] == "job-1"
+
+
+def test_normalize_persisted_job_derives_run_id_when_not_given() -> None:
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "status": "running"}
+    result = normalize_persisted_job(job, fallback_status="completed")
+
+    assert result["run_id"] == "job-1"
+
+
+def test_normalize_persisted_job_defaults_status_from_fallback() -> None:
+    """When neither the data dict nor ``job`` itself has a ``status``, the
+    caller-supplied ``fallback_status`` is used."""
+    from investment_team.strategy_lab.run_state import normalize_persisted_job
+
+    job = {"job_id": "job-1", "data": {}}
+    result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
+
+    assert result["status"] == "completed"
