@@ -1291,6 +1291,7 @@ def test_run_paper_trading_background_happy_path(
         data_period_start="2024-01-01",
         data_period_end="2024-06-01",
         started_at="2024-06-01T00:00:00Z",
+        completed_at="2024-06-01T00:05:00Z",
         verdict=PaperTradingVerdict.READY_FOR_LIVE,
     )
 
@@ -1321,3 +1322,149 @@ def test_run_paper_trading_background_happy_path(
     # Worker overrode the placeholder IDs with the caller's IDs.
     assert persisted.session_id == "pt-ok"
     assert persisted.lab_record_id == "lab-ok"
+
+
+def test_run_paper_trading_background_guards_non_terminal_agent_result(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A ``run_session`` result that violates its documented terminal-state
+    contract (status still RUNNING, no ``completed_at``) must not be persisted
+    verbatim — the worker's postcondition guard should route it into the same
+    FAILED handling as any other in-worker crash.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy, bt = _step_strategy_and_record()
+    running = PaperTradingSession(
+        session_id="pt-nonterminal",
+        lab_record_id="lab-nonterminal",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-nonterminal"] = running
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(
+        mds, "MarketDataService", lambda: _FakeMarketService({"AAA": [{"close": 1.0}]})
+    )
+
+    # A misbehaving agent that returns a non-terminal session (no completed_at).
+    non_terminal = PaperTradingSession(
+        session_id="placeholder",
+        lab_record_id="placeholder",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=["AAA"],
+        data_source="fake",
+        started_at="2024-06-01T00:00:00Z",
+    )
+
+    class _FakeAgent:
+        def run_session(self, **kwargs):
+            return non_terminal
+
+    import investment_team.paper_trading_agent as pta
+
+    monkeypatch.setattr(pta, "PaperTradingAgent", lambda: _FakeAgent())
+
+    api_main._run_paper_trading_background(
+        "pt-nonterminal",
+        "lab-nonterminal",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    persisted = api_main._paper_trading_sessions.get("pt-nonterminal")
+    assert persisted is not None
+    assert persisted.status == PaperTradingStatus.FAILED
+    assert persisted.completed_at
+    assert "non-terminal status" in (persisted.error or "")
+
+
+def test_run_paper_trading_background_guards_terminal_status_missing_completed_at(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A ``run_session`` result with a terminal status but no ``completed_at``
+    also violates the documented terminal-state contract and must be routed
+    into the same FAILED handling — the postcondition guard checks both the
+    status and ``completed_at``, not status alone.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy, bt = _step_strategy_and_record()
+    running = PaperTradingSession(
+        session_id="pt-no-completed-at",
+        lab_record_id="lab-no-completed-at",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-no-completed-at"] = running
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(
+        mds, "MarketDataService", lambda: _FakeMarketService({"AAA": [{"close": 1.0}]})
+    )
+
+    # A misbehaving agent that returns a terminal status but omits completed_at.
+    terminal_no_completed_at = PaperTradingSession(
+        session_id="placeholder",
+        lab_record_id="placeholder",
+        strategy=strategy,
+        status=PaperTradingStatus.COMPLETED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=["AAA"],
+        data_source="fake",
+        started_at="2024-06-01T00:00:00Z",
+    )
+
+    class _FakeAgent:
+        def run_session(self, **kwargs):
+            return terminal_no_completed_at
+
+    import investment_team.paper_trading_agent as pta
+
+    monkeypatch.setattr(pta, "PaperTradingAgent", lambda: _FakeAgent())
+
+    api_main._run_paper_trading_background(
+        "pt-no-completed-at",
+        "lab-no-completed-at",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    persisted = api_main._paper_trading_sessions.get("pt-no-completed-at")
+    assert persisted is not None
+    assert persisted.status == PaperTradingStatus.FAILED
+    assert persisted.completed_at
+    assert "no completed_at" in (persisted.error or "")
