@@ -533,3 +533,45 @@ def test_existing_codebase_excerpt_is_passed_through_in_full() -> None:
     assert len(client.prompts) == 1
     assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
     assert "E" * 100 in client.prompts[0]
+
+
+def test_spec_compliance_single_pass_omits_acceptance_criteria_and_spec_excerpt() -> None:
+    """When ``spec_compliance_single_pass`` is True (``CODE_REVIEW_SPEC_COMPLIANCE_PASS``
+    is on), the per-chunk prompt omits the acceptance-criteria/spec-excerpt blocks --
+    that content is now handled once, post-dedupe, by ``synthesize_spec_compliance`` --
+    but ``architecture_overview`` is unaffected, per ADR-010's contract boundary."""
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(
+        _chunk_input(
+            spec_compliance_single_pass=True,
+            acceptance_criteria=["Must validate input"],
+            spec_excerpt="SPEC_MARKER_TEXT",
+            architecture_overview="ARCH_MARKER_TEXT",
+        )
+    )
+    assert len(client.prompts) == 1
+    prompt = client.prompts[0]
+    assert "Must validate input" not in prompt
+    assert "SPEC_MARKER_TEXT" not in prompt
+    assert "**Acceptance criteria" not in prompt
+    assert "**Project specification" not in prompt
+    assert "ARCH_MARKER_TEXT" in prompt
+
+
+def test_spec_compliance_single_pass_default_false_keeps_legacy_rendering() -> None:
+    """Default (``spec_compliance_single_pass`` unset/False) renders the acceptance-
+    criteria/spec-excerpt blocks exactly as before -- proving the flag-off path is
+    byte-for-byte unchanged."""
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(
+        _chunk_input(
+            acceptance_criteria=["Must validate input"],
+            spec_excerpt="SPEC_MARKER_TEXT",
+        )
+    )
+    assert len(client.prompts) == 1
+    prompt = client.prompts[0]
+    assert "Must validate input" in prompt
+    assert "SPEC_MARKER_TEXT" in prompt

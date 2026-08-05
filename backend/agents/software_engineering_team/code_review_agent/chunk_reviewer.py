@@ -237,7 +237,7 @@ def _run_chunk_review(
     ]
     if input_data.task_requirements:
         context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
-    if input_data.acceptance_criteria:
+    if input_data.acceptance_criteria and not input_data.spec_compliance_single_pass:
         context_parts.extend(
             [
                 "",
@@ -254,7 +254,7 @@ def _run_chunk_review(
                 *[f"- {d}" for d in input_data.user_decisions],
             ]
         )
-    if spec_excerpt:
+    if spec_excerpt and not input_data.spec_compliance_single_pass:
         context_parts.extend(
             [
                 "",

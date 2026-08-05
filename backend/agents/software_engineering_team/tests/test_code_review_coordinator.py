@@ -3505,6 +3505,94 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
     assert any(i.description == side_effect_issue.description for i in result.issues)
 
 
+def test_spec_compliance_single_pass_off_by_default_skips_dedicated_pass(monkeypatch) -> None:
+    """Default (``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` unset): ``synthesize_spec_compliance``
+    is never invoked -- the flag-off path costs zero extra calls, matching today's
+    behavior exactly (see ``test_chunk_reviewer.py`` for the per-chunk-prompt side of
+    this same guarantee)."""
+    import code_review_agent.coordinator as coord
+
+    calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *a, **kw: calls.append(True) or "should not run",
+    )
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert not calls, "synthesize_spec_compliance must not run when the flag is off"
+
+
+def test_spec_compliance_single_pass_routes_note_into_synthesis(monkeypatch) -> None:
+    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true``: ``synthesize_spec_compliance`` runs
+    once, post-dedupe, and its note replaces the (now-empty) per-chunk spec notes fed
+    into ``synthesize_review_findings`` -- even for a single-chunk review, where the
+    old fast path would otherwise return the chunk's summary/notes verbatim and
+    silently drop the dedicated pass's finding (ADR-010 contract boundary point 4)."""
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *a, **kw: "SPEC_GAP_MARKER: missing rate limiting.",
+    )
+
+    synth_calls: list = []
+    original_synthesize = coord.synthesize_review_findings
+
+    def _spy(*args, **kwargs):
+        synth_calls.append(kwargs.get("chunk_spec_notes"))
+        return original_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert synth_calls, (
+        "synthesis must run (fast path bypassed) so the single-pass note isn't dropped"
+    )
+    assert synth_calls[-1] == ["SPEC_GAP_MARKER: missing rate limiting."]
+
+
+def test_spec_compliance_single_pass_restricted_to_code_review_profile(monkeypatch) -> None:
+    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true`` on a non-``CODE_REVIEW`` profile must
+    not call ``synthesize_spec_compliance`` -- and (per ``test_chunk_reviewer.py``'s
+    gating tests, computed off the same profile-aware boolean) must not omit the
+    per-chunk acceptance-criteria/spec-excerpt blocks either. Either alone (chunk
+    omission without a replacement pass) would silently drop spec-compliance checking
+    for that submission entirely."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+    calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *a, **kw: calls.append(True) or "should not run",
+    )
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "x = 1\n"},
+            task_description="t",
+            acceptance_criteria=["Must validate input"],
+            profile=ReviewProfile.ACCEPTANCE,
+        ),
+    )
+
+    assert not calls, "synthesize_spec_compliance must not run outside the CODE_REVIEW profile"
+
+
 def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:
     """``input_data.skip_tail_passes=True`` returns the genuine issues unchanged
     with ``has_additive_findings`` False and no tail-pass LLM calls at all --

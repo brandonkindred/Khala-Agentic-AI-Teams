@@ -326,6 +326,13 @@ class ChunkReviewInput(BaseModel):
         description="Acceptance criteria the code must meet",
     )
     spec_excerpt: str = Field(default="", description="Spec excerpt (capped ~8K)")
+    spec_compliance_single_pass: bool = Field(
+        default=False,
+        description="When True, a dedicated single-pass spec/acceptance-criteria compliance check "
+        "(synthesize_spec_compliance) runs once post-dedupe instead of including "
+        "acceptance_criteria/spec_excerpt in this chunk's prompt. Computed once per run from "
+        "CODE_REVIEW_SPEC_COMPLIANCE_PASS, never re-read per chunk.",
+    )
     architecture_overview: str = Field(default="", description="Architecture overview (capped ~2K)")
     existing_codebase_excerpt: Optional[str] = Field(
         default=None,

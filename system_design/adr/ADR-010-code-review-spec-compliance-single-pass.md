@@ -1,6 +1,7 @@
 # ADR-010 — Single-pass spec/acceptance-criteria compliance for code review
 
-- **Status**: Proposed
+- **Status**: Accepted — implemented with a deviation from the original Decision; see the
+  Amendment section at the bottom.
 - **Date**: 2026-08-04
 - **Owner**: Software Engineering Team / Code Review
 - **Related**:
@@ -221,3 +222,46 @@ A future implementation must satisfy exactly this surface:
   `_merge_narrative`'s fast-path condition, add dual-mode test coverage (≥90% on changed code, per
   this repository's testing floor), measure the token/cost delta on a representative multi-chunk
   fixture, and add the `docs/ENV_VARS.md` entry described above.
+
+## Amendment (implementation, gating sub-issue)
+
+The single-pass function implementation sub-issue shipped `synthesize_spec_compliance`
+(`backend/agents/software_engineering_team/code_review_agent/synthesis.py`) as a
+**findings-only** pass — paired with `synthesize_review_findings`, taking the final
+deduped issue list plus the full spec/acceptance-criteria text, with **no source code**
+included — rather than the code-aware tail-pass module this ADR's Decision section
+originally specified. The gating sub-issue then wired that already-shipped function in
+as "the new single pass," instead of writing a second, separate module. Concretely, this
+means the Decision/Contract-boundary text above is superseded on the following points:
+
+- **No new tail-pass module** (e.g. `spec_compliance_pass.py`) was written. There is no
+  code-aware pass that inlines changed-file content, and nothing runs inside
+  `_run_tail_passes` for this purpose.
+- **`_TailPassResult` gained no new field.** `synthesize_spec_compliance` requires the
+  *final* deduped issue list (post-dedupe) per its own precondition, which is only
+  available after `_run_tail_passes` and `_dedupe_issues`/`_cap_issues`/
+  `_reconcile_approval` complete — well outside the concurrent tail-pass phase — so
+  there is nothing to thread through that machinery.
+- **The call site is in `run_coordinator`, immediately before `_merge_narrative`,** gated
+  on `spec_compliance_single_pass and input_data.profile == ReviewProfile.CODE_REVIEW`.
+  Its result is passed into a new `_merge_narrative(..., single_pass_spec_notes=...)`
+  parameter: `None` (flag/profile off, or the pass failed) preserves today's behavior
+  exactly (including the single-chunk fast path); a non-`None` value (possibly `""`)
+  unconditionally bypasses the fast path and feeds `[single_pass_spec_notes]` into
+  `synthesize_review_findings` in place of `outcome.spec_notes` — satisfying the same
+  "must not silently drop a real single-chunk finding" concern the Contract boundary's
+  point 4 raised, without needing the `_TailPassResult` field it proposed.
+- The `ChunkReviewInput` boolean (`spec_compliance_single_pass`), the `env_bool`-gated,
+  default-off flag read (computed once in `run_coordinator`), the `chunk_reviewer.py`
+  gating of the `acceptance_criteria`/`spec_excerpt` blocks (leaving
+  `architecture_overview` untouched), and the `CODE_REVIEW` profile restriction all
+  landed exactly as this ADR specified.
+
+Rationale for taking the smaller path: `synthesize_spec_compliance` was already
+implemented, reviewed, and merged by the time the gating sub-issue started, and its own
+issue's acceptance criteria described it in the same findings-only terms ("runs once
+over the merged issue list plus the full spec/acceptance criteria") the gating
+sub-issue's acceptance criteria then referred back to ("routes spec compliance through
+the new single pass"). Writing a second, code-aware pass would have duplicated
+functionality without a clear justification for the extra complexity relative to this
+sub-issue's own Fibonacci complexity score.

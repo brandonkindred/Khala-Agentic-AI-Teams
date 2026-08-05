@@ -144,6 +144,7 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
+from .profiles import ReviewProfile
 from .repo_reader import RepoReader
 from .side_effect_consolidation import (
     SIDE_EFFECT_CONSOLIDATION_ENV as _SIDE_EFFECT_CONSOLIDATION_ENV,
@@ -151,7 +152,7 @@ from .side_effect_consolidation import (
 from .side_effect_consolidation import (
     consolidate_side_effect_issues,
 )
-from .synthesis import synthesize_review_findings
+from .synthesis import synthesize_review_findings, synthesize_spec_compliance
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +414,7 @@ def _merge_narrative(
     issues: List[CodeReviewIssue],
     outcome: "_ChunkOutcome",
     has_additive_pass_findings: bool = False,
+    single_pass_spec_notes: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Produce the merged ``(summary, spec_compliance_notes)`` for the review.
 
@@ -427,21 +429,38 @@ def _merge_narrative(
           pass and/or the side-effect-impact pass (both of which run outside the
           map phase) added findings not reflected in any ``outcome.summaries``
           entry.
+        - ``single_pass_spec_notes`` is ``None`` when ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``
+          is off (or profile-gated off, or the dedicated pass failed); otherwise it is
+          the ``synthesize_spec_compliance`` result (possibly ``""`` for "no gaps found")
+          that replaces every per-chunk ``spec_compliance_notes`` entry, since the
+          per-chunk prompts omitted spec/acceptance-criteria context in that mode.
 
     Postconditions:
-        - With exactly one sub-review and no additive-pass findings, returns
-          that sub-review's summary/notes verbatim and makes no synthesis LLM
-          call.
+        - When ``single_pass_spec_notes`` is ``None`` and there's exactly one
+          sub-review with no additive-pass findings, returns that sub-review's
+          summary/notes verbatim and makes no synthesis LLM call — unchanged from
+          today's behavior.
+        - When ``single_pass_spec_notes`` is not ``None``, the single-chunk fast
+          path is never taken (even for one chunk) so the dedicated pass's note is
+          never silently dropped; the synthesis call is fed
+          ``chunk_spec_notes=[single_pass_spec_notes]`` in place of
+          ``outcome.spec_notes``, and the concatenation fallback is
+          ``single_pass_spec_notes`` directly.
         - Otherwise attempts a single findings-only synthesis pass so the
           narrative reflects every source of ``issues`` (including the
           architecture and side-effect passes); on any failure (``None``) falls
           back to the ``"\\n\\n"``-joined per-pass summaries/notes.
     """
-    if len(outcome.summaries) == 1 and not has_additive_pass_findings:
-        return outcome.summaries[0], (outcome.spec_notes[0] if outcome.spec_notes else "")
-
-    concatenated_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
-    concatenated_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
+    if single_pass_spec_notes is None:
+        if len(outcome.summaries) == 1 and not has_additive_pass_findings:
+            return outcome.summaries[0], (outcome.spec_notes[0] if outcome.spec_notes else "")
+        concatenated_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
+        concatenated_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
+        chunk_spec_notes = outcome.spec_notes
+    else:
+        concatenated_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
+        concatenated_notes = single_pass_spec_notes
+        chunk_spec_notes = [single_pass_spec_notes]
 
     synthesized = synthesize_review_findings(
         llm,
@@ -449,7 +468,7 @@ def _merge_narrative(
         approved=approved,
         issues=issues,
         chunk_summaries=outcome.summaries,
-        chunk_spec_notes=outcome.spec_notes,
+        chunk_spec_notes=chunk_spec_notes,
     )
     if synthesized is not None:
         return synthesized.summary, synthesized.spec_compliance_notes
@@ -756,6 +775,15 @@ def run_coordinator(
         progress_callback, "preparing", f"split into {len(chunks)} chunks", _PROGRESS_CHUNKING_DONE
     )
 
+    # Computed once per run (never re-read per chunk) so every chunk's prompt and
+    # the post-dedupe single-pass call below agree on the same decision. Restricted
+    # to CODE_REVIEW, matching every sibling tail pass's profile restriction -- a
+    # profile-blind flag read here would omit per-chunk spec/AC context on other
+    # profiles without the post-dedupe pass ever running to replace it.
+    spec_compliance_single_pass = env_bool("CODE_REVIEW_SPEC_COMPLIANCE_PASS", default=False) and (
+        input_data.profile == ReviewProfile.CODE_REVIEW
+    )
+
     base_input = {
         "language": input_data.language or "",
         "task_description": input_data.task_description or "",
@@ -766,6 +794,7 @@ def run_coordinator(
         "existing_codebase_excerpt": existing_codebase or None,
         "user_decisions": input_data.user_decisions or None,
         "profile": input_data.profile,
+        "spec_compliance_single_pass": spec_compliance_single_pass,
     }
 
     # Fingerprint the shared context + resolved model once per run so unchanged
@@ -887,6 +916,19 @@ def run_coordinator(
     all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
+    # CODE_REVIEW_SPEC_COMPLIANCE_PASS: run the dedicated single pass once, over
+    # the final deduped issue list, instead of relying on the (now-empty)
+    # per-chunk spec_compliance_notes. ``spec_compliance_single_pass`` already
+    # folds in the CODE_REVIEW profile restriction (see its computation above).
+    # ``None`` (flag/profile off, or the pass itself failed) tells
+    # ``_merge_narrative`` to fall back to today's per-chunk-sourced behavior
+    # unchanged.
+    single_pass_spec_notes: Optional[str] = None
+    if spec_compliance_single_pass:
+        single_pass_spec_notes = synthesize_spec_compliance(
+            llm, input_data=input_data, issues=deduped
+        )
+
     merged_summary, spec_notes = _merge_narrative(
         llm,
         input_data,
@@ -894,6 +936,7 @@ def run_coordinator(
         deduped,
         outcome,
         has_additive_pass_findings=tail_pass_result.has_additive_findings,
+        single_pass_spec_notes=single_pass_spec_notes,
     )
 
     logger.info(
