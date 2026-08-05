@@ -399,6 +399,46 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
     assert run_id not in api_main._active_runs
 
 
+def test_fail_strategy_lab_run_persists_outside_the_lock(monkeypatch) -> None:
+    """_persist_run_state performs a synchronous job-service RPC and must not
+    run while _lock (the process-wide lock shared by run-status queries,
+    dispatch, and reconciliation) is held -- otherwise that I/O blocks every
+    other thread needing _lock for its duration.
+
+    Also confirms the persisted payload is a snapshot: mutating the live
+    _active_runs entry after _fail_strategy_lab_run returns must not affect
+    what was captured for persistence.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-persist-unlocked"
+    state = {"run_id": run_id, "status": "running"}
+    monkeypatch.setattr(api_main, "_active_runs", {run_id: state})
+    monkeypatch.setattr(api_main.threading, "Timer", lambda *a, **k: mock.Mock())
+
+    observed = {}
+
+    def _fake_persist(rid, persisted_state, **kwargs):
+        observed["run_id"] = rid
+        observed["state"] = dict(persisted_state)
+        observed["lock_held"] = api_main._lock.locked()
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _fake_persist)
+
+    api_main._fail_strategy_lab_run(run_id, "boom")
+
+    assert observed["run_id"] == run_id
+    assert observed["lock_held"] is False
+    assert observed["state"]["status"] == "failed"
+    assert observed["state"]["error"] == "boom"
+
+    # The live entry is mutated in place (by design -- see the function's
+    # Postconditions), but the persisted snapshot was captured by value and
+    # must not change if the live entry is mutated afterward.
+    state["error"] = "mutated after the fact"
+    assert observed["state"]["error"] == "boom"
+
+
 def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
     monkeypatch,
 ) -> None:
