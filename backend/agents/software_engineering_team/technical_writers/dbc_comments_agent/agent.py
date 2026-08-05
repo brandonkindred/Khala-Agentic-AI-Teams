@@ -6,13 +6,13 @@ import logging
 from typing import Callable, List, Optional
 
 from llm_service import LLMClient, complete_validated, get_client
-from software_engineering_team.code_review_agent.chunking import build_review_chunks
-from software_engineering_team.code_review_agent.models import ReviewChunk
 from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
+from .chunking import DbcChunk, build_dbc_chunks
 from .merge import apply_dbc_insertions
 from .models import (
+    DEFAULT_SUGGESTED_COMMIT_MESSAGE,
     DbcCommentInsertion,
     DbcCommentsInput,
     DbcCommentsLLMResponse,
@@ -66,7 +66,7 @@ class DbcCommentsAgent:
 
     @staticmethod
     def _build_prompt_for_chunk(
-        input_data: DbcCommentsInput, chunk: ReviewChunk, chunk_index: int, chunk_count: int
+        input_data: DbcCommentsInput, chunk: DbcChunk, chunk_index: int, chunk_count: int
     ) -> str:
         """Build one chunk's review prompt.
 
@@ -79,11 +79,9 @@ class DbcCommentsAgent:
             - When chunk_count > 1, the prompt notes this is a partial view
               (chunk_index/chunk_count) so the model does not treat missing
               files/symbols as omissions to flag, and separately notes any
-              segment that is itself a partial (line-range) slice and is not
-              already pre-numbered, so the model knows to report the embedded
-              original line-number prefixes rather than snippet-relative
-              ones (an already pre-numbered segment's prefixes are already
-              visible in its content, so it needs no separate note).
+              segment that is itself a partial (line-range) slice of its
+              file, so the model knows to report the embedded original
+              line-number prefixes rather than snippet-relative ones.
         """
         context_parts = [f"**Language:** {input_data.language}"]
 
@@ -110,7 +108,7 @@ class DbcCommentsAgent:
                 "original line-number prefix (e.g. `123: code`) -- set `line` to those exact "
                 "prefixed numbers."
                 for seg in chunk.segments
-                if seg.is_partial and not seg.pre_numbered
+                if seg.is_partial
             ]
             context_parts.extend(partial_notes)
 
@@ -138,11 +136,15 @@ class DbcCommentsAgent:
             - input_data.code is a string; if empty or whitespace-only, the
               method returns an already_compliant response without calling
               the LLM
-            - input_data.language is one of: python, typescript, java
+            - input_data.language is typically one of: python, typescript,
+              java (the values the prompt gives worked examples for) -- this
+              is a supported-languages note, not an enforced precondition:
+              any string is accepted, logged, and forwarded into the prompt
+              as-is
 
         Postconditions:
             - code is split into one or more bounded chunks (see
-              code_review_agent.chunking.build_review_chunks, sized via
+              .chunking.build_dbc_chunks, sized via
               compute_code_review_map_chunk_chars) so no unbounded prompt is
               ever sent regardless of input size; a small input yields exactly
               one chunk covering the whole input, and this method's observable
@@ -193,7 +195,7 @@ class DbcCommentsAgent:
         Raises:
             Nothing -- run() never raises. Preparing chunks
             (parse_code_into_file_blocks/compute_code_review_map_chunk_chars/
-            build_review_chunks) is itself guarded: a failure there (e.g.
+            build_dbc_chunks) is itself guarded: a failure there (e.g.
             self.llm.get_max_context_tokens() hitting the network) surfaces
             via on_status(FAILED, ...) and already_compliant=False the same
             way an exhausted LLM call does. Each failed-but-retryable LLM
@@ -240,17 +242,17 @@ class DbcCommentsAgent:
         # very large) concatenated code into one or more chunks whose rendered
         # size fits the model's context budget. A small input yields exactly
         # one chunk covering the whole input verbatim (see
-        # code_review_agent.chunking.build_review_chunks's contract), so this
-        # is a no-op for the common case. compute_code_review_map_chunk_chars
-        # calls self.llm.get_max_context_tokens(), which for a real (e.g.
+        # .chunking.build_dbc_chunks's contract), so this is a no-op for the
+        # common case. compute_code_review_map_chunk_chars calls
+        # self.llm.get_max_context_tokens(), which for a real (e.g.
         # Ollama-backed) client can hit the network and fail -- unlike
-        # parse_code_into_file_blocks/build_review_chunks, which are pure --
-        # so this whole setup step is guarded the same way the per-chunk LLM
+        # parse_code_into_file_blocks/build_dbc_chunks, which are pure -- so
+        # this whole setup step is guarded the same way the per-chunk LLM
         # call below is, to hold run()'s "never raises" contract.
         try:
             blocks = parse_code_into_file_blocks(code)
             max_chunk_chars = compute_code_review_map_chunk_chars(self.llm)
-            chunks = build_review_chunks(blocks, max_chunk_chars)
+            chunks = build_dbc_chunks(blocks, max_chunk_chars)
         except Exception as e:
             logger.warning("DbcComments: failed to prepare chunks (%s), surfacing failure", e)
             _update(DbcCommentsStatus.FAILED, str(e))
@@ -334,10 +336,7 @@ class DbcCommentsAgent:
         # occurrence, in first-seen order, before joining -- dict.fromkeys is
         # the standard order-preserving dedupe idiom.
         summary = " ".join(dict.fromkeys(summaries))
-        suggested_commit_message = (
-            suggested_commit_message
-            or DbcCommentsLLMResponse.model_fields["suggested_commit_message"].default
-        )
+        suggested_commit_message = suggested_commit_message or DEFAULT_SUGGESTED_COMMIT_MESSAGE
 
         # Safety: if LLM says not compliant but returned no insertions, treat as compliant
         if not already_compliant and not insertions:

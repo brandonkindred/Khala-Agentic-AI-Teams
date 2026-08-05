@@ -6,9 +6,9 @@ calls and the results merged), a malformed response on a later chunk (still
 fails the whole run loud, not just that chunk), and insertion conflicts
 arising across chunks (the existing merge-step duplicate-target rejection
 still applies when insertions come from more than one LLM call). Reuses the
-real ``code_review_agent`` chunking utilities directly (not mocked) so the
-expected chunk count is derived the same way ``DbcCommentsAgent.run`` derives
-it -- these tests do not hard-code a char budget.
+agent's own local chunking module directly (not mocked) so the expected
+chunk count is derived the same way ``DbcCommentsAgent.run`` derives it --
+these tests do not hard-code a char budget.
 """
 
 from __future__ import annotations
@@ -16,12 +16,14 @@ from __future__ import annotations
 from typing import Any, Dict, List, Union
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.code_review_agent.chunking import build_review_chunks
 from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 from software_engineering_team.technical_writers.dbc_comments_agent import agent as dbc_mod
 from software_engineering_team.technical_writers.dbc_comments_agent.agent import (
     DbcCommentsAgent,
+)
+from software_engineering_team.technical_writers.dbc_comments_agent.chunking import (
+    build_dbc_chunks,
 )
 from software_engineering_team.technical_writers.dbc_comments_agent.models import (
     DbcCommentsInput,
@@ -69,7 +71,7 @@ def _large_multi_file_code() -> str:
           function, so a DbC insertion targeting (path, "foo") always
           resolves via merge.apply_dbc_insertions's AST-based anchoring.
         - Total size comfortably exceeds compute_code_review_map_chunk_chars's
-          budget for a DummyLLMClient, so build_review_chunks always returns
+          budget for a DummyLLMClient, so build_dbc_chunks always returns
           more than one chunk regardless of minor constant tuning.
     """
     padding = "\n".join(f"# padding line {i}" for i in range(_PADDING_LINES))
@@ -88,7 +90,7 @@ def _expected_chunks():
     code = _large_multi_file_code()
     blocks = parse_code_into_file_blocks(code)
     max_chars = compute_code_review_map_chunk_chars(DummyLLMClient())
-    return code, build_review_chunks(blocks, max_chars)
+    return code, build_dbc_chunks(blocks, max_chars)
 
 
 def test_dbc_run_large_input_is_chunked_into_multiple_bounded_llm_calls() -> None:
@@ -239,7 +241,7 @@ def test_dbc_run_small_input_still_yields_exactly_one_chunk() -> None:
     code = "def f():\n    pass\n"
     blocks = parse_code_into_file_blocks(code)
     max_chars = compute_code_review_map_chunk_chars(DummyLLMClient())
-    chunks = build_review_chunks(blocks, max_chars)
+    chunks = build_dbc_chunks(blocks, max_chars)
     assert len(chunks) == 1
 
     canned = {"insertions": [], "already_compliant": True, "summary": "ok"}
