@@ -1498,6 +1498,23 @@ def test_get_run_generation_strict_ignores_active_runs_cache(monkeypatch: pytest
         del run_state.active_runs["run-live"]
 
 
+def test_get_run_generation_strict_null_data_field_defaults_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a job record with "data": None (key present but null --
+    the same shape normalize_persisted_job explicitly guards against) must
+    not crash with AttributeError from None.get(...). Falls back to the
+    top-level job dict, matching normalize_persisted_job's coercion."""
+    from investment_team.strategy_lab import run_state
+
+    class _NullData:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "data": None}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NullData())
+    assert run_state.get_run_generation_strict("run-nulldata") == 1
+
+
 @pytest.mark.parametrize("empty_value", [None, ""])
 def test_get_run_generation_strict_missing_or_empty_value_defaults_to_one(
     monkeypatch: pytest.MonkeyPatch, empty_value

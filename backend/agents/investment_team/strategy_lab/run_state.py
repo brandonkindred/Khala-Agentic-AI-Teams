@@ -144,7 +144,11 @@ def get_run_generation_strict(run_id: str, *, client: Optional["JobServiceClient
     job = client.get_job(run_id)
     if not job:
         return DEFAULT_FENCING_GENERATION
-    data = job.get("data", job)
+    # Same null/malformed-"data" coercion as normalize_persisted_job: a
+    # "data" key present but None (or any other non-dict value) must fall
+    # back to the top-level job dict, not crash with AttributeError.
+    raw_data = job.get("data")
+    data = raw_data if isinstance(raw_data, dict) else job
     raw_generation = data.get("generation", DEFAULT_FENCING_GENERATION)
     if raw_generation is None or raw_generation == "":
         return DEFAULT_FENCING_GENERATION
@@ -215,10 +219,11 @@ def _load_run_from_job_service_strict(run_id: str) -> Optional[Dict[str, Any]]:
     Preconditions:
         - ``run_id`` names a strategy-lab run (may not exist).
     Postconditions:
-        - Returns the persisted state (via ``normalize_persisted_job``,
-          already a copy -- see its own docstring for why that matters), or
-          ``None`` when the job genuinely does not exist. Raises whatever the
-          underlying job-service client raises on a transport failure.
+        - Returns the persisted state via ``normalize_persisted_job`` -- the
+          same dict object as ``job["data"]`` (or ``job`` itself), not a
+          copy; see its own docstring -- or ``None`` when the job genuinely
+          does not exist. Raises whatever the underlying job-service client
+          raises on a transport failure.
     """
     client = get_lab_run_job_client()
     job = client.get_job(run_id)

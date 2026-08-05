@@ -3637,8 +3637,16 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # legitimate absent-field case (apply_and_get's increment
             # target always comes back populated on success) -- treat it
             # the same as any other mint failure rather than silently
-            # assuming a value that could itself be stale.
-            new_generation = int(updated_generation_record["generation"])
+            # assuming a value that could itself be stale. Checked via
+            # isinstance rather than a bare int(...) coercion: the latter
+            # would silently truncate a float or accept a numeric string
+            # instead of rejecting it as the malformed reply it is, and
+            # would accept a bool (an int subclass in Python) as a
+            # seemingly valid generation.
+            raw_generation = updated_generation_record["generation"]
+            if not isinstance(raw_generation, int) or isinstance(raw_generation, bool):
+                raise ValueError(f"non-integer generation {raw_generation!r}")
+            new_generation = raw_generation
             if new_generation <= 0:
                 # The increment applied is always positive (see
                 # _legacy_generation_bootstrap_increment), so a non-positive

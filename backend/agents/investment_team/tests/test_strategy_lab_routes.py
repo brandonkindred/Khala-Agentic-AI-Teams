@@ -1272,6 +1272,38 @@ def test_restart_strategy_lab_run_returns_503_when_mint_response_is_non_positive
     assert api_main._active_runs["run-mintnonpositive"]["generation"] == 1
 
 
+@pytest.mark.parametrize("non_int_generation", [2.7, True, False])
+def test_restart_strategy_lab_run_returns_503_when_mint_response_is_non_integer(
+    monkeypatch: pytest.MonkeyPatch, api_client, non_int_generation
+) -> None:
+    """apply_and_get returning a "generation" that's a float or bool (an int
+    subclass in Python, so `isinstance(True, int)` is True) must be rejected
+    as a malformed mint response, not silently coerced via int(...) --
+    a truncated float or a bool-derived 0/1 could produce a fencing token
+    that doesn't match the durable job-service value."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintnonint"] = {
+        "run_id": "run-mintnonint",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _NonIntMintClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            return {"job_id": jid, "generation": non_int_generation}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _NonIntMintClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintnonint/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintnonint"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintnonint"]["generation"] == 1
+
+
 def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
