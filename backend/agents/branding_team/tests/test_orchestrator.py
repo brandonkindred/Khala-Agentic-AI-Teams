@@ -47,7 +47,7 @@ from branding_team.models import (
     MessagingPillar,
     MoodBoardConcept,
     NarrativeMessagingOutput,
-    PersonaProfile,
+    PersonaProfileOutput,
     PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
@@ -933,7 +933,28 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         MessagingPillar(pillar="Clarity"),
     ]
     _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
-    _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
+    _personas = [
+        PersonaProfileOutput(
+            name="Alex Rivera",
+            role="VP of Product",
+            demographics="35-44, urban, enterprise SaaS",
+            psychographics="Outcome-driven, skeptical of hype",
+            goals=["Ship cohesive experiences"],
+            frustrations=["Inconsistent brand touchpoints"],
+            media_habits=["Industry newsletters"],
+            jobs_to_be_done=["Align teams on brand voice"],
+        ),
+        PersonaProfileOutput(
+            name="Jordan Lee",
+            role="Head of Marketing",
+            demographics="28-34, remote, mid-market",
+            psychographics="Data-driven, values clarity",
+            goals=["Grow brand recall"],
+            frustrations=["Fragmented messaging"],
+            media_habits=["Design newsletters"],
+            jobs_to_be_done=["Brief agencies quickly"],
+        ),
+    ]
     voice_leaf = _phase1_leaf_node(
         WritingGuidelinesOutput(
             **_story,
@@ -1058,7 +1079,28 @@ def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
         MessagingPillar(pillar="Clarity"),
     ]
     _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
-    _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
+    _personas = [
+        PersonaProfileOutput(
+            name="Alex Rivera",
+            role="VP of Product",
+            demographics="35-44, urban, enterprise SaaS",
+            psychographics="Outcome-driven, skeptical of hype",
+            goals=["Ship cohesive experiences"],
+            frustrations=["Inconsistent brand touchpoints"],
+            media_habits=["Industry newsletters"],
+            jobs_to_be_done=["Align teams on brand voice"],
+        ),
+        PersonaProfileOutput(
+            name="Jordan Lee",
+            role="Head of Marketing",
+            demographics="28-34, remote, mid-market",
+            psychographics="Data-driven, values clarity",
+            goals=["Grow brand recall"],
+            frustrations=["Fragmented messaging"],
+            media_habits=["Design newsletters"],
+            jobs_to_be_done=["Brief agencies quickly"],
+        ),
+    ]
     guidelines = WritingGuidelinesBody(
         voice_principles=["Confident", "Human", "Concrete"],
         style_dos=["Lead with outcome", "Use active voice", "Name the audience"],

@@ -340,6 +340,27 @@ class PersonaProfile(BaseModel):
     jobs_to_be_done: List[str] = Field(default_factory=list)
 
 
+class PersonaProfileOutput(BaseModel):
+    """Agent-facing persona profile; requires non-empty fields.
+
+    Field-for-field twin of ``PersonaProfile`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``) — ``PersonaProfile`` itself must stay soft
+    (all-default except ``name``) since it also backs
+    ``NarrativeMessagingOutput.persona_profiles``'s merge target.
+    """
+
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    demographics: str = Field(min_length=1)
+    psychographics: str = Field(min_length=1)
+    goals: List[NonEmptyStr] = Field(min_length=1)
+    frustrations: List[NonEmptyStr] = Field(min_length=1)
+    media_habits: List[NonEmptyStr] = Field(min_length=1)
+    jobs_to_be_done: List[NonEmptyStr] = Field(min_length=1)
+
+
 class BrandStoryOutput(BaseModel):
     """Agent-facing brand story schema.
 
@@ -381,9 +402,14 @@ class MessagingFrameworkOutput(TaglineOutput):
 
 
 class PersonaProfilesOutput(MessagingFrameworkOutput):
-    """Prior narrative carry-forward plus persona profiles."""
+    """Prior narrative carry-forward plus persona profiles.
 
-    persona_profiles: List[PersonaProfile] = Field(min_length=2, max_length=3)
+    Uses ``PersonaProfileOutput`` (not the soft ``PersonaProfile``) so each
+    persona's fields are individually required — a blank-name persona must
+    fail validation instead of silently producing empty output.
+    """
+
+    persona_profiles: List[PersonaProfileOutput] = Field(min_length=2, max_length=3)
 
 
 class WritingGuidelinesBody(BaseModel):

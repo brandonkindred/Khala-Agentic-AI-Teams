@@ -35,7 +35,7 @@ from branding_team.models import (
     ElevatorPitch,
     MessagingFrameworkOutput,
     MessagingPillar,
-    PersonaProfile,
+    PersonaProfileOutput,
     PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
@@ -153,7 +153,16 @@ _PITCHES = [
 ]
 _PILLAR = MessagingPillar(pillar="Cohesion")
 _AUDIENCE = AudienceMessageMap(audience_segment="Enterprise leaders")
-_PERSONA = PersonaProfile(name="Alex")
+_PERSONA = PersonaProfileOutput(
+    name="Alex",
+    role="Product Lead",
+    demographics="30-40, urban",
+    psychographics="Pragmatic, values clarity",
+    goals=["Ship on brand"],
+    frustrations=["Inconsistent guidelines"],
+    media_habits=["Trade newsletters"],
+    jobs_to_be_done=["Brief the design team"],
+)
 _GUIDELINES = WritingGuidelinesBody(
     voice_principles=["a", "b", "c"],
     style_dos=["a", "b", "c"],
@@ -235,6 +244,21 @@ def test_persona_profiles_output_enforces_stated_cardinality() -> None:
 
     output = PersonaProfilesOutput(**base, persona_profiles=[_PERSONA, _PERSONA])
     assert len(output.persona_profiles) == 2
+
+
+def test_persona_profile_output_rejects_blank_name() -> None:
+    """A blank-name persona must fail validation, not silently produce empty output."""
+    valid_kwargs = _PERSONA.model_dump()
+
+    with pytest.raises(ValidationError):
+        PersonaProfileOutput(**{**valid_kwargs, "name": ""})
+    with pytest.raises(ValidationError):
+        PersonaProfileOutput(**{**valid_kwargs, "role": ""})
+    with pytest.raises(ValidationError):
+        PersonaProfileOutput(**{**valid_kwargs, "goals": [""]})
+
+    output = PersonaProfileOutput(**valid_kwargs)
+    assert output.name == "Alex"
 
 
 def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() -> None:
