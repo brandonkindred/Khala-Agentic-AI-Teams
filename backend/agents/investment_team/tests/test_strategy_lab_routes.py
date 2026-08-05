@@ -1240,6 +1240,41 @@ def test_list_strategy_lab_jobs_tolerates_malformed_current_cycle(
     assert entry["label"] == "Strategy batch (1/4)"
 
 
+def test_list_strategy_lab_jobs_tolerates_non_dict_persisted_data(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted-only job (no in-memory counterpart) whose "data" field is
+    itself not a mapping -- a string, in this case -- must not 500 the
+    endpoint. ``job.get("data", job)`` falls back to the job dict itself only
+    when "data" is absent; when "data" is present but malformed (e.g. a
+    corrupted/foreign record), the resolved value must still degrade to
+    sensible defaults instead of raising AttributeError from data.get(...).
+    """
+    from investment_team.api import main as api_main
+
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "persisted-only-malformed",
+                "status": "completed",
+                "data": "not-a-dict",
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == "persisted-only-malformed"]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["progress"] == 0
+    assert entry["label"] == "Strategy batch (0/1)"
+    assert entry["status"] == "completed"
+
+
 def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
