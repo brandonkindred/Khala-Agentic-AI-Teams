@@ -567,6 +567,11 @@ class StrategyLabRunStatusResponse(BaseModel):
     batch_count: int = 1
     completed_batches: int = 0
     current_batch: Optional[int] = None
+    # Read-only fencing generation (see run_state.get_run_generation /
+    # _build_run_state) -- exposed so a caller can observe that a restart
+    # superseded a prior incarnation; never accepted as client input anywhere,
+    # so surfacing it carries none of the write-path fencing risk.
+    generation: int = 1
 
 
 class ActiveRunsResponse(BaseModel):
@@ -600,8 +605,9 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
         field, defaulting each absent field to its response default
         (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
-        lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
-        and mapping a present ``current_cycle`` dict to a
+        lists — including ``tracker_merge_error_count`` (``0`` when absent) and
+        ``generation`` (``1`` when absent, matching a pre-fencing legacy
+        record's implicit generation)) — and mapping a present ``current_cycle`` dict to a
         ``StrategyLabCycleProgress`` (``None`` when absent). ``batch_size`` is
         the one field that deliberately does NOT fall back to the model's
         structural default of ``1``: an absent ``batch_size`` means this is a
@@ -628,6 +634,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         batch_count=state.get("batch_count", 1),
         completed_batches=state.get("completed_batches", 0),
         current_batch=state.get("current_batch"),
+        generation=state.get("generation", 1),
     )
 
 

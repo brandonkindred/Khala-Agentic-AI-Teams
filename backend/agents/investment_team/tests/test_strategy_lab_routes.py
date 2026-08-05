@@ -2397,6 +2397,53 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
     assert body["error"] == "boom"
 
 
+def test_get_strategy_lab_run_status_includes_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The status response is documented as a "full snapshot" of a run --
+    the fencing generation must be part of that snapshot (readable, never
+    client-settable) so a caller can observe that a restart superseded a
+    prior incarnation."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-gen"] = {
+        "run_id": "run-gen",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 3,
+        "generation": 4,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-gen", "status": "running"}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs/run-gen/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["generation"] == 4
+
+
+def test_get_strategy_lab_run_status_defaults_generation_to_one_when_absent(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A legacy/pre-fencing run with no persisted "generation" field must
+    still report a valid response, defaulting to generation 1."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-legacy-gen"] = {
+        "run_id": "run-legacy-gen",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 3,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-legacy-gen", "status": "running"}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs/run-legacy-gen/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["generation"] == 1
+
+
 def test_get_strategy_lab_run_status_reconciles_progress_while_non_terminal(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -2618,13 +2665,19 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
         * ``body_iter`` is an iterator over UTF-8 string chunks (TestClient
           ``iter_text()``).
         * ``max_chunks`` and ``timeout_seconds`` are positive.
+        * The caller is responsible for bounding a stalled/blocking
+          ``next(body_iter)`` call (e.g. ``api_client.stream(..., timeout=...)``'s
+          own read timeout) -- this is a plain synchronous ``for`` loop, so it
+          cannot itself interrupt a chunk read that never arrives; the
+          ``timeout_seconds``/``time.monotonic()`` check below only fires
+          *between* chunks that do arrive.
 
     Postconditions:
         * Returns the concatenated body up to and including the ``done`` line.
         * Raises ``AssertionError`` if the terminal line is not seen within
-          ``max_chunks`` chunks, within ``timeout_seconds`` (measured via
-          ``time.monotonic()``, not wall-clock time), or before
-          ``body_iter`` is exhausted (a route regression that stops
+          ``max_chunks`` chunks, if more than ``timeout_seconds`` (measured
+          via ``time.monotonic()``) elapses between chunks, or if
+          ``body_iter`` is exhausted first (a route regression that stops
           emitting before the terminal event would otherwise silently
           return an incomplete body instead of failing the test).
     """
