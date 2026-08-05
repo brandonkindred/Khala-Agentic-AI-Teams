@@ -549,7 +549,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -585,12 +585,16 @@ jobs:
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
       # ../shared/postgres/tests/ is a filesystem path (backend/shared/ is one
       # level up from backend/agents/); --cov=shared.postgres is the dotted
-      # module name, resolved via PYTHONPATH=.. above.
+      # module name. Step-level `env` does not carry over to later steps, so
+      # PYTHONPATH=.. must be set again here (not just on the step above) for
+      # shared.postgres imports and coverage resolution to work.
       - run: >-
           pytest ../shared/postgres/tests/ -v --tb=short -n 4
           --cov=shared.postgres
           --cov-report=term-missing
           --cov-fail-under=90
+        env:
+          PYTHONPATH: ..
 
   # shared_neo4j: the env-gated Graphiti client. Its tests fake graphiti_core and
   # need no live Neo4j or Postgres, so this job carries no service container.
@@ -698,7 +702,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -751,7 +755,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -952,7 +956,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -1053,7 +1057,7 @@ jobs:
       # trust auth so the ephemeral CI database needs no password (avoids a
       # hardcoded dummy credential); connections come only from this runner.
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: postgres
