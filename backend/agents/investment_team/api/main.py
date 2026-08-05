@@ -2174,10 +2174,16 @@ def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
     return None
 
 
-def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
-    """Return True if the run's job-store status is terminal (external cancel).
+def _is_strategy_lab_run_externally_stopped(run_id: str) -> bool:
+    """Return True if the run's job-store status is any external stop signal.
 
-    Used by the Temporal ``is_run_cancelled_activity``.
+    NOT limited to a genuine user cancellation -- True for
+    ``cancelled``/``failed``/``interrupted`` alike (see
+    ``_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES``). Used by the Temporal
+    ``is_run_cancelled_activity`` (whose activity name predates this rename
+    and still reads "cancelled", but whose own docstring already documents
+    this broader contract: the workflow uses it as a general "should I stop"
+    check, not a cancellation-specific one).
 
     Preconditions:
         ``run_id`` is the strategy-lab run identifier.
@@ -2187,9 +2193,28 @@ def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
         non-terminal/absent status (never raises). Callers that need to know
         WHICH of those three statuses triggered this (to avoid mislabeling
         one as another) should call ``_strategy_lab_external_terminal_status``
-        directly instead.
+        directly instead; callers that need a genuine cancellation-only check
+        should use ``_is_strategy_lab_run_cancelled`` instead.
     """
     return _strategy_lab_external_terminal_status(run_id) is not None
+
+
+def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
+    """Return True only if the run's job-store status is exactly "cancelled".
+
+    Precise counterpart to ``_is_strategy_lab_run_externally_stopped``: use
+    this when a caller must distinguish a genuine user cancellation from a
+    failure or interruption, both of which also stop a run externally but
+    are not cancellations.
+
+    Preconditions:
+        ``run_id`` is the strategy-lab run identifier.
+    Postconditions:
+        Returns True when the persisted job's ``status`` is exactly
+        ``"cancelled"``; False for ``"failed"``/``"interrupted"``/any
+        non-terminal/absent status, or on any read error (never raises).
+    """
+    return _strategy_lab_external_terminal_status(run_id) == "cancelled"
 
 
 def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = False) -> None:
