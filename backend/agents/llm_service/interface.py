@@ -259,6 +259,7 @@ class LLMClient(ABC):
         think: "bool | str | None" = None,
         schema: "Optional[dict | type[BaseModel]]" = None,
         structured_output_model: "Optional[type[BaseModel]]" = None,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -299,6 +300,11 @@ class LLMClient(ABC):
         parameter for that. Absent (``None``) on any call that doesn't
         originate from that bridge. Unsupporting clients silently ignore it
         via ``**kwargs``.
+
+        ``max_tokens`` (optional): a cap on generated output tokens, forwarded
+        by implementations that honor a token limit (e.g. ``OllamaLLMClient``,
+        ``ClaudeLLMClient``). ``None`` (default) means no caller-supplied cap
+        — the implementation falls back to its own default/resolution logic.
 
         Preconditions: ``objective`` is a non-empty string.
         """
@@ -341,11 +347,14 @@ class LLMClient(ABC):
         ``objective`` (required) — see :meth:`complete_json`.
 
         ``think`` controls chain-of-thought / reasoning mode (see ``complete_json``).
+
+        ``max_tokens`` is forwarded to ``complete_json()`` — see its docstring.
         """
         result = self.complete_json(
             prompt,
             objective=objective,
             temperature=temperature,
+            max_tokens=max_tokens,
             system_prompt=system_prompt,
             tools=tools,
             think=think,
