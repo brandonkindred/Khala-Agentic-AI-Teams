@@ -30,7 +30,6 @@ retry (which fires on worker crash / start_to_close timeout):
 
 from __future__ import annotations
 
-import time
 from datetime import timedelta
 from typing import Any
 
@@ -78,20 +77,15 @@ def run_backtest_activity(
           Temporal retries within the bounded policy). Returns a status dict.
     """
     from investment_team.api.main import (
-        _BT_JOB_STATUS_CANCELLED,
         _BT_JOB_STATUS_COMPLETED,
         _BT_JOB_STATUS_FAILED,
         _backtest_job_status,
         _run_backtest_background,
     )
     from investment_team.models import BacktestConfig, StrategySpec
-    
 
-    current_status = _backtest_job_status(job_id)
-    if current_status == _BT_JOB_STATUS_COMPLETED:
+    if _backtest_job_status(job_id) == _BT_JOB_STATUS_COMPLETED:
         return {"job_id": job_id, "status": "completed"}
-    elif current_status == _BT_JOB_STATUS_CANCELLED:
-        return {"job_id": job_id, "status": "cancelled"}
 
     _run_backtest_background(
         job_id,
@@ -100,35 +94,10 @@ def run_backtest_activity(
         submitted_by,
         notes,
     )
-    max_polling_attempts = 30
-    attempts = 0
-    
-    while attempts < max_polling_attempts:
-        attempts += 1
-        final_status = _backtest_job_status(job_id)
-        
-        if final_status == _BT_JOB_STATUS_FAILED:
-            # This will properly raise the error the test expects
-            raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
-            
-        elif final_status == _BT_JOB_STATUS_CANCELLED:
-            return {"job_id": job_id, "status": "cancelled"}
-            
-        elif final_status == _BT_JOB_STATUS_COMPLETED:
-            return {"job_id": job_id, "status": "completed"}
-            
-        # Synchronous sleep safely blocks the loop without throwing an async SyntaxError
-        time.sleep(1)
-        
-    # Fail-safe termination if the loop completes without a valid status
-    # ✅ ADD THIS
 
-
-    raise ApplicationError(
-        f"Backtest {job_id} polling exceeded deadline",
-        type="BacktestPollingTimeout",
-        non_retryable=True,
-    )
+    if _backtest_job_status(job_id) == _BT_JOB_STATUS_FAILED:
+        raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
+    return {"job_id": job_id, "status": "completed"}
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")
