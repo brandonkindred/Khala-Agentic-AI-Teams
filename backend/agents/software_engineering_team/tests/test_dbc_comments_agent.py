@@ -227,7 +227,7 @@ def test_dbc_run_recovers_after_one_transient_failure() -> None:
     assert len(client.calls) == 2
 
 
-def test_dbc_run_non_dict_top_level_json_fails_open() -> None:
+def test_dbc_run_non_dict_top_level_json_fails_loud_non_compliant() -> None:
     """A reply that isn't a JSON object at all fails schema validation on
     every attempt, exhausting the retry -- surfaced as non-compliant, never
     silently marked compliant."""
