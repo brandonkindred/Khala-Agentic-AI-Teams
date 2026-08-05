@@ -266,6 +266,32 @@ def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() ->
     assert len(output.writing_guidelines.voice_principles) == 3
 
 
+def test_writing_guidelines_body_rejects_blank_list_items() -> None:
+    """``voice_principles``/``style_dos``/``style_donts``/``editorial_quality_bar`` reject blanks."""
+    output = WritingGuidelinesBody(
+        voice_principles=["a", "b", "c"],
+        style_dos=["a", "b", "c"],
+        style_donts=["a", "b", "c"],
+        editorial_quality_bar=["a", "b", "c"],
+    )
+    assert len(output.voice_principles) == 3
+
+    valid = dict(
+        voice_principles=["a", "b", "c"],
+        style_dos=["a", "b", "c"],
+        style_donts=["a", "b", "c"],
+        editorial_quality_bar=["a", "b", "c"],
+    )
+    with pytest.raises(ValidationError):
+        WritingGuidelinesBody(**{**valid, "voice_principles": ["", "", ""]})
+    with pytest.raises(ValidationError):
+        WritingGuidelinesBody(**{**valid, "style_dos": ["", "", ""]})
+    with pytest.raises(ValidationError):
+        WritingGuidelinesBody(**{**valid, "style_donts": ["", "", ""]})
+    with pytest.raises(ValidationError):
+        WritingGuidelinesBody(**{**valid, "editorial_quality_bar": ["", "", ""]})
+
+
 _CHANNEL_GUIDE_KWARGS = dict(
     channel="website",
     strategy="Lead with product proof points.",
