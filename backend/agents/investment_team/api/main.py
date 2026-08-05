@@ -1074,6 +1074,21 @@ class BacktestJobListResponse(BaseModel):
     jobs: List[BacktestJobListItem]
 
 
+class CancelBacktestJobResponse(BaseModel):
+    """Response returned when a backtest job cancellation succeeds."""
+
+    job_id: str
+    status: str
+    success: bool
+
+
+class DeleteBacktestJobResponse(BaseModel):
+    """Response returned when a backtest job is deleted."""
+
+    job_id: str
+    deleted: bool
+
+
 def _run_backtest_background(
     job_id: str,
     strategy: StrategySpec,
@@ -1099,8 +1114,8 @@ def _run_backtest_background(
         - On the success path: job status becomes RUNNING then COMPLETED with a
           serialized ``RunBacktestResponse``; a new ``BacktestRecord`` is stored
           under ``_backtests[backtest_id]``
-        - On ``HTTPException`` or other exceptions: job status becomes FAILED with
-          an error string, unless a cancel check already returned
+        - On ``BacktestExecutionError`` or other exceptions: job status becomes
+          FAILED with an error string, unless a cancel check already returned
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
           without writing COMPLETED or FAILED so the cancelled status visible at
           that check is preserved. Updates use unconditional ``_bt_update_job``,
@@ -1136,7 +1151,7 @@ def _run_backtest_background(
             result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
             backtest_id=backtest_id,
         )
-    except HTTPException as exc:
+    except BacktestExecutionError as exc:
         if _bt_is_job_cancelled(job_id):
             return
         _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc.detail))
@@ -1249,8 +1264,8 @@ def list_backtest_jobs(running_only: bool = False) -> BacktestJobListResponse:
     return BacktestJobListResponse(jobs=items)
 
 
-@app.post("/backtests/jobs/{job_id}/cancel")
-def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
+@app.post("/backtests/jobs/{job_id}/cancel", response_model=CancelBacktestJobResponse)
+def cancel_backtest_job(job_id: str) -> CancelBacktestJobResponse:
     """Cancel a pending or running backtest job.
 
     Preconditions:
@@ -1259,35 +1274,34 @@ def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
         Raises 404 if no job with that ID exists. Raises 409 if the job
         exists but is no longer pending/running (already completed, failed,
         or cancelled) and so cannot be cancelled. Otherwise cancels the job
-        and returns ``{"job_id", "status": "cancelled", "success": True}``.
+        and returns ``{job_id, status: "cancelled", success: True}``.
     """
     data = _bt_get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if _bt_cancel_job(job_id):
-        return {"job_id": job_id, "status": _BT_JOB_STATUS_CANCELLED, "success": True}
-    raise HTTPException(
-        status_code=409, detail=f"Cannot cancel job in status {data.get('status')}"
-    )
+        return CancelBacktestJobResponse(
+            job_id=job_id, status=_BT_JOB_STATUS_CANCELLED, success=True
+        )
+    raise HTTPException(status_code=409, detail=f"Cannot cancel job in status {data.get('status')}")
 
 
-@app.delete("/backtests/jobs/{job_id}")
-def delete_backtest_job(job_id: str) -> Dict[str, Any]:
+@app.delete("/backtests/jobs/{job_id}", response_model=DeleteBacktestJobResponse)
+def delete_backtest_job(job_id: str) -> DeleteBacktestJobResponse:
     """Delete a backtest job record.
 
     Preconditions:
         ``job_id`` identifies a job previously created by ``run_backtest``.
     Postconditions:
-        Raises 404 if no job with that ID exists. Raises 500 if the job
-        existed but the delete itself failed (race condition or storage
-        error) — distinct from 404, since existence was already confirmed.
-        Otherwise returns ``{"job_id", "deleted": True}``.
+        Atomically deletes the job and returns ``{job_id, deleted: True}``.
+        Raises 404 if no job with that ID exists at the moment of deletion,
+        including when a concurrent request deleted it first — there is no
+        separate existence check, so there is no window in which a race can
+        turn a legitimate delete into a misleading response.
     """
-    if _bt_get_job(job_id) is None:
-        raise HTTPException(status_code=404, detail="Job not found")
     if not _bt_delete_job(job_id):
-        raise HTTPException(status_code=500, detail="Failed to delete job")
-    return {"job_id": job_id, "deleted": True}
+        raise HTTPException(status_code=404, detail="Job not found")
+    return DeleteBacktestJobResponse(job_id=job_id, deleted=True)
 
 
 @app.get("/backtests", response_model=ListBacktestsResponse)
@@ -1453,6 +1467,21 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
 # ---------------------------------------------------------------------------
 
 
+class BacktestExecutionError(Exception):
+    """Raised by ``_run_real_data_backtest`` when a backtest cannot be executed.
+
+    Framework-agnostic replacement for raising ``HTTPException`` from this
+    non-route business-logic helper, so it stays callable and unit-testable
+    outside an HTTP context. ``status_code``/``detail`` mirror
+    ``HTTPException``'s attributes for the caller's convenience.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 def _run_real_data_backtest(
     strategy: StrategySpec,
     config: BacktestConfig,
@@ -1467,7 +1496,7 @@ def _run_real_data_backtest(
 
     Only Strategy-Lab-generated scripts may produce trades. The prior
     LLM-per-bar fallback has been removed; strategies without
-    ``strategy_code`` now return 422.
+    ``strategy_code`` now raise ``BacktestExecutionError`` (422).
 
     Returns (BacktestResult, trade_ledger).
     """
@@ -1475,7 +1504,7 @@ def _run_real_data_backtest(
     from investment_team.market_data_service import MarketDataService
 
     if not strategy.strategy_code:
-        raise HTTPException(
+        raise BacktestExecutionError(
             status_code=422,
             detail=(
                 "strategy_code is required. The legacy LLM-per-bar backtest "
@@ -1501,7 +1530,7 @@ def _run_real_data_backtest(
     )
 
     if not market_data:
-        raise HTTPException(
+        raise BacktestExecutionError(
             status_code=502,
             detail="Failed to fetch historical market data. Please check the date range and try again.",
         )
@@ -1520,7 +1549,7 @@ def _run_real_data_backtest(
     service_result = run.service_result
 
     if service_result.lookahead_violation:
-        raise HTTPException(
+        raise BacktestExecutionError(
             status_code=422,
             detail=(
                 f"Strategy code attempted to access look-ahead data: {(service_result.error or '')}"
@@ -1531,7 +1560,7 @@ def _run_real_data_backtest(
         # append closed trades *before* raising, so a non-empty ledger here
         # still represents a partial/failed execution and must not be
         # reported as a successful backtest.
-        raise HTTPException(
+        raise BacktestExecutionError(
             status_code=422,
             detail=f"Strategy code execution failed: {service_result.error}",
         )
@@ -4744,7 +4773,7 @@ def _recover_orphaned_paper_trading_sessions() -> None:
 
 
 class StartAdvisorSessionRequest(BaseModel):
-    user_id: str = Field(..., description="Unique user identifier")
+    user_id: str = Field(..., min_length=1, description="Unique user identifier")
 
 
 class StartAdvisorSessionResponse(BaseModel):

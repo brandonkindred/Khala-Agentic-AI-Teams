@@ -465,6 +465,32 @@ describe('ProcessDesignerChatComponent', () => {
     );
   });
 
+  // ── createNewProcess: create + link to the active conversation ─────────────
+
+  it('createNewProcess creates the process and links it to the active conversation', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    component.createNewProcess();
+
+    expect(component.currentProcess()?.process_id).toBe('p-new');
+    expect(component.saving()).toBe(false);
+    expect(api.setConversationProcess).toHaveBeenCalledWith('c-1', 'p-new');
+    expect(component.error()).toBeNull();
+  });
+
+  it('createNewProcess surfaces an error when linking the process to the conversation fails', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    api.setConversationProcess.mockReturnValueOnce(
+      throwError(() => ({ error: { detail: 'link failed' } })),
+    );
+
+    component.createNewProcess();
+
+    // The link failure is surfaced, but the already-created process is kept —
+    // it was not rolled back, matching the unchanged happy-path create step.
+    expect(component.error()).toBe('link failed');
+    expect(component.currentProcess()?.process_id).toBe('p-new');
+  });
+
   // ── Process CRUD: roll back optimistic mutations on save failure ───────────
 
   it('addStep rolls back the new step when updateProcess fails', () => {
