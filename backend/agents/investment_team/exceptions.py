@@ -13,16 +13,21 @@ from __future__ import annotations
 class InvestmentBacktestError(Exception):
     """Base for domain-level failures raised by the real-data backtest pipeline.
 
+    Usage note: raised only by ``_run_real_data_backtest`` and its callees.
+
     Invariants:
-        - Raised only by ``_run_real_data_backtest`` and its callees.
-    Preconditions:
-        - ``message`` is a non-empty, human-readable failure string.
-    Postconditions:
-        - ``str(exc)`` carries ``message``, suitable for direct display to a
-          caller (job error string, HTTP detail, etc.).
+        - ``str(exc)`` is always a non-empty string.
     """
 
     def __init__(self, message: str) -> None:
+        """Build the exception, enforcing the non-empty-string message contract.
+
+        Preconditions:
+            - ``message`` is a non-empty, human-readable failure string.
+        Postconditions:
+            - ``str(exc)`` carries ``message``, suitable for direct display to
+              a caller (job error string, HTTP detail, etc.).
+        """
         if not isinstance(message, str) or not message:
             raise ValueError("InvestmentBacktestError requires a non-empty string message")
         super().__init__(message)

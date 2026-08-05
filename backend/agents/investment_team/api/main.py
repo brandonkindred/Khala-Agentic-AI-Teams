@@ -1323,9 +1323,7 @@ def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     if _bt_cancel_job(job_id):
         return {"job_id": job_id, "status": _BT_JOB_STATUS_CANCELLED, "success": True}
-    raise HTTPException(
-        status_code=409, detail=f"Cannot cancel job in status {data.get('status')}"
-    )
+    raise HTTPException(status_code=409, detail=f"Cannot cancel job in status {data.get('status')}")
 
 
 @app.delete("/backtests/jobs/{job_id}")
@@ -2740,18 +2738,22 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
           corresponding activity's preconditions; ``key`` is a stable id for the
           logical operation.
     Postconditions:
-        - Returns the workflow's result dict. Raises ``HTTPException(503)``
-          when Temporal is disabled/unavailable, or when the Temporal client
-          didn't become ready in time (a bare ``RuntimeError`` from
+        - Returns the raw workflow result dict verbatim; this helper does not
+          validate the presence or shape of any expected key, so callers must
+          guard the result themselves (an ``isinstance``/key-presence/value-type
+          check) and raise ``HTTPException(502)`` for a malformed payload
+          before indexing into it. Raises ``HTTPException(503)`` when Temporal
+          is disabled/unavailable, or when the Temporal client didn't become
+          ready in time (a bare ``RuntimeError`` from
           ``shared.temporal._await_client``, mapped here to the same 503 as
           the up-front check). On any other workflow failure, raises the
           ``HTTPException`` :func:`_translate_advisory_failure` maps it to
           (never an opaque unhandled exception).
     """
     _require_temporal()
-    from investment_team.temporal.start_workflow import execute_advisory_workflow
-
     try:
+        from investment_team.temporal.start_workflow import execute_advisory_workflow
+
         return execute_advisory_workflow(op, payload, key=key)
     except HTTPException:
         raise
@@ -2793,14 +2795,16 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
     Postconditions:
         - Returns (does not raise) an ``HTTPException``, found by walking ``exc``'s
           cause chain: the mapped 404/400 for an ``ApplicationError`` whose
-          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 500 (with the
+          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 502 (with the
           error's own message as detail) for an ``ApplicationError`` whose
           ``type`` is NOT a recognized key (``_ADVISORY_ERROR_TYPE_STATUS.get``'s
-          fallback); 409 for a ``WorkflowAlreadyStartedError`` (workflow-id
-          collision); or 502 when the cause chain contains neither (e.g. a bare
+          fallback — so an unmapped advisory failure type never surfaces as an
+          opaque unhandled 500); 409 for a ``WorkflowAlreadyStartedError``
+          (workflow-id collision); or 502 with a generic dispatch-failure
+          detail when the cause chain contains neither (e.g. a bare
           transport-level error) — the only case this function has no
-          error-specific detail to surface, unlike the 500 case above, which
-          always carries the underlying ``ApplicationError``'s message.
+          error-specific detail to surface, unlike the ``ApplicationError``
+          case above, which always carries the underlying error's own message.
     """
     from temporalio.exceptions import ApplicationError as _AppErr
     from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -3022,7 +3026,9 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     # since it acquires `_lock` internally (it is not reentrant).
     with _lock:
         running_ids = [
-            rid for rid, r in _active_runs.items() if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
+            rid
+            for rid, r in _active_runs.items()
+            if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
         ]
     for rid in running_ids:
         _reconcile_run_progress(rid)
@@ -3536,7 +3542,9 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         for job in persisted_list:
             rid = job.get("job_id") or job.get("run_id", "")
             if rid and rid not in in_memory:
-                in_memory[rid] = _normalize_persisted_job(job, fallback_status="running", run_id=rid)
+                in_memory[rid] = _normalize_persisted_job(
+                    job, fallback_status="running", run_id=rid
+                )
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         with _lock:
@@ -4823,7 +4831,8 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
 
     Raises:
         - ``HTTPException(502)`` if the advisory workflow returns a non-dict
-          result, or a dict missing ``advisor_message`` or ``session``.
+          result, a dict missing ``advisor_message`` or ``session``, or whose
+          ``advisor_message``/``session`` values are not a str/dict respectively.
     """
     session_id = f"adv-{uuid.uuid4().hex}"
     result = _execute_advisory(
@@ -4831,7 +4840,11 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
         {"session_id": session_id, "user_id": request.user_id},
         key=session_id,
     )
-    if not isinstance(result, dict) or "advisor_message" not in result or "session" not in result:
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("advisor_message"), str)
+        or not isinstance(result.get("session"), dict)
+    ):
         raise HTTPException(
             status_code=502,
             detail="Advisor execution returned unexpected response structure",
@@ -4860,7 +4873,9 @@ def send_advisor_message(
         - ``HTTPException(404)`` if ``session_id`` does not match a known session.
         - ``HTTPException(502)`` if the advisory workflow returns a result
           missing ``advisor_message``, ``session_status``, ``current_topic``,
-          or ``missing_fields``.
+          or ``missing_fields``, or whose ``advisor_message``/
+          ``session_status``/``current_topic`` values are not a str or whose
+          ``missing_fields`` value is not a list.
     """
     with _lock:
         session = _advisor_sessions.get(session_id)
@@ -4874,7 +4889,14 @@ def send_advisor_message(
         key=session_id,
     )
     required_keys = ("advisor_message", "session_status", "current_topic", "missing_fields")
-    if not isinstance(result, dict) or any(key not in result for key in required_keys):
+    if (
+        not isinstance(result, dict)
+        or any(key not in result for key in required_keys)
+        or not isinstance(result["advisor_message"], str)
+        or not isinstance(result["session_status"], str)
+        or not isinstance(result["current_topic"], str)
+        or not isinstance(result["missing_fields"], list)
+    ):
         raise HTTPException(
             status_code=502,
             detail="Advisor execution returned unexpected response structure",
@@ -4928,7 +4950,8 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         - ``HTTPException(404)`` if ``session_id`` does not match a known session.
         - ``HTTPException(400)`` if required fields are still missing.
         - ``HTTPException(502)`` if the advisory workflow returns a result
-          missing ``user_id`` or ``ips``.
+          missing ``user_id`` or ``ips``, or whose ``user_id``/``ips`` values
+          are not a str/dict respectively.
     """
     with _lock:
         raw_session = _advisor_sessions.get(session_id)
@@ -4949,7 +4972,11 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         )
 
     result = _execute_advisory("advisor_complete", {"session_id": session_id}, key=session_id)
-    if not isinstance(result, dict) or "user_id" not in result or "ips" not in result:
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("user_id"), str)
+        or not isinstance(result.get("ips"), dict)
+    ):
         raise HTTPException(
             status_code=502,
             detail="Advisor completion returned unexpected response structure",

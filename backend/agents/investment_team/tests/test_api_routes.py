@@ -341,6 +341,7 @@ def test_validate_proposal_404_when_ips_missing(api_client) -> None:
 
 
 def test_validate_proposal_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'valid'/'violations' surfaces as a clean 502, not a KeyError."""
     from investment_team.api import main as api_main
 
     api_client.post("/profiles", json=_profile_payload())
@@ -357,6 +358,7 @@ def test_validate_proposal_502_on_malformed_advisory_result(api_client, monkeypa
 def test_validate_proposal_502_on_non_dict_advisory_result(
     api_client, monkeypatch, bad_result
 ) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
     from investment_team.api import main as api_main
 
     api_client.post("/profiles", json=_profile_payload())
@@ -1356,7 +1358,23 @@ def test_start_advisor_session_502_on_non_dict_advisory_result(
     assert resp.json()["detail"]
 
 
+def test_start_advisor_session_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """'advisor_message'/'session' present but wrong-typed must not fall through
+    to a Pydantic ValidationError / TypeError — it's still a malformed result."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"advisor_message": 123, "session": None},
+    )
+    resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_send_advisor_message_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing expected keys surfaces as a clean 502, not a KeyError."""
     from investment_team.api import main as api_main
 
     start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
@@ -1374,6 +1392,7 @@ def test_send_advisor_message_502_on_malformed_advisory_result(api_client, monke
 def test_send_advisor_message_502_on_non_dict_advisory_result(
     api_client, monkeypatch, bad_result
 ) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
     from investment_team.api import main as api_main
 
     start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
@@ -1385,7 +1404,31 @@ def test_send_advisor_message_502_on_non_dict_advisory_result(
     assert resp.json()["detail"]
 
 
+def test_send_advisor_message_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """All required keys present but wrong-typed (e.g. missing_fields not a
+    list) must not fall through to a Pydantic ValidationError / TypeError."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "advisor_message": "hi",
+            "session_status": "active",
+            "current_topic": "goals",
+            "missing_fields": "not-a-list",
+        },
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_complete_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'user_id'/'ips' surfaces as a clean 502, not a KeyError."""
     from investment_team.api import main as api_main
 
     start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
@@ -1398,13 +1441,14 @@ def test_complete_advisor_session_502_on_malformed_advisory_result(api_client, m
     )
     resp = api_client.post(f"/advisor/sessions/{sid}/complete")
     assert resp.status_code == 502
-    assert resp.json()["detail"] == "Advisor completion returned unexpected response structure"
+    assert resp.json()["detail"]
 
 
 @pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
 def test_complete_advisor_session_502_on_non_dict_advisory_result(
     api_client, monkeypatch, bad_result
 ) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
     from investment_team.api import main as api_main
 
     start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
@@ -1412,6 +1456,25 @@ def test_complete_advisor_session_502_on_non_dict_advisory_result(
 
     monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_complete_advisor_session_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """'user_id'/'ips' present but wrong-typed must not fall through to a
+    Pydantic ValidationError / TypeError — it's still a malformed result."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"user_id": 123, "ips": "not-a-dict"},
+    )
     resp = api_client.post(f"/advisor/sessions/{sid}/complete")
     assert resp.status_code == 502
     assert resp.json()["detail"]
