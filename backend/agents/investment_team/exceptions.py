@@ -23,8 +23,8 @@ class InvestmentBacktestError(Exception):
     """
 
     def __init__(self, message: str) -> None:
-        if not message:
-            raise ValueError("InvestmentBacktestError requires a non-empty message")
+        if not isinstance(message, str) or not message:
+            raise ValueError("InvestmentBacktestError requires a non-empty string message")
         super().__init__(message)
 
 

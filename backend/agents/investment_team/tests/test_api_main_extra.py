@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import threading
 import uuid
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import pytest
+
+if TYPE_CHECKING:
+    from investment_team.models import StrategyLabRecord
 
 
 def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
@@ -1155,6 +1158,8 @@ def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job-service backend that raises on every call must not propagate —
+    ``_persist_run_state`` is a best-effort write, not a hard dependency."""
     from investment_team.api import main as api_main
 
     class _Broken:
@@ -1189,7 +1194,12 @@ def test_run_state_to_response_tolerates_non_dict_current_cycle() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _winning_record(strategy_code: str | None = "def x(): pass"):
+def _winning_record(strategy_code: str | None = "def x(): pass") -> StrategyLabRecord:
+    """Build a winning, publishable ``StrategyLabRecord`` with a backing backtest.
+
+    ``strategy_code`` defaults to a trivial snippet; pass ``None`` to build a
+    record that fails the "has generated strategy code" validation branch.
+    """
     from investment_team.models import (
         BacktestConfig,
         BacktestRecord,
@@ -1245,6 +1255,7 @@ def _winning_record(strategy_code: str | None = "def x(): pass"):
 
 
 def test_run_paper_trading_rejects_losing_strategy(api_client) -> None:
+    """A lab record with ``is_winning=False`` must be rejected with 400."""
     from investment_team.api import main as api_main
 
     losing = _winning_record()
@@ -1261,6 +1272,8 @@ def test_run_paper_trading_rejects_losing_strategy(api_client) -> None:
 
 
 def test_run_paper_trading_rejects_non_publishable_strategy(api_client) -> None:
+    """A lab record with ``is_publishable=False`` must be rejected with 400,
+    and the response detail must surface the skip reason."""
     from investment_team.api import main as api_main
 
     record = _winning_record()
@@ -1279,6 +1292,8 @@ def test_run_paper_trading_rejects_non_publishable_strategy(api_client) -> None:
 
 
 def test_run_paper_trading_rejects_when_no_strategy_code(api_client) -> None:
+    """A winning, publishable lab record with no generated strategy code must
+    still be rejected with 400 (it has nothing executable to paper trade)."""
     from investment_team.api import main as api_main
 
     record = _winning_record(strategy_code=None)
@@ -1302,10 +1317,8 @@ def test_run_paper_trading_kicks_off_background_worker(
     api_main._strategy_lab_records["lab-w"] = record
 
     # Replace the background worker so the test doesn't spin up real work.
-    started: List[bool] = []
-    monkeypatch.setattr(
-        api_main, "_run_paper_trading_background", lambda *a, **k: started.append(True)
-    )
+    started = threading.Event()
+    monkeypatch.setattr(api_main, "_run_paper_trading_background", lambda *a, **k: started.set())
     monkeypatch.setattr(api_main, "_live_paper_enabled", lambda: False)
 
     resp = api_client.post(
@@ -1317,13 +1330,7 @@ def test_run_paper_trading_kicks_off_background_worker(
     assert body["session"]["status"] in ("running", "opening")
     assert body["session"]["data_source"] == "yahoo_finance"
     # The thread eventually invokes the patched background — wait briefly.
-    import time
-
-    for _ in range(20):
-        if started:
-            break
-        time.sleep(0.05)
-    assert started == [True]
+    assert started.wait(timeout=2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1332,6 +1339,8 @@ def test_run_paper_trading_kicks_off_background_worker(
 
 
 def test_complete_advisor_session_builds_ips(api_client) -> None:
+    """Once every required field has been collected via chat replies,
+    completing the session must build and return a full IPS for the user."""
     # Start a session, fill all required fields directly, then complete.
     start = api_client.post("/advisor/sessions", json={"user_id": "u-complete"})
     sid = start.json()["session_id"]
@@ -1357,6 +1366,9 @@ def test_complete_advisor_session_builds_ips(api_client) -> None:
 
 
 def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shutdown hook must sweep any still-RUNNING backtest jobs to FAILED
+    and stop the event-bus reaper, so a killed server doesn't leave jobs
+    stuck RUNNING forever."""
     from investment_team.api import main as api_main
 
     calls: List[str] = []

@@ -854,7 +854,7 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
 
     Raises:
         - ``HTTPException(502)`` if the advisory workflow returns a result
-          missing ``proposal``.
+          that is not a dict, or whose ``proposal`` value is not a dict.
     """
     with _lock:
         ips = _profiles.get(request.user_id)
@@ -913,7 +913,8 @@ def validate_proposal(
 
     Raises:
         - ``HTTPException(502)`` if the advisory workflow returns a result
-          missing ``valid`` or ``violations``.
+          that is not a dict, whose ``valid`` value is not a bool, or whose
+          ``violations`` value is not a list.
     """
     with _lock:
         proposal = _proposals.get(proposal_id)
@@ -1015,7 +1016,9 @@ def validate_strategy(
 
     Raises:
         - ``HTTPException(502)`` if the advisory workflow returns a result
-          missing ``validation``, ``passed``, or ``failures``.
+          that is not a dict, is missing ``validation``, ``passed``, or
+          ``failures``, or whose ``validation``/``passed``/``failures``
+          values are not a dict/bool/list respectively.
     """
     with _lock:
         strategy = _strategies.get(strategy_id)
@@ -1029,7 +1032,13 @@ def validate_strategy(
         key=strategy_id,
     )
     required_keys = ("validation", "passed", "failures")
-    if not isinstance(result, dict) or any(key not in result for key in required_keys):
+    if (
+        not isinstance(result, dict)
+        or any(key not in result for key in required_keys)
+        or not isinstance(result["validation"], dict)
+        or not isinstance(result["passed"], bool)
+        or not isinstance(result["failures"], list)
+    ):
         logger.error(
             "Invalid advisory response for strategy %s validation: %r", strategy_id, result
         )
@@ -1143,6 +1152,7 @@ def _run_backtest_background(
             backtest_id=backtest_id,
         )
     except InvestmentBacktestError as exc:
+        logger.error("Backtest job %s failed with domain error: %s", job_id, exc)
         if _bt_is_job_cancelled(job_id):
             return
         _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
@@ -1325,9 +1335,12 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
 
     Raises:
         - ``HTTPException(502)`` if the advisory workflow returns a result
-          missing ``decision``, an ``escalation_enqueued`` payload missing
-          ``queue``/``payload_id``/``priority``, or an ``escalation_enqueued
-          ["queue"]`` that isn't a known ``_workflow_state.queues`` key.
+          that is not a dict, is missing ``decision``, or whose ``decision``
+          is not a dict; an ``escalation_enqueued`` payload missing
+          ``queue``/``payload_id``/``priority``; an ``escalation_enqueued
+          ["queue"]`` that isn't a string or isn't a known
+          ``_workflow_state.queues`` key; or an ``audit_log_appended`` that
+          is present but not a list.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1357,7 +1370,11 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         },
         key=request.strategy_id,
     )
-    if not isinstance(result, dict) or "decision" not in result:
+    if (
+        not isinstance(result, dict)
+        or "decision" not in result
+        or not isinstance(result["decision"], dict)
+    ):
         logger.error(
             "Invalid advisory response for strategy %s promotion: %r", request.strategy_id, result
         )
@@ -1382,18 +1399,29 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
                     detail="Advisory execution returned unexpected escalation payload",
                 )
             queue_name = escalation["queue"]
-            if queue_name not in _workflow_state.queues:
+            if not isinstance(queue_name, str) or queue_name not in _workflow_state.queues:
                 logger.error(
                     "Unknown escalation queue %r for strategy %s", queue_name, request.strategy_id
                 )
                 raise HTTPException(
-                    status_code=502, detail=f"Invalid escalation queue: {queue_name}"
+                    status_code=502, detail=f"Invalid escalation queue: {queue_name!r}"
                 )
-        # Only mutate shared state once escalation shape/queue validation has
-        # passed — an early raise above must leave _workflow_state untouched,
-        # or a client that retries after a 502 would see duplicated audit-log
-        # entries from the rejected attempt.
-        _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
+        audit_log_appended = result.get("audit_log_appended")
+        if audit_log_appended is not None and not isinstance(audit_log_appended, list):
+            logger.error(
+                "Invalid audit_log_appended for strategy %s: %r",
+                request.strategy_id,
+                audit_log_appended,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Advisory execution returned unexpected audit-log payload",
+            )
+        # Only mutate shared state once escalation shape/queue and audit-log
+        # validation have passed — an early raise above must leave
+        # _workflow_state untouched, or a client that retries after a 502
+        # would see duplicated audit-log entries from the rejected attempt.
+        _workflow_state.audit_log.extend(audit_log_appended or [])
         if escalation is not None:
             _workflow_state.queues[queue_name].append(
                 QueueItem(
@@ -1445,7 +1473,8 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
 
     Raises:
         - ``HTTPException(502)`` if the advisory workflow returns a result
-          missing ``memo``.
+          that is not a dict, is missing ``memo``, or whose ``memo`` value
+          is not a dict.
     """
     result = _execute_advisory(
         "committee_memo",
@@ -1457,7 +1486,7 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    if not isinstance(result, dict) or "memo" not in result:
+    if not isinstance(result, dict) or not isinstance(result.get("memo"), dict):
         logger.error("Invalid advisory response for memo (user %s): %r", request.user_id, result)
         raise HTTPException(
             status_code=502,
@@ -4018,7 +4047,8 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             "Only strategies with executable code can be paper traded.",
         )
 
-    # 2 — Create initial "running" session and persist immediately
+    # 2 — Create initial session (OPENING for the live path, RUNNING for the
+    # legacy path) and persist immediately
     session_id = f"pt-{uuid.uuid4().hex[:8]}"
     now = datetime.now(tz=timezone.utc).isoformat()
     use_live = _live_paper_enabled()
