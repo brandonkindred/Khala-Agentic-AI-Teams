@@ -692,15 +692,19 @@ single budget, not two. Default `16`, floor `1` (`1` runs both phases' calls
 sequentially). Results merge in deterministic order regardless of completion
 order.
 
-The value actually used is `min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY,
-chunk_count)` (see `LLM_MAX_CONCURRENCY` above) -- an adaptive fan-out width
-rather than a flat one: small reviews (few chunks) never request more workers
-than they have chunks, and raising this ceiling for large reviews can never
-push the map phase past the process-wide `LLM_MAX_CONCURRENCY` gate, no matter
-what else is concurrently in flight. With both vars at their defaults (`16`
-and `4`), the effective width is unchanged from the previous fixed-`4`
-behavior; raise `LLM_MAX_CONCURRENCY` (and this var, if a higher value is
-desired) together to let large-PR reviews fan out wider.
+The map phase's outer fan-out width is `min(_map_parallelism(), chunk_count)`,
+i.e. `min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY, chunk_count)` (see
+`LLM_MAX_CONCURRENCY` above) -- an adaptive fan-out width rather than a flat
+one: small reviews (few chunks) never request more workers than they have
+chunks, and raising this ceiling for large reviews can never push the map
+phase past the process-wide `LLM_MAX_CONCURRENCY` gate, no matter what else is
+concurrently in flight. With both vars at their defaults (`16` and `4`), the
+effective width is unchanged from the previous fixed-`4` behavior; raise
+`LLM_MAX_CONCURRENCY` (and this var, if a higher value is desired) together to
+let large-PR reviews fan out wider. This outer, chunk-count-clamped width is
+distinct from the run-wide `reviewer.run()` semaphore ceiling described below,
+which uses `_map_parallelism()` directly and is intentionally **not** clamped
+to `chunk_count`.
 
 The map-phase fan-out governed by this knob **applies only to the in-process
 thread-mode fallback** (`coordinator.run_coordinator`, via `mapping.py`'s
@@ -1422,7 +1426,7 @@ retry conflict; once the lease expires the row is reclaimed in place (its `reque
 re-executed. Distinct from `AGENT_COGNITION_RUN_TTL_S`, which bounds *terminal* rows for replay.
 
 ### AGENT_COGNITION_WRITEBACK_MAX_BYTES
-Byte cap on the cognition `cognition_writeback` half of an invoke envelope
+Byte cap on the `cognition_writeback` half of an invoke envelope
 (`shared/agent_invoke/limits.py`, default `1048576` = 1 MiB). The user `output` field has its
 own bound (`AGENT_INVOKE_MAX_OUTPUT_BYTES`), so control/memory data never competes with user output;
 an over-cap writeback is truncated and flagged rather than dropping the response.
