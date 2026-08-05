@@ -793,6 +793,28 @@ def test_paper_trading_results_rejects_unknown_verdict(api_client) -> None:
     assert resp.status_code == 422
 
 
+def test_paper_trading_results_skips_unparseable_session(api_client) -> None:
+    """A single corrupt in-memory session record must not 500 the bulk
+    endpoint — it should be logged and excluded, while parseable sessions
+    are still returned (matching the recovery-pass and single-session
+    lookup behavior).
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingVerdict
+
+    api_main._paper_trading_sessions["good"] = _paper_trading_session(
+        "good", PaperTradingVerdict.READY_FOR_LIVE
+    )
+    # Missing required fields (e.g. strategy, status) -> parse_persisted raises.
+    api_main._paper_trading_sessions["corrupt"] = {"session_id": "corrupt"}
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == ["good"]
+    assert body["count"] == 1
+
+
 def test_paper_trading_session_get_404(api_client) -> None:
     resp = api_client.get("/strategy-lab/paper-trade/pt-missing")
     assert resp.status_code == 404
