@@ -976,11 +976,11 @@ def _run_backtest_background(
     """
     try:
         if _bt_is_job_cancelled(job_id):
-            return _BT_JOB_STATUS_CANCELLED
+            return
         _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
-            return _BT_JOB_STATUS_CANCELLED
+            return
         backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
         now = _now()
         record = BacktestRecord(
@@ -3581,7 +3581,15 @@ def _run_paper_trading_background(
         )
     except Exception as exc:
         logger.exception("Paper trade %s: background worker crashed", session_id)
-        _fail_paper_trading_session(session_id, str(exc))
+        with _lock:
+            raw = _paper_trading_sessions.get(session_id)
+            if raw is not None:
+                session = PaperTradingSession.parse_persisted(raw)
+                session.status = PaperTradingStatus.FAILED
+                session.error = f"Paper trading crashed: {exc}"
+                session.divergence_analysis = f"Paper trading crashed: {exc}"
+                session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                _paper_trading_sessions[session_id] = session
 
 
 @app.post("/strategy-lab/paper-trade", response_model=PaperTradingResponse)
@@ -3959,7 +3967,14 @@ def _run_live_paper_trading_background(
         )
     except Exception as exc:
         logger.exception("Live paper trade %s: background worker crashed", session_id)
-        _fail_paper_trading_session(session_id, str(exc))
+        with _lock:
+            raw = _paper_trading_sessions.get(session_id)
+            if raw is not None:
+                session = PaperTradingSession.parse_persisted(raw)
+                session.status = PaperTradingStatus.FAILED
+                session.error = str(exc)
+                session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                _paper_trading_sessions[session_id] = session
     finally:
         with _lock:
             _live_paper_stop_controllers.pop(session_id, None)
@@ -4191,7 +4206,7 @@ def _recover_orphaned_paper_trading_sessions() -> None:
 
 
 class StartAdvisorSessionRequest(BaseModel):
-    user_id: str = Field(..., min_length=1, description="Unique user identifier")
+    user_id: str = Field(..., description="Unique user identifier")
 
 
 class StartAdvisorSessionResponse(BaseModel):
