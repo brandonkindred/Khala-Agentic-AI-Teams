@@ -975,34 +975,24 @@ def test_cancel_backtest_job_success_and_failure(
 
 
 def test_delete_backtest_job_404_when_missing(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    """Covers both a genuinely nonexistent job and a concurrent-delete race:
+    since there is no separate existence check to race, either case maps to
+    404 from ``_bt_delete_job``'s own return value, never a misleading 500."""
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: None)
+    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
 
 
 def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
     monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: True)
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
-
-
-def test_delete_backtest_job_500_when_delete_fails_after_existing(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
-    """Job confirmed to exist, but the delete itself fails: 500, not 404."""
-    from investment_team.api import main as api_main
-
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
-    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
-    resp = api_client.delete("/backtests/jobs/j1")
-    assert resp.status_code == 500
-    assert "Failed to delete" in resp.json()["detail"]
 
 
 def test_list_backtests_empty(api_client) -> None:

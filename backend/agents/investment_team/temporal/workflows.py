@@ -74,9 +74,13 @@ def run_backtest_activity(
           retry whose predecessor finished does not orphan a duplicate record.
         - Otherwise ``_run_backtest_background`` has run and persisted the job
           result; raises ``ApplicationError`` if the job ended ``failed`` (so
-          Temporal retries within the bounded policy). Returns a status dict.
+          Temporal retries within the bounded policy). If the job ended
+          ``cancelled`` (a user-initiated cancel during the run), returns a
+          status dict reporting ``cancelled`` rather than ``completed``.
+          Returns a ``completed`` status dict otherwise.
     """
     from investment_team.api.main import (
+        _BT_JOB_STATUS_CANCELLED,
         _BT_JOB_STATUS_COMPLETED,
         _BT_JOB_STATUS_FAILED,
         _backtest_job_status,
@@ -95,8 +99,11 @@ def run_backtest_activity(
         notes,
     )
 
-    if _backtest_job_status(job_id) == _BT_JOB_STATUS_FAILED:
+    final_status = _backtest_job_status(job_id)
+    if final_status == _BT_JOB_STATUS_FAILED:
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
+    if final_status == _BT_JOB_STATUS_CANCELLED:
+        return {"job_id": job_id, "status": "cancelled"}
     return {"job_id": job_id, "status": "completed"}
 
 
