@@ -79,9 +79,11 @@ class DbcCommentsAgent:
             - When chunk_count > 1, the prompt notes this is a partial view
               (chunk_index/chunk_count) so the model does not treat missing
               files/symbols as omissions to flag, and separately notes any
-              segment that is itself a partial (line-range) slice of its file
-              so the model knows to report the embedded original line-number
-              prefixes rather than snippet-relative ones.
+              segment that is itself a partial (line-range) slice and is not
+              already pre-numbered, so the model knows to report the embedded
+              original line-number prefixes rather than snippet-relative
+              ones (an already pre-numbered segment's prefixes are already
+              visible in its content, so it needs no separate note).
         """
         context_parts = [f"**Language:** {input_data.language}"]
 
@@ -172,7 +174,12 @@ class DbcCommentsAgent:
             - rejected_insertions holds one reason per insertion that could
               not be safely anchored/merged; comments_added/comments_updated
               count only insertions the merge actually applied, never the
-              model's self-reported counts
+              model's self-reported counts; a non-empty rejected_insertions
+              also forces already_compliant=False (a fix the model identified
+              -- including one that only surfaced as a conflict between two
+              chunks' insertions -- could not actually be applied, so the
+              code is not yet fully compliant regardless of what any chunk
+              itself reported)
             - summary is every chunk's non-empty summary, deduplicated in
               first-seen order (so multiple chunks reporting the identical
               text, e.g. "No changes needed.", contribute it only once) and
@@ -372,6 +379,12 @@ class DbcCommentsAgent:
                     len(rejected_insertions),
                     rejected_insertions,
                 )
+                # A rejected insertion is a fix the model identified that
+                # could not actually be applied (unknown file, ambiguous
+                # symbol, or a conflict between two chunks' insertions) --
+                # the code is not yet fully compliant, regardless of what any
+                # chunk itself reported.
+                already_compliant = False
 
         # If compliant and no summary, provide a default praise message
         if already_compliant and not summary:

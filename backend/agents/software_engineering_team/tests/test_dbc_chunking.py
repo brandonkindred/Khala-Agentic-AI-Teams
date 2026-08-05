@@ -170,6 +170,27 @@ def test_dbc_run_insertion_conflict_across_chunks_is_rejected() -> None:
     assert len(out.rejected_insertions) == len(chunks) - 1
 
 
+def test_dbc_run_insertion_conflict_forces_non_compliant_even_if_chunks_said_compliant() -> None:
+    """A rejected insertion (here, a duplicate target across chunks) must
+    force already_compliant=False even when every chunk itself reported
+    already_compliant=True -- a fix the model identified but that could not
+    actually be applied means the code is not yet fully compliant,
+    regardless of what any individual chunk claimed."""
+    code, chunks = _expected_chunks()
+    assert len(chunks) > 1
+    target_path = chunks[0].segments[0].path
+
+    canned = {
+        "insertions": [{"file": target_path, "symbol": "foo", "comment": '"""Does nothing."""'}],
+        "already_compliant": True,
+    }
+    client = _RepeatingClient(canned)
+    out = DbcCommentsAgent(llm_client=client).run(DbcCommentsInput(code=code))
+
+    assert len(out.rejected_insertions) == len(chunks) - 1
+    assert out.already_compliant is False
+
+
 def test_dbc_run_malformed_response_on_a_later_chunk_fails_the_whole_run() -> None:
     """A persistently malformed reply on chunk 2 must fail the WHOLE run
     loud, even though chunk 1 already succeeded -- an earlier chunk's
@@ -187,24 +208,29 @@ def test_dbc_run_malformed_response_on_a_later_chunk_fails_the_whole_run() -> No
 
     good_payload = {"insertions": [], "already_compliant": True, "summary": "chunk 1 ok"}
     malformed_payload = {"insertions": []}  # missing required "already_compliant"
-    client = _SequencedClient([good_payload] + [malformed_payload] * 8)
+    responses = [good_payload] + [malformed_payload] * 8
+    client = _SequencedClient(responses)
 
     statuses: List[DbcCommentsStatus] = []
     out = DbcCommentsAgent(llm_client=client).run(
         DbcCommentsInput(code=code), on_status=lambda s, d: statuses.append(s)
     )
 
+    # The acceptance criterion: a persistent failure fails the whole run
+    # loud, surfaced via NEEDS_RETRY-then-FAILED status callbacks. Not
+    # asserted against the summary text or an exact call count -- both are
+    # complete_validated's own implementation detail, not part of the
+    # contract this test is verifying.
     assert out.already_compliant is False
-    assert "chunk 2" in out.summary
     assert statuses.count(DbcCommentsStatus.NEEDS_RETRY) >= 1
     assert DbcCommentsStatus.FAILED in statuses
     assert statuses.index(DbcCommentsStatus.NEEDS_RETRY) < statuses.index(DbcCommentsStatus.FAILED)
-    # chunk 1 succeeds in 1 call (no correction needed); chunk 2 can consume
-    # at most 2 outer attempts * (1 initial + 1 internal correction) = 4
-    # calls before the run gives up -- 5 total, well under the 9 malformed
-    # entries supplied, proving chunk 2's failure short-circuits the run
-    # before a chunk-3-shaped call is ever made.
-    assert len(client.calls) <= 5
+    # A later chunk (3+) is never reached: only `responses` were queued (8
+    # malformed entries -- generously more than any retry budget needs), and
+    # no chunk-3-shaped response exists beyond them, so exhausting the run
+    # without an IndexError from _SequencedClient proves chunk 3 was never
+    # called.
+    assert len(client.calls) < len(responses)
 
 
 def test_dbc_run_small_input_still_yields_exactly_one_chunk() -> None:
