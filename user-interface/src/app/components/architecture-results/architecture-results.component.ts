@@ -13,6 +13,7 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { MatCardModule } from '@angular/material/card';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import type { ArchitectDesignResponse } from '../../models';
 
 @Component({
@@ -87,7 +88,7 @@ export class ArchitectureResultsComponent implements AfterViewInit, AfterViewChe
     if (!text?.trim()) return '';
     try {
       const result = marked.parse(text);
-      const html = typeof result === 'string' ? result : '';
+      const html = typeof result === 'string' ? DOMPurify.sanitize(result) : '';
       return this.sanitizer.bypassSecurityTrustHtml(html || `<pre class="markdown-fallback">${this.escapeHtml(text)}</pre>`);
     } catch {
       return this.sanitizer.bypassSecurityTrustHtml(

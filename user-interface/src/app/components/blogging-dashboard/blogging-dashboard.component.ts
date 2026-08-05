@@ -4,6 +4,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatCardModule } from '@angular/material/card';
 import { Subject, Subscription, timer } from 'rxjs';
@@ -621,7 +622,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     if (!text?.trim()) return this.sanitizer.bypassSecurityTrustHtml('');
     try {
       const result = marked.parse(text);
-      const html = typeof result === 'string' ? result : '';
+      const html = typeof result === 'string' ? DOMPurify.sanitize(result) : '';
       return this.sanitizer.bypassSecurityTrustHtml(html || `<pre>${this.escapeHtml(text)}</pre>`);
     } catch {
       return this.sanitizer.bypassSecurityTrustHtml(`<pre>${this.escapeHtml(text)}</pre>`);

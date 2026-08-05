@@ -19,6 +19,7 @@ import { MatSliderModule } from '@angular/material/slider';
 import { MatSelectModule } from '@angular/material/select';
 import { Subscription } from 'rxjs';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 
 import { DeepthoughtApiService, StreamEvent } from '../../services/deepthought-api.service';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
@@ -252,7 +253,7 @@ export class DeepthoughtDashboardComponent implements AfterViewChecked, OnDestro
 
   renderMarkdown(content: string): string {
     if (!content) return '';
-    return marked.parse(content, { async: false }) as string;
+    return DOMPurify.sanitize(marked.parse(content, { async: false }) as string);
   }
 
   countAgents(node: AgentResult): number {

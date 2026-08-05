@@ -6,8 +6,10 @@ for efficient indexing and querying.
 
 DDL is declared in :mod:`job_service.postgres` and applied at startup via
 ``shared.postgres.register_team_schemas``. This module keeps its own
-``psycopg2.pool.ThreadedConnectionPool`` for high-throughput CRUD (see
-``close_pool`` below — it closes this local pool, not the shared one).
+``psycopg_pool.ConnectionPool`` for high-throughput CRUD (see ``close_pool``
+below — it closes this local pool, not the shared one). Same driver
+generation (psycopg v3 + psycopg_pool) as ``shared.postgres``, just its own
+pool instance sized for CRUD rather than DDL.
 """
 
 from __future__ import annotations
@@ -20,9 +22,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-import psycopg2
-import psycopg2.extras
-import psycopg2.pool
+from psycopg.conninfo import make_conninfo
+from psycopg_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
@@ -31,43 +32,41 @@ logger = logging.getLogger(__name__)
 # is only used at startup for DDL).
 # ---------------------------------------------------------------------------
 
-_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+_pool: ConnectionPool | None = None
 
 
 def _dsn() -> str:
-    host = os.environ.get("POSTGRES_HOST", "localhost")
-    port = os.environ.get("POSTGRES_PORT", "5432")
-    user = os.environ.get("POSTGRES_USER", "khala")
-    password = os.environ.get("POSTGRES_PASSWORD", "khala")
-    dbname = os.environ.get("POSTGRES_DB", "khala_jobs")
-    return f"host={host} port={port} dbname={dbname} user={user} password={password}"
+    return make_conninfo(
+        host=os.environ.get("POSTGRES_HOST", "localhost"),
+        port=os.environ.get("POSTGRES_PORT", "5432"),
+        dbname=os.environ.get("POSTGRES_DB", "khala_jobs"),
+        user=os.environ.get("POSTGRES_USER", "khala"),
+        password=os.environ.get("POSTGRES_PASSWORD", "khala"),
+    )
 
 
-def get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+def get_pool() -> ConnectionPool:
     global _pool
     if _pool is None or _pool.closed:
-        _pool = psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=20, dsn=_dsn())
+        _pool = ConnectionPool(conninfo=_dsn(), min_size=2, max_size=20, open=True, name="job_service")
     return _pool
 
 
 @contextmanager
 def get_conn() -> Generator:
     pool = get_pool()
-    conn = pool.getconn()
-    try:
+    # ``ConnectionPool.connection()`` is itself a context manager that commits
+    # on clean exit, rolls back on exception, and returns the connection to
+    # the pool — same semantics the old manual getconn/commit/rollback/putconn
+    # block implemented by hand for psycopg2.
+    with pool.connection() as conn:
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
 
 
 def close_pool() -> None:
     global _pool
     if _pool and not _pool.closed:
-        _pool.closeall()
+        _pool.close()
         _pool = None
 
 

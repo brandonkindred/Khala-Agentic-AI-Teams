@@ -1447,39 +1447,37 @@ def test_create_custom_provisioner_no_overrides_works(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_postgres_provision_returns_error_when_psycopg2_missing(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_postgres_provision_returns_error_when_psycopg_missing(tmp_path: Path, monkeypatch) -> None:
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", False)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", False)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
     out = prov.provision("a1", {}, GeneratedCredentials(tool_name="pg", username="u", password="p"))
     assert out.success is False
-    assert "psycopg2 is not installed" in out.error
+    assert "psycopg is not installed" in out.error
 
 
-def test_postgres_deprovision_no_psycopg2(monkeypatch, tmp_path: Path) -> None:
+def test_postgres_deprovision_no_psycopg(monkeypatch, tmp_path: Path) -> None:
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", False)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", False)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
     out = prov.deprovision("a1")
     assert out.success is False
-    assert "psycopg2" in out.error
+    assert "psycopg" in out.error
 
 
 def test_postgres_deprovision_no_state(tmp_path: Path, monkeypatch) -> None:
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
@@ -1514,7 +1512,7 @@ def test_postgres_do_provision_no_password_raises(tmp_path: Path, monkeypatch) -
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
@@ -1537,7 +1535,7 @@ def test_postgres_provision_full_path(tmp_path: Path, monkeypatch) -> None:
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool(host="h", port=5432, admin_user="u", admin_password="p")
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
@@ -1561,12 +1559,12 @@ def test_postgres_provision_full_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_postgres_provision_handles_duplicate_role(tmp_path: Path, monkeypatch) -> None:
-    psycopg2 = pytest.importorskip("psycopg2")
+    psycopg = pytest.importorskip("psycopg")
 
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
@@ -1580,10 +1578,10 @@ def test_postgres_provision_handles_duplicate_role(tmp_path: Path, monkeypatch) 
         calls["n"] += 1
         # First call: CREATE USER → raise DuplicateObject; second call: ALTER USER → ok
         if calls["n"] == 1:
-            raise psycopg2.errors.DuplicateObject("already exists")
+            raise psycopg.errors.DuplicateObject("already exists")
         # Third call: CREATE DATABASE → raise DuplicateDatabase
         if calls["n"] == 3:
-            raise psycopg2.errors.DuplicateDatabase("already exists")
+            raise psycopg.errors.DuplicateDatabase("already exists")
         return None
 
     fake_cursor.execute.side_effect = execute
@@ -1602,7 +1600,7 @@ def test_postgres_deprovision_full_path(tmp_path: Path, monkeypatch) -> None:
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
     prov._state.put("a1", {"database": "agent_a1", "username": "u1"})
@@ -1623,7 +1621,7 @@ def test_postgres_deprovision_handles_exception(tmp_path: Path, monkeypatch) -> 
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
     prov._state.put("a1", {"database": "agent_a1", "username": "u1"})
@@ -1638,7 +1636,7 @@ def test_postgres_replay_compensation_database(tmp_path: Path, monkeypatch) -> N
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
@@ -1657,7 +1655,7 @@ def test_postgres_replay_compensation_role(tmp_path: Path, monkeypatch) -> None:
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
@@ -1676,7 +1674,7 @@ def test_postgres_replay_compensation_unknown_falls_through(tmp_path: Path, monk
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
@@ -1688,15 +1686,15 @@ def test_postgres_replay_compensation_unknown_falls_through(tmp_path: Path, monk
         prov.replay_compensation("a1", "unknown.kind", {"k": "v"})
 
 
-def test_postgres_replay_compensation_raises_no_psycopg2(tmp_path: Path, monkeypatch) -> None:
+def test_postgres_replay_compensation_raises_no_psycopg(tmp_path: Path, monkeypatch) -> None:
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", False)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", False)
     prov = PostgresProvisionerTool()
     prov._state = ProvisionerStateStore("postgres_provisioner", storage_dir=tmp_path)
 
-    with pytest.raises(RuntimeError, match="psycopg2"):
+    with pytest.raises(RuntimeError, match="psycopg"):
         prov.replay_compensation("a1", "postgres.drop_role", {"username": "u"})
 
 
@@ -1704,7 +1702,7 @@ def test_postgres_apply_permissions_specific(tmp_path: Path, monkeypatch) -> Non
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
 
-    monkeypatch.setattr(pgm, "HAS_PSYCOPG2", True)
+    monkeypatch.setattr(pgm, "HAS_PSYCOPG", True)
     prov = PostgresProvisionerTool()
 
     fake_cursor = MagicMock()

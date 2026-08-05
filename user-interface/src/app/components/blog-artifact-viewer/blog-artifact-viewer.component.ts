@@ -3,6 +3,7 @@ import { ActivatedRoute, RouterLink } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { BloggingApiService } from '../../services/blogging-api.service';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
@@ -77,7 +78,7 @@ export class BlogArtifactViewerComponent implements OnInit {
     if (!text?.trim()) return this.sanitizer.bypassSecurityTrustHtml('');
     try {
       const result = marked.parse(text);
-      const html = typeof result === 'string' ? result : '';
+      const html = typeof result === 'string' ? DOMPurify.sanitize(result) : '';
       return this.sanitizer.bypassSecurityTrustHtml(html || `<pre>${this.escapeHtml(text)}</pre>`);
     } catch {
       return this.sanitizer.bypassSecurityTrustHtml(`<pre>${this.escapeHtml(text)}</pre>`);
