@@ -38,6 +38,24 @@ from typing import Any, Dict, List
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_job_client_cache():
+    """Isolate _PersistentDict.__init__'s get_job_service_client delegation.
+
+    _PersistentDict.__init__ now resolves its client through the process-wide
+    ``job_service_client`` cache (one client per team, for the life of the
+    process) rather than constructing a fresh JobServiceClient per instance.
+    Clearing the cache before and after each test keeps every
+    ``_PersistentDict(...)`` construction in this file deterministic,
+    regardless of team-string reuse or test execution order.
+    """
+    import job_service_client as jsc
+
+    jsc._clear_job_client_cache_for_testing()
+    yield
+    jsc._clear_job_client_cache_for_testing()
+
+
 def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
     """The Strategy Lab concurrency clamp bounds a request's max_parallel to the
     env-configured ceiling and logs only when it actually lowers the value."""
@@ -536,6 +554,102 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
 
 
+def test_persistent_dict_pop_rejects_extra_positional_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pop() must reject a second default argument with TypeError, matching
+    dict.pop's contract, instead of silently returning the first one."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("pop_arity_test")
+
+    with pytest.raises(TypeError):
+        pd.pop("missing", "a", "b")
+
+
+def test_persistent_dict_pop_accepts_explicit_none_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit default=None must be distinguishable from "no default
+    passed" -- pop() should return None, not raise KeyError."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("pop_none_default_test")
+
+    assert pd.pop("missing", None) is None
+
+
+class _HasNonCallableModelDumpAttr:
+    """A lookalike object exposing a non-Pydantic, non-callable ``model_dump``
+    attribute -- the old ``hasattr(value, "model_dump")`` check would try to
+    call this and raise ``TypeError``; ``isinstance(value, BaseModel)`` must
+    not."""
+
+    model_dump = "not a method"
+
+
+def test_persistent_dict_setitem_treats_non_basemodel_model_dump_attr_as_plain_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("model_dump_lookalike_test")
+    client: _FakeJobClient = pd._client  # type: ignore[assignment]
+
+    obj = _HasNonCallableModelDumpAttr()
+    pd["k"] = obj  # must not raise TypeError trying to call the attribute
+
+    assert client._jobs["k"]["data"] == {"value": obj}
+
+
+def test_persistent_dict_init_delegates_to_get_job_service_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """__init__ must resolve its client via the shared get_job_service_client
+    factory rather than constructing a JobServiceClient directly."""
+    import job_service_client as jsc_mod
+    from investment_team.api.main import _PersistentDict
+
+    calls: List[str] = []
+    sentinel_client = _FakeJobClient(team="spy")
+
+    def _spy_get_job_service_client(team: str):
+        calls.append(team)
+        return sentinel_client
+
+    monkeypatch.setattr(jsc_mod, "get_job_service_client", _spy_get_job_service_client)
+
+    pd = _PersistentDict("spy_test")
+
+    assert calls == ["investment_spy_test"]
+    assert pd._client is sentinel_client
+
+
+def test_persistent_dict_init_shares_cached_client_across_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two _PersistentDict instances for the same entity_type must share one
+    process-wide cached JobServiceClient instead of each opening their own."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd_a = _PersistentDict("shared_test")
+    pd_b = _PersistentDict("shared_test")
+
+    assert pd_a._client is pd_b._client
+
+
 class _LostDeleteRaceClient:
     """Stub JobServiceClient simulating a lost pop() race: get_job still
     finds the job (read before the race is settled), but delete_job reports
@@ -644,6 +758,33 @@ def test_persistent_dict_values_return_annotation() -> None:
 
     hints = get_type_hints(_PersistentDict.values)
     assert hints["return"] == List[Any]
+
+
+# ---------------------------------------------------------------------------
+# Lazy agent singleton factories (_get_advisor_agent / _get_policy_guardian /
+# _get_orchestrator / _get_committee_agent)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "factory_name",
+    ["_get_advisor_agent", "_get_policy_guardian", "_get_orchestrator", "_get_committee_agent"],
+)
+def test_agent_factory_returns_cached_singleton_until_cleared(factory_name: str) -> None:
+    """Each lazy factory must return the same cached instance across repeated
+    calls, and a genuinely new instance after cache_clear() -- proving it's a
+    real lazy/rebuildable singleton, not a disguised eager one."""
+    from investment_team.api import main as api_main
+
+    factory = getattr(api_main, factory_name)
+
+    first = factory()
+    second = factory()
+    assert first is second
+
+    factory.cache_clear()
+    third = factory()
+    assert third is not first
 
 
 # ---------------------------------------------------------------------------
@@ -1547,8 +1688,14 @@ def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.Mo
     assert calls == ["server shutdown"]
 
 
-def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A raising failure-sweep must NOT abort shutdown teardown."""
+def test_shutdown_hook_swallows_job_store_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising failure-sweep must NOT abort shutdown teardown, and the
+    swallowed failure must be logged at WARNING (not DEBUG) so it's visible
+    at standard operational log levels."""
+    import logging
+
     from investment_team.api import main as api_main
 
     def _boom(reason: str) -> None:
@@ -1559,7 +1706,37 @@ def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch)
         "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
     )
 
-    api_main._run_investment_service_shutdown()  # must not raise
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        api_main._run_investment_service_shutdown()  # must not raise
+
+    assert any(
+        r.levelno == logging.WARNING and "backtest job failure sweep skipped" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_shutdown_hook_logs_event_bus_teardown_failure_at_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising event-bus reaper teardown must also be swallowed and logged
+    at WARNING, not DEBUG."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    def _boom() -> None:
+        raise RuntimeError("event bus unavailable")
+
+    monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", _boom, raising=False)
+    monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", lambda reason: None)
+
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        api_main._run_investment_service_shutdown()  # must not raise
+
+    assert any(
+        r.levelno == logging.WARNING and "event-bus reaper shutdown skipped" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1096,7 +1096,7 @@ def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, m
     sid = start.json()["session_id"]
 
     # Bypass the "missing required fields" 400 branch so we reach the guard under test.
-    monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
     monkeypatch.setattr(
         api_main, "_execute_advisory", lambda op, payload, *, key: {"user_id": "u1"}
     )

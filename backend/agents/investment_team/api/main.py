@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import HTTPException
@@ -147,7 +148,6 @@ from job_service_client import (
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -197,19 +197,21 @@ def _run_investment_service_shutdown() -> (
           already-stopped reaper is a no-op). All jobs still pending/running
           in the backtest job store are marked FAILED (best-effort; a store
           error is logged and swallowed). Never raises — teardown failures
-          are logged and swallowed so they cannot abort process shutdown.
+          are logged at ``warning`` (visible at standard operational log
+          levels, not just under ``debug``) and swallowed so they cannot
+          abort process shutdown.
     """
     try:
         from investment_team.api.job_event_bus import shutdown as _shutdown_event_bus
 
         _shutdown_event_bus()
     except Exception:
-        logger.debug("Investment event-bus reaper shutdown skipped", exc_info=True)
+        logger.warning("Investment event-bus reaper shutdown skipped", exc_info=True)
 
     try:
         _bt_mark_all_running_jobs_failed("server shutdown")
     except Exception:
-        logger.debug("Investment backtest job failure sweep skipped", exc_info=True)
+        logger.warning("Investment backtest job failure sweep skipped", exc_info=True)
 
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
@@ -235,6 +237,10 @@ _workflow_state = WorkflowState()
 # ---------------------------------------------------------------------------
 # Persistent storage backed by JobServiceClient (survives server restarts)
 # ---------------------------------------------------------------------------
+_MISSING: Any = object()  # sentinel for _PersistentDict.pop: distinguishes "no
+# default passed" from a caller explicitly passing default=None.
+
+
 class _PersistentDict:
     """Dict-like wrapper around JobServiceClient for restart-safe entity storage.
 
@@ -245,8 +251,11 @@ class _PersistentDict:
 
     Invariants:
         - Keys are strings.
-        - Values with ``model_dump`` are persisted via ``model_dump(mode="json")``;
-          other values are wrapped as ``{"value": value}`` before persistence.
+        - Pydantic ``BaseModel`` values are persisted via
+          ``model_dump(mode="json")``; other values -- including objects that
+          merely happen to expose a non-Pydantic attribute named
+          ``model_dump`` -- are wrapped as ``{"value": value}`` before
+          persistence.
         - Reads (``__getitem__``, ``get``, ``pop``, ``values``) return the
           persisted data dict, not a reconstructed model instance.
         - Storage is namespaced under JobServiceClient team
@@ -254,17 +263,23 @@ class _PersistentDict:
     """
 
     def __init__(self, entity_type: str) -> None:
-        """Bind a JobServiceClient namespaced to this entity store.
+        """Bind a namespaced, process-wide-cached JobServiceClient to this store.
 
         Preconditions:
             - ``entity_type`` is a ``str`` used as the store namespace suffix.
         Postconditions:
-            - ``self._client`` targets team ``investment_{entity_type}``.
+            - ``self._client`` is the process-wide cached client for team
+              ``investment_{entity_type}`` (see
+              ``job_service_client.get_job_service_client`` -- one client per
+              team for the life of the process, so distinct
+              ``_PersistentDict`` instances constructed for the same
+              ``entity_type`` share a single underlying client instead of
+              each opening their own).
             - ``self._entity_type`` equals ``entity_type``.
         """
-        from job_service_client import JobServiceClient
+        from job_service_client import get_job_service_client
 
-        self._client = JobServiceClient(team=f"investment_{entity_type}")
+        self._client = get_job_service_client(f"investment_{entity_type}")
         self._entity_type = entity_type
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -273,8 +288,10 @@ class _PersistentDict:
         Preconditions:
             - ``key`` is a ``str``.
         Postconditions:
-            - Values with ``model_dump`` are stored via ``model_dump(mode="json")``;
-              other values are stored as ``{"value": value}``.
+            - Pydantic ``BaseModel`` values are stored via
+              ``model_dump(mode="json")``; other values -- including objects
+              that merely happen to expose a non-Pydantic attribute named
+              ``model_dump`` -- are stored as ``{"value": value}``.
             - Always calls ``create_job(key, status="stored", data=data)`` --
               no read-before-write. The job-service DB layer implements
               ``create_job`` as ``INSERT ... ON CONFLICT (team, job_id) DO
@@ -285,7 +302,7 @@ class _PersistentDict:
               per-process ``threading.Lock``, this holds across every worker
               process/replica, not just within one.
         """
-        data = value.model_dump(mode="json") if hasattr(value, "model_dump") else {"value": value}
+        data = value.model_dump(mode="json") if isinstance(value, BaseModel) else {"value": value}
         self._client.create_job(key, status="stored", data=data)
 
     def __getitem__(self, key: str) -> Any:
@@ -339,12 +356,16 @@ class _PersistentDict:
         """
         self._client.delete_job(key)
 
-    def pop(self, key: str, *args: Any) -> Any:
+    def pop(self, key: str, default: Any = _MISSING) -> Any:
         """Remove ``key`` and return its persisted data dict.
 
         Preconditions:
             - ``key`` is a ``str``.
-            - If the job is missing and ``args`` is empty, raises ``KeyError``.
+            - At most one ``default`` value is accepted -- Python's own
+              parameter binding rejects a second positional/keyword argument
+              with ``TypeError``, matching ``dict.pop``'s contract.
+            - If the job is missing and ``default`` was not passed, raises
+              ``KeyError``.
         Postconditions:
             - When present: deletes the job and returns its ``data`` payload
               (or the job mapping if ``data`` is absent) -- but ONLY when
@@ -361,17 +382,17 @@ class _PersistentDict:
               same atomic operation. A third caller overwriting the job in
               that narrow window is a known, accepted residual gap; the
               exactly-one-caller-claims-the-deletion guarantee above is not.
-            - When missing and a default is provided in ``args``: returns that
-              default without deleting.
+            - When missing and ``default`` was passed (including explicitly
+              ``None``): returns ``default`` without deleting.
         """
         job = self._client.get_job(key)
         if job is None:
-            if args:
-                return args[0]
+            if default is not _MISSING:
+                return default
             raise KeyError(key)
         if not self._client.delete_job(key):
-            if args:
-                return args[0]
+            if default is not _MISSING:
+                return default
             raise KeyError(key)
         return job.get("data", job)
 
@@ -415,10 +436,28 @@ def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]
     return records
 
 
-_advisor_agent = FinancialAdvisorAgent()
-_policy_guardian = PolicyGuardianAgent()
-_orchestrator = InvestmentTeamOrchestrator()
-_committee_agent = InvestmentCommitteeAgent()
+@lru_cache(maxsize=1)
+def _get_advisor_agent() -> FinancialAdvisorAgent:
+    """Process-wide singleton. Call ``_get_advisor_agent.cache_clear()`` to reset."""
+    return FinancialAdvisorAgent()
+
+
+@lru_cache(maxsize=1)
+def _get_policy_guardian() -> PolicyGuardianAgent:
+    """Process-wide singleton. Call ``_get_policy_guardian.cache_clear()`` to reset."""
+    return PolicyGuardianAgent()
+
+
+@lru_cache(maxsize=1)
+def _get_orchestrator() -> InvestmentTeamOrchestrator:
+    """Process-wide singleton. Call ``_get_orchestrator.cache_clear()`` to reset."""
+    return InvestmentTeamOrchestrator()
+
+
+@lru_cache(maxsize=1)
+def _get_committee_agent() -> InvestmentCommitteeAgent:
+    """Process-wide singleton. Call ``_get_committee_agent.cache_clear()`` to reset."""
+    return InvestmentCommitteeAgent()
 
 
 def _now() -> str:
@@ -4904,7 +4943,7 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         if isinstance(raw_session, AdvisorSession)
         else AdvisorSession.model_validate(raw_session)
     )
-    missing = _advisor_agent.missing_fields(session.collected)
+    missing = _get_advisor_agent().missing_fields(session.collected)
     if missing:
         raise HTTPException(
             status_code=400,
