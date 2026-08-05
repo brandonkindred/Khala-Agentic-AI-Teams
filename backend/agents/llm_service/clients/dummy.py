@@ -22,6 +22,7 @@ from collections.abc import AsyncGenerator, AsyncIterable
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
+from ..util import _flatten_system_prompt_content
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; runtime uses lazy strands imports
     from strands.types.content import Message as StrandsMessage
@@ -311,28 +312,6 @@ def _aggregated_user_tool_text(messages: list) -> str:
         if text:
             parts.append(text)
     return "\n\n".join(parts)
-
-
-def _flatten_system_prompt_content(
-    system_prompt_content: list[SystemContentBlock] | None,
-) -> str:
-    """Flatten Strands system content blocks into a single prompt string.
-
-    Preconditions:
-        - ``system_prompt_content`` is ``None`` or a list of content blocks.
-
-    Postconditions:
-        - Returns concatenated text from blocks (empty when absent).
-    """
-    if not system_prompt_content:
-        return ""
-    parts: list[str] = []
-    for block in system_prompt_content:
-        if isinstance(block, dict):
-            parts.append(str(block.get("text", "") or ""))
-        else:
-            parts.append(str(block))
-    return "".join(parts)
 
 
 def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
