@@ -67,6 +67,20 @@ def test_brand_discovery_audit_output_rejects_missing_and_empty_fields() -> None
     assert output.market_position == "Mid-market challenger."
 
 
+def test_brand_discovery_audit_output_rejects_blank_list_items() -> None:
+    """Container-level min_length isn't enough — blank items must fail too."""
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "strengths": [""]})
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "weaknesses": [""]})
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "opportunities": [""]})
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "threats": [""]})
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "stakeholder_insights": [""]})
+
+
 def test_purpose_vision_output_rejects_missing_and_empty_fields() -> None:
     with pytest.raises(ValidationError):
         PurposeVisionOutput()
