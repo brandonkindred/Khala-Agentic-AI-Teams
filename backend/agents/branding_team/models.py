@@ -617,8 +617,8 @@ class BrandArchitectureOutput(BaseModel):
     """
 
     brand_architecture: List[BrandArchitectureRuleOutput] = Field(min_length=1)
-    naming_conventions: List[str] = Field(min_length=3, max_length=5)
-    terminology_glossary: Dict[str, str] = Field(min_length=5, max_length=10)
+    naming_conventions: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=5, max_length=10)
 
 
 class BrandInActionOutput(BaseModel):

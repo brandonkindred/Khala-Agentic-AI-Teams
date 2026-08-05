@@ -5,10 +5,11 @@ These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput`
 ``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
 ``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``,
 ``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 4's
-``ChannelGuidelineOutput``) must reject empty/omitted content so Strands'
-structured-output tool retries the LLM instead of silently accepting a blank
-or under-cardinality response (see ``structured_output_tool.py``: a
-``ValidationError`` becomes a tool error the model is asked to fix).
+``ChannelGuidelineOutput`` and ``BrandArchitectureOutput``) must reject
+empty/omitted content so Strands' structured-output tool retries the LLM
+instead of silently accepting a blank or under-cardinality response (see
+``structured_output_tool.py``: a ``ValidationError`` becomes a tool error
+the model is asked to fix).
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from branding_team.models import (
     AudienceSegmentsOutput,
     BrandArchetype,
     BrandArchetypesOutput,
+    BrandArchitectureOutput,
+    BrandArchitectureRuleOutput,
     BrandDiscoveryAuditOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
@@ -284,3 +287,51 @@ def test_channel_guideline_output_rejects_blank_list_items() -> None:
         ChannelGuidelineOutput(**{**_CHANNEL_GUIDE_KWARGS, "donts": ["", "", ""]})
     with pytest.raises(ValidationError):
         ChannelGuidelineOutput(**{**_CHANNEL_GUIDE_KWARGS, "content_types": ["", "", ""]})
+
+
+_ARCHITECTURE_RULE = BrandArchitectureRuleOutput(
+    entity="Parent brand",
+    relationship="Umbrella over sub-brands",
+    naming_convention="[Parent] [Product]",
+    visual_treatment="Shared wordmark, distinct accent color",
+)
+_ARCHITECTURE_KWARGS = dict(
+    brand_architecture=[_ARCHITECTURE_RULE],
+    naming_conventions=["Title Case", "No abbreviations", "Product before feature"],
+    terminology_glossary={
+        "Sub-brand": "A product line under the parent brand",
+        "Wordmark": "The brand's logotype",
+        "Accent color": "Secondary color reserved for sub-brand distinction",
+        "Umbrella brand": "The parent brand covering all sub-brands",
+        "Naming convention": "The pattern used to name new products",
+    },
+)
+
+
+def test_brand_architecture_output_rejects_blank_naming_conventions_and_glossary_entries() -> None:
+    """``naming_conventions`` items and glossary keys/values must reject blank content."""
+    output = BrandArchitectureOutput(**_ARCHITECTURE_KWARGS)
+    assert len(output.naming_conventions) == 3
+
+    with pytest.raises(ValidationError):
+        BrandArchitectureOutput(**{**_ARCHITECTURE_KWARGS, "naming_conventions": ["", "", ""]})
+    with pytest.raises(ValidationError):
+        BrandArchitectureOutput(
+            **{
+                **_ARCHITECTURE_KWARGS,
+                "terminology_glossary": {
+                    **_ARCHITECTURE_KWARGS["terminology_glossary"],
+                    "": "blank key",
+                },
+            }
+        )
+    with pytest.raises(ValidationError):
+        BrandArchitectureOutput(
+            **{
+                **_ARCHITECTURE_KWARGS,
+                "terminology_glossary": {
+                    **_ARCHITECTURE_KWARGS["terminology_glossary"],
+                    "Blank value": "",
+                },
+            }
+        )
