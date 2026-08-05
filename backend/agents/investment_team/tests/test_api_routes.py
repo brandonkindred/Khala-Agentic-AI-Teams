@@ -658,6 +658,23 @@ def test_list_providers(api_client) -> None:
     assert "live_paper_enabled" in body
 
 
+def test_list_providers_malformed_row_returns_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A registry row that fails ProviderDescriptor validation -> 500, not a crash."""
+    import investment_team.trading_service.providers as providers_mod
+
+    class _BadRegistry:
+        def describe_all(self):
+            return [{"supports": "not-a-list"}]  # missing required `name`
+
+    monkeypatch.setattr(providers_mod, "default_registry", lambda: _BadRegistry())
+
+    resp = api_client.get("/providers")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Provider registry contains invalid data"
+
+
 # ---------------------------------------------------------------------------
 # Paper-trade results listing
 # ---------------------------------------------------------------------------
