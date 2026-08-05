@@ -682,6 +682,93 @@ def test_compute_signal_brief_snapshot_disabled_returns_skip(monkeypatch):
     assert storage == {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
 
+def test_compute_signal_brief_snapshot_fails_open_on_provider_init_failure(monkeypatch):
+    """Fail-open must cover FreeTierMarketDataProvider() construction itself,
+    not just the body of expert.produce_signal_brief -- a provider that
+    can't even be constructed (e.g. bad config) must not raise out of this
+    function."""
+    from investment_team.api import main as api_main
+
+    def _boom_provider():
+        raise RuntimeError("provider config invalid")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _boom_provider)
+
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert brief is None
+    assert storage["skipped"] is True
+    assert storage["skipped_reason"] == "provider_init_failed"
+    assert "provider config invalid" in storage["error"]
+
+
+def test_compute_signal_brief_snapshot_fails_open_on_expert_init_failure(monkeypatch):
+    """Fail-open must cover SignalIntelligenceExpert() construction, which sits
+    inside the outer try but was previously outside the inner try/except that
+    only guarded produce_signal_brief's body."""
+    from investment_team.api import main as api_main
+
+    closed = []
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            closed.append(True)
+
+    def _boom_expert():
+        raise RuntimeError("expert init failed")
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
+
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert brief is None
+    assert storage["skipped"] is True
+    assert storage["skipped_reason"] == "expert_failed"
+    assert "expert init failed" in storage["error"]
+    # provider.close() still runs even though expert init failed.
+    assert closed == [True]
+
+
+def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypatch):
+    """A provider.close() failure in the finally block must not replace the
+    tuple the try block already decided to return."""
+    from investment_team.api import main as api_main
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            raise RuntimeError("close boom")
+
+    def _boom_expert():
+        raise RuntimeError("expert failed too")
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
+
+    # Must not raise despite close() also failing.
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert brief is None
+    assert storage["skipped"] is True
+    assert storage["skipped_reason"] == "expert_failed"
+
+
 def test_is_strategy_lab_run_cancelled_reads_job_status(monkeypatch):
     from investment_team.api import main as api_main
 

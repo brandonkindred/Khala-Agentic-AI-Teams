@@ -2065,14 +2065,27 @@ def _compute_signal_brief_snapshot(
     Preconditions:
         ``benchmark_symbol`` is the run's benchmark ticker.
     Postconditions:
-        Returns ``(brief, storage)``. Fail-open: on disabled expert / market-fetch
-        failure / expert failure it returns ``(None, {"skipped": True, ...})`` (or a
-        degraded-market brief) rather than raising.
+        Returns ``(brief, storage)``. Fail-open: on disabled expert /
+        provider-initialization failure / market-fetch failure / expert
+        (including its own initialization) failure / provider-cleanup
+        failure, it returns ``(None, {"skipped": True, ...})`` (or a
+        degraded-market brief) rather than raising -- every step from
+        provider construction through cleanup is guarded, not just
+        ``expert.produce_signal_brief``'s body.
     """
     if not _strategy_lab_signal_expert_enabled():
         return None, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
-    provider = FreeTierMarketDataProvider()
+    try:
+        provider = FreeTierMarketDataProvider()
+    except Exception as exc:
+        logger.warning("Failed to initialize market data provider: %s", exc)
+        return None, {
+            "skipped": True,
+            "skipped_reason": "provider_init_failed",
+            "error": str(exc),
+        }
+
     try:
         try:
             market_ctx = provider.fetch_context(
@@ -2088,9 +2101,9 @@ def _compute_signal_brief_snapshot(
             )
         prior_for_brief = _snapshot_prior_records()
 
-        expert = SignalIntelligenceExpert()
-        t0 = datetime.now(tz=timezone.utc)
         try:
+            expert = SignalIntelligenceExpert()
+            t0 = datetime.now(tz=timezone.utc)
             brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
             storage = brief.model_dump(mode="json")
             prov_text = market_ctx.as_prompt_text()
@@ -2109,6 +2122,9 @@ def _compute_signal_brief_snapshot(
             )
             return brief, storage
         except Exception as exc:
+            # Covers both SignalIntelligenceExpert() construction and
+            # produce_signal_brief() itself -- either is an "expert
+            # subsystem failed" outcome from the caller's perspective.
             logger.warning("Signal intelligence expert failed: %s", exc)
             return None, {
                 "skipped": True,
@@ -2116,7 +2132,13 @@ def _compute_signal_brief_snapshot(
                 "error": str(exc),
             }
     finally:
-        provider.close()
+        # A cleanup failure here must not replace whatever the try block
+        # already decided to return (a brief, or a skipped-with-reason
+        # tuple) with an unhandled exception -- log and swallow instead.
+        try:
+            provider.close()
+        except Exception as exc:
+            logger.warning("Failed to close market data provider: %s", exc)
 
 
 # Narrower than ``STRATEGY_LAB_TERMINAL_STATUSES`` (defined above): a run that
