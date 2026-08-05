@@ -2854,9 +2854,13 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     Raises ``HTTPException(409)`` when another run is already active, or
     (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
     when another transition for this freshly-minted run_id is already in
-    flight (#4028). The global check runs before minting a run_id/acquiring
+    flight. An early, unlocked check runs before minting a run_id/acquiring
     its transition lock, so a rejected request never allocates a registry
-    entry that would otherwise never be looked up again.
+    entry that would otherwise never be looked up again -- but that check
+    alone can't stop two concurrent requests from both minting a run_id and
+    reaching the ``_active_runs`` write before either observes the other, so
+    the authoritative check is re-run atomically with that write, inside the
+    same ``_lock`` acquisition (mirroring ``resume_strategy_lab_run``).
     """
     _ensure_no_active_run()
 
@@ -2875,6 +2879,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
             request_payload=request.model_dump(),
         )
         with _lock:
+            _no_active_run_locked()
             _active_runs[run_id] = initial_state
         _persist_run_state(run_id, initial_state, create=True)
 
@@ -3234,7 +3239,14 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           resolves to *some* known run) runs before the lock, so a request
           for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
-        - No other run currently has status ``"running"``.
+        - No other run currently has status ``"running"`` — authoritatively
+          checked (and enforced) atomically with the ``_active_runs[run_id]``
+          write below, both inside the same ``_lock`` acquisition; the
+          earlier, unlocked ``_ensure_no_active_run()`` call is only a
+          fast-fail that skips the Temporal termination RPC below for an
+          obviously-doomed request, and cannot by itself prevent a
+          concurrent run/resume/restart for a DIFFERENT run_id from also
+          passing it and writing "running" before this write lands.
         - No other run/resume/restart transition for this run_id is
           currently in flight (checked first, before re-reading state or
           calling ``_ensure_no_active_run()``).
@@ -3363,7 +3375,15 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # contiguous-cycle count persisted on this run_id.
             contiguous_cycles=0,
         )
+        # Re-run the no-active-run check atomically with the write: the
+        # early call above (before the Temporal termination RPC) is only a
+        # cheap fast-fail that avoids that RPC's cost for an obviously-doomed
+        # request -- on its own it can't stop a concurrent run/resume/restart
+        # for a DIFFERENT run_id from also passing it and writing "running"
+        # before this request's write lands. This second, locked check closes
+        # that window (mirroring resume_strategy_lab_run's own pattern).
         with _lock:
+            _no_active_run_locked()
             _active_runs[run_id] = restarted_state
         _persist_run_state(run_id, restarted_state)
 
