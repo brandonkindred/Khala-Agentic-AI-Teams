@@ -33,10 +33,10 @@ from branding_team.models import (
     CoreValuesOutput,
     DifferentiationPillar,
     DifferentiationPillarsOutput,
-    ElevatorPitch,
+    ElevatorPitchOutput,
     MessagingFrameworkOutput,
     MessagingPillarOutput,
-    PersonaProfile,
+    PersonaProfileOutput,
     PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
@@ -148,9 +148,9 @@ _STORY = dict(
 )
 _ARCHETYPE = BrandArchetype(archetype="The Creator")
 _PITCHES = [
-    ElevatorPitch(tier="5-second", pitch="a"),
-    ElevatorPitch(tier="30-second", pitch="b"),
-    ElevatorPitch(tier="2-minute", pitch="c"),
+    ElevatorPitchOutput(tier="5-second", pitch="a"),
+    ElevatorPitchOutput(tier="30-second", pitch="b"),
+    ElevatorPitchOutput(tier="2-minute", pitch="c"),
 ]
 _PILLAR = MessagingPillarOutput(
     pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
@@ -161,7 +161,16 @@ _AUDIENCE = AudienceMessageMapOutput(
     supporting_messages=["Consistent across every touchpoint"],
     tone_adjustments="Confident, outcome-focused",
 )
-_PERSONA = PersonaProfile(name="Alex")
+_PERSONA = PersonaProfileOutput(
+    name="Alex",
+    role="Product Lead",
+    demographics="30-40, urban",
+    psychographics="Pragmatic, values clarity",
+    goals=["Ship on brand"],
+    frustrations=["Inconsistent guidelines"],
+    media_habits=["Trade newsletters"],
+    jobs_to_be_done=["Brief the design team"],
+)
 _GUIDELINES = WritingGuidelinesBody(
     voice_principles=["a", "b", "c"],
     style_dos=["a", "b", "c"],
@@ -195,6 +204,26 @@ def test_tagline_output_rejects_missing_and_enforces_cardinality() -> None:
     )
     assert output.tagline == "Ship brand"
     assert output.brand_archetypes[0].archetype == "The Creator"
+
+
+def test_tagline_output_rejects_blank_elevator_pitch_fields() -> None:
+    """A blank tier or pitch in any of the three elevator pitches must fail validation."""
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+    }
+    blank_tier = [{"tier": "", "pitch": "a"}, _PITCHES[1], _PITCHES[2]]
+    blank_pitch = [{"tier": "5-second", "pitch": ""}, _PITCHES[1], _PITCHES[2]]
+
+    with pytest.raises(ValidationError):
+        TaglineOutput(**base, elevator_pitches=blank_tier)
+    with pytest.raises(ValidationError):
+        TaglineOutput(**base, elevator_pitches=blank_pitch)
+
+    output = TaglineOutput(**base, elevator_pitches=_PITCHES)
+    assert output.elevator_pitches[0].tier == "5-second"
 
 
 def test_messaging_framework_output_enforces_stated_cardinality() -> None:
@@ -268,6 +297,21 @@ def test_persona_profiles_output_enforces_stated_cardinality() -> None:
 
     output = PersonaProfilesOutput(**base, persona_profiles=[_PERSONA, _PERSONA])
     assert len(output.persona_profiles) == 2
+
+
+def test_persona_profile_output_rejects_blank_name() -> None:
+    """A blank-name persona must fail validation, not silently produce empty output."""
+    valid_kwargs = _PERSONA.model_dump()
+
+    with pytest.raises(ValidationError):
+        PersonaProfileOutput(**{**valid_kwargs, "name": ""})
+    with pytest.raises(ValidationError):
+        PersonaProfileOutput(**{**valid_kwargs, "role": ""})
+    with pytest.raises(ValidationError):
+        PersonaProfileOutput(**{**valid_kwargs, "goals": [""]})
+
+    output = PersonaProfileOutput(**valid_kwargs)
+    assert output.name == "Alex"
 
 
 def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() -> None:

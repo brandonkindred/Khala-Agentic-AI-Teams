@@ -360,6 +360,21 @@ class ElevatorPitch(BaseModel):
     pitch: str = ""
 
 
+class ElevatorPitchOutput(BaseModel):
+    """Agent-facing elevator pitch; requires non-empty fields.
+
+    Field-for-field twin of ``ElevatorPitch`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) —
+    ``ElevatorPitch`` itself must stay soft (all-default) since it also backs
+    ``NarrativeMessagingOutput.elevator_pitches``'s merge target.
+    """
+
+    tier: str = Field(min_length=1)
+    pitch: str = Field(min_length=1)
+
+
 class PersonaProfile(BaseModel):
     """Rich persona profile with psychographic depth."""
 
@@ -371,6 +386,27 @@ class PersonaProfile(BaseModel):
     frustrations: List[str] = Field(default_factory=list)
     media_habits: List[str] = Field(default_factory=list)
     jobs_to_be_done: List[str] = Field(default_factory=list)
+
+
+class PersonaProfileOutput(BaseModel):
+    """Agent-facing persona profile; requires non-empty fields.
+
+    Field-for-field twin of ``PersonaProfile`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``) — ``PersonaProfile`` itself must stay soft
+    (all-default except ``name``) since it also backs
+    ``NarrativeMessagingOutput.persona_profiles``'s merge target.
+    """
+
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    demographics: str = Field(min_length=1)
+    psychographics: str = Field(min_length=1)
+    goals: List[NonEmptyStr] = Field(min_length=1)
+    frustrations: List[NonEmptyStr] = Field(min_length=1)
+    media_habits: List[NonEmptyStr] = Field(min_length=1)
+    jobs_to_be_done: List[NonEmptyStr] = Field(min_length=1)
 
 
 class BrandStoryOutput(BaseModel):
@@ -399,11 +435,16 @@ class BrandArchetypesOutput(BrandStoryOutput):
 
 
 class TaglineOutput(BrandArchetypesOutput):
-    """Prior narrative carry-forward plus tagline / elevator pitches."""
+    """Prior narrative carry-forward plus tagline / elevator pitches.
+
+    Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each
+    pitch's fields are individually required — three blank-tier/blank-pitch
+    entries must fail validation instead of silently passing.
+    """
 
     tagline: str = Field(min_length=1)
     tagline_rationale: str = Field(min_length=1)
-    elevator_pitches: List[ElevatorPitch] = Field(min_length=3, max_length=3)
+    elevator_pitches: List[ElevatorPitchOutput] = Field(min_length=3, max_length=3)
 
 
 class MessagingFrameworkOutput(TaglineOutput):
@@ -420,9 +461,14 @@ class MessagingFrameworkOutput(TaglineOutput):
 
 
 class PersonaProfilesOutput(MessagingFrameworkOutput):
-    """Prior narrative carry-forward plus persona profiles."""
+    """Prior narrative carry-forward plus persona profiles.
 
-    persona_profiles: List[PersonaProfile] = Field(min_length=2, max_length=3)
+    Uses ``PersonaProfileOutput`` (not the soft ``PersonaProfile``) so each
+    persona's fields are individually required — a blank-name persona must
+    fail validation instead of silently producing empty output.
+    """
+
+    persona_profiles: List[PersonaProfileOutput] = Field(min_length=2, max_length=3)
 
 
 class WritingGuidelinesBody(BaseModel):

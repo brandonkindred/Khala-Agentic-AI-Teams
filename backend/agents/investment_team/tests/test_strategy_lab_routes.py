@@ -975,6 +975,33 @@ def test_list_strategy_lab_runs_merged_entry_null_data_does_not_500(
     assert any(r["run_id"] == "run-null-data" for r in resp.json()["runs"])
 
 
+def test_list_strategy_lab_runs_skips_active_run_entry_missing_run_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A malformed/partially-constructed ``_active_runs`` entry that lacks
+    the ``"run_id"`` key must not 500 the whole listing -- it's skipped, and
+    every other (well-formed) entry still appears in the response."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-ok"] = {
+        "run_id": "run-ok",
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    # Missing "run_id" entirely -- simulates a malformed/partially-built entry.
+    api_main._active_runs["malformed-key"] = {
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.get("/strategy-lab/runs")
+
+    assert resp.status_code == 200
+    run_ids = {r["run_id"] for r in resp.json()["runs"]}
+    assert run_ids == {"run-ok"}
+
+
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
