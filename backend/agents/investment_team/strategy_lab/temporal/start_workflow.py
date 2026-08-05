@@ -85,8 +85,13 @@ def build_strategy_lab_batch_input(
         "paper_trading_enabled": request.paper_trading_enabled,
         "paper_trading_lookback_days": request.paper_trading_lookback_days,
         "start_cycle_offset": rehydrate_active_run_offset(run_id),
-        "generation": generation,
         **get_resume_seed_counters(run_id),
+        # Ordered after the counters unpack so the caller-provided fencing
+        # generation always wins even if get_resume_seed_counters' return
+        # shape ever grows a "generation" key -- silently losing this value
+        # to an unpacked counter would break the fencing contract and cause
+        # the freshly-dispatched workflow to self-fence its own writes.
+        "generation": generation,
     }
 
 

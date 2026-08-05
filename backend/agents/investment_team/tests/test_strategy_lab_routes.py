@@ -1055,6 +1055,48 @@ def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
     assert stub.by_id["run-legacy"]["generation"] == 2
 
 
+def test_restart_strategy_lab_run_bootstrap_check_read_failure_still_succeeds(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A get_job failure during restart's legacy-generation bootstrap check
+    (the read used only to decide +1 vs +2 for the mint) must not block the
+    restart -- it's explicitly best-effort: falling back to the legacy/+2
+    branch is safe regardless of why this read failed, since the actual
+    fencing-critical write is the atomic apply_and_get increment right
+    after, which is unaffected by this read's outcome."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-bootstrapreadfail"] = {
+        "run_id": "run-bootstrapreadfail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 3,
+    }
+
+    stub = _StubLabClient(jobs=[{"job_id": "run-bootstrapreadfail", "generation": 3}])
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_failing_on_first_read(jid: str):
+        read_calls.append(jid)
+        if len(read_calls) == 1:
+            raise ConnectionError("connection refused")
+        return real_get_job(jid)
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing_on_first_read)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-bootstrapreadfail/restart")
+
+    assert resp.status_code == 200
+    # The bootstrap read failed, so durable_data fell back to {} -- treated
+    # the same as a genuinely legacy/fieldless record, bootstrapping by +2
+    # (3 -> 5) rather than the ordinary +1, per
+    # _legacy_generation_bootstrap_increment's documented safety margin.
+    assert api_main._active_runs["run-bootstrapreadfail"]["generation"] == 5
+    assert stub.by_id["run-bootstrapreadfail"]["generation"] == 5
+
+
 def test_restart_strategy_lab_run_bootstraps_from_durable_record_not_stale_in_memory_generation(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

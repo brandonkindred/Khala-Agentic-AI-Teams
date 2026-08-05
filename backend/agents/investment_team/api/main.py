@@ -2591,8 +2591,7 @@ def _no_active_run_locked() -> None:
           mutate ``_active_runs`` and does not itself acquire or release
           ``_lock``.
     """
-    active = [r for r in _active_runs.values() if r["status"] == "running"]
-    if active:
+    if any(r["status"] == "running" for r in _active_runs.values()):
         raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
 
 
@@ -3425,10 +3424,23 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           resolves to *some* known run) runs before the lock, so a request
           for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
-        - No other run currently has status ``"running"``.
         - No other run/resume/restart transition for this run_id is
           currently in flight (checked first, before re-reading state or
           calling ``_ensure_no_active_run()``).
+
+    Not a caller precondition — enforced internally, not the caller's to
+    guarantee:
+        - No other run currently has status ``"running"``, checked via
+          ``_ensure_no_active_run()`` after the transition lock above is
+          held. Unlike ``resume_strategy_lab_run``'s ``_no_active_run_locked()``
+          call, this check is *not* atomic with this function's own later
+          ``_active_runs[run_id]`` write — ``_ensure_no_active_run()``
+          acquires and releases ``_lock`` on its own, and this function does
+          real work (workflow termination, generation minting) in between
+          before writing. A second run/resume for a *different* run_id could
+          in principle pass its own check in that gap; this mirrors the
+          pre-existing 409 guard's scope and is not narrowed by generation
+          fencing, which only protects a given run_id's own durable writes.
 
     Postconditions:
         - Any prior Temporal execution still running under this run_id's
