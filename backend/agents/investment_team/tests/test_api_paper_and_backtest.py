@@ -982,6 +982,29 @@ def test_run_paper_trading_live_mode_kicks_off_thread(
     assert started == [True]
 
 
+def test_run_paper_trading_session_id_has_full_uuid4_entropy(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Session ids must carry the full 128-bit UUID4, not a truncated 8-char
+    prefix — a truncation collision would silently overwrite an existing
+    session's record since `_paper_trading_sessions` is keyed by session_id."""
+    import uuid
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+    monkeypatch.setattr(api_main, "_run_live_paper_trading_background", lambda *a, **k: None)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+    assert resp.status_code == 200
+    sid = resp.json()["session"]["session_id"]
+    assert sid.startswith("pt-")
+    suffix = sid[len("pt-") :]
+    assert len(suffix) == 32
+    uuid.UUID(hex=suffix)
+
+
 def test_run_paper_trading_concurrent_starts_same_strategy_only_one_wins(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

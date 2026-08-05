@@ -425,6 +425,25 @@ def test_execute_advisory_maps_client_not_ready_runtime_error_to_503(monkeypatch
     assert ei.value.status_code == 503
 
 
+def test_execute_advisory_translates_unrelated_runtime_error_instead_of_503(monkeypatch) -> None:
+    """A ``RuntimeError`` from workflow/activity code that is NOT the
+    client-not-ready condition must not be misreported as 503 — it should be
+    routed through ``_translate_advisory_failure`` like every other
+    exception type, landing on its 502 default for an unrecognized error."""
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    def _raise(*a, **kw):
+        raise RuntimeError("business logic exploded unexpectedly")
+
+    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+
+    with pytest.raises(HTTPException) as ei:
+        REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
+    assert ei.value.status_code == 502
+
+
 def test_execute_advisory_passes_through_503_when_disabled_without_translation(
     monkeypatch,
 ) -> None:

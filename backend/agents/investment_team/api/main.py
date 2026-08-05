@@ -1326,7 +1326,18 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         process that also serves ``/workflow/status``/``/workflow/queues`` —
         applies the activity's returned audit-log/escalation delta to the local
         ``_workflow_state`` so those reads stay consistent regardless of which
-        process ran the activity.
+        process ran the activity. The activity result is fully validated
+        before any of that shared state is mutated, so a malformed result
+        never leaves ``_workflow_state`` partially updated.
+
+    Raises:
+        - ``HTTPException(404)`` if ``strategy_id`` or the user's IPS is not found.
+        - ``HTTPException(400)`` if the strategy has no validation report.
+        - ``HTTPException(500)`` if the advisory result is missing a
+          ``decision`` field, has a non-list/non-string ``audit_log_appended``,
+          or names an unknown ``escalation_enqueued`` queue.
+        - ``HTTPException(422)`` if the ``decision`` field fails
+          ``PromotionDecision`` validation.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1356,20 +1367,46 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         },
         key=request.strategy_id,
     )
+
+    # Validate the entire result up front — decision, audit-log shape, and
+    # escalation queue name — before mutating any shared _workflow_state, so
+    # a malformed activity result never leaves the audit log or queues
+    # partially updated.
+    decision_data = result.get("decision")
+    if not decision_data:
+        raise HTTPException(
+            status_code=500, detail="Promotion decision result is missing required 'decision' field"
+        )
+    try:
+        decision = PromotionDecision.model_validate(decision_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid decision payload: {exc}") from exc
+
+    audit_entries = result.get("audit_log_appended") or []
+    if not isinstance(audit_entries, list) or not all(isinstance(e, str) for e in audit_entries):
+        raise HTTPException(
+            status_code=500,
+            detail="Promotion decision result has invalid 'audit_log_appended' entries",
+        )
+
+    escalation = result.get("escalation_enqueued")
+    queue_name = escalation.get("queue") if escalation else None
+    if escalation and queue_name not in _workflow_state.queues:
+        raise HTTPException(status_code=500, detail=f"Unknown escalation queue '{queue_name}'")
+
     with _lock:
-        _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
-        escalation = result.get("escalation_enqueued")
+        _workflow_state.audit_log.extend(audit_entries)
         if escalation:
-            _workflow_state.queues[escalation["queue"]].append(
+            _workflow_state.queues[queue_name].append(
                 QueueItem(
-                    queue=escalation["queue"],
+                    queue=queue_name,
                     payload_id=escalation["payload_id"],
                     priority=escalation["priority"],
                 )
             )
     return PromotionDecisionResponse(
         strategy_id=request.strategy_id,
-        decision=PromotionDecision.model_validate(result["decision"]),
+        decision=decision,
     )
 
 
@@ -1429,11 +1466,17 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         Delegates entirely to ``_execute_advisory("committee_memo", ...)``
         with ``key=request.user_id`` as the idempotency/ordering key; no
         local precondition checks are performed (no user/IPS existence
-        check, unlike ``promotion_decision``). Raises ``HTTPException(503)``
-        when Temporal is disabled/unavailable; on any other workflow
-        failure, raises the ``HTTPException`` that
-        ``_translate_advisory_failure`` maps it to. On success, returns the
+        check, unlike ``promotion_decision``). On success, returns the
         generated ``InvestmentCommitteeMemo``.
+
+    Raises:
+        - ``HTTPException(503)`` when Temporal is disabled/unavailable; on
+          any other workflow failure, the ``HTTPException`` that
+          ``_translate_advisory_failure`` maps it to.
+        - ``HTTPException(500)`` if the advisory result is missing a
+          ``memo`` field.
+        - ``HTTPException(422)`` if the ``memo`` field fails
+          ``InvestmentCommitteeMemo`` validation.
     """
     result = _execute_advisory(
         "committee_memo",
@@ -1445,7 +1488,14 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(result["memo"]))
+    memo_data = result.get("memo")
+    if not memo_data:
+        raise HTTPException(status_code=500, detail="Advisory result missing 'memo' field")
+    try:
+        memo = InvestmentCommitteeMemo.model_validate(memo_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid memo payload: {exc}") from exc
+    return CreateMemoResponse(memo=memo)
 
 
 # ---------------------------------------------------------------------------
@@ -2664,12 +2714,17 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
     except HTTPException:
         raise
     except RuntimeError as exc:
-        # ``shared.temporal._await_client`` raises a bare RuntimeError when
-        # TEMPORAL_ADDRESS is set but the worker's client never became ready in
-        # time — the same "no running worker" condition ``_require_temporal``
-        # checks for up front, just discovered later. Map it to the same 503
-        # instead of letting it fall through to _translate_advisory_failure's
-        # generic 502.
+        # ``shared.temporal._await_client`` raises exactly
+        # RuntimeError("Temporal client not available; is the team's worker
+        # running?") when TEMPORAL_ADDRESS is set but the worker's client
+        # never became ready in time — the same "no running worker"
+        # condition ``_require_temporal`` checks for up front, just
+        # discovered later. Map only that specific condition to the same
+        # 503; any other RuntimeError raised by workflow/activity code is a
+        # distinct failure and belongs to _translate_advisory_failure like
+        # every other exception type, not this 503.
+        if "Temporal client not available" not in str(exc):
+            raise _translate_advisory_failure(exc) from exc
         raise HTTPException(
             status_code=503,
             detail="This endpoint requires a running Temporal worker (client did not become ready in time).",
@@ -4152,8 +4207,11 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             "Only strategies with executable code can be paper traded.",
         )
 
-    # 2 — Create initial "running" session and persist immediately
-    session_id = f"pt-{uuid.uuid4().hex[:8]}"
+    # 2 — Create initial "running" session and persist immediately. Uses the
+    # full 32-char UUID4 hex (122 bits of entropy), not a truncated prefix,
+    # since _paper_trading_sessions is keyed by session_id and a collision
+    # would silently overwrite an existing session's record.
+    session_id = f"pt-{uuid.uuid4().hex}"
     now = datetime.now(tz=timezone.utc).isoformat()
     use_live = _live_paper_enabled()
 
@@ -4788,7 +4846,8 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
 
     Raises:
         - ``HTTPException(500)`` if the advisory workflow returns a result
-          missing ``advisor_message`` or ``session``.
+          missing ``advisor_message`` or ``session``, or whose ``session``
+          fails ``AdvisorSession`` validation.
     """
     session_id = f"adv-{uuid.uuid4().hex}"
     result = _execute_advisory(
@@ -4801,10 +4860,17 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
             status_code=500,
             detail="Advisor execution returned unexpected response structure",
         )
+    try:
+        session = AdvisorSession.model_validate(result["session"])
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Advisor execution returned unexpected response structure: {exc}",
+        ) from exc
     return StartAdvisorSessionResponse(
         session_id=session_id,
         advisor_message=result["advisor_message"],
-        session=AdvisorSession.model_validate(result["session"]),
+        session=session,
     )
 
 
@@ -4822,7 +4888,9 @@ def send_advisor_message(
           current topic, and any still-missing required fields.
 
     Raises:
-        - ``HTTPException(404)`` if ``session_id`` does not match a known session.
+        - ``HTTPException(404)`` if ``session_id`` does not match a known session
+          — either when this route is first called, or if the session is
+          concurrently removed between the initial check and workflow dispatch.
         - ``HTTPException(500)`` if the advisory workflow returns a result
           missing ``advisor_message``, ``session_status``, ``current_topic``,
           or ``missing_fields``.
@@ -4832,6 +4900,17 @@ def send_advisor_message(
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
+
+    # Re-check immediately before dispatch: the lock above is released for
+    # this synchronous, potentially slow _execute_advisory call (holding a
+    # single process-wide lock across that I/O would serialize every route
+    # in this module), which leaves a window for another request to remove
+    # the session between the check above and here. Narrow it as tightly as
+    # possible rather than dispatching against a session that may already be
+    # gone.
+    with _lock:
+        if session_id not in _advisor_sessions:
+            raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
 
     result = _execute_advisory(
         "advisor_message",
@@ -4855,13 +4934,13 @@ def send_advisor_message(
 @app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
-    Preconditions:
-        - `session_id` must identify a previously started advisor session.
-        
+
     Postconditions:
-        - Returns the session if found.
-        - Otherwise, returns `found=False` with `session=None`.
-        
+        - Returns the session with `found=True` if `session_id` matches a
+          known session.
+        - Returns `found=False` with `session=None` if no session matches
+          (a missing session is not an error).
+
     Raises:
         - None (intentionally avoids standard 404 errors for missing sessions).
     """
@@ -4891,7 +4970,8 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         - ``HTTPException(404)`` if ``session_id`` does not match a known session.
         - ``HTTPException(400)`` if required fields are still missing.
         - ``HTTPException(500)`` if the advisory workflow returns a result
-          missing ``user_id`` or ``ips``.
+          missing ``user_id`` or ``ips``, or whose ``ips`` fails ``IPS``
+          validation.
     """
     with _lock:
         raw_session = _advisor_sessions.get(session_id)
@@ -4917,6 +4997,11 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
             status_code=500,
             detail="Advisor completion returned unexpected response structure",
         )
-    return CompleteAdvisorSessionResponse(
-        user_id=result["user_id"], ips=IPS.model_validate(result["ips"])
-    )
+    try:
+        ips = IPS.model_validate(result["ips"])
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Advisor completion returned unexpected response structure: {exc}",
+        ) from exc
+    return CompleteAdvisorSessionResponse(user_id=result["user_id"], ips=ips)
