@@ -463,6 +463,23 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.error()).toBeNull();
   });
 
+  it('does not leak the step counter across component instances', () => {
+    // Regression guard: the step counter used to be module-scope (`let _stepCounter`),
+    // shared by every component instance. It must now be a per-instance field.
+    const original = process({ steps: [step({ step_id: 's-1' })] });
+    component.currentProcess.set(original);
+    component.addStep('action');
+    component.addStep('action');
+    expect((component as unknown as { _stepCounter: number })._stepCounter).toBe(2);
+
+    const fixture2 = TestBed.createComponent(ProcessDesignerChatComponent);
+    const component2 = fixture2.componentInstance;
+    component2.team = team();
+    fixture2.detectChanges();
+
+    expect((component2 as unknown as { _stepCounter: number })._stepCounter).toBe(0);
+  });
+
   it('onStepUpdated rolls back the edit when updateProcess fails', () => {
     const original = process({ steps: [step({ step_id: 's-1', name: 'Original name' })] });
     component.currentProcess.set(original);
