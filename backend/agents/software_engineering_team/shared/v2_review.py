@@ -266,9 +266,12 @@ def _code_review_step(
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
         - ``llm_review_fn(llm=, task=, files=, language=, review_context=,
           enable_llm_review_grounding=)`` is the per-team chunking/prompt/parse
-          reviewer (the test patch surface for ``Agent`` /
-          ``resolve_text_mode_strands_model``); it must accept ``review_context``
-          so the fallback reviewer sees the same context the external agent path
+          reviewer. For frontend, this is also the test patch surface for
+          ``Agent`` / ``resolve_text_mode_strands_model``; backend's version
+          calls ``code_review_agent.coordinator.run_coordinator`` directly
+          instead (see this module's own docstring), so it has no ``Agent``
+          patch surface. Either way it must accept ``review_context`` so the
+          fallback reviewer sees the same context the external agent path
           does, and ``language`` so a fallback that forwards it to
           ``CodeReviewInput`` (e.g. backend's coordinator-backed fallback) reviews
           the code under its actual language instead of ``CodeReviewInput``'s

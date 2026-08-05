@@ -807,6 +807,7 @@ def test_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_
 
 
 def test_run_review_with_linting_agent_pass(monkeypatch, tmp_path: Path):
+    """A linting agent reporting success/passed=True yields lint_ok=True."""
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
     _stub_coordinator(monkeypatch)
@@ -829,6 +830,7 @@ def test_run_review_with_linting_agent_pass(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_with_linting_agent_failures(monkeypatch, tmp_path: Path):
+    """A linting agent reporting failure yields lint_ok=False and a "lint"-sourced issue."""
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
     _stub_coordinator(monkeypatch)
@@ -857,6 +859,7 @@ def test_run_review_with_linting_agent_failures(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
+    """A tool agent's issues and recommendations both surface in the result."""
     from software_engineering_team.backend_code_v2_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
@@ -893,6 +896,7 @@ def test_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_tool_agent_raises(monkeypatch, tmp_path: Path):
+    """A tool agent whose .review() raises is contained -- run_review still returns."""
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
@@ -913,6 +917,7 @@ def test_run_review_tool_agent_raises(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_tool_agent_without_review_method(monkeypatch, tmp_path: Path):
+    """A tool agent lacking a .review() method entirely is skipped, not a crash."""
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
@@ -935,6 +940,8 @@ def test_run_review_tool_agent_without_review_method(monkeypatch, tmp_path: Path
 
 
 def test_review_steps_run_sequentially_for_dummy_llm():
+    """A DummyLLMClient (scripted, not thread-safe) forces sequential review steps;
+    any other client allows the concurrent fan-out."""
     from llm_service.clients.dummy import DummyLLMClient
     from software_engineering_team.backend_code_v2_team.phases.review import (
         _review_steps_run_sequentially,
