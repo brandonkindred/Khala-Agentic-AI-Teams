@@ -33,6 +33,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_REGISTRY,
     AddAgentFromRegistryRequest,
     AgentEnvProvisionSummary,
+    AgenticTeam,
     AgenticTeamAgent,
     AgentQualityScore,
     AssetInfo,
@@ -929,6 +930,19 @@ def _get_infra_or_404(team_id: str) -> TeamInfrastructure:
     return get_team_infrastructure(team_id)
 
 
+def _get_team_or_404(team_id: str) -> AgenticTeam:
+    """Look up a team, raising 404 if it doesn't exist.
+
+    Preconditions: none.
+    Postconditions: returns the team when found; otherwise raises HTTPException(404)
+        and never returns.
+    """
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return team
+
+
 # ---------------------------------------------------------------------------
 # Team / Job Status
 # ---------------------------------------------------------------------------
@@ -1152,6 +1166,7 @@ def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
 @app.get("/teams/{team_id}/test-chat/sessions", response_model=List[TestChatSession])
 def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
     """List chat test sessions for a team, optionally filtered by agent."""
+    _get_team_or_404(team_id)
     rows = _test_store.list_chat_sessions(team_id, agent_name=agent_name)
     return [TestChatSession(**r) for r in rows]
 
@@ -1296,6 +1311,7 @@ def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageReques
 @app.get("/teams/{team_id}/test-chat/quality-scores", response_model=List[AgentQualityScore])
 def get_agent_quality_scores(team_id: str):
     """Get aggregated quality scores per agent based on chat ratings."""
+    _get_team_or_404(team_id)
     rows = _test_store.get_agent_quality_scores(team_id)
     return [AgentQualityScore(**r) for r in rows]
 
@@ -1403,6 +1419,7 @@ def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
 @app.get("/teams/{team_id}/test-pipeline/runs", response_model=List[TestPipelineRun])
 def list_pipeline_runs(team_id: str):
     """List pipeline test runs for a team."""
+    _get_team_or_404(team_id)
     rows = _test_store.list_pipeline_runs(team_id)
     return [TestPipelineRun(**r) for r in rows]
 
