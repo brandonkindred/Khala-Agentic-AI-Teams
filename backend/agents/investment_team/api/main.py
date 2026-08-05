@@ -2142,9 +2142,9 @@ def _compute_signal_brief_snapshot(
 
 
 # Narrower than ``STRATEGY_LAB_TERMINAL_STATUSES`` (defined above): a run that
-# reached ``completed``/``completed_with_errors`` is NOT an external cancellation,
-# so those are deliberately excluded from the cancel check.
-_STRATEGY_LAB_CANCEL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
+# reached ``completed``/``completed_with_errors`` ended on its own, not via an
+# external stop signal, so those are deliberately excluded here.
+_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
 
 
 def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
@@ -2155,7 +2155,7 @@ def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
     Postconditions:
         Returns the persisted job's exact ``status`` string ("cancelled",
         "failed", or "interrupted") when it is one of
-        ``_STRATEGY_LAB_CANCEL_STATUSES``; ``None`` on any read error or a
+        ``_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES``; ``None`` on any read error or a
         non-terminal/absent status (never raises). Callers that need to
         distinguish a genuine user cancellation from another external stop
         (e.g. a service-wide "mark all interrupted" reconciliation, or an
@@ -2167,7 +2167,7 @@ def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
         persisted = client.get_job(run_id)
         if persisted:
             status = persisted.get("status", "")
-            if status in _STRATEGY_LAB_CANCEL_STATUSES:
+            if status in _STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES:
                 return status
     except Exception:
         logger.debug("Failed to fetch external terminal status for run %s", run_id, exc_info=True)
