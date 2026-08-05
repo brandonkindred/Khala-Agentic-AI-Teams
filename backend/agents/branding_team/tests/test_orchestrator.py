@@ -41,7 +41,7 @@ from branding_team.models import (
     DesignSystemDefinition,
     DifferentiationPillar,
     DifferentiationPillarsOutput,
-    ElevatorPitch,
+    ElevatorPitchOutput,
     GovernanceOutput,
     MessagingFrameworkOutput,
     MessagingPillar,
@@ -923,9 +923,9 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
     )
     _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
     _pitches = [
-        ElevatorPitch(tier="5-second", pitch="On-brand, shipped weekly."),
-        ElevatorPitch(tier="30-second", pitch="Keep every touchpoint intentional."),
-        ElevatorPitch(tier="2-minute", pitch="Turn strategy into a workable system."),
+        ElevatorPitchOutput(tier="5-second", pitch="On-brand, shipped weekly."),
+        ElevatorPitchOutput(tier="30-second", pitch="Keep every touchpoint intentional."),
+        ElevatorPitchOutput(tier="2-minute", pitch="Turn strategy into a workable system."),
     ]
     _pillars = [
         MessagingPillar(pillar="Cohesion"),
@@ -1069,9 +1069,9 @@ def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
     )
     _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
     _pitches = [
-        ElevatorPitch(tier="5-second", pitch="a"),
-        ElevatorPitch(tier="30-second", pitch="b"),
-        ElevatorPitch(tier="2-minute", pitch="c"),
+        ElevatorPitchOutput(tier="5-second", pitch="a"),
+        ElevatorPitchOutput(tier="30-second", pitch="b"),
+        ElevatorPitchOutput(tier="2-minute", pitch="c"),
     ]
     _pillars = [
         MessagingPillar(pillar="Cohesion"),

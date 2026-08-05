@@ -32,7 +32,7 @@ from branding_team.models import (
     CoreValuesOutput,
     DifferentiationPillar,
     DifferentiationPillarsOutput,
-    ElevatorPitch,
+    ElevatorPitchOutput,
     MessagingFrameworkOutput,
     MessagingPillar,
     PersonaProfileOutput,
@@ -147,9 +147,9 @@ _STORY = dict(
 )
 _ARCHETYPE = BrandArchetype(archetype="The Creator")
 _PITCHES = [
-    ElevatorPitch(tier="5-second", pitch="a"),
-    ElevatorPitch(tier="30-second", pitch="b"),
-    ElevatorPitch(tier="2-minute", pitch="c"),
+    ElevatorPitchOutput(tier="5-second", pitch="a"),
+    ElevatorPitchOutput(tier="30-second", pitch="b"),
+    ElevatorPitchOutput(tier="2-minute", pitch="c"),
 ]
 _PILLAR = MessagingPillar(pillar="Cohesion")
 _AUDIENCE = AudienceMessageMap(audience_segment="Enterprise leaders")
@@ -196,6 +196,26 @@ def test_tagline_output_rejects_missing_and_enforces_cardinality() -> None:
     )
     assert output.tagline == "Ship brand"
     assert output.brand_archetypes[0].archetype == "The Creator"
+
+
+def test_tagline_output_rejects_blank_elevator_pitch_fields() -> None:
+    """A blank tier or pitch in any of the three elevator pitches must fail validation."""
+    base = {
+        **_STORY,
+        "brand_archetypes": [_ARCHETYPE],
+        "tagline": "Ship brand",
+        "tagline_rationale": "Clear",
+    }
+    blank_tier = [{"tier": "", "pitch": "a"}, _PITCHES[1], _PITCHES[2]]
+    blank_pitch = [{"tier": "5-second", "pitch": ""}, _PITCHES[1], _PITCHES[2]]
+
+    with pytest.raises(ValidationError):
+        TaglineOutput(**base, elevator_pitches=blank_tier)
+    with pytest.raises(ValidationError):
+        TaglineOutput(**base, elevator_pitches=blank_pitch)
+
+    output = TaglineOutput(**base, elevator_pitches=_PITCHES)
+    assert output.elevator_pitches[0].tier == "5-second"
 
 
 def test_messaging_framework_output_enforces_stated_cardinality() -> None:
