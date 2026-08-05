@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from investment_team.agents import (
     FinancialAdvisorAgent,
@@ -2656,10 +2656,16 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
           a ``WorkflowAlreadyStartedError`` or a transport-level error (client not
           connected, RPC timeout).
     Postconditions:
-        - Returns (does not raise) an ``HTTPException``: the mapped 404/400 for a
-          well-known ``ApplicationError`` type (found by walking ``exc``'s cause
-          chain), 409 for a workflow-id collision, or 502 for anything else — so
-          a route caller never sees an opaque unhandled 500 with no detail.
+        - Returns (does not raise) an ``HTTPException``, found by walking ``exc``'s
+          cause chain: the mapped 404/400 for an ``ApplicationError`` whose
+          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 500 (with the
+          error's own message as detail) for an ``ApplicationError`` whose
+          ``type`` is NOT a recognized key (``_ADVISORY_ERROR_TYPE_STATUS.get``'s
+          fallback); 409 for a ``WorkflowAlreadyStartedError`` (workflow-id
+          collision); or 502 when the cause chain contains neither (e.g. a bare
+          transport-level error) — the only case this function has no
+          error-specific detail to surface, unlike the 500 case above, which
+          always carries the underlying ``ApplicationError``'s message.
     """
     from temporalio.exceptions import ApplicationError as _AppErr
     from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -3829,10 +3835,11 @@ class RunPaperTradingRequest(BaseModel):
     """Start a paper trading session for a winning strategy.
 
     Live-mode fields (``provider_id``, ``min_fills``, ``max_hours``,
-    ``warmup_bars``, ``timeframe``) take effect only when
-    ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the flag is off (the
-    default), the legacy recent-OHLCV path runs and the new fields are
-    ignored so existing clients and tests remain unaffected.
+    ``warmup_bars``, ``timeframe``) are validated at the API boundary and
+    take effect only when ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the
+    flag is off (the default), the legacy recent-OHLCV path runs and the
+    new fields are not used by the trading logic, but invalid values are
+    still rejected to keep request validation consistent.
     """
 
     lab_record_id: str = Field(..., description="ID of a winning StrategyLabRecord to paper trade")
@@ -3885,12 +3892,14 @@ class RunPaperTradingRequest(BaseModel):
         le=5_000,
         description="Historical bars to replay as ctx.is_warmup=True before the live feed starts.",
     )
-    timeframe: Optional[str] = Field(
-        default=None,
-        description=(
-            "Override the strategy's declared timeframe. Must be one of "
-            "{'1s','15s','30s','1m','5m','15m','30m','1h','4h','1d'}."
-        ),
+    timeframe: Optional[Literal["1s", "15s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"]] = (
+        Field(
+            default=None,
+            description=(
+                "Override the strategy's declared timeframe. Must be one of "
+                "{'1s','15s','30s','1m','5m','15m','30m','1h','4h','1d'}."
+            ),
+        )
     )
 
 
@@ -3904,6 +3913,23 @@ class PaperTradingResultsResponse(BaseModel):
     count: int = 0
     ready_for_live_count: int = 0
     not_performant_count: int = 0
+
+    @model_validator(mode="after")
+    def _derive_counts_from_items(self) -> "PaperTradingResultsResponse":
+        """Recompute the count fields from ``items`` so they can never drift apart.
+
+        Postconditions: ``count == len(items)``, ``ready_for_live_count`` and
+        ``not_performant_count`` equal the number of items with the matching
+        ``verdict``, regardless of what was passed in for those fields.
+        """
+        self.count = len(self.items)
+        self.ready_for_live_count = sum(
+            1 for i in self.items if i.verdict == PaperTradingVerdict.READY_FOR_LIVE
+        )
+        self.not_performant_count = sum(
+            1 for i in self.items if i.verdict == PaperTradingVerdict.NOT_PERFORMANT
+        )
+        return self
 
 
 def _run_paper_trading_background(
@@ -3982,6 +4008,23 @@ def _run_paper_trading_background(
             transaction_cost_bps=transaction_cost_bps,
             slippage_bps=slippage_bps,
         )
+        # Enforce the postcondition this function documents: run_session must
+        # return a terminal session with completed_at set. A violation here is
+        # a bug in the callee, not something to coerce around — raising lets
+        # the except block below turn it into a FAILED record, same as any
+        # other in-worker crash. Explicit raises (not ``assert``) so the guard
+        # stays active under ``python -O``/``-OO``.
+        if result_session.status not in (
+            PaperTradingStatus.COMPLETED,
+            PaperTradingStatus.FAILED,
+        ):
+            raise ValueError(
+                f"PaperTradingAgent.run_session returned non-terminal status {result_session.status!r}"
+            )
+        if not result_session.completed_at:
+            raise ValueError(
+                "PaperTradingAgent.run_session returned a session with no completed_at"
+            )
         # Preserve the session_id and lab_record_id that the caller committed to.
         result_session.session_id = session_id
         result_session.lab_record_id = lab_record_id
@@ -4535,11 +4578,16 @@ def list_providers() -> ProvidersListResponse:
 
 @app.get("/strategy-lab/paper-trade/results", response_model=PaperTradingResultsResponse)
 def get_paper_trading_results(
-    verdict: Optional[str] = None,
+    verdict: Optional[PaperTradingVerdict] = None,
 ) -> PaperTradingResultsResponse:
     """
     Return all paper trading sessions, sorted newest-first.
-    Filter by verdict with ?verdict=ready_for_live or ?verdict=not_performant.
+    Filter by verdict with ?verdict=ready_for_live or ?verdict=not_performant;
+    an unrecognized value is rejected with a 422 rather than silently matching
+    nothing. The response's ``count``, ``ready_for_live_count``, and
+    ``not_performant_count`` are derived from the returned ``items`` by
+    ``PaperTradingResultsResponse`` itself, so they always match the
+    (possibly filtered) list.
     """
     with _lock:
         raw = list(_paper_trading_sessions.values())
@@ -4547,18 +4595,12 @@ def get_paper_trading_results(
     items = [PaperTradingSession.parse_persisted(r) for r in raw]
     items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
 
-    ready_count = sum(1 for s in items if s.verdict == PaperTradingVerdict.READY_FOR_LIVE)
-    not_perf_count = sum(1 for s in items if s.verdict == PaperTradingVerdict.NOT_PERFORMANT)
-
     if verdict is not None:
-        items = [s for s in items if s.verdict and s.verdict.value == verdict]
+        items = [s for s in items if s.verdict == verdict]
 
-    return PaperTradingResultsResponse(
-        items=items,
-        count=len(items),
-        ready_for_live_count=ready_count,
-        not_performant_count=not_perf_count,
-    )
+    # Counts are derived from ``items`` by the response model itself, so they
+    # always match whatever list (filtered or not) is returned here.
+    return PaperTradingResultsResponse(items=items)
 
 
 @app.get("/strategy-lab/paper-trade/{session_id}", response_model=PaperTradingResponse)

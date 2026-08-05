@@ -3,8 +3,8 @@
 # This is the agent-provisioning supervisor image: bundles Docker Engine
 # (DinD), PostgreSQL, nginx, Node/Angular, and every enabled agent team so
 # the agent_provisioning_team can spawn isolated per-agent sandbox
-# containers INSIDE this container (see agent_provisioning_team/tool_agents/
-# docker_provisioner.py). This is NOT the production runtime — for that
+# containers INSIDE this container (see agent_team_studio/agent_provisioning_team/
+# tool_agents/docker_provisioner.py). This is NOT the production runtime — for that
 # see backend/team_service/Dockerfile and backend/blogging_service/Dockerfile.
 #
 # Build speed notes:
@@ -118,7 +118,7 @@ COPY agents/requirements.txt /app/requirements.txt
 COPY agents/software_engineering_team/requirements.txt /app/software_engineering_team/requirements.txt
 COPY agents/blogging/requirements.txt /app/blogging/requirements.txt
 COPY agents/personal_assistant_team/requirements.txt /app/personal_assistant_team/requirements.txt
-COPY agents/agent_provisioning_team/requirements.txt /app/agent_provisioning_team/requirements.txt
+COPY agents/agent_team_studio/agent_provisioning_team/requirements.txt /app/agent_team_studio/agent_provisioning_team/requirements.txt
 
 # One pip invocation with a BuildKit cache mount — wheel cache survives
 # across builds instead of being redownloaded every time. supervisor is
@@ -130,7 +130,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -r /app/software_engineering_team/requirements.txt \
         -r /app/blogging/requirements.txt \
         -r /app/personal_assistant_team/requirements.txt \
-        -r /app/agent_provisioning_team/requirements.txt
+        -r /app/agent_team_studio/agent_provisioning_team/requirements.txt
 
 # Copy every team and shared module (llm_service, shared.postgres,
 # shared.temporal, integrations, etc.) into /app/ so PYTHONPATH=/app can

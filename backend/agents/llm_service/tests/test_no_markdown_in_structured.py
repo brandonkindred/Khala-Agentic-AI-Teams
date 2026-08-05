@@ -16,7 +16,7 @@ How it works
    contain a JSON-mode signal (``json object``, ``respond with a json``,
    ``json schema``). The JSON-signal carve-out prevents false positives like
    "respond with a JSON object (no markdown fencing)" in
-   :data:`user_agent_founder.agent.QUESTION_ANSWERING_PROMPT`.
+   :data:`agent_team_studio.user_agent_founder.agent.QUESTION_ANSWERING_PROMPT`.
 3. Scans every call site in the same module to ``complete_json`` /
    ``chat_json_round`` / ``generate_structured`` and asserts its first
    positional argument is not a text-intent prompt name.

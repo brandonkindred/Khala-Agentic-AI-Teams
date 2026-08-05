@@ -193,7 +193,7 @@ def test_injected_manifest_lets_unknown_agent_boot(monkeypatch: pytest.MonkeyPat
     from agent_registry import get_registry
     from agent_sandbox_runtime.entrypoint import _build_app
 
-    agent_id = "agent_studio.injected-xyz"
+    agent_id = "agent_team_studio.agent_studio.injected-xyz"
     manifest_file = tmp_path / "agent-manifest.json"
     manifest_file.write_text(json.dumps(_injectable_manifest(agent_id).model_dump(mode="json")), encoding="utf-8")
     monkeypatch.setenv("SANDBOX_AGENT_ID", agent_id)
@@ -215,7 +215,7 @@ def test_malformed_injected_manifest_falls_through_to_unknown_gate(
 
     manifest_file = tmp_path / "agent-manifest.json"
     manifest_file.write_text("{ not valid json", encoding="utf-8")
-    monkeypatch.setenv("SANDBOX_AGENT_ID", "agent_studio.bad-xyz")
+    monkeypatch.setenv("SANDBOX_AGENT_ID", "agent_team_studio.agent_studio.bad-xyz")
     monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
     with pytest.raises(SystemExit) as exc_info:
         _build_app()
@@ -229,14 +229,14 @@ def test_maybe_register_injected_manifest_registers_valid(monkeypatch: pytest.Mo
 
     manifest_file = tmp_path / "agent-manifest.json"
     manifest_file.write_text(
-        json.dumps(_injectable_manifest("agent_studio.u-1").model_dump(mode="json")),
+        json.dumps(_injectable_manifest("agent_team_studio.agent_studio.u-1").model_dump(mode="json")),
         encoding="utf-8",
     )
     monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
     registered: list = []
     fake_registry = type("R", (), {"register": lambda self, m: registered.append(m)})()
     _maybe_register_injected_manifest(fake_registry)
-    assert [m.id for m in registered] == ["agent_studio.u-1"]
+    assert [m.id for m in registered] == ["agent_team_studio.agent_studio.u-1"]
 
 
 def test_maybe_register_injected_manifest_noop_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,51 +11,14 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from typing import Optional
 
 import pytest
 
-
-def _ensure_real_modules() -> None:
-    """Evict synthetic module stubs other test files may have installed.
-
-    test_github_source._stub_heavy_modules() registers a fake
-    shared.git.git_utils in sys.modules with no
-    __file__; these tests need the real implementation (and an api.main
-    bound to it), under any test-execution order.
-    """
-    stale = False
-    for name in (
-        "shared.git.git_utils",
-        "software_engineering_team.shared",
-        "software_engineering_team",
-        "software_engineering_team.coding_team_orchestrator",
-    ):
-        mod = sys.modules.get(name)
-        if mod is not None and not getattr(mod, "__file__", None):
-            del sys.modules[name]
-            stale = True
-    if stale:
-        sys.modules.pop("software_engineering_team.api.coding_team_main", None)
-
-
-def _stub_orchestrator_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep api.main importable without the heavy agent stack.
-
-    Installs via ``monkeypatch.setitem`` (not a bare ``sys.modules[...] =
-    stub`` assignment) so pytest automatically reverts this ``sys.modules``
-    entry at the end of the test that requested it — otherwise the stub
-    outlives this test and can leak into an unrelated test (in this file, or
-    another sharing the same xdist worker process) that imports the real
-    ``coding_team.orchestrator`` and gets this no-op stand-in instead.
-    """
-    import types
-
-    if "software_engineering_team.coding_team_orchestrator" not in sys.modules:
-        stub = types.ModuleType("software_engineering_team.coding_team_orchestrator")
-        stub.run_coding_team_orchestrator = lambda *a, **kw: None  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team_orchestrator", stub)
+from software_engineering_team.tests.conftest import (
+    _ensure_real_modules,
+    _stub_orchestrator_only,
+)
 
 
 @pytest.fixture

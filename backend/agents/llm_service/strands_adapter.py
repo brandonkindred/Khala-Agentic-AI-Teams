@@ -570,10 +570,13 @@ class LLMClientModel(Model):
         """Get structured output validated against a Pydantic model.
 
         Flattens the incoming message list to a single user prompt, calls
-        ``LLMClient.complete_json`` in a worker thread, and feeds the dict
-        through ``output_model.model_validate``. Raises ``ValueError`` if the
-        response cannot be validated — matching the behavior of Strands'
-        built-in Ollama/OpenAI models.
+        ``LLMClient.complete_json`` in a worker thread — passing ``output_model``
+        through as ``structured_output_model`` so a client that supports
+        class-identity routing (e.g. the dummy stub) doesn't have to infer it
+        from prompt text — and feeds the dict through
+        ``output_model.model_validate``. Raises ``ValueError`` if the response
+        cannot be validated — matching the behavior of Strands' built-in
+        Ollama/OpenAI models.
         """
         oai_messages = _strands_messages_to_openai(prompt)
         user_parts = [
@@ -612,6 +615,7 @@ class LLMClientModel(Model):
                 temperature=temperature,
                 system_prompt=system_prompt,
                 think=think,
+                structured_output_model=output_model,
             )
 
         try:

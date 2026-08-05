@@ -5,7 +5,7 @@ team_service entrypoint invokes at boot via the ``TEAM_TEMPORAL_WORKER_MODULE`` 
 ``TEAM_TEMPORAL_WORKER_FUNC`` env vars, so the Temporal worker (and its connected
 client) is ready before uvicorn starts accepting requests.
 
-Same contract as ``user_agent_founder.temporal.worker.
+Same contract as ``agent_team_studio.user_agent_founder.temporal.worker.
 start_user_agent_founder_temporal_worker_thread`` and its siblings.
 """
 

@@ -43,6 +43,7 @@ from software_engineering_team.github_source.client_http import (
     _parse_next_link,
 )
 from software_engineering_team.models import CodingTeamPlanInput
+from software_engineering_team.tests.conftest import _expected_basic_header
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,17 +73,6 @@ def _issue_payload(number: int, **overrides: Any) -> dict[str, Any]:
 
 def _sub_payload(number: int, state: str = "open") -> dict[str, Any]:
     return {"number": number, "state": state, "title": f"Sub {number}"}
-
-
-def _expected_basic_header(token: str) -> str:
-    """Expected git auth header for a fake token, built at runtime so a
-    credential-shaped Base64 literal never appears in source — secret
-    scanners (GitGuardian etc.) flag the pattern regardless of how fake
-    the values are (same convention as TestScrubTokenFromText)."""
-    import base64
-
-    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return f"Authorization: Basic {encoded}"
 
 
 # ---------------------------------------------------------------------------
