@@ -2385,7 +2385,16 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
             state["status"] = "failed"
             state["error"] = error
             state["current_cycle"] = None
-            _persist_run_state(run_id, state)
+            # Snapshot for persistence outside the lock: _persist_run_state
+            # performs a synchronous job-service RPC, and _lock is the
+            # process-wide lock also used by run-status queries, dispatch,
+            # and reconciliation -- holding it across network I/O would
+            # block all of those for the RPC's duration. A shallow copy is
+            # enough (_persist_run_state only reads top-level keys) and
+            # protects the persisted snapshot from a concurrent mutator of
+            # this same dict object racing the now-unlocked persist call.
+            persisted_state = dict(state)
+        _persist_run_state(run_id, persisted_state)
 
         from investment_team.api.job_event_bus import cleanup_job
 
