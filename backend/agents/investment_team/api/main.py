@@ -1130,6 +1130,21 @@ class BacktestJobListResponse(BaseModel):
     jobs: List[BacktestJobListItem]
 
 
+class CancelBacktestJobResponse(BaseModel):
+    """Response returned when a backtest job cancellation succeeds."""
+
+    job_id: str
+    status: str
+    success: bool
+
+
+class DeleteBacktestJobResponse(BaseModel):
+    """Response returned when a backtest job is deleted."""
+
+    job_id: str
+    deleted: bool
+
+
 def _run_backtest_background(
     job_id: str,
     strategy: StrategySpec,
@@ -1306,8 +1321,8 @@ def list_backtest_jobs(running_only: bool = False) -> BacktestJobListResponse:
     return BacktestJobListResponse(jobs=items)
 
 
-@app.post("/backtests/jobs/{job_id}/cancel")
-def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
+@app.post("/backtests/jobs/{job_id}/cancel", response_model=CancelBacktestJobResponse)
+def cancel_backtest_job(job_id: str) -> CancelBacktestJobResponse:
     """Cancel a pending or running backtest job.
 
     Preconditions:
@@ -1316,33 +1331,34 @@ def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
         Raises 404 if no job with that ID exists. Raises 409 if the job
         exists but is no longer pending/running (already completed, failed,
         or cancelled) and so cannot be cancelled. Otherwise cancels the job
-        and returns ``{"job_id", "status": "cancelled", "success": True}``.
+        and returns ``{job_id, status: "cancelled", success: True}``.
     """
     data = _bt_get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if _bt_cancel_job(job_id):
-        return {"job_id": job_id, "status": _BT_JOB_STATUS_CANCELLED, "success": True}
+        return CancelBacktestJobResponse(
+            job_id=job_id, status=_BT_JOB_STATUS_CANCELLED, success=True
+        )
     raise HTTPException(status_code=409, detail=f"Cannot cancel job in status {data.get('status')}")
 
 
-@app.delete("/backtests/jobs/{job_id}")
-def delete_backtest_job(job_id: str) -> Dict[str, Any]:
+@app.delete("/backtests/jobs/{job_id}", response_model=DeleteBacktestJobResponse)
+def delete_backtest_job(job_id: str) -> DeleteBacktestJobResponse:
     """Delete a backtest job record.
 
     Preconditions:
         ``job_id`` identifies a job previously created by ``run_backtest``.
     Postconditions:
-        Raises 404 if no job with that ID exists. Raises 500 if the job
-        existed but the delete itself failed (race condition or storage
-        error) — distinct from 404, since existence was already confirmed.
-        Otherwise returns ``{"job_id", "deleted": True}``.
+        Atomically deletes the job and returns ``{job_id, deleted: True}``.
+        Raises 404 if no job with that ID exists at the moment of deletion,
+        including when a concurrent request deleted it first — there is no
+        separate existence check, so there is no window in which a race can
+        turn a legitimate delete into a misleading response.
     """
-    if _bt_get_job(job_id) is None:
-        raise HTTPException(status_code=404, detail="Job not found")
     if not _bt_delete_job(job_id):
-        raise HTTPException(status_code=500, detail="Failed to delete job")
-    return {"job_id": job_id, "deleted": True}
+        raise HTTPException(status_code=404, detail="Job not found")
+    return DeleteBacktestJobResponse(job_id=job_id, deleted=True)
 
 
 @app.get("/backtests", response_model=ListBacktestsResponse)
@@ -4893,7 +4909,7 @@ def _recover_orphaned_paper_trading_sessions() -> None:
 
 
 class StartAdvisorSessionRequest(BaseModel):
-    user_id: str = Field(..., description="Unique user identifier")
+    user_id: str = Field(..., min_length=1, description="Unique user identifier")
 
 
 class StartAdvisorSessionResponse(BaseModel):

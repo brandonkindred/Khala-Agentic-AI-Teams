@@ -45,8 +45,6 @@ import type {
   UpdateAgentRequest,
 } from '../../models';
 
-let _stepCounter = 0;
-
 /** A roster agent's fields, editable via the inline "Edit" affordance. */
 interface AgentEditDraft {
   role: string;
@@ -128,6 +126,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   private rosterRefreshSeq = 0;
 
   private conversationId: string | null = null;
+  private _stepCounter = 0;
 
   form = this.fb.nonNullable.group({
     message: ['', [Validators.required, Validators.minLength(1)]],
@@ -486,7 +485,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         this.saving.set(false);
         // Link the new process to the active conversation so chat stays in sync
         if (this.conversationId) {
-          this.api.setConversationProcess(this.conversationId, process.process_id).subscribe();
+          this.api.setConversationProcess(this.conversationId, process.process_id).subscribe({
+            error: (err) => this.error.set(err?.error?.detail ?? 'Failed to link process to conversation'),
+          });
         }
       },
       error: (err) => {
@@ -500,9 +501,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const process = this.currentProcess();
     if (!process) return;
 
-    _stepCounter++;
+    this._stepCounter++;
     const newStep: ProcessStep = {
-      step_id: `step_${Date.now()}_${_stepCounter}`,
+      step_id: `step_${Date.now()}_${this._stepCounter}`,
       name: stepType === 'decision' ? 'New Decision' : 'New Step',
       description: '',
       step_type: stepType,
