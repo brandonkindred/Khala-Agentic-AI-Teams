@@ -441,6 +441,45 @@ def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
     assert active_runs[run_id]["status"] == "running"
 
 
+def test_fail_strategy_lab_run_cleanup_survives_cleanup_job_failure(monkeypatch) -> None:
+    """The delayed cleanup callback runs on threading.Timer's own daemon
+    thread, well after _fail_strategy_lab_run's own try/except has exited —
+    that outer handler can't catch anything the callback raises. If
+    cleanup_job() raises, the callback must log and swallow it rather than
+    let the exception escape unhandled on the timer thread."""
+    from investment_team.api import job_event_bus
+    from investment_team.api import main as api_main
+
+    run_id = "run-cleanup-job-boom"
+    monkeypatch.setattr(api_main, "_active_runs", {run_id: {"run_id": run_id, "status": "running"}})
+    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+
+    def _boom(_job_id):
+        raise RuntimeError("event bus is on fire")
+
+    monkeypatch.setattr(job_event_bus, "cleanup_job", _boom)
+
+    captured = {}
+
+    class _FakeTimer:
+        def __init__(self, delay, callback):
+            captured["callback"] = callback
+            self.daemon = None
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+
+    api_main._fail_strategy_lab_run(run_id, "boom")
+
+    # The callback must not raise despite cleanup_job() blowing up, and the
+    # _active_runs entry must still be popped (that happens before the
+    # cleanup_job() call).
+    captured["callback"]()
+    assert run_id not in api_main._active_runs
+
+
 def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -> None:
     from investment_team.api import main as api_main
     from investment_team.models import StrategySpec
