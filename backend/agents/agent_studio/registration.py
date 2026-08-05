@@ -12,7 +12,11 @@ so a saved agent's persisted ``role`` / ``system_prompt`` are advertised but not
 yet bound at invoke time. Binding is the same tracked follow-up generated team
 agents carry; out of scope for this Stage-1 backend slice.
 
-Registration is in-process only (see :func:`agent_registry.get_registry`).
+Registration scope tracks ``AgentRegistry.register()``'s own write-through: when a
+dynamic Postgres store is active (``POSTGRES_HOST`` configured, not inside a
+per-invoke sandbox), a saved Studio agent is persisted there too, so every other
+worker and the per-invoke sandbox resolve it — not just this process. Local-only
+(in-process) otherwise. See :func:`agent_registry.get_registry`.
 """
 
 from __future__ import annotations

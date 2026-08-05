@@ -50,17 +50,17 @@ class SecurityLLMResponse(BaseModel):
     """Narrow LLM-authored shape for one security-review call's response.
 
     ``CybersecurityExpertAgent.run`` validates every reply against this model
-    via ``llm_service.complete_validated``, replacing the previous Strands
-    ``structured_output_model=SecurityOutput`` call (single-shot, no
-    corrective retry on a malformed reply).
+    via ``shared.single_shot_review.run_single_shot_review`` (schema-validated
+    mode), replacing the previous Strands ``structured_output_model=SecurityOutput``
+    call (single-shot, no corrective retry on a malformed reply).
 
     All fields are required, not defaulted: ``SECURITY_PROMPT``'s own
     output-contract reminder explicitly tells the model to always emit
     exactly these top-level keys, so a reply missing one is a
     truncated/malformed response, not a legitimately empty field. Defaulting
     them here would silently look like a clean, empty-findings result instead
-    of failing validation and driving ``complete_validated``'s corrective
-    retry.
+    of failing validation and driving the corrective retry
+    ``run_single_shot_review`` gets from ``llm_service.generate_structured``.
 
     There is deliberately no ``approved`` field: the prompt never asks the
     model for one, and ``CybersecurityExpertAgent.run`` always re-derives

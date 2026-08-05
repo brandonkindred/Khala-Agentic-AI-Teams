@@ -259,8 +259,44 @@ def health():
 
 @app.post("/teams", response_model=CreateTeamResponse)
 def create_team(req: CreateTeamRequest):
+    """Create a new agentic team and provision its infrastructure.
+
+    Persists the team row first, then provisions the team's infrastructure.
+    If provisioning fails, the team row is rolled back via ``_store.delete_team``
+    so no orphaned, infrastructure-less row survives a failed create.
+
+    Preconditions: ``req.name`` is a non-empty team name (enforced by
+        ``CreateTeamRequest``).
+    Postconditions: on success, the team row exists, infrastructure is
+        provisioned, and ``200`` is returned with the created team. On
+        provisioning failure, the team row is removed (best-effort — a
+        rollback failure is logged but never masks the ``500``) and an
+        ``HTTPException(500)`` is raised.
+    Invariants: when provisioning fails and the compensating delete succeeds,
+        no team row remains in Postgres without corresponding infrastructure.
+        The delete is best-effort, so a rollback failure is logged but the row
+        may remain — see Postconditions.
+    """
     team = _store.create_team(name=req.name, description=req.description)
-    provision_team(team.team_id)
+    try:
+        provision_team(team.team_id)
+    except Exception as exc:
+        logger.exception(
+            "Failed to provision infrastructure for team %s; rolling back team row",
+            team.team_id,
+        )
+        try:
+            _store.delete_team(team.team_id)
+        except Exception:
+            # Best-effort: a rollback failure must not swallow the 500 below
+            # or hide the original provisioning error from the caller.
+            logger.exception(
+                "Failed to roll back team row for team %s after provisioning failure",
+                team.team_id,
+            )
+        raise HTTPException(
+            status_code=500, detail="Failed to provision team infrastructure."
+        ) from exc
     return CreateTeamResponse(
         team_id=team.team_id,
         name=team.name,

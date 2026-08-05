@@ -154,10 +154,12 @@ own log messages, system prompt, and fallback field values as call-site
 data; `run_structured_persona` is the shared "build → call → coerce-or-fallback"
 scaffold, previously duplicated verbatim four times across these three plus
 `security_agent/agent.py`. `security_agent` (`CybersecurityExpertAgent`) has
-since moved off this pattern onto `complete_validated`
-(`llm_service/structured.py`), the same schema-validated corrective-retry
-call `code_review_agent/chunk_reviewer.py` uses — it gets a bounded retry on
-a malformed reply instead of falling back on the first bad response.
+since moved off this pattern onto `run_single_shot_review`
+(`shared/single_shot_review.py`, schema-validated mode) — the same
+schema-validated corrective-retry semantics `code_review_agent/
+chunk_reviewer.py`'s direct `complete_validated` call uses, it gets a
+bounded retry on a malformed reply instead of falling back on the first
+bad response.
 
 **Failure handling.**
 

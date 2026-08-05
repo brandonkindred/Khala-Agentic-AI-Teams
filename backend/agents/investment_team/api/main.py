@@ -137,7 +137,13 @@ from investment_team.strategy_lab_context import (
     normalize_allowed_asset_classes,
     normalize_asset_class,
 )
-from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+from job_service_client import (
+    RESTARTABLE_STATUSES,
+    RESUMABLE_STATUSES,
+    JobNotFoundError,
+    JobStateError,
+    validate_job_for_action,
+)
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
 
@@ -746,87 +752,106 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
     Preconditions:
-        ``request.risk_tolerance`` is one of low/medium/high/very_high and
-        ``request.default_mode`` is one of advisory/paper/live/monitor_only
-        (validated below, not by Pydantic, since both arrive as plain
-        strings on the wire).
+        - ``request.risk_tolerance`` must be a valid ``RiskTolerance`` value.
+        - ``request.default_mode`` must be a valid ``WorkflowMode`` value.
+        - No profile may already exist for ``request.user_id`` — this endpoint
+          creates; it does not upsert.
+
     Postconditions:
-        Raises 400 if either enum field is invalid. Otherwise builds and
-        persists an ``IPS`` under ``request.user_id`` — a second call for
-        the same ``user_id`` overwrites the previously stored IPS rather
-        than being rejected as a duplicate.
+        - On success: a new IPS is persisted under ``_profiles[request.user_id]``
+          and returned; no prior profile is overwritten.
+        - Raises ``HTTPException`` 400 if ``risk_tolerance`` or ``default_mode``
+          is invalid (message lists the current enum values).
+        - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
+          ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
+        - Raises ``HTTPException`` 409 if a profile already exists for
+          ``request.user_id``.
     """
     try:
         risk_tol = RiskTolerance(request.risk_tolerance)
     except ValueError:
+        allowed = ", ".join(m.value for m in RiskTolerance)
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: low, medium, high, very_high",
+            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: {allowed}",
         )
 
     try:
         workflow_mode = WorkflowMode(request.default_mode)
     except ValueError:
+        allowed = ", ".join(m.value for m in WorkflowMode)
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: advisory, paper, live, monitor_only",
+            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: {allowed}",
         )
 
-    goals = [
-        UserGoal(
-            name=g.get("name", ""),
-            target_amount=g.get("target_amount", 0),
-            target_date=g.get("target_date", ""),
-            priority=g.get("priority", "medium"),
+    try:
+        goals = [
+            UserGoal(
+                name=g.get("name", ""),
+                target_amount=g.get("target_amount", 0),
+                target_date=g.get("target_date", ""),
+                priority=g.get("priority", "medium"),
+            )
+            for g in request.goals
+        ]
+
+        profile = InvestmentProfile(
+            user_id=request.user_id,
+            created_at=_now(),
+            risk_tolerance=risk_tol,
+            max_drawdown_tolerance_pct=request.max_drawdown_tolerance_pct,
+            time_horizon_years=request.time_horizon_years,
+            liquidity_needs=LiquidityNeeds(emergency_fund_months=request.emergency_fund_months),
+            income=IncomeProfile(
+                annual_gross=request.annual_gross_income, stability=request.income_stability
+            ),
+            net_worth=NetWorth(
+                total=request.total_net_worth, investable_assets=request.investable_assets
+            ),
+            savings_rate=SavingsRate(
+                monthly=request.monthly_savings, annual=request.annual_savings
+            ),
+            tax_profile=TaxProfile(
+                country=request.tax_country,
+                state=request.tax_state,
+                account_types=request.account_types,
+            ),
+            preferences=UserPreferences(
+                excluded_asset_classes=request.excluded_asset_classes,
+                excluded_industries=request.excluded_industries,
+                esg_preference=request.esg_preference,
+                crypto_allowed=request.crypto_allowed,
+                options_allowed=request.options_allowed,
+                leverage_allowed=request.leverage_allowed,
+            ),
+            goals=goals,
+            constraints=PortfolioConstraints(
+                max_single_position_pct=request.max_single_position_pct,
+                max_asset_class_pct=request.max_asset_class_pct,
+            ),
         )
-        for g in request.goals
-    ]
 
-    profile = InvestmentProfile(
-        user_id=request.user_id,
-        created_at=_now(),
-        risk_tolerance=risk_tol,
-        max_drawdown_tolerance_pct=request.max_drawdown_tolerance_pct,
-        time_horizon_years=request.time_horizon_years,
-        liquidity_needs=LiquidityNeeds(emergency_fund_months=request.emergency_fund_months),
-        income=IncomeProfile(
-            annual_gross=request.annual_gross_income, stability=request.income_stability
-        ),
-        net_worth=NetWorth(
-            total=request.total_net_worth, investable_assets=request.investable_assets
-        ),
-        savings_rate=SavingsRate(monthly=request.monthly_savings, annual=request.annual_savings),
-        tax_profile=TaxProfile(
-            country=request.tax_country,
-            state=request.tax_state,
-            account_types=request.account_types,
-        ),
-        preferences=UserPreferences(
-            excluded_asset_classes=request.excluded_asset_classes,
-            excluded_industries=request.excluded_industries,
-            esg_preference=request.esg_preference,
-            crypto_allowed=request.crypto_allowed,
-            options_allowed=request.options_allowed,
-            leverage_allowed=request.leverage_allowed,
-        ),
-        goals=goals,
-        constraints=PortfolioConstraints(
-            max_single_position_pct=request.max_single_position_pct,
-            max_asset_class_pct=request.max_asset_class_pct,
-        ),
-    )
-
-    ips = IPS(
-        profile=profile,
-        live_trading_enabled=request.live_trading_enabled,
-        human_approval_required_for_live=request.human_approval_required_for_live,
-        speculative_sleeve_cap_pct=request.speculative_sleeve_cap_pct,
-        rebalance_frequency=request.rebalance_frequency,
-        default_mode=workflow_mode,
-        notes=request.notes,
-    )
+        ips = IPS(
+            profile=profile,
+            live_trading_enabled=request.live_trading_enabled,
+            human_approval_required_for_live=request.human_approval_required_for_live,
+            speculative_sleeve_cap_pct=request.speculative_sleeve_cap_pct,
+            rebalance_frequency=request.rebalance_frequency,
+            default_mode=workflow_mode,
+            notes=request.notes,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_url=False, include_context=False)
+        ) from exc
 
     with _lock:
+        if request.user_id in _profiles:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Profile already exists for user {request.user_id}",
+            )
         _profiles[request.user_id] = ips
 
     return CreateProfileResponse(user_id=request.user_id, ips=ips)
@@ -1476,6 +1501,11 @@ def _run_real_data_backtest(
     return run.result, run.trades
 
 
+# Cap on record.paper_trading_error's length: long enough for a useful
+# summary of the failure, short enough to keep persisted records compact.
+_MAX_PAPER_TRADING_ERROR_LENGTH = 500
+
+
 class _PaperTradingDataUnavailable(Exception):
     """Raised inside the strategy lab cycle when market data can't be fetched for paper trading.
 
@@ -1904,7 +1934,7 @@ def _finalize_strategy_lab_cycle_record(
         except Exception as exc:
             logger.warning("Paper trading step failed (non-fatal): %s", exc)
             record.paper_trading_status = "failed"
-            record.paper_trading_error = str(exc)[:500]
+            record.paper_trading_error = str(exc)[:_MAX_PAPER_TRADING_ERROR_LENGTH]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
 
     _persist_strategy_lab_record(record)
@@ -2041,12 +2071,26 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
 
     Preconditions:
         - ``run_id`` is a non-empty ``str``.
-        - ``state`` contains a ``status`` key (else ``"running"`` is assumed).
 
     Postconditions:
-        - ``create=True``: creates the job via ``client.create_job(...)``.
+        - ``create=True``: creates the job via ``client.create_job(...)``,
+          defaulting ``status`` to ``"running"`` when ``state`` omits it (a
+          fresh run's initial persist always has a real status in practice --
+          see ``_build_run_state`` -- so this default is a pure safety net).
         - ``create=False`` (default): updates the existing job via
-          ``client.update_job(...)``.
+          ``client.update_job(...)``. When ``state`` includes a ``status``
+          key, that value is written. When it does NOT (a progress-only delta
+          -- e.g. the Temporal batch workflow's per-cycle/per-batch persists
+          via ``persist_run_state_activity``, which routinely omit ``status``
+          -- see ``_STRATEGY_LAB_PROGRESS_FIELDS``), NO ``status`` kwarg is
+          passed at all, so the job service's own update path
+          (``backend/job_service/db.py``: ``status`` is only written to the
+          ``UPDATE`` when actually supplied) leaves the persisted status
+          untouched. This previously defaulted a status-less update to
+          ``"running"`` unconditionally, which could clobber a
+          ``cancelled``/``failed``/``completed`` status a concurrent
+          restart/resume/cancel had already persisted with a routine
+          progress-only write.
         - Every key in ``state`` other than ``run_id``/``status`` is persisted
           as a field.
 
@@ -2071,8 +2115,10 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
     fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
     if create:
         client.create_job(run_id, status=state.get("status", "running"), **fields)
+    elif "status" in state:
+        client.update_job(run_id, status=state["status"], **fields)
     else:
-        client.update_job(run_id, status=state.get("status", "running"), **fields)
+        client.update_job(run_id, **fields)
 
 
 # Fields the Temporal workflow's persist-state activity writes as partial
@@ -2985,9 +3031,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         state = _get_run_state(run_id)
         try:
             validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
-        except ValueError as exc:
-            code = 404 if "not found" in str(exc) else 400
-            raise HTTPException(status_code=code, detail=str(exc)) from exc
+        except JobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except JobStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         payload = state.get("request_payload")
         if not isinstance(payload, dict):
@@ -3139,9 +3186,10 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
         try:
             validate_job_for_action(state, run_id, _lab_restartable, "restarted")
-        except ValueError as exc:
-            code = 404 if "not found" in str(exc) else 400
-            raise HTTPException(status_code=code, detail=str(exc)) from exc
+        except JobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except JobStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         payload = state.get("request_payload")
         if not isinstance(payload, dict):
