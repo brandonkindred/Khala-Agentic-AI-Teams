@@ -3050,9 +3050,10 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
 
     Raises:
         - None on an expected job-service failure. ``current_cycle``/
-          ``strategy`` reconciled from job-service data are not
-          schema-validated at ingestion, so their shape is checked
-          defensively before use rather than assumed. A job-service
+          ``strategy`` reconciled from job-service data, and each persisted
+          job's ``"data"`` field itself (defaulting to ``{}`` when it isn't a
+          mapping), are not schema-validated at ingestion, so their shape is
+          checked defensively before use rather than assumed. A job-service
           connection/transport failure (``httpx.HTTPError``) or an
           unconfigured ``JOB_SERVICE_URL`` (``RuntimeError``) is caught and
           logged, and the response falls back to the in-memory-only list; in
@@ -3123,6 +3124,11 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             if jid in in_memory_ids:
                 continue  # already included from in-memory
             data = job.get("data", job)
+            if not isinstance(data, dict):
+                # A malformed persisted record (e.g. "data" is a string/list/
+                # None instead of a mapping) must degrade to sensible
+                # defaults below, not raise AttributeError out of this route.
+                data = {}
             completed = data.get("completed_cycles", 0)
             total = data.get("total_cycles", 1)
             progress = _job_progress_percent(completed, total)
