@@ -1581,19 +1581,26 @@ class DummyLLMClient(LLMClient):
         counter = DummyLLMClient._call_counter
         task_hint = self._extract_task_hint(prompt)
 
-        # Deterministic fast path: when the caller hands us the actual
-        # structured_output model class (Strands' bridge does, via
-        # LLMClientModel.structured_output/chat/stream), route by its class
-        # *name* instead of the text-anchor scan below — sidesteps the exact
-        # fragility this scan is prone to (a prompt reword or an
-        # incidentally-mentioned field name silently returning the wrong
-        # shape). A name string, not the class object itself, because the
-        # production stream()/chat() path only ever has the tool's name
-        # available (Strands sets it to the class's __name__), never the
-        # Python class — see _branding_phase2_structured_output_stub's own
-        # docstring. Only a known subset of classes are wired up; anything
-        # else falls through unchanged.
+        # Deterministic fast path: reached only when a caller hands complete_json
+        # the actual structured_output model class via this parameter — that's
+        # LLMClientModel.structured_output() (through DummyLLMClient.structured_
+        # output(), which forwards it) and any direct complete_json(...,
+        # structured_output_model=X) caller (e.g. this suite's tests). chat()
+        # and stream() do NOT reach this branch: they never call complete_json
+        # with this parameter at all — their own dispatch blocks call
+        # _branding_phase2_structured_output_stub directly with just the tool's
+        # name string (the only identifier Strands' event loop ever gives them,
+        # per that helper's own docstring), bypassing this parameter entirely.
+        # Route by class *name* instead of the text-anchor scan below —
+        # sidesteps the exact fragility this scan is prone to (a prompt reword
+        # or an incidentally-mentioned field name silently returning the wrong
+        # shape). Only a known subset of classes are wired up; anything else
+        # falls through unchanged.
         if structured_output_model is not None:
+            assert isinstance(structured_output_model, type), (
+                f"structured_output_model must be a Pydantic model class, "
+                f"got {structured_output_model!r}"
+            )
             deterministic = _branding_phase2_structured_output_stub(
                 structured_output_model.__name__
             )

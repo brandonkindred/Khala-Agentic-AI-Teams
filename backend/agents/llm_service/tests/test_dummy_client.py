@@ -23,6 +23,7 @@ from llm_service.clients.dummy import (
     _STRIP_VERBS,
     CODE_REVIEW_MIN_PROMPT_LENGTH,
     _aggregated_user_tool_text,
+    _branding_phase2_structured_output_stub,
     _content_to_text,
     _extract_name_from_hint,
     _last_user_text,
@@ -649,18 +650,34 @@ def _openai_structured_output_tools(model_name: str) -> list[dict[str, Any]]:
     ]
 
 
-def test_chat_routes_structured_output_tool_by_name_despite_misleading_prompt() -> None:
-    """chat() must route by the tool's name, not by scanning the user prompt."""
+_PHASE2_ROUTED_MODEL_NAMES: tuple[str, ...] = (
+    "BrandStoryOutput",
+    "BrandArchetypesOutput",
+    "TaglineOutput",
+    "MessagingFrameworkOutput",
+    "PersonaProfilesOutput",
+    "WritingGuidelinesOutput",
+)
+
+
+@pytest.mark.parametrize("model_name", _PHASE2_ROUTED_MODEL_NAMES)
+def test_chat_routes_structured_output_tool_by_name_despite_misleading_prompt(
+    model_name: str,
+) -> None:
+    """chat() must route by the tool's name, not by scanning the user prompt,
+    for every Phase 2 class, not just one. Asserts exact equality against
+    _branding_phase2_structured_output_stub's own output rather than a
+    hand-picked subset of keys, so a wrong/extra/missing key in any class's
+    payload would fail this test too, not just an unrecognized-name miss.
+    """
     c = DummyLLMClient()
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Carry forward messaging_framework and audience_message_maps."},
+        {"role": "user", "content": "Please respond with the requested output."},
     ]
-    result = c.chat(messages, tools=_openai_structured_output_tools("TaglineOutput"))
+    result = c.chat(messages, tools=_openai_structured_output_tools(model_name))
     args = result["__tool_calls__"][0]["function"]["arguments"]
-    assert "tagline_rationale" in args
-    assert "elevator_pitches" in args
-    assert "messaging_framework" not in args
+    assert args == _branding_phase2_structured_output_stub(model_name)
 
 
 def test_chat_unrecognized_tool_name_falls_back_to_text_scan() -> None:
@@ -719,8 +736,14 @@ async def test_stream_unrecognized_tool_name_falls_back_to_text_scan() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt() -> None:
-    """stream() must route by tool_specs' name, not by scanning the user text."""
+@pytest.mark.parametrize("model_name", _PHASE2_ROUTED_MODEL_NAMES)
+async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(
+    model_name: str,
+) -> None:
+    """stream() must route by tool_specs' name, not by scanning the user text,
+    for every Phase 2 class, not just one — mirrors the chat() test above,
+    including asserting exact equality rather than a hand-picked key subset.
+    """
     c = DummyLLMClient()
     messages = _as_stream_messages(
         [{"role": "user", "content": [{"text": "You are a helpful assistant."}]}]
@@ -729,7 +752,7 @@ async def test_stream_routes_structured_output_tool_by_name_despite_misleading_p
         Any,
         [
             {
-                "name": "MessagingFrameworkOutput",
+                "name": model_name,
                 "description": "IMPORTANT: This StructuredOutputTool should only be invoked...",
                 "inputSchema": {"json": {"type": "object", "properties": {}}},
             }
@@ -742,5 +765,4 @@ async def test_stream_routes_structured_output_tool_by_name_despite_misleading_p
         if tool_input:
             chunks.append(tool_input)
     data = json.loads(chunks[0])
-    assert "messaging_framework" in data
-    assert "audience_message_maps" in data
+    assert data == _branding_phase2_structured_output_stub(model_name)
