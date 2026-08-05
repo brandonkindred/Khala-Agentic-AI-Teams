@@ -258,6 +258,7 @@ class LLMClient(ABC):
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
         schema: "Optional[dict | type[BaseModel]]" = None,
+        structured_output_model: "Optional[type[BaseModel]]" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -286,6 +287,18 @@ class LLMClient(ABC):
         enforced downstream by pydantic, exactly as when ``schema`` is
         omitted). Mutually exclusive with ``tools`` on clients that honor it
         (see ``OllamaLLMClient``).
+
+        ``structured_output_model`` (optional): the exact ``type[BaseModel]``
+        subclass passed as ``structured_output=`` to ``build_agent``/Strands,
+        forwarded here only when the call originates from Strands'
+        ``Model.structured_output()`` bridge. This is deliberately distinct
+        from ``schema``: implementations MAY use its presence to select a
+        response deterministically (e.g. a stub/test client routing by class
+        identity instead of prompt text), but MUST NOT let it alter
+        wire-protocol behavior toward a real provider — ``schema`` is the
+        parameter for that. Absent (``None``) on any call that doesn't
+        originate from that bridge. Unsupporting clients silently ignore it
+        via ``**kwargs``.
 
         Preconditions: ``objective`` is a non-empty string.
         """
