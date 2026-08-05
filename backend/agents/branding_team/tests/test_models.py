@@ -3,7 +3,8 @@
 These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
 ``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
 ``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
-``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``,
+``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``
+(and its nested ``MessagingPillarOutput``/``AudienceMessageMapOutput``),
 ``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 4's
 ``ChannelGuidelineOutput`` and ``BrandArchitectureOutput``) must reject
 empty/omitted content so Strands' structured-output tool retries the LLM
@@ -18,7 +19,7 @@ import pytest
 from pydantic import ValidationError
 
 from branding_team.models import (
-    AudienceMessageMap,
+    AudienceMessageMapOutput,
     AudienceSegment,
     AudienceSegmentsOutput,
     BrandArchetype,
@@ -34,7 +35,7 @@ from branding_team.models import (
     DifferentiationPillarsOutput,
     ElevatorPitch,
     MessagingFrameworkOutput,
-    MessagingPillar,
+    MessagingPillarOutput,
     PersonaProfile,
     PersonaProfilesOutput,
     PositioningOutput,
@@ -151,8 +152,15 @@ _PITCHES = [
     ElevatorPitch(tier="30-second", pitch="b"),
     ElevatorPitch(tier="2-minute", pitch="c"),
 ]
-_PILLAR = MessagingPillar(pillar="Cohesion")
-_AUDIENCE = AudienceMessageMap(audience_segment="Enterprise leaders")
+_PILLAR = MessagingPillarOutput(
+    pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
+)
+_AUDIENCE = AudienceMessageMapOutput(
+    audience_segment="Enterprise leaders",
+    primary_message="Ship on-brand, faster.",
+    supporting_messages=["Consistent across every touchpoint"],
+    tone_adjustments="Confident, outcome-focused",
+)
 _PERSONA = PersonaProfile(name="Alex")
 _GUIDELINES = WritingGuidelinesBody(
     voice_principles=["a", "b", "c"],
@@ -215,6 +223,31 @@ def test_messaging_framework_output_enforces_stated_cardinality() -> None:
         **base, messaging_framework=[_PILLAR] * 3, audience_message_maps=[_AUDIENCE]
     )
     assert len(output.messaging_framework) == 3
+
+
+def test_messaging_pillar_and_audience_map_outputs_reject_blank_content() -> None:
+    """A blank pillar or audience segment must fail validation, not silently pass."""
+    valid_pillar_kwargs = _PILLAR.model_dump()
+    valid_audience_kwargs = _AUDIENCE.model_dump()
+
+    with pytest.raises(ValidationError):
+        MessagingPillarOutput(**{**valid_pillar_kwargs, "pillar": ""})
+    with pytest.raises(ValidationError):
+        MessagingPillarOutput(**{**valid_pillar_kwargs, "key_message": ""})
+    with pytest.raises(ValidationError):
+        MessagingPillarOutput(**{**valid_pillar_kwargs, "proof_points": [""]})
+
+    with pytest.raises(ValidationError):
+        AudienceMessageMapOutput(**{**valid_audience_kwargs, "audience_segment": ""})
+    with pytest.raises(ValidationError):
+        AudienceMessageMapOutput(**{**valid_audience_kwargs, "primary_message": ""})
+    with pytest.raises(ValidationError):
+        AudienceMessageMapOutput(**{**valid_audience_kwargs, "supporting_messages": [""]})
+
+    pillar = MessagingPillarOutput(**valid_pillar_kwargs)
+    audience = AudienceMessageMapOutput(**valid_audience_kwargs)
+    assert pillar.pillar == "Cohesion"
+    assert audience.audience_segment == "Enterprise leaders"
 
 
 def test_persona_profiles_output_enforces_stated_cardinality() -> None:

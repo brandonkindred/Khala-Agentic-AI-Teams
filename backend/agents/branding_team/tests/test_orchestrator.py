@@ -20,7 +20,7 @@ from branding_team import (
     WorkflowStatus,
 )
 from branding_team.models import (
-    AudienceMessageMap,
+    AudienceMessageMapOutput,
     AudienceSegment,
     AudienceSegmentsOutput,
     Brand,
@@ -44,7 +44,7 @@ from branding_team.models import (
     ElevatorPitch,
     GovernanceOutput,
     MessagingFrameworkOutput,
-    MessagingPillar,
+    MessagingPillarOutput,
     MoodBoardConcept,
     NarrativeMessagingOutput,
     PersonaProfile,
@@ -928,11 +928,24 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         ElevatorPitch(tier="2-minute", pitch="Turn strategy into a workable system."),
     ]
     _pillars = [
-        MessagingPillar(pillar="Cohesion"),
-        MessagingPillar(pillar="Speed"),
-        MessagingPillar(pillar="Clarity"),
+        MessagingPillarOutput(
+            pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
+        ),
+        MessagingPillarOutput(
+            pillar="Speed", key_message="Ship weekly.", proof_points=["Release cadence"]
+        ),
+        MessagingPillarOutput(
+            pillar="Clarity", key_message="Say it simply.", proof_points=["Plain-language copy"]
+        ),
     ]
-    _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
+    _maps = [
+        AudienceMessageMapOutput(
+            audience_segment="Enterprise product leaders",
+            primary_message="Ship on-brand, faster.",
+            supporting_messages=["Consistent across every touchpoint"],
+            tone_adjustments="Confident, outcome-focused",
+        )
+    ]
     _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
     voice_leaf = _phase1_leaf_node(
         WritingGuidelinesOutput(
@@ -1053,11 +1066,24 @@ def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
         ElevatorPitch(tier="2-minute", pitch="c"),
     ]
     _pillars = [
-        MessagingPillar(pillar="Cohesion"),
-        MessagingPillar(pillar="Speed"),
-        MessagingPillar(pillar="Clarity"),
+        MessagingPillarOutput(
+            pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
+        ),
+        MessagingPillarOutput(
+            pillar="Speed", key_message="Ship weekly.", proof_points=["Release cadence"]
+        ),
+        MessagingPillarOutput(
+            pillar="Clarity", key_message="Say it simply.", proof_points=["Plain-language copy"]
+        ),
     ]
-    _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
+    _maps = [
+        AudienceMessageMapOutput(
+            audience_segment="Enterprise product leaders",
+            primary_message="Ship on-brand, faster.",
+            supporting_messages=["Consistent across every touchpoint"],
+            tone_adjustments="Confident, outcome-focused",
+        )
+    ]
     _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
     guidelines = WritingGuidelinesBody(
         voice_principles=["Confident", "Human", "Concrete"],
