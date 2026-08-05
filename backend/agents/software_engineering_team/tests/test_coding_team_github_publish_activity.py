@@ -12,6 +12,7 @@ real job service.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Optional
 
 import pytest
@@ -101,10 +102,17 @@ class _FakeGitHubClient:
 
 
 class _FakeJobStore:
-    """In-memory ``get_job``/``update_job`` recorder, seeded with one job."""
+    """In-memory ``get_job``/``update_job`` recorder, seeded with one job.
+
+    ``cleared_markers`` records every ``(repo_path, issue_number)`` pair the
+    activity's active-issue-marker cleanup was invoked with, so tests can
+    assert the marker was actually cleared rather than just trusting the
+    docstring.
+    """
 
     def __init__(self, job_id: str, **fields: Any) -> None:
         self.jobs: dict[str, dict[str, Any]] = {job_id: dict(fields)}
+        self.cleared_markers: list[tuple[str, int]] = []
 
     def get_job(self, job_id: str, cache_dir: Any = None) -> Optional[dict[str, Any]]:
         job = self.jobs.get(job_id)
@@ -118,8 +126,13 @@ class _FakeJobStore:
 
 def _install(
     monkeypatch: pytest.MonkeyPatch, api: Any, job_id: str, **job_fields: Any
-) -> tuple[_FakeJobStore, _FakeGitHubClient]:
-    """Wire a fresh fake job store + GitHub client into ``coding_team_main``."""
+) -> tuple[_FakeJobStore, Callable[[], _FakeGitHubClient]]:
+    """Wire a fresh fake job store + GitHub client into ``coding_team_main``.
+
+    The second return value is a getter, not a client instance: the activity
+    constructs its ``GitHubClient`` only after being called, so callers use
+    this to fetch whichever fake client that call produced.
+    """
     store = _FakeJobStore(job_id, **job_fields)
     client_holder: list[_FakeGitHubClient] = []
 
@@ -133,7 +146,11 @@ def _install(
     monkeypatch.setattr(api, "GitHubClient", _make_client)
     monkeypatch.setattr(api, "_fast_forward", lambda repo_path, branch, base: (True, None))
     monkeypatch.setattr(api, "_push_branch", lambda repo_path, remote, branch, token: (True, None))
-    monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda repo_path, num: None)
+    monkeypatch.setattr(
+        api,
+        "_clear_active_issue_if_matches",
+        lambda repo_path, num: store.cleared_markers.append((repo_path, num)),
+    )
     monkeypatch.setattr(api, "_cleanup_issue_checkout", lambda repo_path: None)
 
     # _publish_merged_work/_finish_already_complete/_record_failure all resolve
@@ -234,6 +251,7 @@ def test_publish_activity_merged_work_creates_new_draft_pr(
     assert any("Draft PR opened" in c[3] for c in client.comments)
     assert store.jobs["job-1"]["github_pr_url"] == "https://example/pull/101"
     assert store.jobs["job-1"]["status"] == "completed"
+    assert store.cleared_markers == [("/repo", 9)]
     assert out["status"] == "completed"
 
 
@@ -255,7 +273,6 @@ def test_publish_activity_merged_work_reuses_existing_draft_pr(
     def _make_client_with_existing(token: str) -> _FakeGitHubClient:
         client = _FakeGitHubClient(token)
         client.existing_pr = existing
-        client._seeded = True  # noqa: SLF001
         get_client_holder.append(client)
         return client
 
@@ -308,6 +325,7 @@ def test_publish_activity_update_pr_failure_is_nonfatal_and_still_completes(
     existing = PullRequest(
         number=55, html_url="https://example/pull/55", head="khala/issue-9", base="main"
     )
+    holder: list[_FakeGitHubClient] = []
 
     def _make_client(token: str) -> _FakeGitHubClient:
         client = _FakeGitHubClient(token)
@@ -316,11 +334,11 @@ def test_publish_activity_update_pr_failure_is_nonfatal_and_still_completes(
         holder.append(client)
         return client
 
-    holder: list[_FakeGitHubClient] = []
     monkeypatch.setattr(api, "GitHubClient", _make_client)
 
     out = _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
+    assert len(holder) == 1
     assert store.jobs["job-1"]["status"] == "completed"
     assert out["status"] == "completed"
 
@@ -407,6 +425,7 @@ def test_publish_activity_create_pr_github_api_error_records_failure(
 ) -> None:
     """create_pull_request raising GitHubAPIError marks the job failed."""
     store, _ = _install(monkeypatch, api, "job-1", already_complete=False, task_graph_snapshot=[])
+    holder: list[_FakeGitHubClient] = []
 
     def _make_client(token: str) -> _FakeGitHubClient:
         client = _FakeGitHubClient(token)
@@ -414,11 +433,11 @@ def test_publish_activity_create_pr_github_api_error_records_failure(
         holder.append(client)
         return client
 
-    holder: list[_FakeGitHubClient] = []
     monkeypatch.setattr(api, "GitHubClient", _make_client)
 
     _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
+    assert len(holder) == 1
     assert store.jobs["job-1"]["status"] == "failed"
     assert "create_pull_request" in store.jobs["job-1"]["error"]
 
@@ -448,6 +467,7 @@ def test_publish_activity_already_complete_posts_close_recommendation_and_marks_
     assert "tests already covered this" in body
     assert "Recommend closing #9" in body
     assert store.jobs["job-1"]["status"] == "already_complete"
+    assert store.cleared_markers == [("/repo", 9)]
     assert out["status"] == "already_complete"
 
 
