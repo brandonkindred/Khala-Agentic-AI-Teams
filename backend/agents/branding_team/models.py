@@ -214,11 +214,11 @@ class BrandDiscoveryAuditOutput(BaseModel):
 
     current_brand_perception: str = Field(min_length=1)
     market_position: str = Field(min_length=1)
-    strengths: List[str] = Field(min_length=1)
-    weaknesses: List[str] = Field(min_length=1)
-    opportunities: List[str] = Field(min_length=1)
-    threats: List[str] = Field(min_length=1)
-    stakeholder_insights: List[str] = Field(min_length=1)
+    strengths: List[NonEmptyStr] = Field(min_length=1)
+    weaknesses: List[NonEmptyStr] = Field(min_length=1)
+    opportunities: List[NonEmptyStr] = Field(min_length=1)
+    threats: List[NonEmptyStr] = Field(min_length=1)
+    stakeholder_insights: List[NonEmptyStr] = Field(min_length=1)
 
 
 class PurposeVisionOutput(BaseModel):
