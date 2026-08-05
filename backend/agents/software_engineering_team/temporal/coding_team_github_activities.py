@@ -1,5 +1,5 @@
-"""Temporal activities for GitHub-issue-driven coding-team hooks (branch prep,
-publish, plus the sibling failure-notice activity joining this module next).
+"""Temporal activities for GitHub-issue-driven coding-team hooks (branch
+prep, publish, and failure/outage-notice reporting).
 
 Deliberately its own module rather than appended to ``coding_team_workflow.py``:
 the co-location note in ``system_design/hitl_pause_resume_contract.md`` is
@@ -199,6 +199,103 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
                 request["base"],
                 request["integration_branch"],
                 request["token"],
+            )
+
+    return _main.get_job(job_id) or {"job_id": job_id, "status": "unknown"}
+
+
+_FAILURE_NOTICE_REQUIRED_FIELDS = ("job_id", "owner", "repo", "number", "token", "message", "kind")
+_FAILURE_NOTICE_KINDS = ("failure", "outage")
+
+
+@activity.defn(name="coding_team_github_failure_notice")
+def github_failure_notice_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Report a job failure or review outage to GitHub as a Temporal activity.
+
+    Wraps ``_record_failure``/``_record_review_outage`` (``api/orchestration.py``)
+    unchanged, dispatching on the request's own ``kind`` field: ``"failure"``
+    marks the job failed and posts the raw scrubbed error as a PR/issue
+    comment; ``"outage"`` marks the job failed with the terminal
+    ``phase="completed"`` and posts (only when ``PR_REVIEW_POST_OUTAGE_NOTICE``
+    is enabled) a fixed neutral note instead of the raw error -- the
+    graceful-degradation path for a reviewer-side outage. This activity does
+    not itself evaluate that gate; it delegates to ``_record_review_outage``,
+    which checks it internally, so the gate's behavior lives in exactly one
+    place. Not yet called by ``CodingTeamWorkflow`` (workflow wiring is a
+    separate, later follow-up).
+
+    Preconditions:
+        - ``request`` carries non-empty ``job_id``, ``owner``, ``repo``,
+          ``number`` (an issue or PR number -- generic name matching
+          ``_safe_comment``'s own parameter, since this activity serves
+          both), ``token``, ``message`` (the raw error text passed as the
+          wrapped functions' ``error`` argument), and ``kind``;
+          missing/falsy values raise ``ValueError`` naming only the missing
+          field NAMES before any GitHub/job-store call runs (an activity
+          exception is recorded in Temporal history, so the payload --
+          which carries ``token`` -- must never appear in the message).
+        - ``kind`` must be exactly ``"failure"`` or ``"outage"``; any other
+          value raises a second, separate ``ValueError`` naming the invalid
+          value.
+        - ``token`` is a plain-text GitHub token for now (activity-side
+          resolution from the encrypted job record is a separate, later
+          concern).
+    Postconditions:
+        - ``kind="failure"`` delegates to ``_record_failure`` unchanged: the
+          job (and review row, when one exists) is marked ``failed`` with
+          the scrubbed error captured, ``phase`` is left untouched, and a
+          comment containing the job id and the scrubbed error is always
+          posted.
+        - ``kind="outage"`` delegates to ``_record_review_outage`` unchanged:
+          the job (and review row) is marked ``failed`` with ``phase`` set
+          to the terminal ``"completed"``, and a neutral fixed-text comment
+          (never the raw error) is posted iff ``PR_REVIEW_POST_OUTAGE_NOTICE``
+          is enabled -- this activity does not re-check that gate itself.
+        - Returns the job's resulting record (``get_job(job_id)``), or
+          ``{"job_id": job_id, "status": "unknown"}`` when the job store has
+          nothing for it -- matching ``github_publish_activity``'s and
+          ``run_pipeline_activity``'s existing return contract.
+        - Does NOT catch exceptions the wrapped functions raise -- they
+          propagate uncaught, exactly as they do today through their
+          thread-mode call sites (``_run_with_github_hooks``,
+          ``_publish_merged_work``, ``api/pr_review.py``'s
+          ``_run_reviewer``/``_run_pr_review``), so Temporal's own activity
+          failure/retry semantics apply.
+    """
+    missing = [f for f in _FAILURE_NOTICE_REQUIRED_FIELDS if not request.get(f)]
+    if missing:
+        raise ValueError(f"github_failure_notice_activity missing required fields: {missing!r}")
+
+    kind = request["kind"]
+    if kind not in _FAILURE_NOTICE_KINDS:
+        raise ValueError(
+            f"github_failure_notice_activity: kind must be one of {_FAILURE_NOTICE_KINDS!r}, "
+            f"got {kind!r}"
+        )
+
+    from software_engineering_team.api import coding_team_main as _main
+    from software_engineering_team.api.orchestration import _record_failure, _record_review_outage
+
+    job_id = request["job_id"]
+
+    with _main.GitHubClient(token=request["token"]) as client:
+        if kind == "failure":
+            _record_failure(
+                client,
+                request["owner"],
+                request["repo"],
+                request["number"],
+                job_id,
+                request["message"],
+            )
+        else:
+            _record_review_outage(
+                client,
+                request["owner"],
+                request["repo"],
+                request["number"],
+                job_id,
+                request["message"],
             )
 
     return _main.get_job(job_id) or {"job_id": job_id, "status": "unknown"}
