@@ -9,8 +9,13 @@ single bounded review pass.
 Preconditions:
     - The caller (the coordinator) has already bounded the chunk: the
       ``code_chunk`` carries at most ``compute_code_review_map_chunk_chars`` of
-      code. Spec/architecture/existing-codebase context is passed through in
-      full; this module never mutates the code under review.
+      code. ``architecture_overview`` and ``existing_codebase`` context are
+      always passed through in full; the ``acceptance_criteria``/``spec_excerpt``
+      blocks are included only when ``input_data.spec_compliance_single_pass`` is
+      falsy (the coordinator sets it when ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is
+      enabled for the ``CODE_REVIEW`` profile, deferring spec-compliance findings
+      to a single post-dedupe pass instead). This module never mutates the code
+      under review.
 
 Postconditions:
     - Returns the LLM's findings for this chunk only (``approved``, ``issues``,
@@ -115,8 +120,11 @@ class ChunkReviewAgent:
     Input (``ChunkReviewInput``):
         ``code_chunk`` is the rendered chunk (one or more files, already sized to
         the model's context by the coordinator) plus optional task/spec/
-        architecture/existing-codebase context and the sibling surface. The code
-        and all context fields are passed through to the prompt in full.
+        architecture/existing-codebase context and the sibling surface. The
+        code, ``architecture_overview``, and ``existing_codebase`` fields are
+        always passed through to the prompt in full; the
+        ``acceptance_criteria``/``spec_excerpt`` blocks are included only when
+        ``spec_compliance_single_pass`` is falsy (see module docstring).
 
     Output (``ChunkReviewOutput``):
         This chunk's findings only — ``approved`` (no critical/high issues),
@@ -190,7 +198,13 @@ def _run_chunk_review(
           verbatim; this function never re-caps or re-compacts it — the
           coordinator's prep is the only place that bounds it, so a chunk call
           never fires extra LLM calls, but it also has no local defense if an
-          upstream cap were ever skipped.
+          upstream cap were ever skipped. Exception: when
+          ``input_data.spec_compliance_single_pass`` is True, the
+          ``acceptance_criteria``/``spec_excerpt`` blocks are omitted from the
+          prompt entirely rather than passed through — the coordinator runs a
+          dedicated post-dedupe spec-compliance pass instead (see ADR-010).
+          ``architecture_overview`` and ``existing_codebase_excerpt`` are
+          always passed through verbatim regardless of the flag.
 
     Raises:
         LLMJsonParseError: the injected ``llm``'s ``complete_json`` could not
@@ -237,7 +251,7 @@ def _run_chunk_review(
     ]
     if input_data.task_requirements:
         context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
-    if input_data.acceptance_criteria:
+    if input_data.acceptance_criteria and not input_data.spec_compliance_single_pass:
         context_parts.extend(
             [
                 "",
@@ -254,7 +268,7 @@ def _run_chunk_review(
                 *[f"- {d}" for d in input_data.user_decisions],
             ]
         )
-    if spec_excerpt:
+    if spec_excerpt and not input_data.spec_compliance_single_pass:
         context_parts.extend(
             [
                 "",
