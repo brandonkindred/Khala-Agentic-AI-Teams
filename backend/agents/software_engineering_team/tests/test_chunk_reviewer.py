@@ -560,9 +560,10 @@ def test_spec_compliance_single_pass_omits_acceptance_criteria_and_spec_excerpt(
 
 
 def test_spec_compliance_single_pass_default_false_keeps_legacy_rendering() -> None:
-    """Default (``spec_compliance_single_pass`` unset/False) renders the acceptance-
-    criteria/spec-excerpt blocks exactly as before -- proving the flag-off path is
-    byte-for-byte unchanged."""
+    """Default (``spec_compliance_single_pass`` unset/False) still renders the
+    acceptance-criteria/spec-excerpt blocks in the prompt, preserving the legacy
+    flag-off rendering -- the counterpart to the flag-on test above, which asserts
+    the same markers are absent."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     agent.run(

@@ -198,7 +198,13 @@ def _run_chunk_review(
           verbatim; this function never re-caps or re-compacts it — the
           coordinator's prep is the only place that bounds it, so a chunk call
           never fires extra LLM calls, but it also has no local defense if an
-          upstream cap were ever skipped.
+          upstream cap were ever skipped. Exception: when
+          ``input_data.spec_compliance_single_pass`` is True, the
+          ``acceptance_criteria``/``spec_excerpt`` blocks are omitted from the
+          prompt entirely rather than passed through — the coordinator runs a
+          dedicated post-dedupe spec-compliance pass instead (see ADR-010).
+          ``architecture_overview`` and ``existing_codebase_excerpt`` are
+          always passed through verbatim regardless of the flag.
 
     Raises:
         LLMJsonParseError: the injected ``llm``'s ``complete_json`` could not

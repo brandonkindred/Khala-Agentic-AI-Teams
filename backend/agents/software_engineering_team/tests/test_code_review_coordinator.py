@@ -3059,6 +3059,13 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
 
 
 def test_coordinator_single_chunk_propagates_notes() -> None:
+    """Default-off path: a single chunk's ``spec_compliance_notes`` propagate directly.
+
+    ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is not enabled here, so the coordinator
+    keeps the single-chunk fast path (see ``_merge_narrative``) and the lone
+    chunk's notes reach ``CodeReviewOutput.spec_compliance_notes`` unchanged,
+    with no synthesis LLM call in between.
+    """
     client = _ScriptedClient(
         [
             {
