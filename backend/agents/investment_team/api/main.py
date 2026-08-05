@@ -1109,11 +1109,11 @@ def _run_backtest_background(
     """
     try:
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
         now = _now()
         record = BacktestRecord(
