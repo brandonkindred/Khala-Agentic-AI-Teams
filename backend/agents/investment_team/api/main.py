@@ -3967,14 +3967,7 @@ def _run_live_paper_trading_background(
         )
     except Exception as exc:
         logger.exception("Live paper trade %s: background worker crashed", session_id)
-        with _lock:
-            raw = _paper_trading_sessions.get(session_id)
-            if raw is not None:
-                session = PaperTradingSession.parse_persisted(raw)
-                session.status = PaperTradingStatus.FAILED
-                session.error = str(exc)
-                session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                _paper_trading_sessions[session_id] = session
+        _fail_paper_trading_session(session_id, str(exc))
     finally:
         with _lock:
             _live_paper_stop_controllers.pop(session_id, None)
