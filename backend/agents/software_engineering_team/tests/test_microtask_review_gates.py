@@ -30,7 +30,8 @@ from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
 
 
 class _TextStubClient(DummyLLMClient):
-    """Returns a canned text response through the Strands ``stream()`` path."""
+    """Returns a canned text response from ``complete_json()`` to simulate the
+    legacy text-template review path."""
 
     def __init__(self, text: str = "") -> None:
         super().__init__()

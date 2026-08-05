@@ -10,11 +10,17 @@ fork into one parameterised implementation driven by :class:`ReviewConfig`.
 
 The chunking/prompt/parse orchestration (``_run_llm_review``) and the external
 QA / security / build-verify runners stay **per-team** (in each team's
-``phases/review.py``) because they are the test patch surface for ``Agent`` /
-``resolve_text_mode_strands_model`` and inject the team's own prompt/parser and
-``ReviewIssue`` factory. The shared bodies here call back into those runners via
-injected callables, so the per-team patch surface is preserved and existing
-tests stay green without rewriting their patch targets.
+``phases/review.py``) so each team can inject its own prompt/parser and
+``ReviewIssue`` factory. For frontend, ``_run_llm_review`` is also the test
+patch surface for ``Agent`` / ``resolve_text_mode_strands_model``, since it
+builds the Strands invocation itself; backend's ``_run_llm_review`` is a
+documented exception (see ``backend_code_v2_team.phases.review``'s own
+module docstring) that calls ``code_review_agent.coordinator.run_coordinator``
+directly instead, so ``Agent`` / ``resolve_text_mode_strands_model`` are not
+part of its patch surface. The shared bodies here call back into these
+runners via injected callables either way, so each team's patch surface is
+preserved and existing tests stay green without rewriting their patch
+targets.
 
 The code-review / QA / security checks are independent — none reads another's
 output, they only contribute to the shared ``issues`` list — so the shared body
