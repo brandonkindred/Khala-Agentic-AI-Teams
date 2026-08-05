@@ -119,7 +119,10 @@ def get_job_service_client(team: str) -> "JobServiceClient":
         - Returns the same instance for the same ``team`` across calls
           (one client per team), constructed lazily on first request.
     """
-    assert team, "team must be a non-empty string"
+    # A bare `assert` is stripped under `python -O`, silently admitting
+    # falsy/non-string input; raise explicitly so this precondition always holds.
+    if not team or not isinstance(team, str):
+        raise ValueError("team must be a non-empty string")
     client = _client_cache.get(team)
     if client is not None:
         return client
@@ -765,6 +768,11 @@ class BaseJobStore:
             error=None,
             current_phase=None,
             status_text=None,
+            waiting_for_answers=False,
+            pending_questions=[],
+            resume_token=None,
+            pause_kind=None,
+            pause_context=None,
         )
 
 

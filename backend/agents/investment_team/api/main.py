@@ -1292,7 +1292,18 @@ def delete_backtest_job(job_id: str) -> Dict[str, Any]:
 
 @app.get("/backtests", response_model=ListBacktestsResponse)
 def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
-    """List recorded backtests, optionally filtered by strategy ID."""
+    """List recorded backtests, optionally filtered by strategy ID.
+
+    Postconditions:
+        Returns a ``_lock``-protected snapshot of ``_backtests``, with each
+        stored record rehydrated via ``BacktestRecord.parse_persisted``. When
+        ``strategy_id`` is given, only records whose ``strategy_id`` matches
+        are kept — an unknown ``strategy_id`` yields an empty list, not a
+        404, since no existence check is performed. Results are sorted
+        newest-first by ``completed_at``. ``count`` is always
+        ``len(items)`` after filtering, so it can never drift from the
+        returned list.
+    """
     with _lock:
         raw = list(_backtests.values())
 
@@ -1364,7 +1375,19 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
 
 @app.get("/workflow/status", response_model=WorkflowStatusResponse)
 def workflow_status() -> WorkflowStatusResponse:
-    """Get the current workflow state."""
+    """Get the current workflow state.
+
+    Postconditions:
+        Takes no inputs; always returns 200. Returns a ``_lock``-protected,
+        internally consistent snapshot of ``_workflow_state``: ``mode``,
+        ``audit_log``, and ``queue_counts`` are all read together under the
+        same lock acquisition. ``audit_log`` is a shallow copy, safe from
+        later mutation of the underlying state. ``queue_counts`` maps each
+        queue name to its current length only — not its entries; see
+        ``workflow_queues`` for the entries themselves. ``_workflow_state``
+        is mutated elsewhere (e.g. by ``promotion_decision``), so repeated
+        calls may return different snapshots.
+    """
     with _lock:
         mode = _workflow_state.mode.value
         audit_log = list(_workflow_state.audit_log)
@@ -1375,7 +1398,16 @@ def workflow_status() -> WorkflowStatusResponse:
 
 @app.get("/workflow/queues", response_model=QueuesResponse)
 def workflow_queues() -> QueuesResponse:
-    """Get the contents of all workflow queues."""
+    """Get the contents of all workflow queues.
+
+    Postconditions:
+        Takes no inputs; always returns 200. Returns a ``_lock``-protected
+        snapshot of every queue name currently present in
+        ``_workflow_state.queues`` — an empty dict if none have been
+        populated yet, since queues are created lazily (e.g. by
+        ``promotion_decision``'s escalation path). Each queue name maps to
+        its full ordered list of items, converted to ``QueueItemResponse``.
+    """
     with _lock:
         queues = {}
         for q_name, items in _workflow_state.queues.items():
@@ -1391,7 +1423,18 @@ def workflow_queues() -> QueuesResponse:
 
 @app.post("/memos", response_model=CreateMemoResponse)
 def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
-    """Generate an investment committee memo (runs as a Temporal workflow)."""
+    """Generate an investment committee memo (runs as a Temporal workflow).
+
+    Postconditions:
+        Delegates entirely to ``_execute_advisory("committee_memo", ...)``
+        with ``key=request.user_id`` as the idempotency/ordering key; no
+        local precondition checks are performed (no user/IPS existence
+        check, unlike ``promotion_decision``). Raises ``HTTPException(503)``
+        when Temporal is disabled/unavailable; on any other workflow
+        failure, raises the ``HTTPException`` that
+        ``_translate_advisory_failure`` maps it to. On success, returns the
+        generated ``InvestmentCommitteeMemo``.
+    """
     result = _execute_advisory(
         "committee_memo",
         {
@@ -4565,11 +4608,29 @@ class ProvidersListResponse(BaseModel):
 
 @app.get("/providers", response_model=ProvidersListResponse)
 def list_providers() -> ProvidersListResponse:
-    """Enumerate registered market-data providers and their capabilities."""
+    """Enumerate registered market-data providers and their capabilities.
+
+    Postconditions:
+        Takes no inputs. Iterates ``registry.describe_all()`` from the
+        process-wide ``default_registry()`` singleton
+        (``investment_team.trading_service.providers``), constructing one
+        ``ProviderDescriptor`` per row. Raises ``HTTPException(500,
+        "Provider registry contains invalid data")`` if any row fails
+        Pydantic validation (logged via ``logger.exception`` before being
+        raised). On success, returns a ``ProvidersListResponse`` with
+        ``providers`` set to the constructed rows and
+        ``live_paper_enabled`` from ``_live_paper_enabled()``.
+    """
     from investment_team.trading_service.providers import default_registry
 
     registry = default_registry()
-    rows = [ProviderDescriptor(**row) for row in registry.describe_all()]
+    try:
+        rows = [ProviderDescriptor(**row) for row in registry.describe_all()]
+    except ValidationError as exc:
+        logger.exception("Provider registry returned invalid data")
+        raise HTTPException(
+            status_code=500, detail="Provider registry contains invalid data"
+        ) from exc
     return ProvidersListResponse(
         live_paper_enabled=_live_paper_enabled(),
         providers=rows,

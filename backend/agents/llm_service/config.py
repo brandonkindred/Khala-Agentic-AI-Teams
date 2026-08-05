@@ -600,18 +600,17 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
             if agent_key:
                 logger.warning(
                     "Ignoring non-Claude model %r for the Claude provider for agent %s; "
-                    "using default %s. Set a Claude model in the LLM Provider settings or "
-                    "LLM_MODEL.",
+                    "falling back to the next candidate. Set a Claude model in the LLM "
+                    "Provider settings or LLM_MODEL.",
                     candidate,
                     agent_key,
-                    DEFAULT_CLAUDE_MODEL,
                 )
             else:
                 logger.warning(
-                    "Ignoring non-Claude model %r for the Claude provider; using default %s. "
-                    "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
+                    "Ignoring non-Claude model %r for the Claude provider; falling back "
+                    "to the next candidate. Set a Claude model in the LLM Provider "
+                    "settings or LLM_MODEL.",
                     candidate,
-                    DEFAULT_CLAUDE_MODEL,
                 )
     return DEFAULT_CLAUDE_MODEL
 
@@ -722,11 +721,15 @@ def resolve_base_url() -> str:
 
     The runtime value lets the settings UI toggle between local Ollama
     (``http://host:11434``) and Ollama Cloud (``https://ollama.com``).
+
+    Postconditions: returns a non-empty URL with no trailing slash. A
+        whitespace-only runtime or env candidate is treated as unset and falls
+        through to the next candidate. Never raises.
     """
     key = _runtime_key("KEY_OLLAMA_BASE_URL")
-    runtime = _runtime(key) if key else ""
-    raw = runtime or os.environ.get(ENV_LLM_BASE_URL) or "https://ollama.com"
-    return raw.strip().rstrip("/")
+    runtime = (_runtime(key) or "").strip() if key else ""
+    env_url = (os.environ.get(ENV_LLM_BASE_URL) or "").strip()
+    return (runtime or env_url or "https://ollama.com").rstrip("/")
 
 
 def resolve_timeout(agent_key: Optional[str] = None) -> float:

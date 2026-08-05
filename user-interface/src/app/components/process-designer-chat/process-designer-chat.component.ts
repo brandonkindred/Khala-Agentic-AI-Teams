@@ -550,7 +550,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const updated = { ...process, steps: updatedSteps };
     this.currentProcess.set(updated);
     this.buildFlowchart(updated);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
     this.onStepClick(newStep.step_id);
   }
 
@@ -575,7 +575,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.currentProcess.set(updated);
     this.selectedStep.set({ ...updatedStep });
     this.buildFlowchart(updated);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
   }
 
   onStepDeleted(stepId: string): void {
@@ -594,7 +594,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.selectedStepId.set(null);
     this.selectedStep.set(null);
     this.buildFlowchart(updated);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
   }
 
   onStepEditorClosed(): void {
@@ -621,14 +621,14 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     };
     this.currentProcess.set(updated);
     this.editingProcessMeta.set(false);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
   }
 
   cancelEditProcessMeta(): void {
     this.editingProcessMeta.set(false);
   }
 
-  private saveProcess(process: ProcessDefinition): void {
+  private saveProcess(process: ProcessDefinition, previous: ProcessDefinition | null): void {
     this.saving.set(true);
     this.api.updateProcess(process.process_id, process).subscribe({
       next: () => {
@@ -636,6 +636,8 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         this.refreshRoster();
       },
       error: (err) => {
+        this.currentProcess.set(previous);
+        this.buildFlowchart(previous);
         this.error.set(extractErrorDetail(err, 'Failed to save process'));
         this.saving.set(false);
       },
