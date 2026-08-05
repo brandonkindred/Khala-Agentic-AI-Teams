@@ -103,8 +103,13 @@ against Strands' `structured_output_model` mechanism, and
 `devops_team/phase2_graph.py`'s `run_phase2_parallel` already owns the
 catch/fallback/retry policy one layer above the agent template. The
 template itself propagating failures unchanged is intentional, not an
-oversight — remains the pattern for devops single-shot agents until that
-nested-model verification work happens.
+oversight — remains the pattern for devops single-shot agents built on
+`DevOpsSingleShotAgent` until that nested-model verification work happens.
+`devsecops_review_agent` is an exception: it never subclassed
+`DevOpsSingleShotAgent` (it called `complete_json_with_continuation`
+directly) and has since moved to `run_single_shot_review` (below) for its
+schema-validated corrective retry — this Pattern 3 default doesn't apply
+to it.
 
 ### Pattern 4 — `FileGeneratorToolAgent` / `StubToolAgent`
 

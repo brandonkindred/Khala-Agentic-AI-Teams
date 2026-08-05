@@ -233,12 +233,13 @@ def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _Script
         ],
         # Once the scripted list is exhausted, any further call (e.g. an
         # unrelated upstream corrective retry -- a chunk-review bisection,
-        # say -- consuming an extra slot and shifting a later named step,
-        # most notably DevSecOpsReviewAgent, onto an overrun call) gets this
-        # explicit, schema-neutral "clean, no opinion" response instead of
-        # the real (and now schema-validated) doc_runbook payload silently
-        # overloaded with extra fields. Keeps drift visible as a deliberate,
-        # obviously-generic fallback rather than a masked ordering bug.
+        # say -- consuming an extra slot and shifting a later named step
+        # onto an overrun call) gets this DevSecOps-shaped clean-approval
+        # fallback instead of the real (and now schema-validated)
+        # doc_runbook payload silently overloaded with extra fields. This
+        # keeps DevSecOpsReviewAgent from crashing the test on such drift
+        # while still making non-DevSecOps drift landing here fail schema
+        # validation loudly, rather than masking every step's drift equally.
         default_factory=lambda: {"approved": True, "findings": [], "summary": "fallback"},
     )
 
