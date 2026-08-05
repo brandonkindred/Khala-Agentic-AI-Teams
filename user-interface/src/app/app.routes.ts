@@ -134,7 +134,7 @@ export const routes: Routes = [
       {
         path: 'agent-studio',
         loadComponent: () =>
-          import('./components/agent-studio-shell/agent-studio-shell.component').then(
+          import('./components/agent-team-studio/agent-studio-shell/agent-studio-shell.component').then(
             (m) => m.AgentStudioShellComponent,
           ),
         title: 'Agent Studio',
@@ -143,7 +143,7 @@ export const routes: Routes = [
       {
         path: 'agent-console',
         loadComponent: () =>
-          import('./components/agent-console/agent-console.component').then((m) => m.AgentConsoleComponent),
+          import('./components/agent-team-studio/agent-console/agent-console.component').then((m) => m.AgentConsoleComponent),
         title: 'Agent Console',
         data: { breadcrumb: 'Agent Console' },
       },
@@ -222,7 +222,7 @@ export const routes: Routes = [
       {
         path: 'agentic-teams',
         loadComponent: () =>
-          import('./components/agentic-team-dashboard/agentic-team-dashboard.component').then(
+          import('./components/agent-team-studio/agentic-team-dashboard/agentic-team-dashboard.component').then(
             (m) => m.AgenticTeamDashboardComponent,
           ),
         title: 'Agentic Teams',
@@ -240,7 +240,7 @@ export const routes: Routes = [
       {
         path: 'persona-testing',
         loadComponent: () =>
-          import('./components/persona-testing-dashboard/persona-testing-dashboard.component').then(
+          import('./components/agent-team-studio/persona-testing-dashboard/persona-testing-dashboard.component').then(
             (m) => m.PersonaTestingDashboardComponent,
           ),
         title: 'Testing Personas',
@@ -249,7 +249,7 @@ export const routes: Routes = [
       {
         path: 'persona-testing/audit/:runId',
         loadComponent: () =>
-          import('./components/persona-test-audit-panel/persona-test-audit-panel.component').then(
+          import('./components/agent-team-studio/persona-test-audit-panel/persona-test-audit-panel.component').then(
             (m) => m.PersonaTestAuditPanelComponent,
           ),
         title: 'Testing Personas Audit',

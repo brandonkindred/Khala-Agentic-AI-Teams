@@ -80,3 +80,45 @@ class _StubLLMClient(LLMClient):
 def test_llm_client_default_supports_structured_output_is_false() -> None:
     """A client that doesn't override the capability flag reports no support, by design."""
     assert _StubLLMClient().supports_structured_output() is False
+
+
+class _RecordingLLMClient(LLMClient):
+    """Concrete LLMClient that records the kwargs each complete_json() call received.
+
+    Used to verify complete()'s default implementation forwards its own
+    keyword arguments (e.g. max_tokens) through to complete_json() rather
+    than silently dropping them.
+    """
+
+    def __init__(self) -> None:
+        self.complete_json_calls: list[Dict[str, Any]] = []
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+        schema: Any = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        self.complete_json_calls.append({"max_tokens": max_tokens, **kwargs})
+        return {"text": "stub response"}
+
+
+def test_complete_forwards_max_tokens_to_complete_json() -> None:
+    """complete()'s max_tokens argument must reach the delegated complete_json() call."""
+    client = _RecordingLLMClient()
+    client.complete(prompt="hi", objective="test", max_tokens=123)
+    assert client.complete_json_calls[-1]["max_tokens"] == 123
+
+
+def test_complete_forwards_max_tokens_none_by_default() -> None:
+    """Omitting max_tokens on complete() keeps the no-cap default behavior unchanged."""
+    client = _RecordingLLMClient()
+    client.complete(prompt="hi", objective="test")
+    assert client.complete_json_calls[-1]["max_tokens"] is None

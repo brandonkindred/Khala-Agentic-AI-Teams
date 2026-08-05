@@ -459,10 +459,10 @@ services:
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
-      TEAM_MODULE: agent_provisioning_team.api.main
+      TEAM_MODULE: agent_team_studio.agent_provisioning_team.api.main
       TEAM_NAME: agent_provisioning_team
       TEAM_PORT: "8097"
-      TEAM_TEMPORAL_WORKER_MODULE: agent_provisioning_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_MODULE: agent_team_studio.agent_provisioning_team.temporal.worker
       TEAM_TEMPORAL_WORKER_FUNC: start_agent_provisioning_temporal_worker_thread
       # Provisioning jobs are Temporal-owned; do not flip them interrupted on
       # API process restart (would race durable workflows + break /resume).
@@ -716,10 +716,10 @@ services:
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
-      TEAM_MODULE: agentic_team_provisioning.api.main
+      TEAM_MODULE: agent_team_studio.agentic_team_provisioning.api.main
       TEAM_NAME: agentic_team_provisioning
       TEAM_PORT: "8108"
-      TEAM_TEMPORAL_WORKER_MODULE: agentic_team_provisioning.temporal.worker
+      TEAM_TEMPORAL_WORKER_MODULE: agent_team_studio.agentic_team_provisioning.temporal.worker
       TEAM_TEMPORAL_WORKER_FUNC: start_agentic_team_provisioning_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
@@ -746,10 +746,10 @@ services:
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
-      TEAM_MODULE: user_agent_founder.api.main
+      TEAM_MODULE: agent_team_studio.user_agent_founder.api.main
       TEAM_NAME: user_agent_founder
       TEAM_PORT: "8109"
-      TEAM_TEMPORAL_WORKER_MODULE: user_agent_founder.temporal.worker
+      TEAM_TEMPORAL_WORKER_MODULE: agent_team_studio.user_agent_founder.temporal.worker
       TEAM_TEMPORAL_WORKER_FUNC: start_user_agent_founder_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts

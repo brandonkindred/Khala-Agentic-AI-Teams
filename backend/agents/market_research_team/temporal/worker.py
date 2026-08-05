@@ -6,7 +6,7 @@ generic team_service entrypoint invokes at boot via the
 so the Temporal worker (and its connected client) is ready before uvicorn
 starts accepting requests.
 
-This shape mirrors ``user_agent_founder.temporal.worker.
+This shape mirrors ``agent_team_studio.user_agent_founder.temporal.worker.
 start_user_agent_founder_temporal_worker_thread`` — same contract, same
 boot hook in docker-compose.
 """

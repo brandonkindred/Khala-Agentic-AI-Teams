@@ -9,7 +9,13 @@ import { ProcessDesignerChatComponent } from './process-designer-chat.component'
 import { AddAgentFromRegistryDialogComponent } from './add-agent-from-registry-dialog.component';
 import { ConfirmDialogComponent } from '../../shared/confirm-dialog/confirm-dialog.component';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
-import type { AgenticTeam, AgenticTeamAgent, RosterValidationResult } from '../../models';
+import type {
+  AgenticTeam,
+  AgenticTeamAgent,
+  ProcessDefinition,
+  ProcessStep,
+  RosterValidationResult,
+} from '../../models';
 
 const team = (overrides: Partial<AgenticTeam> = {}): AgenticTeam => ({
   team_id: 't-1',
@@ -31,6 +37,28 @@ const agent = (overrides: Partial<AgenticTeamAgent> = {}): AgenticTeamAgent => (
   expertise: [],
   source: 'generated',
   manifest_id: null,
+  ...overrides,
+});
+
+const step = (overrides: Partial<ProcessStep> = {}): ProcessStep => ({
+  step_id: 's-1',
+  name: 'Step 1',
+  description: '',
+  step_type: 'action',
+  agents: [],
+  next_steps: [],
+  condition: null,
+  ...overrides,
+});
+
+const process = (overrides: Partial<ProcessDefinition> = {}): ProcessDefinition => ({
+  process_id: 'p-1',
+  name: 'Process',
+  description: 'A process',
+  trigger: { trigger_type: 'manual', description: '' },
+  steps: [step()],
+  output: { description: '', destination: '' },
+  status: 'draft',
   ...overrides,
 });
 
@@ -384,5 +412,92 @@ describe('ProcessDesignerChatComponent', () => {
     component.saveAgentEdits(agent({ agent_name: 'Writer' }), new Event('click'));
     expect(component.rosterActionError()).toBe('bad edit');
     expect(component.editingAgent()).toBe('Writer');
+  });
+
+  // ── createNewProcess: create + link to the active conversation ─────────────
+
+  it('createNewProcess creates the process and links it to the active conversation', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    component.createNewProcess();
+
+    expect(component.currentProcess()?.process_id).toBe('p-new');
+    expect(component.saving()).toBe(false);
+    expect(api.setConversationProcess).toHaveBeenCalledWith('c-1', 'p-new');
+    expect(component.error()).toBeNull();
+  });
+
+  it('createNewProcess surfaces an error when linking the process to the conversation fails', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    api.setConversationProcess.mockReturnValueOnce(
+      throwError(() => ({ error: { detail: 'link failed' } })),
+    );
+
+    component.createNewProcess();
+
+    // The link failure is surfaced, but the already-created process is kept —
+    // it was not rolled back, matching the unchanged happy-path create step.
+    expect(component.error()).toBe('link failed');
+    expect(component.currentProcess()?.process_id).toBe('p-new');
+  });
+
+  // ── Process CRUD: roll back optimistic mutations on save failure ───────────
+
+  it('addStep rolls back the new step when updateProcess fails', () => {
+    const original = process({ steps: [step({ step_id: 's-1' })] });
+    component.currentProcess.set(original);
+
+    api.updateProcess.mockReturnValueOnce(throwError(() => ({ error: { detail: 'save failed' } })));
+    component.addStep('action');
+
+    expect(component.currentProcess()?.steps).toEqual([step({ step_id: 's-1' })]);
+    expect(component.error()).toBe('save failed');
+  });
+
+  it('addStep keeps the optimistic step when updateProcess succeeds', () => {
+    const original = process({ steps: [step({ step_id: 's-1' })] });
+    component.currentProcess.set(original);
+
+    component.addStep('action');
+
+    expect(component.currentProcess()?.steps.length).toBe(2);
+    expect(component.error()).toBeNull();
+  });
+
+  it('onStepUpdated rolls back the edit when updateProcess fails', () => {
+    const original = process({ steps: [step({ step_id: 's-1', name: 'Original name' })] });
+    component.currentProcess.set(original);
+
+    api.updateProcess.mockReturnValueOnce(throwError(() => ({ error: { detail: 'save failed' } })));
+    component.onStepUpdated(step({ step_id: 's-1', name: 'Edited name' }));
+
+    expect(component.currentProcess()?.steps).toEqual([step({ step_id: 's-1', name: 'Original name' })]);
+    expect(component.error()).toBe('save failed');
+  });
+
+  it('onStepDeleted restores the deleted step when updateProcess fails', () => {
+    const original = process({
+      steps: [step({ step_id: 's-1', next_steps: ['s-2'] }), step({ step_id: 's-2' })],
+    });
+    component.currentProcess.set(original);
+
+    api.updateProcess.mockReturnValueOnce(throwError(() => ({ error: { detail: 'save failed' } })));
+    component.onStepDeleted('s-2');
+
+    expect(component.currentProcess()?.steps).toEqual(original.steps);
+    expect(component.error()).toBe('save failed');
+  });
+
+  it('saveProcessMeta rolls back name/description when updateProcess fails', () => {
+    const original = process({ name: 'Original', description: 'Original desc' });
+    component.currentProcess.set(original);
+    component.processNameEdit.set('Edited');
+    component.processDescEdit.set('Edited desc');
+
+    api.updateProcess.mockReturnValueOnce(throwError(() => ({ error: { detail: 'save failed' } })));
+    component.saveProcessMeta();
+
+    expect(component.currentProcess()?.name).toBe('Original');
+    expect(component.currentProcess()?.description).toBe('Original desc');
+    expect(component.error()).toBe('save failed');
   });
 });

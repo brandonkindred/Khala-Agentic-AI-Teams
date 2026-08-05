@@ -258,6 +258,8 @@ class LLMClient(ABC):
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
         schema: "Optional[dict | type[BaseModel]]" = None,
+        structured_output_model: "Optional[type[BaseModel]]" = None,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -286,6 +288,23 @@ class LLMClient(ABC):
         enforced downstream by pydantic, exactly as when ``schema`` is
         omitted). Mutually exclusive with ``tools`` on clients that honor it
         (see ``OllamaLLMClient``).
+
+        ``structured_output_model`` (optional): the exact ``type[BaseModel]``
+        subclass passed as ``structured_output=`` to ``build_agent``/Strands,
+        forwarded here only when the call originates from Strands'
+        ``Model.structured_output()`` bridge. This is deliberately distinct
+        from ``schema``: implementations MAY use its presence to select a
+        response deterministically (e.g. a stub/test client routing by class
+        identity instead of prompt text), but MUST NOT let it alter
+        wire-protocol behavior toward a real provider — ``schema`` is the
+        parameter for that. Absent (``None``) on any call that doesn't
+        originate from that bridge. Unsupporting clients silently ignore it
+        via ``**kwargs``.
+
+        ``max_tokens`` (optional): a cap on generated output tokens, forwarded
+        by implementations that honor a token limit (e.g. ``OllamaLLMClient``,
+        ``ClaudeLLMClient``). ``None`` (default) means no caller-supplied cap
+        — the implementation falls back to its own default/resolution logic.
 
         Preconditions: ``objective`` is a non-empty string.
         """
@@ -328,11 +347,14 @@ class LLMClient(ABC):
         ``objective`` (required) — see :meth:`complete_json`.
 
         ``think`` controls chain-of-thought / reasoning mode (see ``complete_json``).
+
+        ``max_tokens`` is forwarded to ``complete_json()`` — see its docstring.
         """
         result = self.complete_json(
             prompt,
             objective=objective,
             temperature=temperature,
+            max_tokens=max_tokens,
             system_prompt=system_prompt,
             tools=tools,
             think=think,

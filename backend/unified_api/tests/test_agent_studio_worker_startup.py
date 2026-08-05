@@ -40,7 +40,9 @@ def test_worker_start_invoked_when_enabled(monkeypatch: pytest.MonkeyPatch) -> N
         return True
 
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
-    monkeypatch.setattr("agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start)
+    monkeypatch.setattr(
+        "agent_team_studio.agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start
+    )
     infos, warns = _capture_logs(monkeypatch)
 
     main._start_agent_studio_temporal_worker()
@@ -55,7 +57,7 @@ def test_worker_start_warns_when_temporal_disabled(monkeypatch: pytest.MonkeyPat
     WARNING rather than a misleading success line — and never raises."""
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
     monkeypatch.setattr(
-        "agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        "agent_team_studio.agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
         lambda: False,
     )
     infos, warns = _capture_logs(monkeypatch)
@@ -70,7 +72,7 @@ def test_worker_start_skipped_when_disabled(monkeypatch: pytest.MonkeyPatch) -> 
     called: list[bool] = []
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(False))
     monkeypatch.setattr(
-        "agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        "agent_team_studio.agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
         lambda: called.append(True),
     )
     main._start_agent_studio_temporal_worker()
@@ -84,7 +86,7 @@ def test_worker_start_skipped_when_temporal_worker_flag_disabled(monkeypatch: py
     monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", False)
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
     monkeypatch.setattr(
-        "agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        "agent_team_studio.agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
         lambda: called.append(True),
     )
     infos, warns = _capture_logs(monkeypatch)
@@ -106,7 +108,9 @@ def test_worker_start_invoked_when_temporal_worker_flag_enabled(monkeypatch: pyt
 
     monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", True)
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
-    monkeypatch.setattr("agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start)
+    monkeypatch.setattr(
+        "agent_team_studio.agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start
+    )
 
     main._start_agent_studio_temporal_worker()
 
@@ -118,7 +122,9 @@ def test_worker_start_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("worker exploded")
 
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
-    monkeypatch.setattr("agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _boom)
+    monkeypatch.setattr(
+        "agent_team_studio.agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _boom
+    )
     infos, warns = _capture_logs(monkeypatch)
 
     # Must not raise — startup is log-and-continue.

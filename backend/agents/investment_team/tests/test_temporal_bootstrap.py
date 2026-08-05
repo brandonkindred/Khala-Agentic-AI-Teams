@@ -277,6 +277,25 @@ def test_run_backtest_activity_raises_when_job_failed(monkeypatch) -> None:
         run_backtest_activity("job-x", {}, {}, "agent", [])
 
 
+def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
+    """A user-cancelled backtest must be reported as ``cancelled``, not the
+    default ``completed`` — the job store's actual terminal status wins."""
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    # Not completed at entry, cancelled after the worker runs.
+    statuses = iter([None, api_main._BT_JOB_STATUS_CANCELLED])
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: next(statuses))
+    monkeypatch.setattr(api_main, "_run_backtest_background", lambda *a: None)
+
+    result = run_backtest_activity("job-cancelled", {}, {}, "agent", [])
+
+    assert result == {"job_id": "job-cancelled", "status": "cancelled"}
+
+
 # ---------------------------------------------------------------------------
 # 3. Dispatch branch
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ strategy-lab cycles execute.
 
 from __future__ import annotations
 
+import time
 from collections.abc import MutableMapping
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -2627,12 +2628,10 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
           emitting before the terminal event would otherwise silently
           return an incomplete body instead of failing the test).
     """
-    import time as _time
-
     assert max_chunks > 0
     assert timeout_seconds > 0
     buf = ""
-    deadline = _time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds
     seen = 0
     for chunk in body_iter:
         buf += chunk
@@ -2640,7 +2639,7 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
         if '"type": "done"' in buf or '"type":"done"' in buf:
             return buf
         assert seen <= max_chunks, f"SSE stream exceeded {max_chunks} chunks without terminating"
-        assert _time.monotonic() < deadline, "SSE stream did not terminate within timeout"
+        assert time.monotonic() < deadline, "SSE stream did not terminate within timeout"
     raise AssertionError("SSE stream ended without a terminal done line")
 
 
@@ -2810,7 +2809,8 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
 
     segments = [s for s in body.split("\n\n") if s.strip()]
     snapshot_seg = next(s for s in segments if '"type": "snapshot"' in s)
-    snapshot = json.loads(snapshot_seg[len("data: ") :])
+    data_lines = [line[len("data: ") :] for line in snapshot_seg.splitlines() if line.startswith("data: ")]
+    snapshot = json.loads("\n".join(data_lines))
     assert snapshot["completed_cycles"] == 6
     assert snapshot["skipped_cycles"] == 1
     assert snapshot["errored_cycles"] == 1

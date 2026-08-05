@@ -86,7 +86,7 @@ def test_submit_rejects_request_with_parent_order_id() -> None:
 def test_submit_rejects_request_with_oco_group_id() -> None:
     book = OrderBook()
     bad_request = _base(qty=10.0).model_copy(update={"oco_group_id": "g1"})
-    with pytest.raises(ValueError, match="must not receive a request with parent_order_id"):
+    with pytest.raises(ValueError, match="oco_group_id='g1'"):
         book.submit(bad_request, submitted_at="2024-01-02", submitted_equity=100_000.0)
     assert book.all_pending() == []
 
@@ -547,8 +547,8 @@ def test_requeue_clamps_tiny_negative_residual_to_zero(residual) -> None:
 def test_requeue_preserves_remainder_above_relative_threshold() -> None:
     """A remainder safely above the relative tolerance threshold should not
     be clamped. For ``original_qty=10``, the threshold is ``1e-11``; a
-    remainder of ``1e-7`` is six orders of magnitude above it and clearly
-    a real partial fill, not float noise.
+    remainder of ``1e-5`` is well above it and clearly a real partial fill,
+    not float noise.
     """
     book = OrderBook()
     po = book.submit(
@@ -1117,6 +1117,10 @@ def test_submit_attached_rejects_bad_parent_order_id(bad_parent) -> None:
 
 @pytest.mark.parametrize("bad_group", [123, None, "", 1.5])
 def test_submit_attached_rejects_bad_oco_group_id(bad_group) -> None:
+    """``submit_attached`` must reject any non-string or empty
+    ``oco_group_id`` with a ``TypeError`` and leave the book's pending
+    orders unchanged.
+    """
     book = OrderBook()
     parent = _bracket_parent(book)
     with pytest.raises(TypeError, match="oco_group_id must be a non-empty str"):
@@ -1367,6 +1371,9 @@ def test_prune_evicts_fully_resolved_parents() -> None:
 
 
 def test_expire_day_orders_uses_original_submitted_at() -> None:
+    """A DAY order requeued after a partial fill must expire at the close of
+    its original session date, not the date of the most recent requeue.
+    """
     book = OrderBook()
     po = book.submit(
         _base(qty=10.0, tif=TimeInForce.DAY),
