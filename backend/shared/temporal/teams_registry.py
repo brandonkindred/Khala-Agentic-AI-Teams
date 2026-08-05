@@ -45,11 +45,11 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     "sales": "sales_team.temporal",
     "road_trip_planning": "road_trip_planning_team.temporal",
     "startup_advisor": "startup_advisor.temporal",
-    "user_agent_founder": "user_agent_founder.temporal",
-    "agentic_team_provisioning": "agentic_team_provisioning.temporal",
+    "user_agent_founder": "agent_team_studio.user_agent_founder.temporal",
+    "agentic_team_provisioning": "agent_team_studio.agentic_team_provisioning.temporal",
     "deepthought": "deepthought.temporal",
     "coding_team": "software_engineering_team.temporal.coding_team_workflow",
-    "agent_provisioning": "agent_provisioning_team.temporal",
+    "agent_provisioning": "agent_team_studio.agent_provisioning_team.temporal",
     "job_matching": "job_matching_team.temporal",
     "soc2_compliance": "soc2_compliance_team.temporal",
     # The code review agent runs Temporal by default; its worker serves the
@@ -138,9 +138,7 @@ def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]
             max_concurrent = _resolve_max_concurrent_activities(mod)
             if max_concurrent is not None:
                 worker_kwargs["max_concurrent_activities"] = max_concurrent
-            started = start_team_worker(
-                team, workflows=workflows, activities=activities, **worker_kwargs
-            )
+            started = start_team_worker(team, workflows=workflows, activities=activities, **worker_kwargs)
             results[team] = started
         except Exception as e:
             logger.exception("Failed to start Temporal worker for %s: %s", team, e)

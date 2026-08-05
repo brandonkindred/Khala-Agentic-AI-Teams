@@ -3,7 +3,7 @@
 Drives ``.run()`` directly as a plain object (no Temporal server, no
 ``pytest.mark.integration``), patching ``temporalio.workflow.execute_activity``
 and ``temporalio.workflow.wait_condition`` in place -- the same lightweight
-pattern ``agentic_team_provisioning/tests/test_temporal_activity.py`` uses for
+pattern ``agent_team_studio/agentic_team_provisioning/tests/test_temporal_activity.py`` uses for
 ``AgenticPipelineWorkflow``.
 
 ``run_pipeline_activity`` now emits ``{"outcome": "paused", ...}`` under

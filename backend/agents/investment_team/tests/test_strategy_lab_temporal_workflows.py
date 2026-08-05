@@ -10,7 +10,7 @@ gate-result / tracker threading across re-entries, and short-circuit assembly â€
 with every activity mocked.
 
 Pattern mirrors the codebase's other workflow tests
-(``agentic_team_provisioning/tests/test_temporal_activity.py``): monkeypatch
+(``agent_team_studio/agentic_team_provisioning/tests/test_temporal_activity.py``): monkeypatch
 ``temporalio.workflow.execute_activity`` to dispatch by activity-function name
 to canned responses and drive ``run()`` directly with ``asyncio.run`` â€” no live
 Temporal server or sandbox needed. The dedicated real-sandbox regression guard

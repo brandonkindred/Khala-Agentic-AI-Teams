@@ -1,5 +1,5 @@
 """Temporal activities for GitHub-issue-driven coding-team hooks (branch prep,
-plus the sibling publish/failure-notice activities joining this module next).
+publish, plus the sibling failure-notice activity joining this module next).
 
 Deliberately its own module rather than appended to ``coding_team_workflow.py``:
 the co-location note in ``system_design/hitl_pause_resume_contract.md`` is
@@ -90,3 +90,115 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
         issue_number=request.get("issue_number"),
     )
     return {"ok": ok, "error": err, "notes": notes}
+
+
+_PUBLISH_REQUIRED_FIELDS = ("job_id", "owner", "repo", "repo_path", "issue_number", "token")
+_PUBLISH_MERGED_WORK_FIELDS = ("base", "integration_branch", "issue_title")
+
+
+@activity.defn(name="coding_team_github_publish")
+def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Publish a GitHub-issue-driven run's result as a Temporal activity.
+
+    Wraps ``_finish_already_complete``/``_publish_merged_work``
+    (``api/orchestration.py``) unchanged, dispatching on the job's own
+    ``already_complete`` flag exactly as the thread-mode
+    ``_run_with_github_hooks`` orchestrator does immediately before calling
+    them: an already-complete run gets a close-recommendation comment and no
+    PR; every other run publishes the merged work (fast-forward, push, draft
+    PR create/reuse, comments), annotating the PR and job status when some
+    tasks failed to merge. Not yet called by ``CodingTeamWorkflow`` (workflow
+    wiring is a separate, later follow-up); does not itself decide whether
+    publishing is warranted for a given job -- skipping publish entirely when
+    nothing merged stays the caller's responsibility, exactly as it is today
+    in ``_run_with_github_hooks``.
+
+    Preconditions:
+        - ``request`` carries non-empty ``job_id``, ``owner``, ``repo``,
+          ``repo_path``, ``issue_number``, and ``token``; missing/falsy
+          values raise ``ValueError`` naming only the missing field NAMES
+          before any GitHub/job-store call runs (an activity exception is
+          recorded in Temporal history, so the payload -- which carries
+          ``token`` -- must never appear in the message).
+        - When the job identified by ``job_id`` is not already-complete (per
+          the job store's own ``already_complete`` flag), ``request`` must
+          additionally carry non-empty ``base``, ``integration_branch``, and
+          ``issue_title``, checked only once that branch is known and before
+          any GitHub call runs; missing/falsy values raise a second, separate
+          ``ValueError`` naming only those missing fields.
+        - May also carry ``remote`` (defaults to ``"origin"``, matching
+          ``RunFromGitHubRequest``'s own default) and
+          ``cleanup_checkout_on_success`` (defaults to ``False``).
+        - ``token`` is a plain-text GitHub token for now (activity-side
+          resolution from the encrypted job record is a separate, later
+          concern).
+    Postconditions:
+        - Delegates to ``_finish_already_complete`` or ``_publish_merged_work``
+          exactly as thread mode does, then returns the job's resulting
+          record (``get_job(job_id)``), or ``{"job_id": job_id, "status":
+          "unknown"}`` when the job store has nothing for it -- matching
+          ``run_pipeline_activity``'s existing return contract so a future
+          workflow caller can branch on ``status``/``github_pr_url``/``error``.
+        - Does NOT catch exceptions the wrapped functions raise -- they
+          propagate uncaught, exactly as they do today through
+          ``_run_with_github_hooks``'s call sites (no surrounding try/except
+          there either), so Temporal's own activity failure/retry semantics
+          apply.
+    """
+    missing = [f for f in _PUBLISH_REQUIRED_FIELDS if not request.get(f)]
+    if missing:
+        raise ValueError(f"github_publish_activity missing required fields: {missing!r}")
+
+    from software_engineering_team.api import coding_team_main as _main
+    from software_engineering_team.api.orchestration import (
+        _finish_already_complete,
+        _publish_merged_work,
+    )
+
+    job_id = request["job_id"]
+    num = request["issue_number"]
+    job_after = _main.get_job(job_id) or {}
+    already_complete = bool(job_after.get("already_complete"))
+
+    if not already_complete:
+        missing_publish = [f for f in _PUBLISH_MERGED_WORK_FIELDS if not request.get(f)]
+        if missing_publish:
+            raise ValueError(
+                "github_publish_activity missing required fields for merged-work "
+                f"publish: {missing_publish!r}"
+            )
+
+    req_obj = _main.RunFromGitHubRequest(
+        owner=request["owner"],
+        repo=request["repo"],
+        repo_path=request["repo_path"],
+        remote=request.get("remote") or "origin",
+        cleanup_checkout_on_success=bool(request.get("cleanup_checkout_on_success")),
+    )
+
+    with _main.GitHubClient(token=request["token"]) as client:
+        if already_complete:
+            issue_obj = _main.Issue(
+                number=num, title="", body="", state="open", html_url="", labels=()
+            )
+            _finish_already_complete(client, job_id, req_obj, issue_obj, job_after)
+        else:
+            issue_obj = _main.Issue(
+                number=num,
+                title=request["issue_title"],
+                body="",
+                state="open",
+                html_url="",
+                labels=(),
+            )
+            _publish_merged_work(
+                client,
+                job_id,
+                req_obj,
+                issue_obj,
+                request["base"],
+                request["integration_branch"],
+                request["token"],
+            )
+
+    return _main.get_job(job_id) or {"job_id": job_id, "status": "unknown"}

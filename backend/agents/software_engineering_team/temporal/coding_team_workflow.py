@@ -9,6 +9,7 @@ from temporalio import activity, workflow
 
 from software_engineering_team.temporal.coding_team_github_activities import (
     github_branch_prep_activity,
+    github_publish_activity,
 )
 
 
@@ -271,7 +272,7 @@ class CodingTeamWorkflow:
 
 
 WORKFLOWS = [CodingTeamWorkflow]
-ACTIVITIES = [run_pipeline_activity, github_branch_prep_activity]
+ACTIVITIES = [run_pipeline_activity, github_branch_prep_activity, github_publish_activity]
 
 # NB: no worker self-boot at import time. This module DEFINES CodingTeamWorkflow,
 # so the temporalio sandbox re-imports it during workflow registration; a top-level

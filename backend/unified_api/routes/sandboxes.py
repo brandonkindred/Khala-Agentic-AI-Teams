@@ -3,7 +3,7 @@ Agent Console sandbox lifecycle API (issue #265, Phase 3).
 
 All routes are keyed by ``agent_id`` — one sandbox per specialist agent —
 rather than by team. The new agent-keyed lifecycle owner lives in
-``agent_provisioning_team.sandbox``.
+``agent_team_studio.agent_provisioning_team.sandbox``.
 
 - GET    /api/agents/sandboxes                   — list all tracked sandboxes
 - GET    /api/agents/sandboxes/metrics           — pool-wide live counters (#302)
@@ -18,7 +18,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from agent_provisioning_team.sandbox import (
+from agent_team_studio.agent_provisioning_team.sandbox import (
     DockerUnavailableError,
     SandboxAcquireFailedError,
     SandboxHandle,
@@ -28,11 +28,11 @@ from agent_provisioning_team.sandbox import (
     metrics,
     status,
 )
-from agent_provisioning_team.sandbox.provisioner import DockerError
+from agent_team_studio.agent_provisioning_team.sandbox.provisioner import DockerError
 
 # Temporal-aware mutators (durable workflows when Temporal is enabled, direct
 # in-process calls otherwise). Read-only routes below stay direct.
-from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox, teardown_sandbox
+from agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox, teardown_sandbox
 
 logger = logging.getLogger(__name__)
 
