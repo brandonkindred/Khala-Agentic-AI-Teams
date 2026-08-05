@@ -1,11 +1,15 @@
 """Tests for the reduce-phase findings synthesis (Stage 2).
 
-``synthesis.py`` owns the narrative only: a single findings-only LLM pass that
-merges per-chunk summaries/notes. These tests cover the digest builder (ordering
-and completeness, no code), the synthesis call's success path and its ``None``
-fallback on every failure mode, and the coordinator integration — synthesis is
-used for multi-chunk reviews, skipped for single-chunk ones, never mutates the
-verdict or issues, and falls back to concatenation when it returns ``None``.
+``synthesis.py`` owns the reduce-phase narrative synthesis: a findings-only LLM
+pass that merges per-chunk summaries/notes (``synthesize_review_findings``),
+and a separate spec-compliance LLM pass that checks the merged findings
+against the full spec/acceptance-criteria text once
+(``synthesize_spec_compliance``). These tests cover the digest builder
+(ordering and completeness, no code), both synthesis calls' success paths and
+their ``None``/fallback behavior on every failure mode, and the coordinator
+integration — ``synthesize_review_findings`` is used for multi-chunk reviews,
+skipped for single-chunk ones, never mutates the verdict or issues, and falls
+back to concatenation when it returns ``None``.
 """
 
 from __future__ import annotations
@@ -385,6 +389,9 @@ class _NoNotesClient(DummyLLMClient):
     """Per-chunk summaries, but the synthesis pass yields an empty summary → None."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        """Route each chunk-review call to fixed per-chunk output; the synthesis
+        pass call (identified by falling through both chunk markers) returns an
+        empty summary so the coordinator falls back to concatenation."""
         if "### a.py ###" in prompt:
             return {
                 "approved": True,
@@ -407,6 +414,9 @@ class _SynthOkClient(DummyLLMClient):
     """One chunk flags a critical issue; the synthesis pass returns clean prose."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        """Route each chunk-review call to fixed per-chunk output (one chunk
+        flags a critical issue, the other is clean); the synthesis pass call
+        returns a fixed, recognizable summary/notes pair."""
         if "### a.py ###" in prompt:
             return {
                 "approved": False,
@@ -436,15 +446,25 @@ class _SynthOkClient(DummyLLMClient):
 
 
 def test_coordinator_falls_back_to_concatenation_when_synthesis_unavailable() -> None:
+    """When the narrative synthesis pass returns an empty summary, the
+    coordinator must fall back to concatenating per-chunk summaries and
+    spec_compliance_notes without changing the deterministic verdict or issue
+    list."""
     result = run_coordinator(
         _NoNotesClient(),
         CodeReviewInput(files=_two_chunk_files(), task_description="t", language="python"),
     )
     assert "alpha summary" in result.summary
     assert "beta summary" in result.summary
+    # Per-chunk spec_compliance_notes are both "" here, so the concatenation
+    # fallback must also be "" -- not the synthesis pass's (unused) "ignored".
+    assert result.spec_compliance_notes == ""
 
 
 def test_coordinator_uses_synthesis_without_mutating_verdict_or_issues() -> None:
+    """When the synthesis pass succeeds, its summary/notes replace the
+    per-chunk narrative, but the deterministic verdict and issue list --
+    already decided before synthesis runs -- are never touched."""
     result = run_coordinator(
         _SynthOkClient(),
         CodeReviewInput(files=_two_chunk_files(), task_description="t", language="python"),
@@ -459,6 +479,9 @@ def test_coordinator_uses_synthesis_without_mutating_verdict_or_issues() -> None
 
 
 def test_single_chunk_makes_no_synthesis_call(monkeypatch) -> None:
+    """A submission that reviews as exactly one chunk has nothing to merge, so
+    the coordinator must skip the synthesis LLM call entirely and pass that
+    chunk's own summary/notes through verbatim."""
     calls: list[int] = []
     real = coordinator_mod.synthesize_review_findings
 
@@ -484,6 +507,8 @@ def test_single_chunk_makes_no_synthesis_call(monkeypatch) -> None:
 
 
 def test_multi_chunk_invokes_synthesis_exactly_once(monkeypatch) -> None:
+    """A submission that reviews as multiple chunks must invoke the synthesis
+    pass exactly once per run, not once per chunk."""
     calls: list[int] = []
     real = coordinator_mod.synthesize_review_findings
 
