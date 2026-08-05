@@ -395,10 +395,10 @@ class WritingGuidelinesBody(BaseModel):
     Cardinalities encode the prompt's stated "3-4" for each list.
     """
 
-    voice_principles: List[str] = Field(min_length=3, max_length=4)
-    style_dos: List[str] = Field(min_length=3, max_length=4)
-    style_donts: List[str] = Field(min_length=3, max_length=4)
-    editorial_quality_bar: List[str] = Field(min_length=3, max_length=4)
+    voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    style_dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    style_donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    editorial_quality_bar: List[NonEmptyStr] = Field(min_length=3, max_length=4)
 
 
 class WritingGuidelinesOutput(PersonaProfilesOutput):
