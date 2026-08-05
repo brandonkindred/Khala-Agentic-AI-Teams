@@ -66,7 +66,6 @@ If no vulnerabilities are found, return empty vulnerabilities list. Be thorough 
         '  - "location": string (file path, function name, or line reference)\n'
         '  - "recommendation": string (REQUIRED – concrete instruction for the coding agent: what code to add/change to remediate this)\n'
         '- "summary": string (overall assessment)\n'
-        '- "remediations": list of {"issue", "recommendation"} for reference\n'
-        '- "suggested_commit_message": string'
+        '- "remediations": list of {"issue", "recommendation"} for reference'
     ),
 )

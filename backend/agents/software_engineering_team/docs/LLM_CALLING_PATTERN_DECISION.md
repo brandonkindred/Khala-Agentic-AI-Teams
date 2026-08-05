@@ -75,7 +75,7 @@ is not exhaustive:
 
 ### Pattern 2 — `run_structured_persona`
 
-Justified for the four existing top-level persona agents (security, QA,
+Justified for the three existing top-level persona agents (QA,
 accessibility, integration): Strands' `structured_output_model` forced
 tool-choice mechanism and a caller-authored, safe-by-default typed
 fallback are a good fit for a single top-level agent producing one typed
@@ -84,6 +84,15 @@ reasonably choose this pattern instead of Pattern 1 if its shape — one
 agent, one structured output type, one caller-owned fallback value — fits
 it better. See the audit's Pattern 2 section for the exact
 construction-vs-call exception boundary.
+
+`security_agent` (`CybersecurityExpertAgent`) was originally a fourth
+Pattern 2 caller but has since migrated to `run_single_shot_review`
+(below, schema-validated mode) to gain a bounded corrective retry on a
+malformed reply, which Pattern 2 does not offer. That migration is a
+change to an *existing* agent, not a new agent's pattern choice, so it
+falls under this document's own "migrating any existing agent between
+patterns" out-of-scope carve-out rather than the "no new hand-rolled call
+sites" rule below (Pattern 5), which is scoped to new agents.
 
 ### Pattern 3 — `DevOpsSingleShotAgent`
 
@@ -150,6 +159,12 @@ in both places instead of two parallel implementations of it. The
 plain-JSON branch still has no canonical entrypoint to delegate to (`schema`
 is a required parameter of `generate_structured`), so it resolves a client
 and calls `complete_json` directly, as documented above.
+
+`security_agent/agent.py` (`CybersecurityExpertAgent`) is the first such
+migration: it now calls `run_single_shot_review` in schema-validated mode
+(`schema=SecurityLLMResponse`) in place of its former Pattern 2
+(`run_structured_persona`) call, gaining the bounded corrective retry
+Pattern 2 doesn't offer.
 
 ## Out of scope
 
