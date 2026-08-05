@@ -1938,6 +1938,47 @@ def test_job_progress_percent_clamps_out_of_range_values() -> None:
     assert api_main._job_progress_percent(-1, 4) == 0  # negative completed
 
 
+@pytest.mark.parametrize(
+    "completed,total",
+    [("not-a-number", 4), (4, "not-a-number"), (None, 4), ([], 4), ({}, {})],
+)
+def test_job_progress_percent_tolerates_non_numeric_inputs(completed, total) -> None:
+    """Regression: malformed in-memory or persisted state (e.g. a
+    non-numeric string from durable-record corruption) must not raise
+    TypeError -- list_strategy_lab_jobs's in-memory loop calls this
+    unguarded by any try/except, unlike the persisted-job merge loop, so a
+    raise here would crash the whole endpoint despite its own documented
+    "always returns 200" contract."""
+    from investment_team.api import main as api_main
+
+    assert api_main._job_progress_percent(completed, total) == 0
+
+
+def test_list_strategy_lab_jobs_tolerates_malformed_in_memory_progress_fields(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a malformed in-memory run (non-numeric completed_cycles/
+    total_cycles, e.g. from corrupted durable state merged in via
+    normalize_persisted_job) must not crash the endpoint -- it must degrade
+    to a 0% progress entry instead, honoring the documented "always returns
+    200" contract for the in-memory path, not just the persisted-job path."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-malformed-progress"] = {
+        "run_id": "run-malformed-progress",
+        "status": "completed",
+        "completed_cycles": "not-a-number",
+        "total_cycles": "also-not-a-number",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    job = next(j for j in resp.json()["jobs"] if j["job_id"] == "run-malformed-progress")
+    assert job["progress"] == 0
+
+
 # ---------------------------------------------------------------------------
 # list_strategy_lab_jobs — persisted merge + running filter
 # ---------------------------------------------------------------------------

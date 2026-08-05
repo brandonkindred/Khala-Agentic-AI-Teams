@@ -3012,21 +3012,31 @@ class InvestmentJobsListResponse(BaseModel):
     jobs: List[InvestmentJobSummary] = Field(default_factory=list)
 
 
-def _job_progress_percent(completed: int, total: int) -> int:
-    """Compute a job's completion percentage, tolerating a non-positive total.
+def _job_progress_percent(completed: object, total: object) -> int:
+    """Compute a job's completion percentage, tolerating malformed state.
 
     Preconditions:
-        - ``completed`` and ``total`` are integers (possibly 0 or negative,
-          e.g. from malformed persisted state).
+        - None. ``completed``/``total`` are typically integers (possibly 0
+          or negative), but callers pass values read from in-memory or
+          durably-persisted run state without a prior type check, so a
+          malformed record (e.g. a non-numeric string) must not crash this
+          function or its callers.
 
     Postconditions:
-        - Returns ``0`` when ``total <= 0`` (never divides by a non-positive
-          total, so this can never raise ``ZeroDivisionError``).
+        - Returns ``0`` when either value can't be coerced to an ``int``
+          (e.g. a non-numeric string, ``None``, a list/dict), or when the
+          coerced ``total <= 0`` -- never divides by a non-positive total,
+          so this can never raise ``ZeroDivisionError`` or ``TypeError``.
         - Otherwise returns ``int((completed / total) * 100)``, clamped to
           ``0..100`` -- ``completed`` exceeding ``total`` or being negative
           (both possible from malformed persisted state) can never produce
           an out-of-range percentage.
     """
+    try:
+        completed = int(completed)
+        total = int(total)
+    except (TypeError, ValueError):
+        return 0
     if total <= 0:
         return 0
     return max(0, min(100, int((completed / total) * 100)))
