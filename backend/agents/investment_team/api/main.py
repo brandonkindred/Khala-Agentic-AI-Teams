@@ -529,7 +529,9 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
         lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
         and mapping a present, dict-shaped ``current_cycle`` to a
-        ``StrategyLabCycleProgress`` (``None`` when absent or not a dict).
+        ``StrategyLabCycleProgress`` (``None`` when absent, not a dict, or a
+        dict that fails ``StrategyLabCycleProgress`` validation — e.g. a
+        malformed/partial persisted snapshot missing a required field).
         ``batch_size`` is
         the one field that deliberately does NOT fall back to the model's
         structural default of ``1``: an absent ``batch_size`` means this is a
@@ -539,6 +541,17 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         Pure: ``state`` is not mutated.
     """
     cc = state.get("current_cycle")
+    current_cycle = None
+    if isinstance(cc, dict):
+        try:
+            current_cycle = StrategyLabCycleProgress(**cc)
+        except ValidationError:
+            logger.warning(
+                "Discarding malformed current_cycle for run %s: %r",
+                state.get("run_id"),
+                cc,
+                exc_info=True,
+            )
     return StrategyLabRunStatusResponse(
         run_id=state["run_id"],
         status=state.get("status", "unknown"),
@@ -549,7 +562,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         errored_cycles=state.get("errored_cycles", 0),
         errored_details=state.get("errored_details", []),
         tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
-        current_cycle=StrategyLabCycleProgress(**cc) if isinstance(cc, dict) else None,
+        current_cycle=current_cycle,
         completed_record_ids=state.get("completed_record_ids", []),
         error=state.get("error"),
         batch_size=state.get("batch_size", state.get("total_cycles", 1)),
@@ -1536,10 +1549,14 @@ def workflow_queues() -> QueuesResponse:
     Postconditions:
         Takes no inputs; always returns 200. Returns a ``_lock``-protected
         snapshot of every queue name currently present in
-        ``_workflow_state.queues`` — an empty dict if none have been
-        populated yet, since queues are created lazily (e.g. by
-        ``promotion_decision``'s escalation path). Each queue name maps to
-        its full ordered list of items, converted to ``QueueItemResponse``.
+        ``_workflow_state.queues`` — pre-populated with the fixed set of
+        known queue names (``research``, ``portfolio_design``,
+        ``validation``, ``promotion``, ``execution``, ``escalation``) by
+        ``WorkflowState``'s ``default_factory``; ``promotion_decision``
+        only appends to one of these existing queues after validating the
+        escalation payload's ``queue`` value against them, it does not
+        create new queue keys. Each queue name maps to its full ordered
+        list of items, converted to ``QueueItemResponse``.
     """
     with _lock:
         queues = {}

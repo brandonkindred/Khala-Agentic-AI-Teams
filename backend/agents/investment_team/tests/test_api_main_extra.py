@@ -1377,6 +1377,20 @@ def test_run_state_to_response_tolerates_non_dict_current_cycle() -> None:
     assert response.current_cycle is None
 
 
+def test_run_state_to_response_tolerates_malformed_dict_current_cycle() -> None:
+    """A ``current_cycle`` dict that's missing a required field (e.g. ``phase``)
+    must degrade to ``None`` instead of raising a Pydantic ValidationError."""
+    from investment_team.api import main as api_main
+
+    state = {
+        "run_id": "run-malformed-dict",
+        "status": "running",
+        "current_cycle": {"cycle_index": 1},
+    }
+    response = api_main._run_state_to_response(state)
+    assert response.current_cycle is None
+
+
 # ---------------------------------------------------------------------------
 # run_paper_trading validation branches
 # ---------------------------------------------------------------------------
@@ -1563,9 +1577,7 @@ def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         api_main, "_bt_mark_all_running_jobs_failed", lambda reason: calls.append(reason)
     )
-    monkeypatch.setattr(
-        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
-    )
+    monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", lambda: None, raising=False)
 
     api_main._run_investment_service_shutdown()
 
@@ -1580,9 +1592,7 @@ def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch)
         raise RuntimeError("job service unreachable")
 
     monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", _boom)
-    monkeypatch.setattr(
-        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
-    )
+    monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", lambda: None, raising=False)
 
     api_main._run_investment_service_shutdown()  # must not raise
 
