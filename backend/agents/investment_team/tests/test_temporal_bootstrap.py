@@ -226,8 +226,7 @@ def test_run_backtest_activity_reconstructs_models_and_runs_worker(monkeypatch) 
     monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: strat_sentinel)
     monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: cfg_sentinel)
     # Job is not yet complete/failed → run, then report completed.
-    statuses = iter([None, api_main._BT_JOB_STATUS_COMPLETED])
-    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: next(statuses))
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
 
     calls = []
     monkeypatch.setattr(
