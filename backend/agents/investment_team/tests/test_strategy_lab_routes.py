@@ -247,6 +247,37 @@ def test_run_strategy_lab_starts_run_when_idle(api_client) -> None:
     assert body["run_id"] in api_main._active_runs
 
 
+def test_run_strategy_lab_locked_recheck_catches_race_past_early_check(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The early, unlocked ``_ensure_no_active_run()`` call is only a
+    fast-fail optimization -- it must not be the ONLY guard. Bypass it (as a
+    stand-in for a concurrent request that raced past it before another run's
+    ``_active_runs`` write landed) and confirm the second, ``_lock``-guarded
+    recheck at the actual write still rejects with 409 and leaves no partial
+    entry behind.
+
+    Regression test for the run_id-vs-run_id TOCTOU: two concurrent
+    run/resume/restart calls for DIFFERENT run_ids could previously both pass
+    the early check before either wrote "running", since the per-run_id
+    transition lock only serializes same-run_id transitions.
+    """
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_ensure_no_active_run", lambda: None)
+    api_main._active_runs["already-running"] = {"run_id": "already-running", "status": "running"}
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+
+    assert resp.status_code == 409
+    assert "already in progress" in resp.json()["detail"]
+    # No new run_id was left half-registered by the aborted write.
+    assert set(api_main._active_runs.keys()) == {"already-running"}
+
+
 # ---------------------------------------------------------------------------
 # resume_strategy_lab_run + restart_strategy_lab_run
 # ---------------------------------------------------------------------------
@@ -386,6 +417,33 @@ def test_restart_strategy_lab_run_409_when_other_active(lab_job_client, api_clie
     api_main._active_runs["other"] = {"run_id": "other", "status": "running"}
     resp = api_client.post("/strategy-lab/runs/run-f/restart")
     assert resp.status_code == 409
+
+
+def test_restart_strategy_lab_run_locked_recheck_catches_race_past_early_check(
+    lab_job_client, monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Same TOCTOU regression as run_strategy_lab's equivalent test, for
+    restart: bypass the early, unlocked ``_ensure_no_active_run()`` call (a
+    stand-in for a concurrent request that raced past it before another
+    run's ``_active_runs`` write landed) and confirm the second, ``_lock``-
+    guarded recheck immediately before this endpoint's own write still
+    rejects with 409 -- leaving the target run's pre-restart state
+    untouched, not overwritten with an optimistic "running" reset."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_ensure_no_active_run", lambda: None)
+    original = {
+        "run_id": "run-f2",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    api_main._active_runs["run-f2"] = dict(original)
+    api_main._active_runs["other"] = {"run_id": "other", "status": "running"}
+
+    resp = api_client.post("/strategy-lab/runs/run-f2/restart")
+
+    assert resp.status_code == 409
+    assert api_main._active_runs["run-f2"] == original
 
 
 def test_restart_strategy_lab_run_happy_path(lab_job_client, api_client) -> None:
