@@ -2452,11 +2452,19 @@ class TestMainOrchestratorRegistration:
 # ===========================================================================
 # FENCE-RECOVERY REGRESSION TESTS
 #
-# Each of these 8 agents now routes its raw LLM completion through
+# Each of these 7 agents now routes its raw LLM completion through
 # complete_json_with_continuation() instead of a bare json.loads(). These
 # tests exercise the real recovery path (llm_mod.Agent is mocked at the
 # shared/llm.py level, not at complete_json_with_continuation itself) to
 # prove a markdown-fenced response no longer crashes the agent.
+#
+# devsecops_review is deliberately absent here: it was retrofitted onto
+# software_engineering_team.shared.single_shot_review.run_single_shot_review
+# (a raw LLMClient.complete_json call), which no longer goes through a
+# Strands Agent or complete_json_with_continuation at all, so this
+# fence-recovery mechanism doesn't apply to it. Fenced/markdown-wrapped
+# replies are the underlying LLMClient implementation's responsibility now,
+# same as every other complete_json-based caller (e.g. code_review_agent).
 # ===========================================================================
 
 
@@ -2554,18 +2562,6 @@ def _fenced_infra_patch_case():
     )
 
 
-def _fenced_devsecops_case():
-    from software_engineering_team.devops_team.devsecops_review_agent import (
-        DevSecOpsReviewAgent,
-        DevSecOpsReviewInput,
-    )
-
-    return (
-        DevSecOpsReviewAgent(_strands_model_double()),
-        DevSecOpsReviewInput(task_description="test", artifacts={}),
-    )
-
-
 def _fenced_task_clarifier_case():
     return (
         DevOpsTaskClarifierAgent(_strands_model_double()),
@@ -2597,10 +2593,6 @@ def _check_fenced_doc_runbook(out) -> None:
 
 def _check_fenced_infra_patch(out) -> None:
     assert "main.tf" in out.patched_artifacts
-
-
-def _check_fenced_devsecops(out) -> None:
-    assert out.approved is True
 
 
 def _check_fenced_task_clarifier(out) -> None:
@@ -2671,12 +2663,6 @@ _FENCED_RECOVERY_CASES = [
             "edits_applied": 1,
         },
         _check_fenced_infra_patch,
-    ),
-    (
-        "devsecops_review",
-        _fenced_devsecops_case,
-        {"approved": True, "findings": [], "summary": "fenced sec ok"},
-        _check_fenced_devsecops,
     ),
     (
         "task_clarifier",
