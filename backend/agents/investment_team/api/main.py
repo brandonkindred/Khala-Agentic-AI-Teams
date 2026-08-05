@@ -4811,11 +4811,26 @@ def get_paper_trading_results(
     ``not_performant_count`` are derived from the returned ``items`` by
     ``PaperTradingResultsResponse`` itself, so they always match the
     (possibly filtered) list.
+
+    Postconditions:
+        A session record that fails ``PaperTradingSession.parse_persisted`` is
+        logged and excluded from ``items`` rather than raising — matching the
+        recovery pass in ``_recover_orphaned_paper_trading_sessions`` and the
+        single-session lookup in ``get_paper_trading_session``. One corrupt
+        in-memory record must not 500 this bulk endpoint for every caller.
     """
     with _lock:
         raw = list(_paper_trading_sessions.values())
 
-    items = [PaperTradingSession.parse_persisted(r) for r in raw]
+    items: List[PaperTradingSession] = []
+    for r in raw:
+        try:
+            items.append(PaperTradingSession.parse_persisted(r))
+        except Exception:
+            logger.warning(
+                "Paper-trade results: skipping unparseable session record",
+                exc_info=True,
+            )
     items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
 
     if verdict is not None:
