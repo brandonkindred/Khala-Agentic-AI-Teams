@@ -91,6 +91,50 @@ def test_run_llm_review_calls_coordinator_with_skip_tail_passes(monkeypatch):
     assert input_data.acceptance_criteria == ["AC1", "AC2"]
 
 
+def test_run_llm_review_defaults_language_to_profile_default(monkeypatch):
+    """With no ``language`` argument, the fallback must still set
+    ``CodeReviewInput.language`` to this team's own default ("python") rather
+    than leaving it unset and falling back to ``CodeReviewInput``'s own
+    "typescript" default -- backend code reviewed under the wrong language
+    label would misdirect the LLM's language-specific checks."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
+
+    captured: dict = {}
+
+    def _spy(llm, input_data, *args, **kwargs):
+        captured["input_data"] = input_data
+        return CodeReviewOutput(approved=True, issues=[])
+
+    monkeypatch.setattr(review_mod, "run_coordinator", _spy)
+
+    _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
+
+    assert captured["input_data"].language == "python"
+
+
+def test_run_llm_review_forwards_explicit_language(monkeypatch):
+    """An explicit ``language`` argument reaches ``CodeReviewInput`` verbatim,
+    matching the external ``code_review_agent`` path's handling in
+    ``shared.v2_review._code_review_step``."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
+
+    captured: dict = {}
+
+    def _spy(llm, input_data, *args, **kwargs):
+        captured["input_data"] = input_data
+        return CodeReviewOutput(approved=True, issues=[])
+
+    monkeypatch.setattr(review_mod, "run_coordinator", _spy)
+
+    _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"}, language="go")
+
+    assert captured["input_data"].language == "go"
+
+
 def test_run_llm_review_forwards_review_context(monkeypatch):
     """The LLM fallback reviewer (used when no external code_review_agent is
     configured, or it fails) also sees architecture/spec_content -- previously

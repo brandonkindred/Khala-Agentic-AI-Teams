@@ -78,6 +78,7 @@ def _run_llm_review(
     llm: LLMClient,
     task: Task,
     files: Dict[str, str],
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> LlmReviewOutput[ReviewIssue]:
@@ -95,6 +96,12 @@ def _run_llm_review(
     Preconditions:
         - See ``code_review_agent.coordinator.run_coordinator`` for ``llm``.
         - ``files`` maps file paths to their full source text.
+        - ``language`` is forwarded to ``CodeReviewInput`` so the coordinator's
+          chunk reviewer prompts against this team's actual language instead of
+          ``CodeReviewInput.language``'s ``typescript`` default; defaults to
+          this team's ``PROFILE.default_language`` ("python") so an existing
+          caller that does not pass it yet keeps reviewing under the correct
+          language.
         - ``review_context`` bundles the caller's system architecture and
           project specification, when available; ``None`` means "nothing to
           add" so a caller without this context yet keeps working unchanged.
@@ -133,6 +140,7 @@ def _run_llm_review(
         acceptance_criteria=task.acceptance_criteria or [],
         architecture=ctx.architecture,
         spec_content=ctx.spec_content or "",
+        language=language,
         skip_tail_passes=True,
     )
     result = run_coordinator(llm, cr_input)

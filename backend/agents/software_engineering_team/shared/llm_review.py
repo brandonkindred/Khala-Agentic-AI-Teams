@@ -226,12 +226,15 @@ def run_team_llm_review(
 ) -> LlmReviewOutput[IssueT]:
     """Team-level entry point for the LLM review fallback.
 
-    Both V2 teams' ``_run_llm_review`` wrappers built the same
+    The ``frontend_code_v2_team`` ``_run_llm_review`` wrapper builds the same
     ``review_context`` -> ``architecture_context``/``spec_content`` bounding step
     before delegating to :func:`run_llm_review`; this function owns that shared
-    step so each team's wrapper is left with only the
+    step so the frontend wrapper is left with only the
     ``Agent``/``resolve_text_mode_strands_model`` invocation, which must stay in
-    the team module (tests patch it there directly).
+    the team module (tests patch it there directly). ``backend_code_v2_team``
+    no longer uses this path; it calls
+    ``code_review_agent.coordinator.run_coordinator`` directly (see this
+    module's docstring).
 
     Preconditions:
         - See :func:`run_llm_review` for ``files``/``prompt_template``/

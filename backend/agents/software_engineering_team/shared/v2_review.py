@@ -258,11 +258,15 @@ def _code_review_step(
         - ``files`` maps file paths to their full source text. ``task_description`` is the
           description surfaced to the external agent (the caller scopes this to the task or a
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
-        - ``llm_review_fn(llm=, task=, files=, review_context=, enable_llm_review_grounding=)``
-          is the per-team chunking/prompt/parse reviewer (the test patch surface for
-          ``Agent`` / ``resolve_text_mode_strands_model``); it must accept
-          ``review_context`` so the fallback reviewer sees the same context the
-          external agent path does. It returns an :class:`LlmReviewOutput` in
+        - ``llm_review_fn(llm=, task=, files=, language=, review_context=,
+          enable_llm_review_grounding=)`` is the per-team chunking/prompt/parse
+          reviewer (the test patch surface for ``Agent`` /
+          ``resolve_text_mode_strands_model``); it must accept ``review_context``
+          so the fallback reviewer sees the same context the external agent path
+          does, and ``language`` so a fallback that forwards it to
+          ``CodeReviewInput`` (e.g. backend's coordinator-backed fallback) reviews
+          the code under its actual language instead of ``CodeReviewInput``'s
+          ``typescript`` default. It returns an :class:`LlmReviewOutput` in
           production; a bare issue list is also accepted (see
           ``_unwrap_llm_review_result``) so a stub runner without a raw count is
           unaffected.
@@ -292,6 +296,7 @@ def _code_review_step(
                     llm=llm,
                     task=task,
                     files=files,
+                    language=language,
                     review_context=review_context,
                     enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
@@ -347,6 +352,7 @@ def _code_review_step(
                     llm=llm,
                     task=task,
                     files=files,
+                    language=language,
                     review_context=review_context,
                     enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
