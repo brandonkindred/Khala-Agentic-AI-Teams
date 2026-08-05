@@ -255,14 +255,25 @@ def _save_agents_and_process(
     leaves the conversation history untouched (the caller lets this propagate
     before appending messages).
 
-    Preconditions: ``team_id`` names an existing team; ``conversation_id``
-        names an existing conversation.
+    Preconditions: ``team_id`` and ``conversation_id`` are guaranteed valid by
+        the caller — ``create_conversation``/``send_message`` each look up the
+        team/conversation before reaching this point — and are not
+        independently re-validated here.
     Postconditions: on success, the roster (if ``agents_data`` is non-empty)
         is registered and ``process`` (if given) is saved and linked to the
-        conversation. On failure (e.g. a registry outage propagating out of
-        ``_save_agents_from_llm``), raises ``HTTPException(503)`` — not the
-        underlying exception — so the caller gets a clear "try again" signal
-        instead of an opaque 500.
+        conversation. Not atomic across the two steps: if the roster save
+        commits but the process save/link then fails, the roster is left
+        updated while the process is not (documented gap, not silently
+        hidden — closing it would need a shared transaction across
+        ``_save_agents_from_llm`` and ``_store.save_process``, which the
+        underlying stores don't currently support). On failure, a
+        non-retryable data/programming error (``ValueError``, ``TypeError``,
+        ``AttributeError``, ``KeyError``, pydantic ``ValidationError`` — e.g.
+        malformed LLM ``agents_data``) propagates as itself, since retrying an
+        identical malformed request cannot succeed. Any other failure (e.g. a
+        registry or database outage) is raised as ``HTTPException(503)``
+        instead of the underlying exception, so the caller gets a clear
+        "try again" signal.
     """
     try:
         _save_agents_from_llm(team_id, agents_data)
@@ -270,6 +281,16 @@ def _save_agents_and_process(
             _store.save_process(team_id, process)
             _store.set_conversation_process(conversation_id, process.process_id)
             _after_process_saved(team_id, process)
+    except (ValueError, TypeError, AttributeError, KeyError, ValidationError):
+        # Not retryable: a data-shape or programming bug, not a transient
+        # outage — let it propagate as itself (500) rather than a misleading
+        # "service unavailable, try again".
+        logger.exception(
+            "Non-retryable error saving roster/process for team %s (conversation %s)",
+            team_id,
+            conversation_id,
+        )
+        raise
     except Exception as exc:
         logger.exception(
             "Failed to save roster/process for team %s (conversation %s); "
@@ -837,19 +858,23 @@ def _build_state_response(
 def create_conversation(req: CreateConversationRequest):
     """Create a conversation and, if given, run its first turn.
 
-    The turn's writes (user + assistant messages, roster save, process save)
-    happen in dependency order but are committed to the conversation history
-    only after the LLM call and the roster/process saves have all succeeded.
+    When ``req.initial_message`` is given, the turn's writes (user + assistant
+    messages, roster save, process save) happen in dependency order but are
+    committed to the conversation history only after the LLM call and the
+    roster/process saves have all succeeded. Without an initial message, this
+    atomicity guarantee doesn't apply — there is no LLM call or roster/process
+    save, just a single greeting message written directly.
 
     Preconditions: ``req.team_id`` names an existing team.
     Postconditions: on success, the conversation exists with the greeting or
-        the full first turn persisted. On failure, no partial turn is left in
-        the conversation history — neither message is appended, so a client
-        retry re-processes a clean conversation instead of duplicating a
-        half-saved turn. Two distinct failure modes precede the appends: an
-        ``_agent.respond`` (LLM) error propagates as-is; a roster/process save
-        failure is raised by ``_save_agents_and_process`` as
-        ``HTTPException(503)``.
+        the full first turn persisted. When an initial message is given and
+        the turn fails, no partial turn is left in the conversation history —
+        neither message is appended, so a client retry re-processes a clean
+        conversation instead of duplicating a half-saved turn. Two distinct
+        failure modes precede the appends: an ``_agent.respond`` (LLM) error
+        propagates as-is; a roster/process save failure is raised by
+        ``_save_agents_and_process`` as ``HTTPException(503)`` (see its
+        docstring for the non-retryable-error exceptions to that).
     """
     # Validate team exists
     team = _store.get_team(req.team_id)

@@ -107,6 +107,45 @@ def test_send_message_persists_turn_on_success(
     ]
 
 
+def test_send_message_propagates_non_retryable_errors_instead_of_503(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A non-retryable data/programming error must not be disguised as a 503.
+
+    Preconditions: ``_agent.respond`` returns an ``agents`` block, and
+        ``register_team_manifests`` is patched to raise ``ValueError`` (e.g.
+        malformed LLM output) rather than a transient failure.
+    Postconditions: the ``ValueError`` propagates as itself — not swallowed
+        into an ``HTTPException(503)`` implying a retry could succeed — and
+        no messages were persisted.
+    """
+    import agentic_team_provisioning.api.main as main_mod
+
+    team_id = _new_team()
+    conversation_id = AgenticTeamStore().create_conversation(team_id=team_id)
+
+    monkeypatch.setattr(
+        main_mod._agent,
+        "respond",
+        lambda **kwargs: (
+            "Sure, let's design that.",
+            None,
+            ["What's next?"],
+            [{"agent_name": "Planner", "role": "Plans things"}],
+        ),
+    )
+
+    def _boom(*args, **kwargs):
+        raise ValueError("malformed agents_data")
+
+    monkeypatch.setattr(main_mod, "register_team_manifests", _boom)
+
+    with pytest.raises(ValueError, match="malformed agents_data"):
+        client.post(f"/conversations/{conversation_id}/messages", json={"message": "hi"})
+
+    assert AgenticTeamStore().get_messages(conversation_id) == []
+
+
 def test_create_conversation_leaves_no_messages_when_registry_fails(
     fake_pg: dict, monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
