@@ -5,15 +5,27 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from llm_service import LLMClient, complete_validated, get_client
 
 from .merge import apply_dbc_insertions
-from .models import DbcCommentInsertion, DbcCommentsInput, DbcCommentsOutput, DbcCommentsStatus
+from .models import (
+    DbcCommentsInput,
+    DbcCommentsLLMResponse,
+    DbcCommentsOutput,
+    DbcCommentsStatus,
+)
 from .prompts import DBC_COMMENTS_PROMPT
 
 logger = logging.getLogger(__name__)
+
+# Total LLM-call budget for one run(): 1 initial attempt + 1 automatic retry.
+# complete_validated's own correction_attempts only retries a JSON-parse/
+# schema-validation failure -- everything else that can escape it untouched
+# (LLMNotConfiguredError, rate limits, semantic exhaustion, truncation, a
+# bare network error) gets zero retries from complete_validated itself, so
+# this outer loop is what actually guarantees at least one automatic retry
+# across the full class of failures the old fail-open handler covered.
+_MAX_LLM_ATTEMPTS = 2
 
 
 class DbcCommentsAgent:
@@ -23,9 +35,8 @@ class DbcCommentsAgent:
     complying with Design by Contract principles.
 
     Preconditions:
-        - llm_client may be None, a Strands Model, or an LLMClient; when None,
-          resolve_strands_model constructs the default Strands model for the
-          dbc_comments agent
+        - llm_client may be None or an LLMClient; when None,
+          get_client("dbc_comments") resolves the default client
 
     Postconditions:
         - Agent is ready to review code via the run() method
@@ -34,16 +45,14 @@ class DbcCommentsAgent:
         - The agent never modifies code logic, only comments
     """
 
-    def __init__(self, llm_client=None) -> None:
+    def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
         """
         Initialize the DbC Comments agent.
 
         Postconditions:
-            - self._model is set to a resolved Strands Model
+            - self.llm is set to a resolved LLMClient
         """
-        self._model = resolve_strands_model(
-            llm_client, agent_key="dbc_comments", get_strands_model_fn=get_strands_model
-        )
+        self.llm = llm_client if llm_client is not None else get_client("dbc_comments")
 
     def run(
         self,
@@ -60,11 +69,18 @@ class DbcCommentsAgent:
             - input_data.language is one of: python, typescript, java
 
         Postconditions:
-            - insertions contains the validated list of DbcCommentInsertion
-              objects parsed from the model response, kept unmerged (for
-              observability) regardless of already_compliant; malformed or
-              non-object entries are skipped and logged, so this list may be
-              shorter than the raw model output
+            - The LLM call is retried up to _MAX_LLM_ATTEMPTS times, validated
+              against DbcCommentsLLMResponse on each attempt via
+              complete_validated; a malformed reply (including one malformed
+              insertion entry, since insertions is a required, non-permissive
+              schema field) fails the whole attempt and drives a retry, not a
+              silent partial acceptance
+            - If every attempt fails: already_compliant=False and summary
+              describes the failure -- a persistent LLM failure can never
+              silently and permanently mark the code compliant
+            - Otherwise, insertions is the validated list of
+              DbcCommentInsertion objects from the successful reply, kept
+              unmerged (for observability) regardless of already_compliant
             - already_compliant reflects the model's assessment, overridden
               to True only when the model reported False but returned no
               insertions
@@ -83,14 +99,21 @@ class DbcCommentsAgent:
               the model-provided summary as-is, which may be empty
 
         Raises:
-            Nothing -- an LLM call failure is caught internally and produces
-            a fail-open DbcCommentsOutput(already_compliant=True, ...)
-            instead of propagating.
+            Nothing -- run() never raises. Each failed-but-retryable LLM
+            attempt is surfaced via on_status(NEEDS_RETRY, ...); final
+            exhaustion via on_status(FAILED, ...) and
+            already_compliant=False, never a silent fail-open. A merge-step
+            exception (apply_dbc_insertions) is a separate, still fail-open
+            path -- see that block's own comment.
         """
 
         def _update(status: DbcCommentsStatus, detail: str = "") -> None:
             if on_status:
-                on_status(status, detail)
+                try:
+                    on_status(status, detail)
+                except Exception as e:  # noqa: BLE001 -- a status hook is observability
+                    # and must never abort the review it's reporting on.
+                    logger.warning("DbcComments: on_status callback failed (ignored): %s", e)
             logger.info(
                 "DbcComments: %s %s",
                 status.value,
@@ -145,57 +168,51 @@ class DbcCommentsAgent:
 
         prompt = "\n".join(context_parts)
 
-        try:
-            data = complete_json_with_continuation(
-                self._model, prompt, system_prompt=DBC_COMMENTS_PROMPT
-            )
-            if not isinstance(data, dict):
-                raise ValueError(f"expected a JSON object, got {type(data).__name__}")
-        except Exception as e:
-            # Fail-open: if LLM call fails, don't block the pipeline
-            logger.warning(
-                "DbcComments: LLM call failed (%s), returning compliant (fail-open)",
-                e,
-            )
-            _update(DbcCommentsStatus.FAILED, str(e))
+        validated: Optional[DbcCommentsLLMResponse] = None
+        last_error: Optional[Exception] = None
+        for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):
+            try:
+                validated = complete_validated(
+                    self.llm,
+                    prompt,
+                    schema=DbcCommentsLLMResponse,
+                    objective="review code for Design by Contract compliance",
+                    system_prompt=DBC_COMMENTS_PROMPT,
+                    temperature=0.0,
+                )
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < _MAX_LLM_ATTEMPTS:
+                    logger.warning(
+                        "DbcComments: LLM call attempt %d/%d failed (%s), retrying",
+                        attempt,
+                        _MAX_LLM_ATTEMPTS,
+                        e,
+                    )
+                    _update(DbcCommentsStatus.NEEDS_RETRY, str(e))
+                else:
+                    logger.warning(
+                        "DbcComments: LLM call failed after %d attempt(s) (%s), "
+                        "surfacing failure -- never marking compliant",
+                        _MAX_LLM_ATTEMPTS,
+                        e,
+                    )
+
+        if validated is None:
+            _update(DbcCommentsStatus.FAILED, str(last_error))
             return DbcCommentsOutput(
-                already_compliant=True,
-                summary=f"DbC review skipped due to error: {e}",
+                already_compliant=False,
+                summary=f"DbC review failed after {_MAX_LLM_ATTEMPTS} attempt(s) and could "
+                f"not determine compliance: {last_error}",
             )
 
         _update(DbcCommentsStatus.ADDING_COMMENTS)
 
-        # Parse response
-        raw_insertions = data.get("insertions") or []
-        if not isinstance(raw_insertions, list):
-            logger.warning(
-                "DbcComments: LLM returned non-list insertions field (%s), treating as compliant",
-                type(raw_insertions).__name__,
-            )
-            raw_insertions = []
-
-        # Build typed insertions, skipping any malformed entry rather than
-        # failing the whole review over one bad item.
-        insertions: list[DbcCommentInsertion] = []
-        for entry in raw_insertions:
-            if not isinstance(entry, dict):
-                logger.warning(
-                    "DbcComments: skipping non-object insertion entry (%s): %r",
-                    type(entry).__name__,
-                    entry,
-                )
-                continue
-            try:
-                insertions.append(DbcCommentInsertion(**entry))
-            except Exception as e:
-                logger.warning("DbcComments: skipping malformed insertion (%s): %s", entry, e)
-
-        already_compliant = bool(data.get("already_compliant", False))
-        summary = data.get("summary", "")
-        suggested_commit_message = data.get(
-            "suggested_commit_message",
-            "docs(dbc): add Design by Contract comments",
-        )
+        insertions = validated.insertions
+        already_compliant = validated.already_compliant
+        summary = validated.summary
+        suggested_commit_message = validated.suggested_commit_message
 
         # Safety: if LLM says not compliant but returned no insertions, treat as compliant
         if not already_compliant and not insertions:
@@ -220,9 +237,11 @@ class DbcCommentsAgent:
                     code, insertions
                 )
             except Exception as e:
-                # Fail-open, same as an LLM call failure: an unexpected merge
-                # error must not crash the calling pipeline or violate run()'s
-                # documented "never raises" contract.
+                # Fail-open: merge.py is pure and LLM-free, so there is nothing
+                # a retry could fix here (unlike the LLM-call path above, which
+                # is retried and surfaces failure instead of failing open). An
+                # unexpected merge error must not crash the calling pipeline or
+                # violate run()'s documented "never raises" contract.
                 logger.warning("DbcComments: merge failed (%s), returning compliant (fail-open)", e)
                 _update(DbcCommentsStatus.FAILED, str(e))
                 return DbcCommentsOutput(
