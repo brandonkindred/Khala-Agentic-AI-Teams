@@ -695,10 +695,16 @@ def test_strategy_lab_restart_returns_503_when_termination_fails(monkeypatch, ap
 
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
 
+    persist_calls = []
+    monkeypatch.setattr(
+        api_main, "_persist_run_state", lambda rid, state, **k: persist_calls.append(state)
+    )
+
     resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
 
     assert resp.status_code == 503
     assert api_main._active_runs == {}  # never written
+    assert persist_calls == []  # never written
 
 
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(

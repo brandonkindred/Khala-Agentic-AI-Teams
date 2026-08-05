@@ -419,10 +419,20 @@ def test_resume_strategy_lab_run_carries_forward_generation_unchanged(
 
     api_main._active_runs["run-i"] = _resumable_state("run-i", generation=4)
     stub = _StubLabClient(jobs=[{"job_id": "run-i", "generation": 4}])
+    mint_calls: List[Any] = []
+    real_apply_and_get = stub.apply_and_get
+    monkeypatch.setattr(
+        stub,
+        "apply_and_get",
+        lambda *a, **k: (mint_calls.append((a, k)), real_apply_and_get(*a, **k))[1],
+    )
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
     resp = api_client.post("/strategy-lab/runs/run-i/resume")
     assert resp.status_code == 200
     assert api_main._active_runs["run-i"]["generation"] == 4
+    # Resume must carry the generation forward, never mint a new one --
+    # only restart is allowed to call the atomic-increment mint path.
+    assert mint_calls == []
 
 
 def test_resume_strategy_lab_run_uses_durable_generation_not_stale_local_cache(
@@ -456,10 +466,16 @@ def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_re
     _persist_run_state write must not clobber a NEWER durable value minted by
     a concurrent restart on another process/replica in the gap between the
     initial read and this write. Simulated by bumping the stub's durable
-    generation on every read, mimicking a same-request race window rather
-    than a pre-existing stale cache. (Resume performs two durable reads --
-    the initial carry-forward read and a pre-dispatch revalidation read --
-    both are exercised here.)"""
+    generation only on the FIRST read (mimicking a same-request race window
+    that happens once, between the initial read and the write) and then
+    leaving the durable store alone -- so the revalidation read and the
+    final assertion both observe whatever the write actually left behind,
+    genuinely proving the write didn't regress it back down to the stale
+    snapshot. (A prior version of this test re-bumped the durable value on
+    EVERY read, including the one after the write; that would have forced
+    the final assertion to pass even if the write itself had incorrectly
+    regressed the durable generation in between, since the post-write read
+    would silently re-stamp it back to 5 regardless.)"""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-race"] = _resumable_state("run-race", generation=1)
@@ -473,22 +489,26 @@ def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_re
     real_get_job = stub.get_job
     read_calls: List[str] = []
 
-    def _get_job_with_concurrent_restart(jid: str):
+    def _get_job_with_concurrent_restart_on_first_read(jid: str):
         read_calls.append(jid)
         result = real_get_job(jid)
-        # Simulate a restart on another replica minting generation 5 in the
-        # durable store immediately after this resume's read of it.
-        stub.by_id[jid]["generation"] = 5
+        if len(read_calls) == 1:
+            # Simulate a restart on another replica minting generation 5 in
+            # the durable store immediately after this resume's first read
+            # of it -- a one-time race, not re-injected on later reads.
+            stub.by_id[jid]["generation"] = 5
         return result
 
-    monkeypatch.setattr(stub, "get_job", _get_job_with_concurrent_restart)
+    monkeypatch.setattr(stub, "get_job", _get_job_with_concurrent_restart_on_first_read)
 
     resp = api_client.post("/strategy-lab/runs/run-race/resume")
 
     assert resp.status_code == 200
-    assert read_calls == ["run-race", "run-race"]  # confirms the race was injected at both reads
+    assert read_calls == ["run-race", "run-race"]  # confirms both reads happened
     # The durable value must still be 5 -- resume's write must not have
-    # regressed it back down to the stale 1 it read moments earlier.
+    # regressed it back down to the stale 1 it read moments earlier. Nothing
+    # re-injects 5 after the write, so this genuinely reflects the write's
+    # own exclude_fields behavior, not a test-side reset.
     assert stub.by_id["run-race"]["generation"] == 5
 
 
