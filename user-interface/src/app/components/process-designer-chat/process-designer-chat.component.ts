@@ -639,7 +639,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   // ---------------------------------------------------------------------------
 
   /**
-   * Build a Mermaid-style flowchart as inline SVG from the process definition.
+   * Build a custom interactive SVG flowchart from the process definition.
    * Nodes are interactive — clicking them opens the step editor.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {
