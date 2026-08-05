@@ -704,6 +704,11 @@ class TestBackendReviewDependencies:
 
 class TestBackendRunMicrotaskReview:
     def test_run_microtask_review_basic(self, tmp_path):
+        """Smoke-test backend microtask review through the run_coordinator fallback.
+
+        A bare DummyLLMClient should satisfy the coordinator's chunk-review call
+        and produce a passed review with no build failures and no issues.
+        """
         from backend_code_v2_team.models import Microtask
         from backend_code_v2_team.phases.review import run_microtask_review
 
@@ -725,6 +730,7 @@ class TestBackendRunMicrotaskReview:
         )
         assert result.passed
         assert result.build_ok
+        assert result.issues == []
 
 
 class TestBackendAgentReviewCache:
