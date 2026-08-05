@@ -704,11 +704,9 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
     assert state.get("backtest_id", "").startswith("bt-")
 
 
-def test_run_backtest_background_handles_http_exception(
+def test_run_backtest_background_handles_backtest_execution_error(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
-    from fastapi import HTTPException
-
     from investment_team.api import main as api_main
     from investment_team.models import BacktestConfig, StrategySpec
 
@@ -716,10 +714,10 @@ def test_run_backtest_background_handles_http_exception(
     monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
     monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
 
-    def _raises_http(strategy, config):
-        raise HTTPException(status_code=422, detail="bad strategy")
+    def _raises_backtest_error(strategy, config):
+        raise api_main.BacktestExecutionError(status_code=422, detail="bad strategy")
 
-    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_http)
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_backtest_error)
 
     strategy = StrategySpec(
         strategy_id="s",
