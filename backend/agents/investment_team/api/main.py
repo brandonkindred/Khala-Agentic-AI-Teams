@@ -2432,8 +2432,12 @@ def _dispatch_strategy_lab_run(
             abort itself.
           On any other failure (Temporal disabled/unavailable, or the start
           RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` and ``HTTPException(503)`` is raised;
-          a delayed cleanup timer is scheduled by ``_fail_strategy_lab_run``.
+          via ``_fail_strategy_lab_run`` (which schedules a delayed cleanup
+          timer), and then: if ``exc`` is already an ``HTTPException`` (e.g.
+          ``_require_temporal()``'s own 503, or one the dispatch RPC itself
+          raised), it is re-raised unchanged, preserving its original status
+          code and detail; otherwise it is wrapped in a fresh
+          ``HTTPException(503)``.
     """
     try:
         _require_temporal()
