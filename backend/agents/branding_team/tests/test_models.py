@@ -1,13 +1,14 @@
-"""Validation tests for the Phase 1 and Phase 2 structured-output wrapper models.
+"""Validation tests for the Phase 1, Phase 2, and Phase 4 structured-output wrapper models.
 
 These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
 ``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
 ``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
 ``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``,
-``PersonaProfilesOutput``, ``WritingGuidelinesOutput``) must reject empty/omitted
-content so Strands' structured-output tool retries the LLM instead of silently
-accepting a blank or under-cardinality response (see ``structured_output_tool.py``:
-a ``ValidationError`` becomes a tool error the model is asked to fix).
+``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 4's
+``ChannelGuidelineOutput``) must reject empty/omitted content so Strands'
+structured-output tool retries the LLM instead of silently accepting a blank
+or under-cardinality response (see ``structured_output_tool.py``: a
+``ValidationError`` becomes a tool error the model is asked to fix).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from branding_team.models import (
     BrandArchetypesOutput,
     BrandDiscoveryAuditOutput,
     BrandStoryOutput,
+    ChannelGuidelineOutput,
     CoreValue,
     CoreValuesOutput,
     DifferentiationPillar,
@@ -259,3 +261,26 @@ def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() ->
 
     output = WritingGuidelinesOutput(**base, writing_guidelines=_GUIDELINES)
     assert len(output.writing_guidelines.voice_principles) == 3
+
+
+_CHANNEL_GUIDE_KWARGS = dict(
+    channel="website",
+    strategy="Lead with product proof points.",
+    dos=["Use active voice", "Lead with benefits", "Link to case studies"],
+    donts=["Bury the CTA", "Overuse jargon", "Ignore mobile layout"],
+    content_types=["Landing pages", "Case studies", "Product demos"],
+    frequency_guidance="Refresh quarterly.",
+)
+
+
+def test_channel_guideline_output_rejects_blank_list_items() -> None:
+    """``dos``/``donts``/``content_types`` must reject blank items, not just wrong counts."""
+    output = ChannelGuidelineOutput(**_CHANNEL_GUIDE_KWARGS)
+    assert len(output.dos) == 3
+
+    with pytest.raises(ValidationError):
+        ChannelGuidelineOutput(**{**_CHANNEL_GUIDE_KWARGS, "dos": ["", "", ""]})
+    with pytest.raises(ValidationError):
+        ChannelGuidelineOutput(**{**_CHANNEL_GUIDE_KWARGS, "donts": ["", "", ""]})
+    with pytest.raises(ValidationError):
+        ChannelGuidelineOutput(**{**_CHANNEL_GUIDE_KWARGS, "content_types": ["", "", ""]})

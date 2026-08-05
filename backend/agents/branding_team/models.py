@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
 
+# Individual list/dict items, not just container length, must be non-empty —
+# a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
+# strings, undermining every "requires non-empty content" docstring below.
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+
 # ---------------------------------------------------------------------------
 # Shared models
 # ---------------------------------------------------------------------------
@@ -522,9 +527,9 @@ class ChannelGuidelineOutput(BaseModel):
 
     channel: str = Field(min_length=1)
     strategy: str = Field(min_length=1)
-    dos: List[str] = Field(min_length=3, max_length=4)
-    donts: List[str] = Field(min_length=3, max_length=4)
-    content_types: List[str] = Field(min_length=3, max_length=5)
+    dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    content_types: List[NonEmptyStr] = Field(min_length=3, max_length=5)
     frequency_guidance: str = Field(min_length=1)
 
 
@@ -670,12 +675,6 @@ class GovernanceOutput(BaseModel):
     brand_guidelines: List[str] = Field(default_factory=list)
     # Knowledge-base backlog (from asset_wiki_planner)
     wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
-
-
-# Individual list/dict items, not just container length, must be non-empty —
-# a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
-# strings, undermining every "requires non-empty content" docstring below.
-NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 
 class ApprovalWorkflowOutput(BaseModel):
