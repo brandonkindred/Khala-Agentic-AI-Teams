@@ -529,7 +529,7 @@ def test_is_run_cancelled_activity_delegates(monkeypatch):
         seen["run_id"] = run_id
         return True
 
-    monkeypatch.setattr(api_main, "_is_strategy_lab_run_cancelled", _fake)
+    monkeypatch.setattr(api_main, "_is_strategy_lab_run_externally_stopped", _fake)
     assert act.is_run_cancelled_activity("run-42") is True
     assert seen["run_id"] == "run-42"
 
@@ -769,7 +769,50 @@ def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypat
     assert storage["skipped_reason"] == "expert_failed"
 
 
-def test_is_strategy_lab_run_cancelled_reads_job_status(monkeypatch):
+def test_is_strategy_lab_run_externally_stopped_reads_job_status(monkeypatch):
+    """The broad check fires for any external stop signal -- cancelled,
+    failed, or interrupted alike -- not just a genuine cancellation."""
+    from investment_team.api import main as api_main
+
+    class _FakeClient:
+        def __init__(self, status):
+            self._status = status
+
+        def get_job(self, run_id):
+            return {"status": self._status} if self._status is not None else None
+
+    def _use(status):
+        monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _FakeClient(status))
+
+    _use("cancelled")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is True
+    _use("failed")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is True
+    _use("interrupted")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is True
+    _use("running")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+    _use(None)  # no persisted job
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+    # completed is a terminal *success*, not an external stop.
+    _use("completed")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+
+
+def test_is_strategy_lab_run_externally_stopped_swallows_errors(monkeypatch):
+    from investment_team.api import main as api_main
+
+    def _boom():
+        raise RuntimeError("job service down")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", _boom)
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+
+
+def test_is_strategy_lab_run_cancelled_is_precise(monkeypatch):
+    """Unlike _is_strategy_lab_run_externally_stopped, this must return True
+    ONLY for an exact "cancelled" status -- a failed or interrupted run is
+    NOT a cancellation and must return False."""
     from investment_team.api import main as api_main
 
     class _FakeClient:
@@ -785,13 +828,12 @@ def test_is_strategy_lab_run_cancelled_reads_job_status(monkeypatch):
     _use("cancelled")
     assert api_main._is_strategy_lab_run_cancelled("r") is True
     _use("failed")
-    assert api_main._is_strategy_lab_run_cancelled("r") is True
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
+    _use("interrupted")
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
     _use("running")
     assert api_main._is_strategy_lab_run_cancelled("r") is False
-    _use(None)  # no persisted job
-    assert api_main._is_strategy_lab_run_cancelled("r") is False
-    # completed is a terminal *success*, not a cancellation.
-    _use("completed")
+    _use(None)
     assert api_main._is_strategy_lab_run_cancelled("r") is False
 
 
