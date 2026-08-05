@@ -127,7 +127,10 @@ def test_run_llm_review_forwards_review_context(monkeypatch):
 
 def test_run_llm_review_translates_issues_to_review_issue(monkeypatch):
     """CodeReviewIssue fields translate to ReviewIssue: suggestion -> recommendation,
-    source is set to "code_review", and raw_issue_count reflects the kept issues."""
+    source is set to "code_review", and raw_issue_count is always None (the
+    lightweight coordinator has no grounding pass to report a pre-filter count
+    for; reporting a fabricated int would make review_cycle.py's grounding
+    circuit breaker see a false "0% rejected" instead of "no data")."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
     from software_engineering_team.code_review_agent.models import (
@@ -154,7 +157,7 @@ def test_run_llm_review_translates_issues_to_review_issue(monkeypatch):
 
     out = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
 
-    assert out.raw_issue_count == 1
+    assert out.raw_issue_count is None
     assert len(out.issues) == 1
     issue = out.issues[0]
     assert issue.source == "code_review"
@@ -162,6 +165,26 @@ def test_run_llm_review_translates_issues_to_review_issue(monkeypatch):
     assert issue.description == "bad code"
     assert issue.file_path == "x.py"
     assert issue.recommendation == "fix it"
+
+
+def test_run_llm_review_raw_issue_count_is_none_on_clean_pass(monkeypatch):
+    """raw_issue_count stays None even when the coordinator finds nothing --
+    it must never default back to 0, which grounding_rejection_ratio would
+    also treat as "no ratio available" today but could stop doing so."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
+
+    monkeypatch.setattr(
+        review_mod,
+        "run_coordinator",
+        lambda llm, input_data, *a, **kw: CodeReviewOutput(approved=True, issues=[]),
+    )
+
+    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
+
+    assert out.issues == []
+    assert out.raw_issue_count is None
 
 
 def test_run_llm_review_propagates_coordinator_unavailable(monkeypatch):
@@ -800,13 +823,6 @@ def test_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
     _stub_coordinator(monkeypatch)
 
     tool_agent = MagicMock()
-
-    class _Issue:
-        source = "custom"
-        severity = "low"
-        description = "x"
-        file_path = ""
-        recommendation = ""
 
     tool_agent.review.return_value = ToolAgentPhaseOutput(
         issues=[

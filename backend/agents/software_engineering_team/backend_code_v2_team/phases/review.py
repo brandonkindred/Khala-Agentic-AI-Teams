@@ -110,9 +110,14 @@ def _run_llm_review(
           ``result.issues`` translated to this team's ``ReviewIssue`` type
           (``suggestion`` -> ``recommendation``; ``category``/``line``/
           ``start_line``/``title``/``pre_existing`` have no ``ReviewIssue``
-          field and are dropped) and whose ``raw_issue_count`` equals
-          ``len(issues)`` (the lightweight coordinator has no separate
-          raw-vs-grounded distinction to report).
+          field and are dropped) and whose ``raw_issue_count`` is always
+          ``None`` — the lightweight coordinator has no separate raw-vs-
+          grounded distinction to report, and reporting a fabricated int
+          (e.g. ``len(issues)``) would make
+          ``shared.phases.review_cycle``'s grounding circuit breaker see a
+          false "0% rejected" instead of "no grounding data" for every call
+          (see ``grounding_rejection_ratio``, which already treats ``None``
+          as "no ratio available").
         - Propagates ``CodeReviewUnavailableError`` uncaught when no chunk
           could be reviewed at all: the caller
           (``shared.v2_review._code_review_step``) already converts an
@@ -141,7 +146,7 @@ def _run_llm_review(
         )
         for issue in result.issues
     ]
-    return LlmReviewOutput(issues=issues, raw_issue_count=len(issues))
+    return LlmReviewOutput(issues=issues, raw_issue_count=None)
 
 
 def _run_qa_agent(
@@ -252,10 +257,9 @@ def run_review(
 
     Thin wrapper over the shared parametrised reviewer
     (:func:`software_engineering_team.shared.v2_review.run_review`) driven by this
-    team's :data:`REVIEW_CONFIG`. The per-team chunking/prompt/parse reviewer and
-    the external QA/security/build runners are injected as module-level callables
-    so this module stays the test patch surface for ``Agent`` /
-    ``resolve_text_mode_strands_model`` / ``_run_qa_agent`` / ``_run_security_agent``.
+    team's :data:`REVIEW_CONFIG`. The per-team code-review/QA/security runners
+    are injected as module-level callables so this module stays the test patch
+    surface for ``_run_llm_review`` / ``_run_qa_agent`` / ``_run_security_agent``.
 
     Preconditions: ``execution_result`` exposes ``.files``.
     Postconditions: see the shared ``run_review``.
@@ -377,8 +381,13 @@ def run_code_review_phase(
     per-team result class via ``phase_review_result_cls``. ``_run_llm_review``
     is referenced here by bare module-global name (resolved at call time, not
     captured at import time), so this module stays the test patch surface for
-    ``Agent`` / ``resolve_text_mode_strands_model`` -- exactly the technique
+    ``_run_llm_review``/``run_coordinator`` itself -- exactly the technique
     ``run_review`` / ``run_microtask_review`` already use for the same reason.
+    ``enable_llm_review_grounding`` is forwarded for call-signature
+    compatibility with ``llm_review_fn``'s contract but is a no-op on this
+    path: the coordinator's chunk reviewer only ever reports on the literal
+    code it was shown, so there is no free-text hallucinated-claim filter
+    left to toggle (see ``_run_llm_review``'s own docstring).
     """
     return run_code_review_phase_impl(
         llm=llm,
