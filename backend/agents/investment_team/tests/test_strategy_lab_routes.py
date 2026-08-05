@@ -22,6 +22,7 @@ strategy-lab cycles execute.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -885,6 +886,37 @@ def test_list_strategy_lab_runs_merged_entry_missing_keys_does_not_500(
     assert run["total_cycles"] == 0
 
 
+def test_list_strategy_lab_runs_merged_entry_null_data_does_not_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted job whose ``"data"`` key is present but ``None`` must not
+    500 -- regression test for issue #4325. Before the fix,
+    ``normalize_persisted_job`` did ``data = job.get("data", job)``, which
+    only falls back to ``job`` when the key is *absent*; a present-but-null
+    value passed straight through and crashed on the next line's
+    ``data["run_id"] = ...``. That ``TypeError`` was swallowed by the outer
+    ``except Exception`` around the whole reconcile+merge block, silently
+    dropping every persisted running/pending job from the response (not just
+    this malformed one) and falling back to the in-memory-only snapshot.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs.clear()
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-null-data",
+                "status": "running",
+                "data": None,
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    resp = api_client.get("/strategy-lab/runs")
+    assert resp.status_code == 200
+    assert any(r["run_id"] == "run-null-data" for r in resp.json()["runs"])
+
+
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -1545,12 +1577,10 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
         * Raises ``AssertionError`` if the terminal line is not seen within
           ``max_chunks`` chunks or ``timeout_seconds`` wall-clock seconds.
     """
-    import time as _time
-
     assert max_chunks > 0
     assert timeout_seconds > 0
     buf = ""
-    deadline = _time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds
     seen = 0
     for chunk in body_iter:
         buf += chunk
@@ -1558,7 +1588,7 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
         if '"type": "done"' in buf or '"type":"done"' in buf:
             return buf
         assert seen <= max_chunks, f"SSE stream exceeded {max_chunks} chunks without terminating"
-        assert _time.monotonic() < deadline, "SSE stream did not terminate within timeout"
+        assert time.monotonic() < deadline, "SSE stream did not terminate within timeout"
     assert '"type": "done"' in buf or '"type":"done"' in buf, (
         "SSE stream ended without terminal done marker"
     )
@@ -1731,7 +1761,8 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
 
     segments = [s for s in body.split("\n\n") if s.strip()]
     snapshot_seg = next(s for s in segments if '"type": "snapshot"' in s)
-    snapshot = json.loads(snapshot_seg[len("data: ") :])
+    data_lines = [line[len("data: ") :] for line in snapshot_seg.splitlines() if line.startswith("data: ")]
+    snapshot = json.loads("\n".join(data_lines))
     assert snapshot["completed_cycles"] == 6
     assert snapshot["skipped_cycles"] == 1
     assert snapshot["errored_cycles"] == 1

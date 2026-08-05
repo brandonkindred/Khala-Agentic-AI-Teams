@@ -19,11 +19,12 @@ See :doc:`/backend/agents/llm_service/FEATURE_SPEC_structured_output_contract.md
 
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from .factory import get_client
+from .interface import LLMClient
 from .structured import complete_validated
 
 T = TypeVar("T", bound=BaseModel)
@@ -77,6 +78,10 @@ def generate_structured(
     temperature: float = 0.0,
     agent_key: str | None = None,
     correction_attempts: int = 1,
+    llm_client: LLMClient | None = None,
+    think: bool | str | None = False,
+    context: dict[str, Any] | None = None,
+    **kwargs: Any,
 ) -> T:
     """Generate a typed structured response validated against ``schema``.
 
@@ -91,8 +96,21 @@ def generate_structured(
         temperature: Sampling temperature (default 0.0 for deterministic
             structured output).
         agent_key: Per-agent config selector forwarded to ``get_client``.
+            Ignored when ``llm_client`` is given (see below).
         correction_attempts: Max corrective follow-up calls on parse /
             validation failure (default 1; 0 opts out).
+        llm_client: Optional pre-resolved client. When given, used as-is
+            instead of resolving one via ``get_client(agent_key)`` — lets a
+            caller that already holds a client (e.g. one shared across
+            several calls, or built with a per-call ``on_reasoning`` sink)
+            reuse it here instead of a second, independently-resolved client.
+        think: Forwarded to ``complete_validated`` (and from there to
+            ``client.complete_json``). Defaults to ``False``, matching
+            ``complete_validated``'s own default.
+        context: Forwarded to ``complete_validated`` as the Pydantic
+            ``model_validate`` ``context`` kwarg.
+        **kwargs: Forwarded to ``complete_validated`` (and from there to
+            ``client.complete_json``).
 
     Returns:
         An instance of ``schema`` validated against the final successful reply.
@@ -102,7 +120,7 @@ def generate_structured(
         LLMSchemaValidationError: Every attempt returned parseable JSON that
             failed Pydantic validation.
     """
-    client = get_client(agent_key=agent_key)
+    client = llm_client if llm_client is not None else get_client(agent_key=agent_key)
     return complete_validated(
         client,
         prompt,
@@ -111,6 +129,9 @@ def generate_structured(
         system_prompt=system_prompt,
         temperature=temperature,
         correction_attempts=correction_attempts,
+        think=think,
+        context=context,
+        **kwargs,
     )
 
 

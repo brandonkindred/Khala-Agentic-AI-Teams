@@ -59,9 +59,16 @@ class _InMemoryDict:
         return key in self._d
 
     def __delitem__(self, key: str) -> None:
-        self._d.pop(key, None)
+        """Preconditions: none. Postconditions: removes ``key``; raises ``KeyError`` if absent."""
+        del self._d[key]
 
     def pop(self, key: str, *args: Any) -> Any:
+        """Preconditions: at most one default in ``args`` (else ``TypeError``, matching
+        ``dict.pop``). Postconditions: removes and returns ``key``'s value, or the sole
+        default if provided and ``key`` is absent; raises ``KeyError`` if absent and no
+        default was given."""
+        if len(args) > 1:
+            raise TypeError(f"pop expected at most 2 arguments, got {1 + len(args)}")
         if args:
             return self._d.pop(key, args[0])
         return self._d.pop(key)
@@ -93,6 +100,18 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api_main, "_workflow_state", WorkflowState())
 
     return TestClient(api_main.app)
+
+
+def test_inmemorydict_delitem_raises_keyerror_for_missing_key() -> None:
+    d = _InMemoryDict()
+    with pytest.raises(KeyError):
+        del d["missing"]
+
+
+def test_inmemorydict_pop_raises_typeerror_for_extra_defaults() -> None:
+    d = _InMemoryDict()
+    with pytest.raises(TypeError):
+        d.pop("missing", "default1", "default2")
 
 
 # ---------------------------------------------------------------------------
@@ -351,12 +370,13 @@ def test_create_strategy_rejects_unknown_field(api_client) -> None:
 def test_create_strategy_unsupported_asset_class_returns_422(api_client) -> None:
     """An off-vocabulary asset_class trips StrategySpec's validator at
     construction inside the handler; that must surface as a 422 client error,
-    not an unhandled 500."""
+    not an unhandled 500, with the structured error body naming the field."""
     payload = _strategy_body()
     payload["asset_class"] = "bonds"
     resp = api_client.post("/strategies", json=payload)
     assert resp.status_code == 422
-    assert "asset_class" in str(resp.json()).lower()
+    body = resp.json()
+    assert any("asset_class" in err.get("loc", []) for err in body["detail"])
 
 
 def test_validate_strategy_404_when_missing(api_client) -> None:
@@ -658,6 +678,23 @@ def test_list_providers(api_client) -> None:
     assert "live_paper_enabled" in body
 
 
+def test_list_providers_malformed_row_returns_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A registry row that fails ProviderDescriptor validation -> 500, not a crash."""
+    import investment_team.trading_service.providers as providers_mod
+
+    class _BadRegistry:
+        def describe_all(self):
+            return [{"supports": "not-a-list"}]  # missing required `name`
+
+    monkeypatch.setattr(providers_mod, "default_registry", lambda: _BadRegistry())
+
+    resp = api_client.get("/providers")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Provider registry contains invalid data"
+
+
 # ---------------------------------------------------------------------------
 # Paper-trade results listing
 # ---------------------------------------------------------------------------
@@ -669,6 +706,91 @@ def test_paper_trading_results_empty(api_client) -> None:
     body = resp.json()
     assert body["items"] == []
     assert body["count"] == 0
+
+
+def _paper_trading_session(session_id: str, verdict):
+    from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
+
+    strat = StrategySpec(
+        strategy_id=f"strat-{session_id}",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    return PaperTradingSession(
+        session_id=session_id,
+        lab_record_id=f"lab-{session_id}",
+        strategy=strat,
+        status=PaperTradingStatus.COMPLETED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        verdict=verdict,
+        started_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+    )
+
+
+def test_paper_trading_results_response_counts_are_derived_from_items() -> None:
+    """Constructing the response with mismatched standalone counts must not
+    stick — the model derives them from ``items`` regardless of what's passed.
+    """
+    from investment_team.api.main import PaperTradingResultsResponse
+    from investment_team.models import PaperTradingVerdict
+
+    items = [
+        _paper_trading_session("a", PaperTradingVerdict.READY_FOR_LIVE),
+        _paper_trading_session("b", PaperTradingVerdict.NOT_PERFORMANT),
+        _paper_trading_session("c", PaperTradingVerdict.NOT_PERFORMANT),
+    ]
+    resp = PaperTradingResultsResponse(
+        items=items, count=999, ready_for_live_count=999, not_performant_count=999
+    )
+    assert resp.count == 3
+    assert resp.ready_for_live_count == 1
+    assert resp.not_performant_count == 2
+
+
+@pytest.mark.parametrize(
+    "verdict,expected_ids,expected_ready,expected_not",
+    [
+        ("ready_for_live", ["a"], 1, 0),
+        ("not_performant", ["b", "c"], 0, 2),
+    ],
+)
+def test_paper_trading_results_verdict_filter_counts_match_filtered_items(
+    api_client, verdict, expected_ids, expected_ready, expected_not
+) -> None:
+    """Filtering by ``verdict`` must return counts consistent with the
+    filtered ``items``, not global totals across all sessions.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingVerdict
+
+    api_main._paper_trading_sessions["a"] = _paper_trading_session(
+        "a", PaperTradingVerdict.READY_FOR_LIVE
+    )
+    api_main._paper_trading_sessions["b"] = _paper_trading_session(
+        "b", PaperTradingVerdict.NOT_PERFORMANT
+    )
+    api_main._paper_trading_sessions["c"] = _paper_trading_session(
+        "c", PaperTradingVerdict.NOT_PERFORMANT
+    )
+
+    resp = api_client.get(f"/strategy-lab/paper-trade/results?verdict={verdict}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == expected_ids
+    assert body["count"] == len(expected_ids)
+    assert body["ready_for_live_count"] == expected_ready
+    assert body["not_performant_count"] == expected_not
+
+
+def test_paper_trading_results_rejects_unknown_verdict(api_client) -> None:
+    """An unrecognized ``verdict`` must 422, not silently match nothing."""
+    resp = api_client.get("/strategy-lab/paper-trade/results?verdict=bogus")
+    assert resp.status_code == 422
 
 
 def test_paper_trading_session_get_404(api_client) -> None:
@@ -853,34 +975,24 @@ def test_cancel_backtest_job_success_and_failure(
 
 
 def test_delete_backtest_job_404_when_missing(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    """Covers both a genuinely nonexistent job and a concurrent-delete race:
+    since there is no separate existence check to race, either case maps to
+    404 from ``_bt_delete_job``'s own return value, never a misleading 500."""
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: None)
+    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
 
 
 def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
     monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: True)
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
-
-
-def test_delete_backtest_job_500_when_delete_fails_after_existing(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
-    """Job confirmed to exist, but the delete itself fails: 500, not 404."""
-    from investment_team.api import main as api_main
-
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
-    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
-    resp = api_client.delete("/backtests/jobs/j1")
-    assert resp.status_code == 500
-    assert "Failed to delete" in resp.json()["detail"]
 
 
 def test_list_backtests_empty(api_client) -> None:

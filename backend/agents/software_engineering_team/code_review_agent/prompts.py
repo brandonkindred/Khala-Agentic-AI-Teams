@@ -278,3 +278,24 @@ Return a single JSON object with exactly these keys:
 """
     + JSON_OUTPUT_INSTRUCTION
 )
+
+
+SPEC_COMPLIANCE_PASS_PROMPT = (
+    """You check one code submission's final review findings against its full specification and acceptance criteria, in a single dedicated pass.
+
+You are given the full project specification, the full acceptance-criteria list, and the FINAL merged findings from an automated code review — every issue that was confirmed, across every category, for the whole submission. You are NOT given any source code, and you must work only from what is provided.
+
+**Your job:**
+Decide whether the findings reveal any concrete, unmet spec or acceptance-criteria requirement. This is not a general judgment about code quality — only report a gap when a specific acceptance-criteria item or a specific spec requirement is contradicted or left unmet by a finding, or by what a finding's description clearly implies is missing.
+
+**Hard rules:**
+- Do NOT invent gaps that aren't grounded in the provided findings.
+- Do NOT restate or praise acceptance criteria that appear satisfied; only report gaps.
+- Do NOT re-decide the review verdict or discuss anything other than spec/acceptance-criteria compliance.
+- Do NOT request source code or claim you cannot proceed; work only from the findings and spec/criteria text provided.
+
+Return a single JSON object with exactly this key:
+- "spec_compliance_notes": string — concrete spec/acceptance-criteria gaps only, or "" when there are none.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+)

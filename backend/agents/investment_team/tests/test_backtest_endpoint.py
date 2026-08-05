@@ -6,9 +6,9 @@ gone; execution now flows through the unified ``run_backtest`` event loop
 that turns strategy ``submit_order`` calls into ``TradeRecord`` objects via
 ``FillSimulator``. These tests lock in the current public behaviour:
 
-* Missing ``strategy_code`` → HTTP 422 fast-fail.
+* Missing ``strategy_code`` → ``BacktestExecutionError`` (422) fast-fail.
 * A strategy that fails to import (no ``Strategy`` subclass / bad module)
-  surfaces as HTTP 422 from the subprocess harness error.
+  surfaces as a 422 ``BacktestExecutionError`` from the subprocess harness error.
 * A strategy that reads a non-existent forward field triggers a
   look-ahead-violation-classified 422.
 * A well-formed strategy produces metrics + trades.
@@ -20,7 +20,6 @@ import textwrap
 from typing import Dict, List
 
 import pytest
-from fastapi import HTTPException
 
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
@@ -165,7 +164,7 @@ _LOOKAHEAD_CODE = textwrap.dedent('''\
 
 
 def test_run_real_data_backtest_returns_422_when_no_strategy_code() -> None:
-    """Strategies without ``strategy_code`` must return HTTP 422.
+    """Strategies without ``strategy_code`` must raise a 422-flavored error.
 
     The LLM-per-bar fallback was removed in PR 1; only Strategy-Lab-generated
     Python scripts may produce trades.
@@ -175,7 +174,7 @@ def test_run_real_data_backtest_returns_422_when_no_strategy_code() -> None:
     strategy = _sample_strategy(code=None)
     config = _sample_config()
 
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(api_main.BacktestExecutionError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
 
     assert excinfo.value.status_code == 422
@@ -213,7 +212,7 @@ def test_run_real_data_backtest_422_on_malformed_strategy_module(monkeypatch) ->
     strategy = _sample_strategy(code=_NO_STRATEGY_CLASS_CODE)
     config = _sample_config()
 
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(api_main.BacktestExecutionError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
     assert excinfo.value.status_code == 422
     assert "execution failed" in excinfo.value.detail.lower()
@@ -229,7 +228,7 @@ def test_run_real_data_backtest_422_on_lookahead_violation(monkeypatch) -> None:
     strategy = _sample_strategy(code=_LOOKAHEAD_CODE)
     config = _sample_config()
 
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(api_main.BacktestExecutionError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
     assert excinfo.value.status_code == 422
     assert "look-ahead" in excinfo.value.detail.lower()

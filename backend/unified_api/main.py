@@ -215,7 +215,7 @@ async def _start_sandbox_reaper_with_retry() -> None:
     isn't ready *yet* rather than block for up to 10s before this loop's own
     delay even applies.
     """
-    from agent_provisioning_team.temporal.sandbox_dispatch import start_sandbox_reaper_workflow
+    from agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch import start_sandbox_reaper_workflow
 
     delay = 2.0
     while True:
@@ -255,10 +255,10 @@ async def _start_sandbox_reaper_task() -> asyncio.Task:
           back to the in-process ``run_idle_reaper()`` asyncio task
           (thread mode).
     """
-    from agent_provisioning_team.temporal.sandbox_dispatch import sandbox_temporal_enabled
+    from agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch import sandbox_temporal_enabled
 
     if sandbox_temporal_enabled():
-        from agent_provisioning_team.temporal.worker import (
+        from agent_team_studio.agent_provisioning_team.temporal.worker import (
             start_agent_provisioning_sandbox_temporal_worker_thread,
         )
 
@@ -266,7 +266,7 @@ async def _start_sandbox_reaper_task() -> asyncio.Task:
         logger.info("Starting Agent Console sandbox idle reaper (Temporal workflow)")
         return asyncio.create_task(_start_sandbox_reaper_with_retry())
 
-    from agent_provisioning_team.sandbox import run_idle_reaper
+    from agent_team_studio.agent_provisioning_team.sandbox import run_idle_reaper
 
     logger.info("Started Agent Console sandbox idle reaper (in-process)")
     return asyncio.create_task(run_idle_reaper())
@@ -601,7 +601,7 @@ def _start_agent_studio_temporal_worker() -> None:
     if not TEAM_CONFIGS["agent_studio"].enabled:
         return
     try:
-        from agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
+        from agent_team_studio.agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
 
         started = start_agent_studio_temporal_worker_thread()
     except Exception:
@@ -671,7 +671,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     # to run unconditionally regardless of config.
     if TEAM_CONFIGS["agent_studio"].enabled:
         try:
-            from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
+            from agent_team_studio.agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
             from shared.postgres import register_team_schemas
 
             register_team_schemas(AGENT_STUDIO_SCHEMA)

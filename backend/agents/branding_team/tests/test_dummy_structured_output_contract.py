@@ -2,10 +2,13 @@
 
 Every branding agent built with ``structured_output=`` hands Strands a Pydantic
 model that the provider response *must* validate against. Under
-``LLM_PROVIDER=dummy`` that response comes from ``DummyLLMClient.complete_json``,
-which routes on substrings of the agent's system prompt. Nothing else in the
-suite drives those two halves against each other, so three independent edits can
-silently break the no-LLM harness:
+``LLM_PROVIDER=dummy`` that response comes from ``DummyLLMClient.complete_json``
+(via ``chat()``/``stream()``/``structured_output()``), which routes the six
+Phase 2 "Narrative & Messaging" classes deterministically by the
+``structured_output_model``'s class name and routes every other class by
+scanning the agent's system prompt for field-name substrings. Nothing else in
+the suite drives those two halves against each other, so three independent
+edits can silently break the no-LLM harness:
 
 1. tightening a model in ``branding_team.models`` (adding a field, a ``Literal``,
    an enum, or a length bound) past what the dummy stub supplies;
@@ -13,12 +16,17 @@ silently break the no-LLM harness:
    satisfies its model;
 3. rewording an agent's system prompt in ``branding_team.agents`` so it stops
    matching its dummy routing branch and falls through to the generic
-   ``{"status": ..., "output": ...}`` fallback.
+   ``{"status": ..., "output": ...}`` fallback — this applies only to the
+   text-routed classes; the six Phase 2 classes route on class name and are
+   unaffected by prompt wording.
 
 All three surface here as a failure naming the offending agent. Case (3) is the
 one that needed follow-up commits when Phases 3, 4, and 5 migrated to
 ``structured_output=``, and ``test_generic_prompt_payload_is_rejected_by_every_schema``
-is what keeps the primary assertion honest about catching it.
+is what keeps the primary assertion honest about catching it — for the
+text-routed classes only; the six Phase 2 classes moved to
+``test_model_routed_payload_validates_regardless_of_prompt_text`` since an
+unrouted prompt no longer breaks them, which is the point of their fix.
 
 ``governance_compositor`` (Phase 5's fan-in node) is not a ``make_*`` factory in
 this module — it's built inline in ``graphs/phase5_governance.py`` — so it never
@@ -34,7 +42,7 @@ import pytest
 
 from branding_team import agents as branding_agents
 from branding_team.graphs.phase3_visual import _PHASE3_CONCEPTUALIST_VARIANTS
-from branding_team.graphs.shared import serialize_mission
+from branding_team.graphs.shared import build_agent, serialize_mission
 from branding_team.models import (
     ApprovalWorkflowsOutput,
     AssetWikiOutput,
@@ -172,6 +180,40 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
 
 _CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
 
+# Model classes DummyLLMClient.complete_json routes by structured_output_model
+# class name (see _branding_phase2_structured_output_stub in
+# llm_service.clients.dummy) rather than by scanning system-prompt text.
+# For these six, an unrouted/misleading prompt no longer prevents a valid
+# payload — that is the point of issue #4252's fix, and is asserted
+# separately in test_model_routed_payload_validates_regardless_of_prompt_text
+# below instead of test_generic_prompt_payload_is_rejected_by_every_schema.
+_MODEL_ROUTED_CLASS_NAMES: frozenset[str] = frozenset(
+    {
+        "BrandStoryOutput",
+        "BrandArchetypesOutput",
+        "TaglineOutput",
+        "MessagingFrameworkOutput",
+        "PersonaProfilesOutput",
+        "WritingGuidelinesOutput",
+    }
+)
+_TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case for case in _CASES if case[2].__name__ not in _MODEL_ROUTED_CLASS_NAMES
+)
+_TEXT_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _TEXT_ROUTED_CASES
+)
+_MODEL_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case for case in _CASES if case[2].__name__ in _MODEL_ROUTED_CLASS_NAMES
+)
+_MODEL_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _MODEL_ROUTED_CASES
+)
+_MODEL_ROUTED_CLASSES: tuple[type, ...] = tuple(
+    model for _case_id, _factory, model in _MODEL_ROUTED_CASES
+)
+_MODEL_ROUTED_CLASS_NAME_IDS: tuple[str, ...] = tuple(cls.__name__ for cls in _MODEL_ROUTED_CLASSES)
+
 # Factory names covered by ``_CASES``. Parameterized factories appear once here
 # and expand to several table rows, so this is not derivable from ``_CASE_IDS``.
 _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
@@ -287,18 +329,44 @@ def test_dummy_payload_validates_against_agent_schema(
     assert isinstance(output, output_model)
 
 
-@pytest.mark.parametrize(("_case_id", "_factory", "output_model"), _CASES, ids=_CASE_IDS)
+@pytest.mark.parametrize(
+    ("_case_id", "_factory", "output_model"), _TEXT_ROUTED_CASES, ids=_TEXT_ROUTED_CASE_IDS
+)
 def test_generic_prompt_payload_is_rejected_by_every_schema(
     _case_id: str, _factory: Callable[[], Any], output_model: type
 ) -> None:
-    """The dummy's unrouted fallback satisfies none of the branding schemas.
+    """The dummy's unrouted fallback satisfies none of the still-text-routed schemas.
 
     Without this, ``test_dummy_payload_validates_against_agent_schema`` would
     pass just as happily if an agent's prompt stopped matching its dummy branch
     and fell through — this is what makes that assertion evidence of routing.
+
+    Excludes the six Phase 2 classes in ``_MODEL_ROUTED_CLASS_NAMES``: see
+    ``test_model_routed_payload_validates_regardless_of_prompt_text`` for why
+    an unrouted prompt is no longer the right probe for those.
     """
     with pytest.raises(ValueError, match="failed to parse into"):
         _drive_structured_output(output_model, _UNROUTED_SYSTEM_PROMPT)
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "_factory", "output_model"), _MODEL_ROUTED_CASES, ids=_MODEL_ROUTED_CASE_IDS
+)
+def test_model_routed_payload_validates_regardless_of_prompt_text(
+    _case_id: str, _factory: Callable[[], Any], output_model: type
+) -> None:
+    """Phase 2 dummy routing keys off the structured_output model class, not text.
+
+    Proves issue #4252's fix: ``DummyLLMClient.structured_output`` forwards the
+    real ``output_model`` class into ``complete_json``, which routes these six
+    classes deterministically by class identity (see
+    ``_branding_phase2_structured_output_stub``). So even
+    ``_UNROUTED_SYSTEM_PROMPT`` — carrying none of the legacy text anchors —
+    still yields a schema-valid payload, unlike the remaining classes covered
+    by ``test_generic_prompt_payload_is_rejected_by_every_schema``.
+    """
+    output = _drive_structured_output(output_model, _UNROUTED_SYSTEM_PROMPT)
+    assert isinstance(output, output_model)
 
 
 def test_archetype_stub_matches_the_form_its_prompt_asks_for() -> None:
@@ -315,6 +383,40 @@ def test_archetype_stub_matches_the_form_its_prompt_asks_for() -> None:
 
     output = _drive_structured_output(BrandArchetypesOutput, agent.system_prompt)
     assert [a.archetype for a in output.brand_archetypes] == ["The Creator"]
+
+
+@pytest.mark.parametrize("output_model", _MODEL_ROUTED_CLASSES, ids=_MODEL_ROUTED_CLASS_NAME_IDS)
+def test_real_agent_event_loop_routes_deterministically_despite_misleading_prompt(
+    output_model: type,
+) -> None:
+    """The actual production path — a real Strands event loop, not
+    ``DummyLLMClient.structured_output()`` called directly — must also route
+    deterministically, for every Phase 2 class the dispatcher covers.
+
+    Every other test in this module drives ``DummyLLMClient.structured_output()``
+    directly via ``_drive_structured_output``. That method is only reachable
+    through Strands' deprecated ``Agent.structured_output()``/
+    ``structured_output_async()``, which nothing in this repo calls. The
+    current API (``structured_output_model=``, what ``build_agent`` uses)
+    drives agents through the tool-calling event loop instead — Strands
+    registers a ``StructuredOutputTool`` and the loop calls
+    ``Model.stream()``, which for a real ``Agent`` always lands on
+    ``LLMClientModel.stream()`` -> ``chat()``, never on ``.structured_output()``.
+    So a passing suite of ``_drive_structured_output``-based tests does not by
+    itself prove the real path routes correctly — this test does, by actually
+    running the event loop with a system prompt that carries none of the
+    legacy text anchors. Parametrized over all six routed classes rather than
+    just ``TaglineOutput``: the dispatcher is a flat name lookup shared by all
+    six, but a class-specific edge case on the event-loop path would
+    otherwise regress silently for the other five.
+    """
+    agent = build_agent(
+        name="RealEventLoopProbe",
+        system_prompt=_UNROUTED_SYSTEM_PROMPT,
+        structured_output=output_model,
+    )
+    result = agent("Please respond.")
+    assert isinstance(result.structured_output, output_model)
 
 
 def test_every_agent_factory_is_either_covered_or_explicitly_excluded() -> None:

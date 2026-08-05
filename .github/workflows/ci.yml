@@ -137,9 +137,9 @@ jobs:
               - 'backend/agents/**/postgres/**'
               - 'backend/agents/branding_team/**'
               - 'backend/agents/startup_advisor/**'
-              - 'backend/agents/user_agent_founder/**'
+              - 'backend/agents/agent_team_studio/user_agent_founder/**'
               - 'backend/agents/team_assistant/**'
-              - 'backend/agents/agentic_team_provisioning/**'
+              - 'backend/agents/agent_team_studio/agentic_team_provisioning/**'
               - 'backend/agents/blogging/**'
               - 'backend/agents/requirements.txt'
               - 'backend/unified_api/postgres/**'
@@ -208,7 +208,7 @@ jobs:
             # too, but listing it here keeps the matrix narrow on the common
             # provisioning-only PR.
             agent_provisioning:
-              - 'backend/agents/agent_provisioning_team/**'
+              - 'backend/agents/agent_team_studio/agent_provisioning_team/**'
               - 'backend/agents/agent_registry/**'
             sales:
               - 'backend/agents/sales_team/**'
@@ -221,8 +221,8 @@ jobs:
             # suite is not in the matrix yet (pre-existing failures); until
             # it is, this filter is what turns CI red on that boundary.
             user_agent_founder:
-              - 'backend/agents/user_agent_founder/**'
-              - 'backend/agents/agentic_team_provisioning/**'
+              - 'backend/agents/agent_team_studio/user_agent_founder/**'
+              - 'backend/agents/agent_team_studio/agentic_team_provisioning/**'
               - 'backend/agents/agent_registry/**'
             # Each docker_* filter mirrors what its Dockerfile actually
             # copies into the image, so a change to any baked-in source
@@ -296,12 +296,12 @@ jobs:
               - '!backend/agents/soc2_compliance_team/**'
               - '!backend/agents/investment_team/**'
               - '!backend/agents/social_media_marketing_team/**'
-              - '!backend/agents/agent_provisioning_team/**'
+              - '!backend/agents/agent_team_studio/agent_provisioning_team/**'
               - '!backend/agents/agent_registry/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
-              - '!backend/agents/user_agent_founder/**'
-              - '!backend/agents/agentic_team_provisioning/**'
+              - '!backend/agents/agent_team_studio/user_agent_founder/**'
+              - '!backend/agents/agent_team_studio/agentic_team_provisioning/**'
               # shared_backend paths (already trigger fan-out separately)
               - '!backend/shared/postgres/**'
               - '!backend/shared/neo4j/**'
@@ -378,9 +378,9 @@ jobs:
               },
               "agent_provisioning": {
                   "name": "Agent Provisioning",
-                  "tests": "agent_provisioning_team/tests/",
-                  "source": "agent_provisioning_team",
-                  "extra_requirements": "agent_provisioning_team/requirements.txt",
+                  "tests": "agent_team_studio/agent_provisioning_team/tests/",
+                  "source": "agent_team_studio.agent_provisioning_team",
+                  "extra_requirements": "agent_team_studio/agent_provisioning_team/requirements.txt",
               },
               # unified_api lives at backend/unified_api/ (a sibling of backend/agents/,
               # this job's working directory), so its test/source paths are given
@@ -426,8 +426,8 @@ jobs:
                   "source": "agent_repo_tools",
               },
               "user_agent_founder": {
-                  "tests": "user_agent_founder/tests/",
-                  "source": "user_agent_founder",
+                  "tests": "agent_team_studio/user_agent_founder/tests/",
+                  "source": "agent_team_studio.user_agent_founder",
               },
           }
 
@@ -549,7 +549,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -585,12 +585,16 @@ jobs:
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
       # ../shared/postgres/tests/ is a filesystem path (backend/shared/ is one
       # level up from backend/agents/); --cov=shared.postgres is the dotted
-      # module name, resolved via PYTHONPATH=.. above.
+      # module name. Step-level `env` does not carry over to later steps, so
+      # PYTHONPATH=.. must be set again here (not just on the step above) for
+      # shared.postgres imports and coverage resolution to work.
       - run: >-
           pytest ../shared/postgres/tests/ -v --tb=short -n 4
           --cov=shared.postgres
           --cov-report=term-missing
           --cov-fail-under=90
+        env:
+          PYTHONPATH: ..
 
   # shared_neo4j: the env-gated Graphiti client. Its tests fake graphiti_core and
   # need no live Neo4j or Postgres, so this job carries no service container.
@@ -698,7 +702,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -751,7 +755,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -816,7 +820,7 @@ jobs:
             backend/agents/software_engineering_team/requirements.txt
             backend/agents/blogging/requirements.txt
             backend/agents/investment_team/requirements-test.txt
-            backend/agents/agent_provisioning_team/requirements.txt
+            backend/agents/agent_team_studio/agent_provisioning_team/requirements.txt
       - uses: actions/cache@v4
         with:
           path: |
@@ -952,7 +956,7 @@ jobs:
         working-directory: backend/agents
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -1053,7 +1057,7 @@ jobs:
       # trust auth so the ephemeral CI database needs no password (avoids a
       # hardcoded dummy credential); connections come only from this runner.
       postgres:
-        image: postgres:18-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: postgres
