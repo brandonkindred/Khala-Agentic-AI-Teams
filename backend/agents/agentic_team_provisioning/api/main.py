@@ -259,9 +259,11 @@ def _save_agents_and_process(
         the caller — ``create_conversation``/``send_message`` each look up the
         team/conversation before reaching this point — and are not
         independently re-validated here.
-    Postconditions: on success, the roster (if ``agents_data`` is non-empty)
-        is registered and ``process`` (if given) is saved and linked to the
-        conversation. Not atomic across the two steps: if the roster save
+    Postconditions: on success, any entries in ``agents_data`` that carry an
+        ``agent_name`` are merged into the roster (``_save_agents_from_llm``
+        silently drops entries without one, and is a no-op if none remain),
+        and ``process`` (if given) is saved and linked to the conversation.
+        Not atomic across the two steps: if the roster save
         commits but the process save/link then fails, the roster is left
         updated while the process is not (documented gap, not silently
         hidden — closing it would need a shared transaction across
