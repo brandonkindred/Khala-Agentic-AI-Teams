@@ -889,11 +889,11 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         ``request.user_id`` must already have an IPS created via
         ``create_profile``.
     Postconditions:
-        Raises 404 if no IPS exists for ``request.user_id``. Otherwise
-        persists a new ``PortfolioProposal`` under a freshly generated
+        Persists a new ``PortfolioProposal`` under a freshly generated
         ``proposal_id`` and returns it.
 
     Raises:
+        - ``HTTPException(404)`` if no IPS exists for ``request.user_id``.
         - ``HTTPException(502)`` if the advisory workflow returns a result
           that is not a dict, or whose ``proposal`` value is not a dict.
     """
@@ -1384,13 +1384,17 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         process ran the activity.
 
     Raises:
+        - ``HTTPException(404)`` if ``request.strategy_id`` is not found in
+          ``_strategies`` or no IPS exists for ``request.user_id``.
+        - ``HTTPException(400)`` if the strategy has no validation report in
+          ``_validations``.
         - ``HTTPException(502)`` if the advisory workflow returns a result
           that is not a dict, is missing ``decision``, or whose ``decision``
           is not a dict; an ``escalation_enqueued`` payload missing
-          ``queue``/``payload_id``/``priority``; an ``escalation_enqueued
-          ["queue"]`` that isn't a string or isn't a known
-          ``_workflow_state.queues`` key; or an ``audit_log_appended`` that
-          is present but not a list.
+          ``queue``/``payload_id``/``priority``; an
+          ``escalation_enqueued["queue"]`` that isn't a string or isn't a
+          known ``_workflow_state.queues`` key; or an ``audit_log_appended``
+          that is present but not a list.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -2782,12 +2786,16 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
           guard the result themselves (an ``isinstance``/key-presence/value-type
           check) and raise ``HTTPException(502)`` for a malformed payload
           before indexing into it. Raises ``HTTPException(503)`` when Temporal
-          is disabled/unavailable, or when the Temporal client didn't become
+          is disabled/unavailable, when the Temporal client didn't become
           ready in time (a bare ``RuntimeError`` from
           ``shared.temporal._await_client``, mapped here to the same 503 as
-          the up-front check). On any other workflow failure, raises the
-          ``HTTPException`` :func:`_translate_advisory_failure` maps it to
-          (never an opaque unhandled exception).
+          the up-front check), or when the ``investment_team.temporal.
+          start_workflow`` module fails to import (a deployment/packaging
+          defect, not a downstream advisory-workflow failure, so it is kept
+          distinct from :func:`_translate_advisory_failure`'s 502 fallback).
+          On any other workflow failure, raises the ``HTTPException``
+          :func:`_translate_advisory_failure` maps it to (never an opaque
+          unhandled exception).
     """
     _require_temporal()
     try:
@@ -2796,6 +2804,11 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
         return execute_advisory_workflow(op, payload, key=key)
     except HTTPException:
         raise
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Required advisory workflow module is unavailable.",
+        ) from exc
     except RuntimeError as exc:
         # ``shared.temporal._await_client`` raises a bare RuntimeError when
         # TEMPORAL_ADDRESS is set but the worker's client never became ready in

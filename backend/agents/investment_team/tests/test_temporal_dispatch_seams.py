@@ -435,6 +435,24 @@ def test_execute_advisory_maps_client_not_ready_runtime_error_to_503(monkeypatch
     assert ei.value.status_code == 503
 
 
+def test_execute_advisory_maps_import_error_to_503(monkeypatch) -> None:
+    """A deployment/packaging defect that breaks the deferred
+    ``investment_team.temporal.start_workflow`` import is not itself an
+    advisory-workflow failure — it must surface as a distinct 503, not the
+    generic 502 ``_translate_advisory_failure`` defaults to for an
+    unrecognized error."""
+    import sys
+
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setitem(sys.modules, "investment_team.temporal.start_workflow", None)
+
+    with pytest.raises(HTTPException) as ei:
+        REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
+    assert ei.value.status_code == 503
+
+
 def test_execute_advisory_passes_through_503_when_disabled_without_translation(
     monkeypatch,
 ) -> None:
