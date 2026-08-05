@@ -64,6 +64,7 @@ from strands.types.tools import ToolChoice, ToolSpec
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
 from .factory import client_agent_key, get_client, unwrap_client
 from .interface import LLMClient
+from .util import _flatten_system_prompt_content
 
 logger = logging.getLogger(__name__)
 
@@ -124,31 +125,6 @@ def _tool_result_content_to_text(content: List[Dict[str, Any]]) -> str:
         # image/document/video tool results are intentionally dropped: the
         # underlying ``LLMClient`` contract is text-in/text-out.
     return "\n".join(parts)
-
-
-def _flatten_system_prompt_content(system_prompt_content: Optional[List[Any]]) -> str:
-    """Flatten Strands ``system_prompt_content`` blocks into a single string.
-
-    Mirrors ``clients.dummy._flatten_system_prompt_content``: ``{"text": ...}``
-    blocks are the common case; non-dict blocks are stringified defensively
-    for forward compatibility with content-block shapes this adapter doesn't
-    otherwise understand.
-
-    Preconditions:
-        - ``system_prompt_content`` is ``None`` or a list of content blocks.
-
-    Postconditions:
-        - Returns the concatenated block text (``""`` when absent/empty).
-    """
-    if not system_prompt_content:
-        return ""
-    parts: List[str] = []
-    for block in system_prompt_content:
-        if isinstance(block, dict):
-            parts.append(str(block.get("text", "") or ""))
-        else:
-            parts.append(str(block))
-    return "".join(parts)
 
 
 def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
