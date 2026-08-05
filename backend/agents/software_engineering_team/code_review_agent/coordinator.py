@@ -280,20 +280,16 @@ def _tail_passes_run_sequentially(llm: LLMClient) -> bool:
 
     Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response index,
     so they are not safe under concurrent fan-out. Mirrors
-    ``shared.v2_review._review_steps_run_sequentially``.
-
-    Production callers may pass a Strands ``LLMClientModel`` wrapper, which survives
-    clone paths. A bare ``isinstance(llm, DummyLLMClient)`` misses a dummy reached
-    through that wrapper, so unwrap via ``.client`` before checking.
+    ``shared.v2_review._review_steps_run_sequentially``; both delegate to the shared
+    ``is_dummy_llm_client_wrapped`` helper (unwraps a Strands ``LLMClientModel``
+    wrapper before checking) so the detection logic lives in one place.
 
     Preconditions: ``llm`` is the LLM client that will be handed to the tail-pass thunks.
     Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
     """
-    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.clients.dummy import is_dummy_llm_client_wrapped
 
-    if isinstance(llm, DummyLLMClient):
-        return True
-    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+    return is_dummy_llm_client_wrapped(llm)
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:

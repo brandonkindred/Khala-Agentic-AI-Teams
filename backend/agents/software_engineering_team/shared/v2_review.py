@@ -207,19 +207,17 @@ def _review_steps_run_sequentially(llm: LLMClient) -> bool:
 
     Production coding-team callers often pass a Strands ``LLMClientModel`` wrapper
     (reasoning-stream capture via ``_make_reasoning_llm_getter``), which survives the
-    ``worker_factory._v2_text_mode_llm`` clone path. A bare ``isinstance(llm,
-    DummyLLMClient)`` misses a dummy reached through that wrapper, so unwrap via
-    ``LLMClientModel.client`` before checking.
+    ``worker_factory._v2_text_mode_llm`` clone path; the shared
+    ``is_dummy_llm_client_wrapped`` helper (also used by
+    ``code_review_agent.coordinator._tail_passes_run_sequentially``) unwraps it
+    before checking.
 
     Preconditions: ``llm`` is the LLM client that will be handed to the step thunks.
     Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
     """
-    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.clients.dummy import is_dummy_llm_client_wrapped
 
-    if isinstance(llm, DummyLLMClient):
-        return True
-    # Unwrap Strands LLMClientModel wrapper to reach the real client for isinstance check.
-    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+    return is_dummy_llm_client_wrapped(llm)
 
 
 def _unwrap_llm_review_result(result: Any) -> _ReviewStepResult:
