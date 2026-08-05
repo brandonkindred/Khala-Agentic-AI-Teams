@@ -136,10 +136,44 @@ class _ScriptedClient(DummyLLMClient):
             return self._default_factory()
         return self._responses[-1] if self._responses else {}
 
+    @property
+    def responses(self) -> List[Dict[str, Any]]:
+        """Copy of the scripted response list (safe to mutate by callers)."""
+        return list(self._responses)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# Shared prefix for the security-blocking pipeline script: task_clarifier →
+# iac → cicd → deployment → devsecops (blocked). Tests that need this
+# five-step blocked-by-security-review sequence append their own differing
+# tail entries rather than re-inlining the prefix.
+_SECURITY_BLOCKING_SCRIPT_PREFIX: List[Dict[str, Any]] = [
+    {"approved_for_execution": True},
+    {"artifacts": {}, "summary": "iac"},
+    {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
+    {
+        "artifacts": {},
+        "summary": "deploy",
+        "strategy": "rolling",
+        "rollback_plan": ["rb"],
+    },
+    {
+        "approved": False,
+        "findings": [
+            {
+                "finding_id": "F1",
+                "severity": "high",
+                "blocking": True,
+                "issue": "bad iam",
+            }
+        ],
+        "summary": "blocked",
+    },
+]
 
 
 def _base_task_spec(**overrides) -> DevOpsTaskSpec:
@@ -1529,7 +1563,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         # 8 LLM calls while hosts without it consume 9 — which desynchronizes a
         # chained two-run script. Use the full 9-response happy-path script twice.
         happy_path = _scripted_llm_for_happy_path()
-        per_run = list(happy_path._responses)
+        per_run = list(happy_path.responses)
         assert len(per_run) == 9
         chained = _ScriptedClient(per_run + per_run, default_factory=happy_path._default_factory)
         agent = DevOpsTeamLeadAgent(chained)
@@ -1575,28 +1609,8 @@ class TestDevOpsTeamLeadAgentIntegration:
 
     def test_blocked_by_security_review(self) -> None:
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 {"approved": True, "quality_gates": {"iac_validate": "pass"}, "summary": "ok"},
             ]
@@ -1619,28 +1633,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         a blocking DevSecOps review: the gate is force-assigned from the
         DevSecOps + policy result, not preserved via setdefault."""
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 # Validation agent wrongly reports the security gate as passing.
                 {
@@ -1741,10 +1735,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         spec = _base_task_spec()
         pkg = agent.run(spec)
         assert len(pkg.files_changed) > 0
-        assert any(
-            path.endswith((".tf", ".yml", ".yaml", ".md")) or "/" in path
-            for path in pkg.files_changed
-        )
+        assert any(path.endswith((".tf", ".yml", ".yaml", ".md")) for path in pkg.files_changed)
 
     def test_quality_gates_in_completion(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
