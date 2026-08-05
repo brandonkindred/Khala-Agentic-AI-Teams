@@ -3228,10 +3228,15 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           already in flight, or another run is already ``"running"``.
         - ``HTTPException`` 503: reading the current durable generation —
           either the initial carry-forward read or the pre-dispatch
-          revalidation — failed (job service unavailable). The
-          revalidation failure additionally marks the run ``"failed"``
-          (state was already written by this point, so leaving it
-          ``"running"`` with no workflow ever dispatched would wedge it).
+          revalidation — failed. Covers both a job-service transport
+          failure (unreachable/timed out) AND ``_get_run_generation_strict``
+          raising ``ValueError`` for a malformed/corrupt persisted
+          ``generation`` value — either way, the generation can't be
+          reliably determined, so the request fails closed with the same
+          503 rather than distinguishing the two causes. The revalidation
+          failure additionally marks the run ``"failed"`` (state was
+          already written by this point, so leaving it ``"running"`` with
+          no workflow ever dispatched would wedge it).
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged).

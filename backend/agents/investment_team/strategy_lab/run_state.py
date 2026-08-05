@@ -136,9 +136,14 @@ def get_run_generation_strict(run_id: str, *, client: Optional["JobServiceClient
           for it would let a stale pre-restart activity (carrying token
           ``1``) pass ``check_fencing_token`` (which accepts
           ``provided_token >= current_token``), reopening the exact race
-          this module's fencing exists to close. Also raises whatever the
-          underlying job-service client raises on a transport failure —
-          callers must let both propagate, not swallow them.
+          this module's fencing exists to close. A ``bool`` or ``float``
+          persisted value is treated the same as unparseable (raises
+          ``ValueError``) rather than silently coerced via ``int(...)``,
+          which would truncate a float or accept a bool as a seemingly
+          valid generation -- a numeric *string* (e.g. ``"5"``) is still
+          accepted, only the raw Python type is restricted. Also raises
+          whatever the underlying job-service client raises on a transport
+          failure — callers must let both propagate, not swallow them.
     """
     client = client or get_lab_run_job_client()
     job = client.get_job(run_id)
@@ -152,6 +157,8 @@ def get_run_generation_strict(run_id: str, *, client: Optional["JobServiceClient
     raw_generation = data.get("generation", DEFAULT_FENCING_GENERATION)
     if raw_generation is None or raw_generation == "":
         return DEFAULT_FENCING_GENERATION
+    if isinstance(raw_generation, bool) or isinstance(raw_generation, float):
+        raise ValueError(f"Invalid persisted generation for run {run_id}: {raw_generation!r}")
     try:
         # A persisted value below DEFAULT_FENCING_GENERATION is treated as
         # uninitialized/corrupt, not returned verbatim: the generation

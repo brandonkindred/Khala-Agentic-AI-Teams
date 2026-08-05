@@ -1564,6 +1564,26 @@ def test_get_run_generation_strict_raises_on_unparseable_value(
         run_state.get_run_generation_strict("run-bad")
 
 
+@pytest.mark.parametrize("non_int_value", [2.9, True, False])
+def test_get_run_generation_strict_raises_on_float_or_bool(
+    monkeypatch: pytest.MonkeyPatch, non_int_value
+) -> None:
+    """A persisted `generation` that's a float or bool (an int subclass in
+    Python, so `isinstance(True, int)` is True) must be rejected as
+    corruption rather than silently coerced via int(...) -- a truncated
+    float or a bool-derived 0/1 could produce a generation lower than the
+    actual persisted value, letting a stale activity pass fencing."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": non_int_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted generation"):
+        run_state.get_run_generation_strict("run-bad")
+
+
 def test_get_run_generation_strict_returns_one_for_unknown_run(monkeypatch: pytest.MonkeyPatch) -> None:
     from investment_team.strategy_lab import run_state
 

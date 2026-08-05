@@ -2538,10 +2538,11 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
     Postconditions:
         * Returns the concatenated body up to and including the ``done`` line.
         * Raises ``AssertionError`` if the terminal line is not seen within
-          ``max_chunks`` chunks, within ``timeout_seconds`` wall-clock
-          seconds, or before ``body_iter`` is exhausted (a route regression
-          that stops emitting before the terminal event would otherwise
-          silently return an incomplete body instead of failing the test).
+          ``max_chunks`` chunks, within ``timeout_seconds`` (measured via
+          ``time.monotonic()``, not wall-clock time), or before
+          ``body_iter`` is exhausted (a route regression that stops
+          emitting before the terminal event would otherwise silently
+          return an incomplete body instead of failing the test).
     """
     import time as _time
 
