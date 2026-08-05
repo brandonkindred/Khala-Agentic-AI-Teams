@@ -1,5 +1,18 @@
-"""Temporal activities for GitHub-issue-driven coding-team hooks (branch prep;
-publish/failure-notice activities to follow per #3990/#3991).
+"""Temporal activities for GitHub-issue-driven coding-team hooks (branch prep,
+plus the sibling publish/failure-notice activities joining this module next).
+
+Deliberately its own module rather than appended to ``coding_team_workflow.py``:
+the co-location note in ``system_design/hitl_pause_resume_contract.md`` is
+scoped to ``run_pipeline_activity`` specifically -- that activity is
+long-running, has no Temporal heartbeat coordination, and its paused/terminal
+return shape is interpreted directly by ``CodingTeamWorkflow.run``'s control
+flow, which is why it is co-located with the workflow it drives. The
+activities in this module are short-lived and self-contained, dispatched by
+their registered Temporal name regardless of which module defines them, so
+they follow the repository's general activities-module convention instead
+(matching ``code_review_agent``'s ``activities.py``/``workflows.py`` split)
+rather than growing ``coding_team_workflow.py`` with unrelated GitHub-hook
+logic.
 
 NB: this module is imported at the top of ``coding_team_workflow.py``, which
 DEFINES ``CodingTeamWorkflow`` -- the temporalio workflow sandbox re-imports
@@ -27,8 +40,8 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
     workflow run can execute the same branch-recovery/continuation logic the
     thread-mode ``_run_with_github_hooks`` orchestrator calls today, on a
     worker rather than a caller thread. Not yet called by ``CodingTeamWorkflow``
-    (see #3993 for wiring this family into the workflow after pipeline
-    success) and does not publish comments (see #3990/#3991).
+    (workflow wiring is a separate, later follow-up) and does not publish
+    comments (that is the sibling publish/failure-notice activity work).
 
     Preconditions:
         - ``request`` carries non-empty string values for ``repo_path``,
