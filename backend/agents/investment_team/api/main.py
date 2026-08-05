@@ -4744,7 +4744,7 @@ def _recover_orphaned_paper_trading_sessions() -> None:
 
 
 class StartAdvisorSessionRequest(BaseModel):
-    user_id: str = Field(..., description="Unique user identifier")
+    user_id: str = Field(..., min_length=1, description="Unique user identifier")
 
 
 class StartAdvisorSessionResponse(BaseModel):
