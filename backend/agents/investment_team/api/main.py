@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, get_args
 
 import httpx
 from fastapi import HTTPException
@@ -1766,6 +1766,23 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
     return normalize_asset_class(raw)
 
 
+# The timeframe values StrategySpec.timeframe (a strict Literal) accepts.
+# Derived from the field itself so this can never drift out of sync with
+# models.py.
+_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(get_args(StrategySpec.model_fields["timeframe"].annotation))
+
+
+def _coerce_strategy_lab_timeframe(raw: object) -> str:
+    """Return ``raw`` if it's a timeframe ``StrategySpec`` accepts, else ``"1d"``.
+
+    Preconditions: ``raw`` may be any value, including ``None`` or an
+    unrecognized/malformed string — no type check required of the caller.
+    Postconditions: returns ``raw`` unchanged when it's a member of
+    ``_STRATEGY_SPEC_TIMEFRAMES``; otherwise returns ``"1d"``. Never raises.
+    """
+    return raw if raw in _STRATEGY_SPEC_TIMEFRAMES else "1d"
+
+
 def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[StrategySpec, str]:
     """Build a StrategySpec + strategy_id from raw ideation output.
 
@@ -1792,11 +1809,13 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
         hypothesis=str(strategy_data.get("hypothesis", "")),
         signal_definition=str(strategy_data.get("signal_definition", "")),
-        # Issue #537: ideation must declare a timeframe. Default to "1d"
-        # only when the LLM forgot the field — the prompt makes it
-        # mandatory; this fallback keeps the cycle alive rather than
-        # forcing a re-run for a clearly-resolvable omission.
-        timeframe=strategy_data.get("timeframe") or "1d",
+        # Ideation must declare a timeframe StrategySpec accepts. Default to
+        # "1d" when the LLM omitted the field or returned a value outside
+        # the allowed set (e.g. "1x") -- the prompt makes a valid timeframe
+        # mandatory, but this fallback keeps the cycle alive on a
+        # clearly-resolvable omission/typo instead of raising a strict
+        # pydantic ValidationError deep inside StrategySpec construction.
+        timeframe=_coerce_strategy_lab_timeframe(strategy_data.get("timeframe")),
         # Issue #551/#554: pass structured rule payloads through to
         # Pydantic; non-dict / non-DSL items are discarded so a malformed
         # ideation LLM response doesn't crash the cycle.
