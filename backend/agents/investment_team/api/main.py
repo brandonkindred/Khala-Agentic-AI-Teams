@@ -2378,16 +2378,25 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
         from investment_team.api.job_event_bus import cleanup_job
 
         def _cleanup() -> None:
-            with _lock:
-                # resume/restart always replace the entry with a new dict
-                # rather than mutate this one in place, so an identity check
-                # reliably detects a run that got resumed within this delay
-                # window — pop/cleanup would otherwise tear down a live,
-                # freshly-resumed run's tracking state.
-                if _active_runs.get(run_id) is not state:
-                    return
-                _active_runs.pop(run_id, None)
-            cleanup_job(run_id)
+            # Runs on threading.Timer's own daemon thread, 900s after this
+            # function returns -- the outer try/except below has long since
+            # exited by then, so it can't catch anything raised in here. An
+            # uncaught cleanup_job failure would otherwise surface only as an
+            # unhandled exception trace on a background thread, with the
+            # rest of this callback silently skipped.
+            try:
+                with _lock:
+                    # resume/restart always replace the entry with a new dict
+                    # rather than mutate this one in place, so an identity check
+                    # reliably detects a run that got resumed within this delay
+                    # window — pop/cleanup would otherwise tear down a live,
+                    # freshly-resumed run's tracking state.
+                    if _active_runs.get(run_id) is not state:
+                        return
+                    _active_runs.pop(run_id, None)
+                cleanup_job(run_id)
+            except Exception:
+                logger.warning("Failed to clean up strategy-lab run %s after failure timeout", run_id, exc_info=True)
 
         timer = threading.Timer(900.0, _cleanup)
         timer.daemon = True
