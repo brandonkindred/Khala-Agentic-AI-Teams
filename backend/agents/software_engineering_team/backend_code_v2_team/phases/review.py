@@ -396,6 +396,26 @@ def run_code_review_phase(
     path: the coordinator's chunk reviewer only ever reports on the literal
     code it was shown, so there is no free-text hallucinated-claim filter
     left to toggle (see ``_run_llm_review``'s own docstring).
+
+    Preconditions:
+        - ``llm`` is a usable text-mode LLM client (forwarded to
+          ``_run_llm_review`` when no ``code_review_agent`` is supplied or it
+          fails).
+        - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
+        - ``files`` maps file paths to their full source text.
+    Postconditions:
+        - Returns a :class:`PhaseReviewResult` whose ``passed`` is true iff no
+          critical/high code-review issue was found. Never raises: an
+          outright failure of the code-review agent or LLM fallback
+          (including ``CodeReviewUnavailableError`` from ``_run_llm_review``)
+          is caught by the shared ``_code_review_step`` and reported as a
+          synthetic high-severity issue instead of propagating.
+          Caller-supplied ``detail_callback`` exceptions are not contained --
+          they propagate to the caller.
+    Invariants:
+        - Does not run build verification or linting -- those run in this
+          team's own pre-review quality gate, or the separate
+          ``run_review``/``run_microtask_review`` path.
     """
     return run_code_review_phase_impl(
         llm=llm,
