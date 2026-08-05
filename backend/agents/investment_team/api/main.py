@@ -3587,8 +3587,30 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
     Raises:
         - None. Job-service lookup/reconciliation failures are caught and
           logged (``logger.debug``), and the endpoint falls back to the
-          in-memory-only snapshot; this endpoint always returns 200.
+          in-memory-only snapshot; this endpoint always returns 200. An
+          ``_active_runs`` entry missing a truthy ``run_id`` (malformed or
+          partially-constructed) is skipped and logged rather than raising
+          ``KeyError``.
     """
+
+    def _in_memory_runs_by_id() -> Dict[str, Dict[str, Any]]:
+        """Locked snapshot of ``_active_runs``, keyed by each entry's own ``run_id``.
+
+        An entry missing (or with a falsy) ``run_id`` is skipped and logged
+        instead of raising ``KeyError`` -- this endpoint must always return
+        200, and a single malformed entry must not break the whole listing.
+        """
+        with _lock:
+            snapshot = list(_active_runs.items())
+        result: Dict[str, Dict[str, Any]] = {}
+        for key, r in snapshot:
+            rid = r.get("run_id")
+            if not rid:
+                logger.warning("Skipping _active_runs entry %r with missing/falsy run_id", key)
+                continue
+            result[rid] = r
+        return result
+
     try:
         client = _get_lab_run_job_client()
 
@@ -3603,8 +3625,7 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         for rid in running_ids:
             _reconcile_run_progress(rid)
 
-        with _lock:
-            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+        in_memory = _in_memory_runs_by_id()
 
         # Merge running/pending jobs from the persistent job service that
         # may not be in _active_runs (e.g. after a server restart).
@@ -3615,8 +3636,7 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
                 in_memory[rid] = _normalize_persisted_job(job, fallback_status="running", run_id=rid)
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
-        with _lock:
-            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+        in_memory = _in_memory_runs_by_id()
 
     runs = [_run_state_to_response(r) for r in in_memory.values()]
     return ActiveRunsResponse(runs=runs)
