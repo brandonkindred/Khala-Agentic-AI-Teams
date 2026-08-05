@@ -1170,6 +1170,20 @@ def test_persist_run_state_swallows_exception(monkeypatch: pytest.MonkeyPatch) -
     api_main._persist_run_state("run-z", {"status": "running"}, create=False)
 
 
+def test_run_state_to_response_tolerates_non_dict_current_cycle() -> None:
+    """A ``current_cycle`` that's present but not a dict (corrupted/foreign
+    data) must degrade to ``None`` instead of raising via the ``**cc`` splat."""
+    from investment_team.api import main as api_main
+
+    state = {
+        "run_id": "run-malformed",
+        "status": "running",
+        "current_cycle": "not-a-dict",
+    }
+    response = api_main._run_state_to_response(state)
+    assert response.current_cycle is None
+
+
 # ---------------------------------------------------------------------------
 # run_paper_trading validation branches
 # ---------------------------------------------------------------------------

@@ -1185,6 +1185,19 @@ def test_start_advisor_session_502_on_malformed_advisory_result(api_client, monk
     assert resp.json()["detail"]
 
 
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_start_advisor_session_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_send_advisor_message_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
     from investment_team.api import main as api_main
 
@@ -1194,6 +1207,21 @@ def test_send_advisor_message_502_on_malformed_advisory_result(api_client, monke
     monkeypatch.setattr(
         api_main, "_execute_advisory", lambda op, payload, *, key: {"advisor_message": "hi"}
     )
+    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_send_advisor_message_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
     resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
     assert resp.status_code == 502
     assert resp.json()["detail"]
@@ -1213,3 +1241,19 @@ def test_complete_advisor_session_502_on_malformed_advisory_result(api_client, m
     resp = api_client.post(f"/advisor/sessions/{sid}/complete")
     assert resp.status_code == 502
     assert resp.json()["detail"] == "Advisor completion returned unexpected response structure"
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_complete_advisor_session_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert resp.status_code == 502
+    assert resp.json()["detail"]

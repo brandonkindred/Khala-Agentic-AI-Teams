@@ -268,3 +268,12 @@ def test_run_real_data_backtest_raises_lookahead_violation_error_on_forward_fiel
     with pytest.raises(LookaheadViolationError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
     assert "look-ahead" in str(excinfo.value).lower()
+
+
+def test_investment_backtest_error_rejects_empty_message() -> None:
+    """The str(exc)-carries-a-message postcondition is enforced at construction,
+    not just documented — an empty message must raise, not silently succeed."""
+    from investment_team.exceptions import InvestmentBacktestError
+
+    with pytest.raises(ValueError):
+        InvestmentBacktestError("")

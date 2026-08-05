@@ -506,8 +506,9 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         field, defaulting each absent field to its response default
         (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
         lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
-        and mapping a present ``current_cycle`` dict to a
-        ``StrategyLabCycleProgress`` (``None`` when absent). ``batch_size`` is
+        and mapping a present, dict-shaped ``current_cycle`` to a
+        ``StrategyLabCycleProgress`` (``None`` when absent or not a dict).
+        ``batch_size`` is
         the one field that deliberately does NOT fall back to the model's
         structural default of ``1``: an absent ``batch_size`` means this is a
         legacy single-batch record predating multi-batch support, so it falls
@@ -526,7 +527,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         errored_cycles=state.get("errored_cycles", 0),
         errored_details=state.get("errored_details", []),
         tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
-        current_cycle=StrategyLabCycleProgress(**cc) if cc else None,
+        current_cycle=StrategyLabCycleProgress(**cc) if isinstance(cc, dict) else None,
         completed_record_ids=state.get("completed_record_ids", []),
         error=state.get("error"),
         batch_size=state.get("batch_size", state.get("total_cycles", 1)),
@@ -4631,8 +4632,8 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
           created ``AdvisorSession``.
 
     Raises:
-        - ``HTTPException(502)`` if the advisory workflow returns a result
-          missing ``advisor_message`` or ``session``.
+        - ``HTTPException(502)`` if the advisory workflow returns a non-dict
+          result, or a dict missing ``advisor_message`` or ``session``.
     """
     session_id = f"adv-{uuid.uuid4().hex}"
     result = _execute_advisory(
@@ -4640,7 +4641,7 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
         {"session_id": session_id, "user_id": request.user_id},
         key=session_id,
     )
-    if "advisor_message" not in result or "session" not in result:
+    if not isinstance(result, dict) or "advisor_message" not in result or "session" not in result:
         raise HTTPException(
             status_code=502,
             detail="Advisor execution returned unexpected response structure",
@@ -4683,7 +4684,7 @@ def send_advisor_message(
         key=session_id,
     )
     required_keys = ("advisor_message", "session_status", "current_topic", "missing_fields")
-    if any(key not in result for key in required_keys):
+    if not isinstance(result, dict) or any(key not in result for key in required_keys):
         raise HTTPException(
             status_code=502,
             detail="Advisor execution returned unexpected response structure",
@@ -4701,7 +4702,8 @@ def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
 
     Preconditions:
-        - `session_id` is a non-empty advisor session identifier.
+        - `session_id` is an advisor session identifier; any string is
+          accepted, including one that matches no session.
 
     Postconditions:
         - Returns the session if found.
@@ -4757,7 +4759,7 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         )
 
     result = _execute_advisory("advisor_complete", {"session_id": session_id}, key=session_id)
-    if "user_id" not in result or "ips" not in result:
+    if not isinstance(result, dict) or "user_id" not in result or "ips" not in result:
         raise HTTPException(
             status_code=502,
             detail="Advisor completion returned unexpected response structure",
