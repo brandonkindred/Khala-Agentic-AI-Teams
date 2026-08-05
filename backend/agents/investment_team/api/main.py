@@ -2035,6 +2035,18 @@ def _finalize_strategy_lab_cycle_record(
 
 
 def _strategy_lab_signal_expert_enabled() -> bool:
+    """Return whether the per-batch signal-intelligence expert is enabled.
+
+    Gates ``_compute_signal_brief_snapshot`` (used by the Temporal
+    ``compute_signal_brief_activity``): when disabled, that function skips
+    the market-data fetch and ``SignalIntelligenceExpert`` call entirely and
+    fails open with a ``{"skipped": True, ...}`` brief instead.
+
+    Reads the ``STRATEGY_LAB_SIGNAL_EXPERT_ENABLED`` env var, defaulting to
+    enabled (``"true"``) when unset. Case-insensitive; ``"true"``, ``"1"``,
+    and ``"yes"`` are treated as enabled -- any other explicit value
+    (including an empty string) is treated as disabled.
+    """
     return os.environ.get("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "true").lower() in (
         "true",
         "1",
