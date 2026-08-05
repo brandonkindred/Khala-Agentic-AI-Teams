@@ -852,12 +852,15 @@ class CodeReviewInput(BaseModel):
         default=False,
         description="When True, the coordinator skips BOTH tail passes entirely (the "
         "false-positive filter and the merged architecture/side-effect pass) and returns "
-        "the per-chunk findings as-is, with no additional LLM calls after the map phase. "
-        "Default False keeps both passes on for every existing caller. Intended for a "
-        "lightweight fallback caller that wants speed over full tail-pass rigor; implies "
-        "skip_false_positive_filter's effect (setting both is redundant, not conflicting). "
-        "Only honored by the in-process coordinator today — the Temporal workflow path "
-        "does not yet thread it through.",
+        "the per-chunk findings as-is, with no additional LLM calls from those two passes "
+        "after the map phase. Default False keeps both passes on for every existing caller. "
+        "Intended for a lightweight fallback caller that wants speed over full tail-pass "
+        "rigor; implies skip_false_positive_filter's effect (setting both is redundant, not "
+        "conflicting). Does NOT affect the separate, independently-gated post-dedupe "
+        "spec-compliance synthesis pass: when CODE_REVIEW_SPEC_COMPLIANCE_PASS is enabled "
+        "for the CODE_REVIEW profile, that single synthesize_spec_compliance call still runs "
+        "even if skip_tail_passes is set. Only honored by the in-process coordinator today — "
+        "the Temporal workflow path does not yet thread it through.",
     )
     repo_root: Optional[str] = Field(
         default=None,

@@ -3509,9 +3509,14 @@ def test_spec_compliance_single_pass_off_by_default_skips_dedicated_pass(monkeyp
     """Default (``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` unset): ``synthesize_spec_compliance``
     is never invoked -- the flag-off path costs zero extra calls, matching today's
     behavior exactly (see ``test_chunk_reviewer.py`` for the per-chunk-prompt side of
-    this same guarantee)."""
+    this same guarantee).
+
+    Hermetic against external environment state: explicitly clears the env var
+    instead of relying on it happening to be unset in CI or a developer's shell.
+    """
     import code_review_agent.coordinator as coord
 
+    monkeypatch.delenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", raising=False)
     calls: list = []
     monkeypatch.setattr(
         coord,
@@ -3528,19 +3533,28 @@ def test_spec_compliance_single_pass_off_by_default_skips_dedicated_pass(monkeyp
 
 
 def test_spec_compliance_single_pass_routes_note_into_synthesis(monkeypatch) -> None:
-    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true``: ``synthesize_spec_compliance`` runs
-    once, post-dedupe, and its note replaces the (now-empty) per-chunk spec notes fed
-    into ``synthesize_review_findings`` -- even for a single-chunk review, where the
-    old fast path would otherwise return the chunk's summary/notes verbatim and
-    silently drop the dedicated pass's finding (ADR-010 contract boundary point 4)."""
+    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true`` on an explicit ``CODE_REVIEW`` profile,
+    multi-chunk submission: ``synthesize_spec_compliance`` runs exactly once, after
+    deduplication, over the final merged issue list, and its note replaces the
+    (now-empty) per-chunk spec notes fed into ``synthesize_review_findings`` for
+    EVERY chunk -- not just the first one. Two chunks each report the identical
+    (file_path, line, description) finding, so the merged list ``synthesize_spec_compliance``
+    receives is the single deduped copy, never the raw two-copy per-chunk list; this
+    also proves the old single-chunk fast path is bypassed regardless of chunk count,
+    so the dedicated pass's finding is never silently dropped (ADR-010 contract
+    boundary point 4)."""
     import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
 
     monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
-    monkeypatch.setattr(
-        coord,
-        "synthesize_spec_compliance",
-        lambda *a, **kw: "SPEC_GAP_MARKER: missing rate limiting.",
-    )
+
+    spec_calls: list = []
+
+    def _spec_spy(*args, **kwargs):
+        spec_calls.append(kwargs)
+        return "SPEC_GAP_MARKER: missing rate limiting."
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _spec_spy)
 
     synth_calls: list = []
     original_synthesize = coord.synthesize_review_findings
@@ -3551,15 +3565,61 @@ def test_spec_compliance_single_pass_routes_note_into_synthesis(monkeypatch) -> 
 
     monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
 
-    run_coordinator(
-        DummyLLMClient(),
-        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    duplicate_issue = {
+        "severity": "high",
+        "category": "logic",
+        "file_path": "app/main.py",
+        "line": 10,
+        "description": "duplicate string literal",
+        "suggestion": "extract a constant",
+    }
+    client = _ScriptedClient(
+        [
+            {
+                "approved": False,
+                "issues": [duplicate_issue],
+                "summary": "Chunk 1 finding.",
+                "spec_compliance_notes": "",
+            },
+            {
+                "approved": False,
+                "issues": [duplicate_issue],
+                "summary": "Chunk 2 finding.",
+                "spec_compliance_notes": "",
+            },
+        ]
+    )
+
+    file1 = "### app/main.py ###\n" + ("x" * 20_000)
+    file2 = "### app/models.py ###\n" + ("y" * 20_000)
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            code=file1 + "\n\n" + file2,
+            task_description="t",
+            profile=ReviewProfile.CODE_REVIEW,
+            skip_tail_passes=True,
+        ),
     )
 
     assert synth_calls, (
         "synthesis must run (fast path bypassed) so the single-pass note isn't dropped"
     )
-    assert synth_calls[-1] == ["SPEC_GAP_MARKER: missing rate limiting."]
+    assert synth_calls[-1] == ["SPEC_GAP_MARKER: missing rate limiting."], (
+        "chunk_spec_notes must be the single dedicated note for every chunk, not a "
+        "per-chunk list -- otherwise a later chunk's per-chunk note could survive"
+    )
+
+    assert len(spec_calls) == 1, "synthesize_spec_compliance must be called exactly once"
+    assert spec_calls[0]["issues"] == result.issues, (
+        "synthesize_spec_compliance must run over the final merged/deduped issue list"
+    )
+    # Both chunks reported the identical (file_path, line, description) finding;
+    # a genuine post-dedupe call sees exactly one copy, not two.
+    assert len(spec_calls[0]["issues"]) == 1, (
+        "the duplicate finding from both chunks must already be deduped before "
+        "synthesize_spec_compliance runs"
+    )
 
 
 def test_spec_compliance_single_pass_restricted_to_code_review_profile(monkeypatch) -> None:

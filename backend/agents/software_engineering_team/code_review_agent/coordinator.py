@@ -12,7 +12,16 @@ mismatches the per-chunk view cannot see — see
 ``merged_architecture_side_effect_pass``) → side-effect consolidation (merges
 related ``side-effects`` findings that share an enclosing construct or cite
 one another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
-severity gate, safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
+severity gate, safety nets) → optional post-dedupe spec-compliance synthesis.
+When ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is enabled for the ``CODE_REVIEW``
+profile, each chunk's prompt omits the per-chunk ``acceptance_criteria``/
+``spec_excerpt`` blocks (``architecture_overview`` is unaffected) and, after the
+deterministic merge above, a single ``synthesize_spec_compliance`` call runs
+over the final merged issue list; its note replaces the (now-empty) per-chunk
+``spec_compliance_notes`` fed into ``synthesize_review_findings``, so a real
+spec-compliance finding is synthesized once over the complete picture rather
+than being silently dropped by per-chunk fast paths. The flag defaults off, in
+which case behavior is unchanged. Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
 after recovery (retry, bisection, and a last-resort thinking-off retry) degrades
@@ -639,13 +648,25 @@ def run_coordinator(
           ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
           the consolidation step in the body) before the deterministic
           dedupe/severity gate.
+        - When ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is enabled and
+          ``input_data.profile`` is ``ReviewProfile.CODE_REVIEW``, every chunk's
+          prompt omits the ``acceptance_criteria``/``spec_excerpt`` blocks
+          (``architecture_overview`` is unaffected), and after the deterministic
+          dedupe/severity gate above, ``synthesize_spec_compliance`` is called
+          exactly once over the final merged issue list; its note replaces the
+          per-chunk ``spec_compliance_notes`` passed into
+          ``synthesize_review_findings``. When the flag is off (the default) or
+          the profile is not ``CODE_REVIEW``, behavior is unchanged: every chunk
+          gets its per-chunk spec/AC context and ``synthesize_spec_compliance``
+          is never called.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
           fully reviewed* (same code + context + model + output-affecting
-          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; no
-          unreviewed ranges) returns the recorded approved output with no LLM
-          call at all — unless a ``repo_reader`` is given, in which case this
+          toggles including ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` and
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS``; no unreviewed ranges) returns
+          the recorded approved output with no LLM call at all — unless a
+          ``repo_reader`` is given, in which case this
           short-circuit never fires (see module docstring's "Submission-level
           short-circuit" section for why). The cache-hit check, its LRU touch,
           and the deep clone of the served output all happen under a single
