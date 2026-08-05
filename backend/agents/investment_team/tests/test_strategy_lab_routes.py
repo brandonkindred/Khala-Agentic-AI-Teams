@@ -499,6 +499,88 @@ def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
     assert resp.status_code == 409
 
 
+def test_restart_strategy_lab_run_503_when_worker_client_not_ready(
+    lab_job_client, api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A RuntimeError from terminate_and_await_workflow_sync (the worker
+    client never became ready -- documented by that function's own
+    docstring) maps to 503, not an unhandled 500."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-worker-not-ready"] = {
+        "run_id": "run-worker-not-ready",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+
+    def _boom(*a, **k):
+        raise RuntimeError("worker client never became ready")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
+
+    resp = api_client.post("/strategy-lab/runs/run-worker-not-ready/restart")
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+
+
+def test_restart_strategy_lab_run_503_on_rpc_error(
+    lab_job_client, api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine temporalio RPCError (a real Temporal-side RPC failure, not
+    the NOT_FOUND case terminate_and_await_workflow_sync already treats as
+    a no-op internally) also maps to 503."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-rpc-error"] = {
+        "run_id": "run-rpc-error",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+
+    def _boom(*a, **k):
+        raise RPCError("temporal server unreachable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
+
+    resp = api_client.post("/strategy-lab/runs/run-rpc-error/restart")
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+
+
+def test_restart_strategy_lab_run_propagates_unexpected_termination_error(
+    lab_job_client, api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exception from terminate_and_await_workflow_sync that is NOT one of
+    the documented Temporal-side failure modes (RuntimeError/RPCError/
+    TimeoutError) -- e.g. a programming error -- must NOT be swallowed into a
+    misleading 503. It propagates instead, matching the pattern used
+    elsewhere in this file for narrowed except clauses. TestClient re-raises
+    unhandled server exceptions by default, so the POST call itself raises.
+    """
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-unexpected-boom"] = {
+        "run_id": "run-unexpected-boom",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+
+    def _boom(*a, **k):
+        raise TypeError("not a Temporal-side failure at all")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
+
+    with pytest.raises(TypeError, match="not a Temporal-side failure"):
+        api_client.post("/strategy-lab/runs/run-unexpected-boom/restart")
+
+
 # ---------------------------------------------------------------------------
 # run/resume/restart — same-run_id transition-lock serialization (#4028)
 # ---------------------------------------------------------------------------

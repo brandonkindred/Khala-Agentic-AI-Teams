@@ -3356,8 +3356,16 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           silently resume — see ``_dispatch_strategy_lab_run``'s
           ``allow_already_started`` parameter; the optimistic reset is rolled
           back in this case, see Postconditions).
-        - ``HTTPException`` 503: Temporal is disabled/unavailable, or the
-          prior execution couldn't be resolved due to a Temporal-side error.
+        - ``HTTPException`` 503: Temporal is disabled/unavailable
+          (``_require_temporal``), or the prior execution couldn't be
+          resolved because the worker client never became ready
+          (``RuntimeError``) or a Temporal RPC itself failed
+          (``temporalio.service.RPCError``) -- the only two failure modes
+          ``terminate_and_await_workflow_sync`` raises for a genuine
+          Temporal-side problem (besides ``TimeoutError``, mapped to 409
+          above). Any other exception (e.g. a programming error in this
+          block) is NOT caught here and propagates as an unhandled 500,
+          rather than being misreported as Temporal unavailability.
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
@@ -3415,6 +3423,8 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # let it observe that transient state and run an extra wave before a
         # dispatch collision is even detected.
         _require_temporal()
+        from temporalio.service import RPCError
+
         from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
         from shared.temporal import terminate_and_await_workflow_sync
 
@@ -3428,7 +3438,17 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 status_code=409,
                 detail="A prior execution for this run is still winding down; retry shortly.",
             ) from exc
-        except Exception as exc:
+        except (RuntimeError, RPCError) as exc:
+            # RuntimeError: the worker client never became ready (documented
+            # by terminate_and_await_workflow_sync's own docstring).
+            # RPCError: a genuine Temporal-side RPC failure (the underlying
+            # temporalio client's exception type; a NOT_FOUND status is
+            # already handled as a no-op inside terminate_and_await_workflow_sync
+            # itself, so anything that reaches here is a real transport/RPC
+            # problem). Anything else -- e.g. an ImportError from the imports
+            # above, or a programming error -- is NOT one of the documented
+            # Temporal-side failure modes and must propagate as an unhandled
+            # 500 instead of being misreported as "Temporal worker unavailable."
             raise HTTPException(
                 status_code=503,
                 detail=(
