@@ -47,8 +47,6 @@ import type {
   UpdateAgentRequest,
 } from '../../models';
 
-let _stepCounter = 0;
-
 /** Chat prompt seeded by the roster panel's "Suggest via chat" action. */
 const SUGGEST_AGENT_PROMPT = 'Suggest an additional agent for this team.';
 
@@ -133,6 +131,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   private readonly rosterRefreshGuard = new LatestOnly();
 
   private conversationId: string | null = null;
+  private _stepCounter = 0;
 
   form = this.fb.nonNullable.group({
     message: ['', [Validators.required]],
@@ -527,9 +526,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const process = this.currentProcess();
     if (!process) return;
 
-    _stepCounter++;
+    this._stepCounter++;
     const newStep: ProcessStep = {
-      step_id: `step_${Date.now()}_${_stepCounter}`,
+      step_id: `step_${Date.now()}_${this._stepCounter}`,
       name: stepType === 'decision' ? 'New Decision' : 'New Step',
       description: '',
       step_type: stepType,
