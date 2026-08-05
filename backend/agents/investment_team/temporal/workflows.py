@@ -121,7 +121,14 @@ def run_backtest_activity(
         time.sleep(1)
         
     # Fail-safe termination if the loop completes without a valid status
-    raise TimeoutError(f"Backtest polling timed out for job {job_id} after {max_polling_attempts} attempts. CI hang prevented.")
+    # ✅ ADD THIS
+
+
+    raise ApplicationError(
+        f"Backtest {job_id} polling exceeded deadline",
+        type="BacktestPollingTimeout",
+        non_retryable=True,
+    )
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")
