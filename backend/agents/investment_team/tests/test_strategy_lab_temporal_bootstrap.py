@@ -1,8 +1,14 @@
 """Bootstrap tests for the ``strategy_lab.temporal`` Pattern-A package.
 
-Covers the package exports, the worker boot helper, and the sync dispatch helper
-— all thin wrappers with lazy imports, mocked at the ``shared.temporal`` /
-``api.main`` boundary so no live Temporal server or job service is needed.
+Covers the package exports, the worker boot helper, and the sync dispatch
+helper — all thin wrappers with lazy imports. Worker-boot tests mock at the
+``shared.temporal`` boundary (``start_team_worker``/``is_temporal_enabled``);
+the sync dispatch (``build_strategy_lab_batch_input``) tests additionally
+mock the ``investment_team.strategy_lab`` internals it reads from
+(``config.clamp_max_parallel``, ``run_state.rehydrate_active_run_offset``/
+``get_resume_seed_counters``/``active_runs``/``get_run_state_strict``,
+``strategy_lab_context.excluded_for_allowed``) and ``shared.temporal.start_workflow_sync``
+for the final submit — so no live Temporal server or job service is needed.
 """
 
 from __future__ import annotations
