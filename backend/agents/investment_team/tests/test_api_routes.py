@@ -523,6 +523,31 @@ def test_validate_strategy_502_on_non_dict_advisory_result(
     assert resp.json()["detail"]
 
 
+def test_validate_strategy_502_on_wrong_typed_nested_values(api_client, monkeypatch) -> None:
+    """All required keys present but wrong-typed (validation/passed/failures)
+    must still raise a clean 502, not a Pydantic ValidationError as a 500."""
+    from investment_team.api import main as api_main
+
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "validation": "not-a-dict",
+            "passed": "true",
+            "failures": None,
+        },
+    )
+    resp = api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Promotion + Workflow + Memo routes
 # ---------------------------------------------------------------------------
@@ -680,6 +705,62 @@ def test_promotion_decision_502_on_non_dict_advisory_result(
     assert resp.json()["detail"]
 
 
+def test_promotion_decision_502_on_non_dict_decision(api_client, monkeypatch) -> None:
+    """A 'decision' key present but not a dict must raise 502, not an
+    unhandled Pydantic ValidationError from PromotionDecision.model_validate."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"decision": "not-a-dict"}
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_non_string_escalation_queue(api_client, monkeypatch) -> None:
+    """An escalation_enqueued['queue'] that is an unhashable type (e.g. a
+    list) must raise 502, not a TypeError from the ``in`` membership test."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {},
+            "escalation_enqueued": {
+                "queue": ["not", "a", "string"],
+                "payload_id": sid,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_non_list_audit_log_appended(api_client, monkeypatch) -> None:
+    """An 'audit_log_appended' value that is present but not a list must
+    raise 502 rather than corrupt or crash on _workflow_state.audit_log.extend()."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"decision": {}, "audit_log_appended": "not-a-list"},
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+    status = api_client.get("/workflow/status").json()
+    assert status["audit_log"] == []
+
+
 def test_promotion_decision_502_on_malformed_escalation_payload(api_client, monkeypatch) -> None:
     """An escalation_enqueued payload missing payload_id/priority surfaces as a 502."""
     from investment_team.api import main as api_main
@@ -818,6 +899,27 @@ def test_create_memo_502_on_non_dict_advisory_result(api_client, monkeypatch, ba
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": ["bear case"],
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_create_memo_502_on_non_dict_memo(api_client, monkeypatch) -> None:
+    """A 'memo' key present but not a dict must raise 502, not an unhandled
+    Pydantic ValidationError from InvestmentCommitteeMemo.model_validate."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"memo": "not-a-dict"}
+    )
     resp = api_client.post(
         "/memos",
         json={
