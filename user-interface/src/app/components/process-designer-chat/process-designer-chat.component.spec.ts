@@ -416,14 +416,20 @@ describe('ProcessDesignerChatComponent', () => {
   });
 
   it('rolls back the optimistic user message when the send fails', () => {
-    api.sendMessage.mockReturnValueOnce(
-      throwError(() => ({
-        error: { detail: 'Failed to update the team roster or process; please try again.' },
-      })),
-    );
+    const send$ = new Subject<unknown>();
+    api.sendMessage.mockReturnValueOnce(send$.asObservable() as never);
 
     component.form.setValue({ message: 'hi' });
     component.onSubmit();
+
+    // Before the API responds, the optimistic message must already be visible —
+    // otherwise the later empty-array assertion can't distinguish a real rollback
+    // from an implementation that never appended anything in the first place.
+    expect(component.messages().map((m) => m.content)).toEqual(['hi']);
+
+    send$.error({
+      error: { detail: 'Failed to update the team roster or process; please try again.' },
+    });
 
     expect(component.messages()).toHaveLength(0);
     expect(component.error()).toBe(

@@ -188,6 +188,66 @@ def test_send_message_persists_turn_when_background_provisioning_fails(
     ]
 
 
+def test_send_message_retry_after_process_save_failure_does_not_duplicate_roster(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A retry after a split roster/process failure must not duplicate generated agents.
+
+    ``_save_agents_and_process``'s docstring documents that the roster save and
+    the process save are not atomic: a process-save failure after the roster
+    already committed leaves the roster updated. This test proves a client
+    retry is still safe despite that gap — ``merge_generated_agents`` replaces
+    the entire generated-sourced portion of the roster on every call, so
+    re-running it does not accumulate duplicate entries.
+
+    Preconditions: an existing conversation; ``_agent.respond`` returns the
+        same single generated agent and a ``process`` on both calls;
+        ``_store.save_process`` is patched to raise once, then succeed.
+    Postconditions: the first call is a 503 with the roster already holding
+        the one generated agent and no messages persisted; the retry is a 200
+        with the roster still holding exactly that one agent (no duplicate)
+        and the turn's messages persisted.
+    """
+    import agent_team_studio.agentic_team_provisioning.api.main as main_mod
+    from agent_team_studio.agentic_team_provisioning.assistant import store as store_mod
+
+    team_id = _new_team()
+    conversation_id = AgenticTeamStore().create_conversation(team_id=team_id)
+    process = ProcessDefinition(process_id="p1")
+    agents_data = [{"agent_name": "Planner", "role": "Plans things"}]
+
+    monkeypatch.setattr(
+        main_mod._agent,
+        "respond",
+        lambda **kwargs: ("Sure, let's design that.", process, ["What's next?"], agents_data),
+    )
+
+    real_save_process = store_mod.AgenticTeamStore.save_process
+    calls = {"n": 0}
+
+    def _flaky_save_process(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("process store unavailable")
+        return real_save_process(self, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.AgenticTeamStore, "save_process", _flaky_save_process)
+
+    first = client.post(f"/conversations/{conversation_id}/messages", json={"message": "hi"})
+    assert first.status_code == 503
+    assert [a.agent_name for a in AgenticTeamStore().list_team_agents(team_id)] == ["Planner"]
+    assert AgenticTeamStore().get_messages(conversation_id) == []
+
+    retry = client.post(f"/conversations/{conversation_id}/messages", json={"message": "hi"})
+    assert retry.status_code == 200
+    assert [a.agent_name for a in AgenticTeamStore().list_team_agents(team_id)] == ["Planner"]
+    messages = AgenticTeamStore().get_messages(conversation_id)
+    assert [(m.role, m.content) for m in messages] == [
+        ("user", "hi"),
+        ("assistant", "Sure, let's design that."),
+    ]
+
+
 def test_create_conversation_leaves_no_messages_when_registry_fails(
     fake_pg: dict, monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:

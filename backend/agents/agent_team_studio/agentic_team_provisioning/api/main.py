@@ -270,7 +270,13 @@ def _save_agents_and_process(
         updated while the process is not (documented gap, not silently
         hidden — closing it would need a shared transaction across
         ``_save_agents_from_llm`` and ``_store.save_process``, which the
-        underlying stores don't currently support). Scheduling background
+        underlying stores don't currently support). A client retry after
+        such a failure re-invokes the LLM and calls this helper again, but
+        that cannot duplicate roster entries: ``merge_generated_agents``
+        fully replaces the generated-sourced portion of the roster on every
+        call (only ``source == "registry"`` entries survive from what was
+        already there), so re-merging is idempotent with respect to the
+        generated set, not additive. Scheduling background
         agent-env provisioning (``_after_process_saved``) is best-effort: it
         runs after the process is already saved and linked, and a failure
         there is logged and swallowed rather than propagated, so it can never
