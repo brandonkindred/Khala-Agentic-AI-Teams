@@ -170,25 +170,67 @@ def test_create_profile_happy_path_round_trips(api_client) -> None:
 
 
 def test_create_profile_invalid_risk_tolerance(api_client) -> None:
-    from investment_team.models import RiskTolerance
-
+    """An unrecognized risk_tolerance is rejected at the request-validation
+    boundary (422), not passed through to business logic — risk_tolerance is
+    typed as the ``RiskTolerance`` enum itself."""
     resp = api_client.post("/profiles", json=_profile_payload(risk_tolerance="extreme"))
-    assert resp.status_code == 400
+    assert resp.status_code == 422
     detail = resp.json()["detail"]
-    assert "Invalid risk_tolerance" in detail
-    allowed = ", ".join(m.value for m in RiskTolerance)
-    assert allowed in detail
+    assert isinstance(detail, list)
+    assert any("risk_tolerance" in str(err.get("loc", "")) for err in detail)
 
 
 def test_create_profile_invalid_default_mode(api_client) -> None:
-    from investment_team.models import WorkflowMode
-
+    """An unrecognized default_mode is rejected at the request-validation
+    boundary (422) — default_mode is typed as the ``WorkflowMode`` enum
+    itself."""
     resp = api_client.post("/profiles", json=_profile_payload(default_mode="wild"))
-    assert resp.status_code == 400
+    assert resp.status_code == 422
     detail = resp.json()["detail"]
-    assert "Invalid default_mode" in detail
-    allowed = ", ".join(m.value for m in WorkflowMode)
-    assert allowed in detail
+    assert isinstance(detail, list)
+    assert any("default_mode" in str(err.get("loc", "")) for err in detail)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("income_stability", "bankrupt"),
+        ("esg_preference", "extreme"),
+        ("rebalance_frequency", "daily"),
+    ],
+)
+def test_create_profile_rejects_undocumented_enum_like_values(api_client, field, value) -> None:
+    """income_stability/esg_preference/rebalance_frequency each have a closed,
+    documented value set (see the Angular profile form) — an undocumented
+    value is rejected with 422, not silently accepted."""
+    resp = api_client.post("/profiles", json=_profile_payload(**{field: value}))
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert any(field in str(err.get("loc", "")) for err in detail)
+
+
+@pytest.mark.parametrize("field", ["max_single_position_pct", "speculative_sleeve_cap_pct"])
+@pytest.mark.parametrize("value", [-1.0, 100.1])
+def test_create_profile_rejects_out_of_range_percentages(api_client, field, value) -> None:
+    resp = api_client.post("/profiles", json=_profile_payload(**{field: value}))
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert any(field in str(err.get("loc", "")) for err in detail)
+
+
+@pytest.mark.parametrize("field", ["max_single_position_pct", "speculative_sleeve_cap_pct"])
+def test_create_profile_accepts_in_range_percentages(api_client, field) -> None:
+    resp = api_client.post("/profiles", json=_profile_payload(**{field: 50.0}))
+    assert resp.status_code == 200
+
+
+def test_create_profile_rejects_unknown_field(api_client) -> None:
+    """CreateProfileRequest sets extra="forbid" — a stale/misspelled field
+    is rejected with 422 rather than silently dropped."""
+    payload = _profile_payload()
+    payload["not_a_real_field"] = "x"
+    resp = api_client.post("/profiles", json=payload)
+    assert resp.status_code == 422
 
 
 def test_create_profile_duplicate_user_id_returns_409(api_client) -> None:
@@ -1047,6 +1089,15 @@ def test_start_advisor_session_id_has_full_uuid4_entropy(api_client) -> None:
     suffix = sid[len("adv-") :]
     assert len(suffix) == 32
     uuid.UUID(hex=suffix)
+
+
+def test_start_advisor_session_rejects_empty_user_id(api_client) -> None:
+    """user_id has min_length=1 — an empty string is rejected with 422
+    rather than creating a session tied to an invalid identifier."""
+    resp = api_client.post("/advisor/sessions", json={"user_id": ""})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert any("user_id" in str(err.get("loc", "")) for err in detail)
 
 
 def test_advisor_session_404_for_missing_ids(api_client) -> None:

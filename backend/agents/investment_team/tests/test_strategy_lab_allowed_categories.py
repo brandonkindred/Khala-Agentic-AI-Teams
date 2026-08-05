@@ -127,6 +127,35 @@ def test_request_rejects_selection_with_no_valid_category() -> None:
         RunStrategyLabRequest(allowed_asset_classes=["bonds", "nonsense"])
 
 
+def test_request_rejection_message_reflects_canonical_classes() -> None:
+    """The error message is built from PROMPT_ASSET_CLASSES (the canonical
+    source), not a hardcoded copy that could drift out of sync with it."""
+    with pytest.raises(ValidationError) as exc_info:
+        RunStrategyLabRequest(allowed_asset_classes=["options"])
+    message = str(exc_info.value)
+    for cls in PROMPT_ASSET_CLASSES:
+        assert cls in message
+
+
+# ---------------------------------------------------------------------------
+# RunStrategyLabRequest.paper_trading_lookback_days bounds
+# ---------------------------------------------------------------------------
+
+
+def test_paper_trading_lookback_days_accepts_within_ceiling() -> None:
+    from investment_team.strategy_lab.config import MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+    req = RunStrategyLabRequest(paper_trading_lookback_days=MAX_PAPER_TRADING_LOOKBACK_DAYS)
+    assert req.paper_trading_lookback_days == MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+
+def test_paper_trading_lookback_days_rejects_above_ceiling() -> None:
+    from investment_team.strategy_lab.config import MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+    with pytest.raises(ValidationError):
+        RunStrategyLabRequest(paper_trading_lookback_days=MAX_PAPER_TRADING_LOOKBACK_DAYS + 1)
+
+
 # ---------------------------------------------------------------------------
 # asset_class_mix_hint(..., exclude=...)
 # ---------------------------------------------------------------------------
