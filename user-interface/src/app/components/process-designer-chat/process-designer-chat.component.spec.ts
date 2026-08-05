@@ -10,12 +10,20 @@ import { AddAgentFromRegistryDialogComponent } from './add-agent-from-registry-d
 import { ConfirmDialogComponent } from '../../shared/confirm-dialog/confirm-dialog.component';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import type {
+  AgenticConversationMessage,
   AgenticTeam,
   AgenticTeamAgent,
   ProcessDefinition,
   ProcessStep,
   RosterValidationResult,
 } from '../../models';
+
+interface ConversationStateResponse {
+  conversation_id: string;
+  messages: AgenticConversationMessage[];
+  current_process: ProcessDefinition | null;
+  suggested_questions: string[];
+}
 
 const team = (overrides: Partial<AgenticTeam> = {}): AgenticTeam => ({
   team_id: 't-1',
@@ -155,6 +163,45 @@ describe('ProcessDesignerChatComponent', () => {
     });
     expect(api.createConversation.mock.calls.length).toBe(initialCreateCalls + 1);
     expect(api.createConversation).toHaveBeenLastCalledWith('t-2');
+  });
+
+  // ── startConversation: sequence-token guard against out-of-order responses ──
+
+  it('drops a stale createConversation response: an older call completing last cannot clobber the newer state', () => {
+    const r1 = new Subject<ConversationStateResponse>();
+    const r2 = new Subject<ConversationStateResponse>();
+    api.createConversation.mockReturnValueOnce(r1.asObservable()).mockReturnValueOnce(r2.asObservable());
+
+    component.newConversation(); // A -> subscribes r1
+    component.newConversation(); // B -> subscribes r2 (now the latest)
+
+    // B resolves first, then the stale A completes last.
+    r2.next({ conversation_id: 'c-b', messages: [], current_process: null, suggested_questions: ['B?'] });
+    r2.complete();
+    r1.next({ conversation_id: 'c-a-stale', messages: [], current_process: null, suggested_questions: ['A (stale)?'] });
+    r1.complete();
+
+    // Only B's state survives; the late stale A is ignored.
+    expect((component as unknown as { conversationId: string | null }).conversationId).toBe('c-b');
+    expect(component.suggestedQuestions()).toEqual(['B?']);
+  });
+
+  it('drops a stale createConversation error: an older failure completing last cannot clobber the newer state', () => {
+    const r1 = new Subject<ConversationStateResponse>();
+    const r2 = new Subject<ConversationStateResponse>();
+    api.createConversation.mockReturnValueOnce(r1.asObservable()).mockReturnValueOnce(r2.asObservable());
+
+    component.newConversation(); // A -> subscribes r1
+    component.newConversation(); // B -> subscribes r2 (now the latest)
+
+    // B resolves successfully first, then the stale A errors last.
+    r2.next({ conversation_id: 'c-b', messages: [], current_process: null, suggested_questions: [] });
+    r2.complete();
+    r1.error({ error: { detail: 'stale failure' } });
+
+    // The stale error must not surface, since it belongs to a superseded call.
+    expect(component.error()).toBeNull();
+    expect((component as unknown as { conversationId: string | null }).conversationId).toBe('c-b');
   });
 
   it('emits rosterChanged with the validation result on a successful refresh', () => {
