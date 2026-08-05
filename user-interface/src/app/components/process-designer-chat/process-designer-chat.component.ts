@@ -441,10 +441,12 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     if (!this.conversationId) return;
 
     this.form.reset({ message: '' });
-    this.messages.update((msgs) => [
-      ...msgs,
-      { role: 'user' as const, content: message, timestamp: new Date().toISOString() },
-    ]);
+    const optimisticMessage: AgenticConversationMessage = {
+      role: 'user',
+      content: message,
+      timestamp: new Date().toISOString(),
+    };
+    this.messages.update((msgs) => [...msgs, optimisticMessage]);
     this.loading.set(true);
     this.error.set(null);
 
@@ -454,6 +456,11 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         this.loading.set(false);
       },
       error: (err) => {
+        // The backend persists the turn only once the LLM call and roster/process
+        // save succeed (see agentic_team_provisioning's send_message); on failure
+        // nothing was saved, so roll back the optimistic append rather than leave
+        // a message visible that a refresh would show was never sent.
+        this.messages.update((msgs) => msgs.filter((m) => m !== optimisticMessage));
         this.error.set(err?.error?.detail ?? 'Failed to send message');
         this.loading.set(false);
       },

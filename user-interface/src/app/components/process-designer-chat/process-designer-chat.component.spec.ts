@@ -385,4 +385,49 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.rosterActionError()).toBe('bad edit');
     expect(component.editingAgent()).toBe('Writer');
   });
+
+  // ── sendMessage: optimistic append must reconcile with backend atomicity ────
+  //
+  // The backend (agentic_team_provisioning's send_message) persists a turn's
+  // messages only after the LLM call and roster/process save succeed; on
+  // failure nothing is saved. The UI optimistically appends the user's message
+  // before the API call, so a failed send must roll that optimistic message
+  // back — otherwise it stays visible until a refresh silently drops it.
+
+  it('appends the user message and the assistant reply on a successful send', () => {
+    api.sendMessage.mockReturnValueOnce(
+      of({
+        conversation_id: 'c-1',
+        messages: [
+          { role: 'user', content: 'hi', timestamp: '2024-01-01T00:00:00Z' },
+          { role: 'assistant', content: 'hello', timestamp: '2024-01-01T00:00:01Z' },
+        ],
+        current_process: null,
+        suggested_questions: [],
+      }),
+    );
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit();
+
+    expect(api.sendMessage).toHaveBeenCalledWith('c-1', 'hi');
+    expect(component.messages().map((m) => m.content)).toEqual(['hi', 'hello']);
+    expect(component.error()).toBeNull();
+  });
+
+  it('rolls back the optimistic user message when the send fails', () => {
+    api.sendMessage.mockReturnValueOnce(
+      throwError(() => ({
+        error: { detail: 'Failed to update the team roster or process; please try again.' },
+      })),
+    );
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit();
+
+    expect(component.messages()).toHaveLength(0);
+    expect(component.error()).toBe(
+      'Failed to update the team roster or process; please try again.',
+    );
+  });
 });

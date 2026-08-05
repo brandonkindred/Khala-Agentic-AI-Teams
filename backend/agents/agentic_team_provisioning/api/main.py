@@ -843,12 +843,13 @@ def create_conversation(req: CreateConversationRequest):
 
     Preconditions: ``req.team_id`` names an existing team.
     Postconditions: on success, the conversation exists with the greeting or
-        the full first turn persisted. On failure (LLM error, or a roster/
-        process save failure — see ``_save_agents_and_process``, which turns
-        that into an ``HTTPException(503)``), no partial turn is left in the
-        conversation history — the exception propagates before either message
-        is appended, so a client retry re-processes a clean conversation
-        instead of duplicating a half-saved turn.
+        the full first turn persisted. On failure, no partial turn is left in
+        the conversation history — neither message is appended, so a client
+        retry re-processes a clean conversation instead of duplicating a
+        half-saved turn. Two distinct failure modes precede the appends: an
+        ``_agent.respond`` (LLM) error propagates as-is; a roster/process save
+        failure is raised by ``_save_agents_and_process`` as
+        ``HTTPException(503)``.
     """
     # Validate team exists
     team = _store.get_team(req.team_id)
@@ -891,12 +892,12 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     Preconditions: ``conversation_id`` names an existing conversation.
     Postconditions: on success, both the user message and the assistant
         reply are appended (in that order) and any updated process is saved.
-        On failure (LLM error, or a roster/process save failure — see
-        ``_save_agents_and_process``, which turns that into an
-        ``HTTPException(503)``), neither message is appended — the exception
-        propagates before either write, so the conversation history stays
-        exactly as it was before this call and a client retry cannot
-        duplicate or half-save a turn.
+        On failure, neither message is appended — the conversation history
+        stays exactly as it was before this call, so a client retry cannot
+        duplicate or half-save a turn. Two distinct failure modes precede the
+        appends: an ``_agent.respond`` (LLM) error propagates as-is; a
+        roster/process save failure is raised by ``_save_agents_and_process``
+        as ``HTTPException(503)``.
     """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
