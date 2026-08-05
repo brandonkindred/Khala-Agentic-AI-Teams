@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
+from agentic_team_provisioning.models import ProcessDefinition
 from agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 
 _REPLY = ("Sure, let's design that.", None, ["What's next?"], None)
@@ -144,6 +145,47 @@ def test_send_message_propagates_non_retryable_errors_instead_of_503(
         client.post(f"/conversations/{conversation_id}/messages", json={"message": "hi"})
 
     assert AgenticTeamStore().get_messages(conversation_id) == []
+
+
+def test_send_message_persists_turn_when_background_provisioning_fails(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A background-provisioning-scheduling failure must not discard the turn.
+
+    Preconditions: an existing conversation; ``_agent.respond`` returns a
+        ``process`` update, and ``schedule_provision_step_agents`` (invoked via
+        ``_after_process_saved``, after the process is already saved and
+        linked) is patched to raise.
+    Postconditions: the response is 200 — the roster/process save already
+        committed and scheduling provisioning is best-effort, so its failure
+        is logged and swallowed rather than discarding the already-successful
+        turn — and both messages are persisted.
+    """
+    import agentic_team_provisioning.api.main as main_mod
+
+    team_id = _new_team()
+    conversation_id = AgenticTeamStore().create_conversation(team_id=team_id)
+    process = ProcessDefinition(process_id="p1")
+
+    monkeypatch.setattr(
+        main_mod._agent,
+        "respond",
+        lambda **kwargs: ("Sure, let's design that.", process, ["What's next?"], None),
+    )
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("provisioning service unavailable")
+
+    monkeypatch.setattr(main_mod, "schedule_provision_step_agents", _boom)
+
+    resp = client.post(f"/conversations/{conversation_id}/messages", json={"message": "hi"})
+
+    assert resp.status_code == 200
+    messages = AgenticTeamStore().get_messages(conversation_id)
+    assert [(m.role, m.content) for m in messages] == [
+        ("user", "hi"),
+        ("assistant", "Sure, let's design that."),
+    ]
 
 
 def test_create_conversation_leaves_no_messages_when_registry_fails(

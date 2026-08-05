@@ -246,7 +246,7 @@ def _save_agents_and_process(
     team_id: str,
     conversation_id: str,
     agents_data: list[dict[str, Any]] | None,
-    process: Optional[ProcessDefinition],
+    process: ProcessDefinition | None,
 ) -> None:
     """Register a conversation turn's roster/process updates, or fail with a 503.
 
@@ -266,21 +266,38 @@ def _save_agents_and_process(
         updated while the process is not (documented gap, not silently
         hidden — closing it would need a shared transaction across
         ``_save_agents_from_llm`` and ``_store.save_process``, which the
-        underlying stores don't currently support). On failure, a
-        non-retryable data/programming error (``ValueError``, ``TypeError``,
-        ``AttributeError``, ``KeyError``, pydantic ``ValidationError`` — e.g.
-        malformed LLM ``agents_data``) propagates as itself, since retrying an
-        identical malformed request cannot succeed. Any other failure (e.g. a
-        registry or database outage) is raised as ``HTTPException(503)``
-        instead of the underlying exception, so the caller gets a clear
-        "try again" signal.
+        underlying stores don't currently support). Scheduling background
+        agent-env provisioning (``_after_process_saved``) is best-effort: it
+        runs after the process is already saved and linked, and a failure
+        there is logged and swallowed rather than propagated, so it can never
+        discard an otherwise-successful turn or make the roster/process saves
+        look retryable when they already committed. On failure of the roster
+        or process save itself, a non-retryable data/programming error
+        (``ValueError``, ``TypeError``, ``AttributeError``, ``KeyError``,
+        pydantic ``ValidationError`` — e.g. malformed LLM ``agents_data``)
+        propagates as itself, since retrying an identical malformed request
+        cannot succeed. Any other failure (e.g. a registry or database
+        outage) is raised as ``HTTPException(503)`` instead of the underlying
+        exception, so the caller gets a clear "try again" signal.
     """
     try:
         _save_agents_from_llm(team_id, agents_data)
         if process:
             _store.save_process(team_id, process)
             _store.set_conversation_process(conversation_id, process.process_id)
-            _after_process_saved(team_id, process)
+            try:
+                _after_process_saved(team_id, process)
+            except Exception:
+                # Best-effort: scheduling provisioning must not discard an
+                # already-committed roster/process, nor the turn about to be
+                # persisted by the caller.
+                logger.exception(
+                    "Failed to schedule background agent-env provisioning for "
+                    "team %s process %s; roster/process already saved, "
+                    "continuing",
+                    team_id,
+                    process.process_id,
+                )
     except (ValueError, TypeError, AttributeError, KeyError, ValidationError):
         # Not retryable: a data-shape or programming bug, not a transient
         # outage — let it propagate as itself (500) rather than a misleading
@@ -930,7 +947,9 @@ def create_conversation(req: CreateConversationRequest):
 def send_message(conversation_id: str, req: SendMessageRequest):
     """Run one conversation turn and append it to the conversation history.
 
-    Preconditions: ``conversation_id`` names an existing conversation.
+    Preconditions: ``conversation_id`` names an existing conversation —
+        checked first, before any LLM call or store mutation: an unknown
+        ``conversation_id`` raises ``HTTPException(404)`` immediately.
     Postconditions: on success, both the user message and the assistant
         reply are appended (in that order) and any updated process is saved.
         A failure in ``_agent.respond`` (LLM error, propagates as-is) or
