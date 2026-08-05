@@ -1223,6 +1223,62 @@ def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
     assert by_id["persisted-zero"]["progress"] == 0
 
 
+def test_list_strategy_lab_jobs_falls_back_on_job_service_connection_error(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ``httpx`` transport failure from the job-service client is caught
+    and the endpoint still returns 200, falling back to the in-memory-only
+    list -- the expected-failure path the narrowed ``except`` must preserve.
+    """
+    import httpx
+
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["mem-only"] = {
+        "run_id": "mem-only",
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+
+    class _Unreachable:
+        def list_jobs(self, *a, **k):
+            raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Unreachable())
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    ids = {j["job_id"] for j in resp.json()["jobs"]}
+    assert "mem-only" in ids
+
+
+def test_list_strategy_lab_jobs_propagates_unexpected_merge_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A programming error in the persisted-merge block (e.g. a ``TypeError``,
+    as opposed to an expected job-service/connection failure) is NOT
+    swallowed by the narrowed ``except`` -- it propagates instead of being
+    silently absorbed into a quiet 200 fallback.
+
+    Regression test for the bug this fix addresses: the previous bare
+    ``except Exception`` around this block hid programming errors in the
+    merge logic, making them invisible.
+    """
+    from investment_team.api import main as api_main
+
+    class _Broken:
+        def list_jobs(self, *a, **k):
+            raise TypeError("boom: not a job-service failure")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+
+    with pytest.raises(TypeError, match="boom"):
+        api_main.list_strategy_lab_jobs()
+
+
 def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

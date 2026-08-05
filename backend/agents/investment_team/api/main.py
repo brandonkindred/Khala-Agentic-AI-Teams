@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional
 
+import httpx
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -2943,12 +2944,17 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         - Entries are sorted by ``created_at`` descending.
 
     Raises:
-        - None. ``current_cycle``/``strategy`` reconciled from job-service data
-          are not schema-validated at ingestion, so their shape is checked
-          defensively before use rather than assumed. Job-service
-          merge/reconciliation failures are caught and logged, and the
-          response falls back to the in-memory-only list; this endpoint
-          always returns 200.
+        - None on an expected job-service failure. ``current_cycle``/
+          ``strategy`` reconciled from job-service data are not
+          schema-validated at ingestion, so their shape is checked
+          defensively before use rather than assumed. A job-service
+          connection/transport failure (``httpx.HTTPError``) or an
+          unconfigured ``JOB_SERVICE_URL`` (``RuntimeError``) is caught and
+          logged, and the response falls back to the in-memory-only list; in
+          that case this endpoint still returns 200. A programming error in
+          the merge logic itself (e.g. ``TypeError``, ``AttributeError``) is
+          NOT caught here and propagates, surfacing as a 500 instead of being
+          silently swallowed.
     """
     jobs: List[InvestmentJobSummary] = []
 
@@ -3025,8 +3031,15 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
                     created_at=data.get("started_at"),
                 )
             )
-    except Exception as exc:
-        logger.warning("Failed to load persisted strategy lab runs: %s", exc)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # httpx.HTTPError: transport/connection/HTTP-status failures from the
+        # job-service client. RuntimeError: JobServiceClient raises this when
+        # JOB_SERVICE_URL is unconfigured. Both are expected, transient/
+        # environmental failure modes -- fall back to the in-memory-only
+        # list. Anything else (e.g. a TypeError/AttributeError in the merge
+        # logic above) is a programming error and must propagate instead of
+        # being silently swallowed here.
+        logger.warning("Failed to load persisted strategy lab runs: %s", exc, exc_info=True)
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]
