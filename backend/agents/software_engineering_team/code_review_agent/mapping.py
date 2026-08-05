@@ -956,7 +956,9 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     return _stable_json_digest(normalized)
 
 
-def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str) -> str:
+def _submission_fingerprint(
+    input_data: CodeReviewInput, model_fingerprint: str, spec_compliance_single_pass: bool
+) -> str:
     """Hash the whole raw submission plus the resolved model.
 
     The submission-level analogue of ``_context_fingerprint`` (which keys only the
@@ -967,19 +969,32 @@ def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str)
         - ``input_data`` is a valid ``CodeReviewInput``.
         - ``model_fingerprint`` is ``_review_model_fingerprint(llm)`` for the
           client that would run the review.
+        - ``spec_compliance_single_pass`` is the caller's already-resolved decision
+          (``run_coordinator``'s single per-run computation, already folding in the
+          ``CODE_REVIEW`` profile restriction) — this function never reads the
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` env var itself, so a non-``CODE_REVIEW``
+          submission is never fingerprinted as flag-sensitive merely because the
+          env var happens to be set (which would cause needless cache misses on
+          every such submission).
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
-          resolved model) changes, and also whenever the output-affecting
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` toggle flips. It is derived
-          from ``input_data.model_dump()`` plus that toggle, so it keys on the
-          whole input (not a hand-picked subset) plus consolidation identity: a
-          new ``CodeReviewInput`` field is hashed automatically and can never be
-          silently dropped. Two submissions collide only when their full inputs
-          and consolidation setting are identical, so a hit means the review
-          would be the same work. (Every current field is verdict-affecting, so
-          this is exactly the submission identity; a future non-verdict field
-          would only cause extra misses — full re-reviews — never a stale hit.)
+          resolved model) changes, and also whenever an output-affecting toggle —
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` or the caller's resolved
+          ``spec_compliance_single_pass`` decision — flips. It is derived from
+          ``input_data.model_dump()`` plus those toggles, so it keys on the whole
+          input (not a hand-picked subset) plus consolidation and
+          spec-compliance-pass identity: a new ``CodeReviewInput`` field is hashed
+          automatically and can never be silently dropped. Two submissions
+          collide only when their full inputs and toggle settings are identical,
+          so a hit means the review would be the same work — in particular, an
+          identical ``CODE_REVIEW``-profile submission approved with
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` off can never be served from cache
+          once the flag is on, since that would silently skip the post-dedupe
+          ``synthesize_spec_compliance`` pass the flag adds. (Every current field
+          is verdict-affecting, so this is exactly the submission identity; a
+          future non-verdict field would only cause extra misses — full
+          re-reviews — never a stale hit.)
         - Computed from raw fields only (no compaction/LLM), so the short-circuit
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
@@ -987,6 +1002,7 @@ def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str)
     payload = input_data.model_dump(mode="json")
     payload["__model__"] = model_fingerprint
     payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
+    payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
     return _stable_json_digest(payload)
 
 
