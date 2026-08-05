@@ -218,7 +218,19 @@ def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _Script
                 ],
                 "summary": "validation ok",
             },
-            {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
+            # Also carries "approved"/"findings" (unused by the doc_runbook
+            # agent) so that an unrelated upstream retry drift (e.g. a
+            # chunk-review corrective retry consuming an extra script slot)
+            # landing this same entry on a *later* step -- most notably
+            # DevSecOpsReviewAgent, which now schema-validates its reply --
+            # still parses as a clean "approved, no findings" result instead
+            # of failing validation and blocking the pipeline.
+            {
+                "files": {"docs/runbook.md": "# Runbook"},
+                "summary": "doc ok",
+                "approved": True,
+                "findings": [],
+            },
         ]
     )
 
@@ -892,6 +904,68 @@ class TestDevSecOpsReviewAgent:
         agent = DevSecOpsReviewAgent(client)
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved
+
+    def test_recovers_from_malformed_first_response(self) -> None:
+        """A schema-invalid first reply (missing the required ``summary``
+        key) drives ``run_single_shot_review``'s corrective retry; a valid
+        second reply is used instead of falling back."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _ScriptedClient(
+            [
+                {"findings": []},  # missing required "summary" -- schema-invalid
+                {"approved": True, "findings": [], "summary": "recovered on retry"},
+            ]
+        )
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.summary == "recovered on retry"
+        assert client._idx == 2
+
+    def test_recovers_from_malformed_finding(self) -> None:
+        """A finding dict missing its required ``finding_id`` used to crash
+        ``run()`` via a bare ``ReviewFinding(**f)`` call -- it now fails
+        schema validation and drives a corrective retry instead."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _ScriptedClient(
+            [
+                {
+                    "approved": False,
+                    "findings": [{"severity": "high", "issue": "no finding_id here"}],
+                    "summary": "malformed finding",
+                },
+                {"approved": True, "findings": [], "summary": "clean on retry"},
+            ]
+        )
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.findings == []
+        assert out.summary == "clean on retry"
+        assert client._idx == 2
+
+    def test_falls_back_when_retries_exhausted(self) -> None:
+        """A reply that stays schema-invalid across the corrective retry
+        still yields the safe fallback -- never raises out of ``run()``."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _StubClient({"findings": []})  # missing required "summary" every call
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is False
+        assert out.findings == []
+        assert "DevSecOps review failed" in out.summary
 
 
 class TestDevOpsTestValidationAgent:
@@ -2554,18 +2628,6 @@ def _fenced_infra_patch_case():
     )
 
 
-def _fenced_devsecops_case():
-    from software_engineering_team.devops_team.devsecops_review_agent import (
-        DevSecOpsReviewAgent,
-        DevSecOpsReviewInput,
-    )
-
-    return (
-        DevSecOpsReviewAgent(_strands_model_double()),
-        DevSecOpsReviewInput(task_description="test", artifacts={}),
-    )
-
-
 def _fenced_task_clarifier_case():
     return (
         DevOpsTaskClarifierAgent(_strands_model_double()),
@@ -2599,14 +2661,17 @@ def _check_fenced_infra_patch(out) -> None:
     assert "main.tf" in out.patched_artifacts
 
 
-def _check_fenced_devsecops(out) -> None:
-    assert out.approved is True
-
-
 def _check_fenced_task_clarifier(out) -> None:
     assert out.approved_for_execution is True
 
 
+# DevSecOpsReviewAgent is deliberately absent from this list: it no longer
+# builds a Strands Agent or calls complete_json_with_continuation (see
+# devsecops_review_agent/agent.py), so this Strands-Agent-double-based
+# fenced-markdown-recovery harness no longer applies to it. Fenced-JSON
+# recovery for its new run_single_shot_review/complete_json call path is
+# each concrete LLMClient's own extract_json_from_response usage, already
+# covered by llm_service's own tests -- not a per-agent concern here.
 _FENCED_RECOVERY_CASES = [
     (
         "iac",
@@ -2671,12 +2736,6 @@ _FENCED_RECOVERY_CASES = [
             "edits_applied": 1,
         },
         _check_fenced_infra_patch,
-    ),
-    (
-        "devsecops_review",
-        _fenced_devsecops_case,
-        {"approved": True, "findings": [], "summary": "fenced sec ok"},
-        _check_fenced_devsecops,
     ),
     (
         "task_clarifier",

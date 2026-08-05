@@ -160,11 +160,17 @@ plain-JSON branch still has no canonical entrypoint to delegate to (`schema`
 is a required parameter of `generate_structured`), so it resolves a client
 and calls `complete_json` directly, as documented above.
 
-`security_agent/agent.py` (`CybersecurityExpertAgent`) is the first such
+`security_agent/agent.py` (`CybersecurityExpertAgent`) was the first such
 migration: it now calls `run_single_shot_review` in schema-validated mode
 (`schema=SecurityLLMResponse`) in place of its former Pattern 2
 (`run_structured_persona`) call, gaining the bounded corrective retry
-Pattern 2 doesn't offer.
+Pattern 2 doesn't offer. `devops_team/devsecops_review_agent/agent.py`
+(`DevSecOpsReviewAgent`) followed: it now calls `run_single_shot_review`
+with `schema=DevSecOpsReviewLLMResponse` in place of its former Pattern 5
+`complete_json_with_continuation` call plus unguarded, manual
+`ReviewFinding(**f)` construction — a malformed finding dict used to crash
+`run()` outright; it now fails validation and drives the corrective retry
+instead.
 
 ## Out of scope
 
