@@ -652,6 +652,87 @@ def test_stop_swallows_closed_workflow_rpc_error(
     assert "already finished" in resp.json()["message"]
 
 
+def test_stop_rpc_not_found_does_not_resurrect_session_deleted_during_signal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """If the session is deleted concurrently while the stop signal RPC is in
+    flight and that RPC then raises a closed-workflow NOT_FOUND error, the
+    NOT_FOUND handler must re-read the store rather than returning the stale
+    pre-signal snapshot — otherwise it would resurrect a session that should
+    have stayed deleted."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-race-deleted"] = _live_session(
+        "pt-race-deleted", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _delete_then_not_found(session_id):
+        del api_main._paper_trading_sessions[session_id]
+        raise RPCError("workflow execution already completed", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _delete_then_not_found)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-race-deleted/stop")
+
+    assert resp.status_code == 404
+    assert "pt-race-deleted" not in api_main._paper_trading_sessions
+
+
+def test_stop_rpc_not_found_returns_fresh_state_not_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """When the session still exists but the background worker independently
+    reached a terminal state while the stop-signal RPC was in flight (which
+    then raises NOT_FOUND because the workflow already closed), the response
+    must reflect the fresh persisted state, not the pre-signal snapshot."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-race-completed"] = _live_session(
+        "pt-race-completed", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _complete_then_not_found(session_id):
+        completed = _live_session(session_id, strategy, PaperTradingStatus.COMPLETED)
+        completed.current_capital = 123_456.0
+        api_main._paper_trading_sessions[session_id] = completed
+        raise RPCError("workflow execution already completed", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _complete_then_not_found)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-race-completed/stop")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session"]["status"] == "completed"
+    assert body["session"]["current_capital"] == 123_456.0
+
+
 def test_stop_surfaces_genuine_signal_delivery_failure(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

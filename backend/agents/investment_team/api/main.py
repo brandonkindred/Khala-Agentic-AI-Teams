@@ -4713,8 +4713,21 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
                 "(already closed); treating as already-stopped.",
                 session_id,
             )
+            # Re-read under lock rather than returning the pre-signal ``session``
+            # snapshot taken above — the RPC was a real network call, and the
+            # session may have been deleted concurrently (e.g. its lab record
+            # was deleted) while it was in flight. Returning the stale snapshot
+            # would resurrect a session that no longer exists.
+            with _lock:
+                fresh_raw = _paper_trading_sessions.get(session_id)
+                if fresh_raw is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Paper trading session '{session_id}' not found.",
+                    ) from exc
+                fresh_session = PaperTradingSession.parse_persisted(fresh_raw)
             return PaperTradingResponse(
-                session=session,
+                session=fresh_session,
                 message="Session already finished; nothing to stop.",
             )
         logger.exception("Stop signal for paper-trading session %s failed to deliver", session_id)
