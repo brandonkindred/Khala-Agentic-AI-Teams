@@ -60,7 +60,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import AgentReviewCache
@@ -691,7 +691,7 @@ def run_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[Any, Any]] = None,
     language: str,
-    llm_review_fn: Callable[..., List[ReviewIssue]],
+    llm_review_fn: Callable[..., Union[LlmReviewOutput[ReviewIssue], List[ReviewIssue]]],
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
@@ -849,7 +849,7 @@ def run_microtask_review(
     tool_agents: Optional[Dict[Any, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str,
-    llm_review_fn: Callable[..., List[ReviewIssue]],
+    llm_review_fn: Callable[..., Union[LlmReviewOutput[ReviewIssue], List[ReviewIssue]]],
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
