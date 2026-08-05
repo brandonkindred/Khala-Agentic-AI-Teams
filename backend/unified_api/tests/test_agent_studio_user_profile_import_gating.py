@@ -85,8 +85,18 @@ assert "agent_studio" not in sys.modules, (
 assert "unified_api.routes.agent_studio" not in sys.modules, (
     "disabled agent_studio: unified_api.routes.agent_studio was still imported"
 )
+def _has_prefix(route, prefix):
+    # FastAPI 0.137+ wraps app.include_router()'s target in a private
+    # _IncludedRouter with no .path attribute; the fully-prefixed leaf paths
+    # live on original_router.routes instead. Falls back to route.path for
+    # unwrapped route types (e.g. Mount), which this wrapping doesn't touch.
+    inner_routes = getattr(getattr(route, "original_router", None), "routes", None)
+    if inner_routes is not None:
+        return any(getattr(r, "path", "").startswith(prefix) for r in inner_routes)
+    return getattr(route, "path", "").startswith(prefix)
+
 assert not any(
-    getattr(r, "path", "").startswith("/api/agent-studio") for r in unified_api.main.app.routes
+    _has_prefix(r, "/api/agent-studio") for r in unified_api.main.app.routes
 ), "disabled agent_studio route was still mounted"
 
 from fastapi.testclient import TestClient
@@ -124,8 +134,14 @@ assert "agent_studio" in sys.modules, "enabled agent_studio was not imported"
 assert "unified_api.routes.agent_studio" in sys.modules, (
     "enabled agent_studio: unified_api.routes.agent_studio was not imported"
 )
+def _has_prefix(route, prefix):
+    inner_routes = getattr(getattr(route, "original_router", None), "routes", None)
+    if inner_routes is not None:
+        return any(getattr(r, "path", "").startswith(prefix) for r in inner_routes)
+    return getattr(route, "path", "").startswith(prefix)
+
 assert any(
-    getattr(r, "path", "").startswith("/api/agent-studio") for r in unified_api.main.app.routes
+    _has_prefix(r, "/api/agent-studio") for r in unified_api.main.app.routes
 ), "enabled agent_studio route was not mounted"
 
 from fastapi.testclient import TestClient
@@ -166,8 +182,14 @@ assert "user_profile" not in sys.modules, (
 assert "unified_api.routes.user_profile" not in sys.modules, (
     "disabled user_profile: unified_api.routes.user_profile was still imported"
 )
+def _has_prefix(route, prefix):
+    inner_routes = getattr(getattr(route, "original_router", None), "routes", None)
+    if inner_routes is not None:
+        return any(getattr(r, "path", "").startswith(prefix) for r in inner_routes)
+    return getattr(route, "path", "").startswith(prefix)
+
 assert not any(
-    getattr(r, "path", "").startswith("/api/user-profile") for r in unified_api.main.app.routes
+    _has_prefix(r, "/api/user-profile") for r in unified_api.main.app.routes
 ), "disabled user_profile route was still mounted"
 
 from fastapi.testclient import TestClient
@@ -205,8 +227,14 @@ assert "user_profile" in sys.modules, "enabled user_profile was not imported"
 assert "unified_api.routes.user_profile" in sys.modules, (
     "enabled user_profile: unified_api.routes.user_profile was not imported"
 )
+def _has_prefix(route, prefix):
+    inner_routes = getattr(getattr(route, "original_router", None), "routes", None)
+    if inner_routes is not None:
+        return any(getattr(r, "path", "").startswith(prefix) for r in inner_routes)
+    return getattr(route, "path", "").startswith(prefix)
+
 assert any(
-    getattr(r, "path", "").startswith("/api/user-profile") for r in unified_api.main.app.routes
+    _has_prefix(r, "/api/user-profile") for r in unified_api.main.app.routes
 ), "enabled user_profile route was not mounted"
 
 from fastapi.testclient import TestClient

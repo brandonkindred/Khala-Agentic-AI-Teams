@@ -86,8 +86,18 @@ assert "product_delivery" not in sys.modules, (
 assert "unified_api.routes.product_delivery" not in sys.modules, (
     "disabled product_delivery: unified_api.routes.product_delivery was still imported"
 )
+def _has_prefix(route, prefix):
+    # FastAPI 0.137+ wraps app.include_router()'s target in a private
+    # _IncludedRouter with no .path attribute; the fully-prefixed leaf paths
+    # live on original_router.routes instead. Falls back to route.path for
+    # unwrapped route types (e.g. Mount), which this wrapping doesn't touch.
+    inner_routes = getattr(getattr(route, "original_router", None), "routes", None)
+    if inner_routes is not None:
+        return any(getattr(r, "path", "").startswith(prefix) for r in inner_routes)
+    return getattr(route, "path", "").startswith(prefix)
+
 assert not any(
-    getattr(r, "path", "").startswith("/api/product-delivery") for r in unified_api.main.app.routes
+    _has_prefix(r, "/api/product-delivery") for r in unified_api.main.app.routes
 ), "disabled product_delivery route was still mounted"
 
 from fastapi.testclient import TestClient
@@ -125,8 +135,14 @@ assert "product_delivery" in sys.modules, "enabled product_delivery was not impo
 assert "unified_api.routes.product_delivery" in sys.modules, (
     "enabled product_delivery: unified_api.routes.product_delivery was not imported"
 )
+def _has_prefix(route, prefix):
+    inner_routes = getattr(getattr(route, "original_router", None), "routes", None)
+    if inner_routes is not None:
+        return any(getattr(r, "path", "").startswith(prefix) for r in inner_routes)
+    return getattr(route, "path", "").startswith(prefix)
+
 assert any(
-    getattr(r, "path", "").startswith("/api/product-delivery") for r in unified_api.main.app.routes
+    _has_prefix(r, "/api/product-delivery") for r in unified_api.main.app.routes
 ), "enabled product_delivery route was not mounted"
 
 from fastapi.testclient import TestClient
