@@ -893,6 +893,44 @@ def test_spec_compliance_pass_toggle_invalidates_submission_cache(
     assert second.approved is False  # real re-review, not a stale flag-off cache hit
 
 
+def test_spec_compliance_flag_passed_to_fingerprint_is_profile_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_coordinator`` computes the ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` decision
+    exactly once and passes the *already profile-gated* result into
+    ``_submission_fingerprint`` -- the fingerprint helper itself never reads the raw
+    env var.
+
+    Regression test: a profile-blind ``env_bool`` read inside the fingerprint helper
+    would fingerprint a non-``CODE_REVIEW`` submission as flag-sensitive whenever the
+    env var happens to be set, even though the resolved decision (and thus the real
+    review) never depends on it for that profile -- causing needless cache misses.
+    Spying on the call site (rather than inferring it from cache hit/miss side
+    effects) proves the exact boolean the coordinator resolved and threaded through.
+    """
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+    original = coord._submission_fingerprint
+    calls: list = []
+
+    def _spy(input_data, model_fingerprint, spec_compliance_single_pass):
+        calls.append(spec_compliance_single_pass)
+        return original(input_data, model_fingerprint, spec_compliance_single_pass)
+
+    monkeypatch.setattr(coord, "_submission_fingerprint", _spy)
+
+    client = _CountingClient(_APPROVED)
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.SPEC_CONFORMANCE))
+
+    assert calls == [False], (
+        "the flag is CODE_REVIEW-only; a non-CODE_REVIEW profile must fingerprint "
+        "as spec-compliance-pass=False regardless of the env var"
+    )
+
+    calls.clear()
+    run_coordinator(client, _one_file_input(profile=ReviewProfile.CODE_REVIEW))
+    assert calls == [True], "the CODE_REVIEW profile must fingerprint the env var as-is"
+
+
 def test_rejected_submission_is_not_short_circuited(monkeypatch: pytest.MonkeyPatch) -> None:
     """A rejection is never stored, so an identical resubmission reviews again."""
     client = _CountingClient(_REJECTED)

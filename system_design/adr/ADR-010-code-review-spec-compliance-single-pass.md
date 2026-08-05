@@ -2,7 +2,7 @@
 
 - **Status**: Accepted — implemented with a deviation from the original Decision; see the
   Amendment section at the bottom.
-- **Date**: 2026-08-04
+- **Date**: 2026-08-05
 - **Owner**: Software Engineering Team / Code Review
 - **Related**:
   - Reduces redundant per-chunk spec/architecture context in the code-review map phase; this ADR is
@@ -216,12 +216,14 @@ A future implementation must satisfy exactly this surface:
 - **`synthesize_review_findings` and its digest/prompt stay untouched**, minimizing the blast radius
   of the eventual implementation to `chunk_reviewer.py`'s prompt assembly, one new tail-pass module,
   and `_merge_narrative`'s fast-path condition.
-- **This ADR does not itself implement anything.** A future implementation PR must still: add the
-  `env_bool` flag read, thread the new `ChunkReviewInput` boolean, write the new tail-pass module
-  (budgeting, prompt, fail-safe wrapper), extend `_TailPassResult` and `_run_tail_passes`, adjust
-  `_merge_narrative`'s fast-path condition, add dual-mode test coverage (≥90% on changed code, per
-  this repository's testing floor), measure the token/cost delta on a representative multi-chunk
-  fixture, and add the `docs/ENV_VARS.md` entry described above.
+- **This ADR does not itself implement anything.** *(Superseded by the Amendment below: the gating
+  sub-issue has since landed. What it actually did was add the `env_bool` flag read, thread the new
+  `ChunkReviewInput` boolean, wire the already-shipped, findings-only `synthesize_spec_compliance`
+  call into `run_coordinator` immediately before `_merge_narrative` — not a new tail-pass module, and
+  no `_TailPassResult`/`_run_tail_passes` change, per the Amendment — adjust `_merge_narrative`'s
+  fast-path condition, add dual-mode test coverage (≥90% on changed code, per this repository's
+  testing floor), and add the `docs/ENV_VARS.md` entry described above. Token/cost delta measurement
+  on a representative multi-chunk fixture remains a separate, later work item.)*
 
 ## Amendment (implementation, gating sub-issue)
 

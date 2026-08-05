@@ -206,6 +206,11 @@ __all__ = [
 # guaranteed miss).
 DEFAULT_SUBMISSION_CACHE_SIZE = 256  # CODE_REVIEW_SUBMISSION_CACHE_SIZE, floor 0
 
+# Named so ``run_coordinator`` (the sole reader) and this module's docstrings/tests
+# never risk a typo'd duplicate literal; mirrors ``SIDE_EFFECT_CONSOLIDATION_ENV``'s
+# module-level-constant pattern.
+CODE_REVIEW_SPEC_COMPLIANCE_PASS_ENV = "CODE_REVIEW_SPEC_COMPLIANCE_PASS"
+
 # Progress-bar checkpoints (0.0-1.0), in the order the review actually reaches them:
 # preparing input -> chunking done (also the map phase's start -- see
 # mapping.py's _MAP_PHASE_START, which must stay equal to this) -> per-chunk map
@@ -709,6 +714,19 @@ def run_coordinator(
     # is identical throughout (best-effort identity, never raises).
     model_fingerprint = _review_model_fingerprint(llm)
 
+    # Computed once per run (never re-read per chunk or per fingerprint call) so
+    # every chunk's prompt, the submission fingerprint below, and the post-dedupe
+    # single-pass call later all agree on the same decision. Restricted to
+    # CODE_REVIEW, matching every sibling tail pass's profile restriction -- a
+    # profile-blind flag read would omit per-chunk spec/AC context on other
+    # profiles without the post-dedupe pass ever running to replace it, and would
+    # also fingerprint non-CODE_REVIEW submissions as flag-sensitive when they
+    # never actually are, causing needless cache misses whenever the env var
+    # happens to be set.
+    spec_compliance_single_pass = env_bool(
+        CODE_REVIEW_SPEC_COMPLIANCE_PASS_ENV, default=False
+    ) and (input_data.profile == ReviewProfile.CODE_REVIEW)
+
     # Submission-level short-circuit (see module docstring's "Submission-level
     # short-circuit" section for the full rationale). On a miss the run proceeds
     # and stores its verdict below if approved.
@@ -716,7 +734,9 @@ def run_coordinator(
     submission_key: Optional[str] = None
     cached: Optional[CodeReviewOutput] = None
     if submission_size > 0 and repo_reader is None:
-        submission_key = _submission_fingerprint(input_data, model_fingerprint)
+        submission_key = _submission_fingerprint(
+            input_data, model_fingerprint, spec_compliance_single_pass
+        )
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
             hit = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
             if hit is not None:
@@ -794,15 +814,6 @@ def run_coordinator(
     )
     notify_review_progress(
         progress_callback, "preparing", f"split into {len(chunks)} chunks", _PROGRESS_CHUNKING_DONE
-    )
-
-    # Computed once per run (never re-read per chunk) so every chunk's prompt and
-    # the post-dedupe single-pass call below agree on the same decision. Restricted
-    # to CODE_REVIEW, matching every sibling tail pass's profile restriction -- a
-    # profile-blind flag read here would omit per-chunk spec/AC context on other
-    # profiles without the post-dedupe pass ever running to replace it.
-    spec_compliance_single_pass = env_bool("CODE_REVIEW_SPEC_COMPLIANCE_PASS", default=False) and (
-        input_data.profile == ReviewProfile.CODE_REVIEW
     )
 
     base_input = {
