@@ -2526,11 +2526,19 @@ class TestMainOrchestratorRegistration:
 # ===========================================================================
 # FENCE-RECOVERY REGRESSION TESTS
 #
-# Each of these 8 agents now routes its raw LLM completion through
+# Each of these 7 agents now routes its raw LLM completion through
 # complete_json_with_continuation() instead of a bare json.loads(). These
 # tests exercise the real recovery path (llm_mod.Agent is mocked at the
 # shared/llm.py level, not at complete_json_with_continuation itself) to
 # prove a markdown-fenced response no longer crashes the agent.
+#
+# devsecops_review is deliberately absent here: it was retrofitted onto
+# software_engineering_team.shared.single_shot_review.run_single_shot_review
+# (a raw LLMClient.complete_json call), which no longer goes through a
+# Strands Agent or complete_json_with_continuation at all, so this
+# fence-recovery mechanism doesn't apply to it. Fenced/markdown-wrapped
+# replies are the underlying LLMClient implementation's responsibility now,
+# same as every other complete_json-based caller (e.g. code_review_agent).
 # ===========================================================================
 
 

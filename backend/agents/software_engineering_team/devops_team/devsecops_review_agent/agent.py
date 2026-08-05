@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from llm_service import LLMClient
+from software_engineering_team.shared.llm import DEFAULT_JSON_SYSTEM_PROMPT
 from software_engineering_team.shared.security_service import derive_approved
 from software_engineering_team.shared.single_shot_review import run_single_shot_review
 
@@ -58,7 +59,7 @@ class DevSecOpsReviewAgent:
                 self.llm,
                 agent_key="devops",
                 prompt=DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context,
-                system_prompt="You are DevSecOpsReviewAgent, an infra security reviewer.",
+                system_prompt=DEFAULT_JSON_SYSTEM_PROMPT,
                 schema=DevSecOpsReviewLLMResponse,
                 temperature=0.0,
                 think=True,
