@@ -173,12 +173,23 @@ class DbcCommentsAgent:
               not be safely anchored/merged; comments_added/comments_updated
               count only insertions the merge actually applied, never the
               model's self-reported counts
-            - summary contains a message when already_compliant=True
-              (defaulted when the model didn't provide one); otherwise it is
-              the model-provided summary as-is, which may be empty
+            - summary is every chunk's non-empty summary, deduplicated in
+              first-seen order (so multiple chunks reporting the identical
+              text, e.g. "No changes needed.", contribute it only once) and
+              space-joined; contains a default praise message when
+              already_compliant=True and the joined result is still empty
+            - suggested_commit_message is the first non-empty value returned
+              by any chunk, in chunk order; a later chunk's differing
+              suggestion is ignored, and the schema's own default is used
+              when no chunk provided one
 
         Raises:
-            Nothing -- run() never raises. Each failed-but-retryable LLM
+            Nothing -- run() never raises. Preparing chunks
+            (parse_code_into_file_blocks/compute_code_review_map_chunk_chars/
+            build_review_chunks) is itself guarded: a failure there (e.g.
+            self.llm.get_max_context_tokens() hitting the network) surfaces
+            via on_status(FAILED, ...) and already_compliant=False the same
+            way an exhausted LLM call does. Each failed-but-retryable LLM
             attempt (on any chunk) is surfaced via on_status(NEEDS_RETRY,
             ...); a chunk's final exhaustion via on_status(FAILED, ...) and
             already_compliant=False, never a silent fail-open. A merge-step
@@ -223,10 +234,24 @@ class DbcCommentsAgent:
         # size fits the model's context budget. A small input yields exactly
         # one chunk covering the whole input verbatim (see
         # code_review_agent.chunking.build_review_chunks's contract), so this
-        # is a no-op for the common case.
-        blocks = parse_code_into_file_blocks(code)
-        max_chunk_chars = compute_code_review_map_chunk_chars(self.llm)
-        chunks = build_review_chunks(blocks, max_chunk_chars)
+        # is a no-op for the common case. compute_code_review_map_chunk_chars
+        # calls self.llm.get_max_context_tokens(), which for a real (e.g.
+        # Ollama-backed) client can hit the network and fail -- unlike
+        # parse_code_into_file_blocks/build_review_chunks, which are pure --
+        # so this whole setup step is guarded the same way the per-chunk LLM
+        # call below is, to hold run()'s "never raises" contract.
+        try:
+            blocks = parse_code_into_file_blocks(code)
+            max_chunk_chars = compute_code_review_map_chunk_chars(self.llm)
+            chunks = build_review_chunks(blocks, max_chunk_chars)
+        except Exception as e:
+            logger.warning("DbcComments: failed to prepare chunks (%s), surfacing failure", e)
+            _update(DbcCommentsStatus.FAILED, str(e))
+            return DbcCommentsOutput(
+                already_compliant=False,
+                summary=f"DbC review failed while preparing chunks and could not determine "
+                f"compliance: {e}",
+            )
         chunk_count = len(chunks)
 
         all_insertions: List[DbcCommentInsertion] = []
@@ -297,7 +322,11 @@ class DbcCommentsAgent:
 
         insertions = all_insertions
         already_compliant = all_compliant
-        summary = " ".join(summaries)
+        # Distinct chunks reporting the identical summary text (e.g. every
+        # already-compliant chunk saying "No changes needed.") collapse to one
+        # occurrence, in first-seen order, before joining -- dict.fromkeys is
+        # the standard order-preserving dedupe idiom.
+        summary = " ".join(dict.fromkeys(summaries))
         suggested_commit_message = (
             suggested_commit_message
             or DbcCommentsLLMResponse.model_fields["suggested_commit_message"].default

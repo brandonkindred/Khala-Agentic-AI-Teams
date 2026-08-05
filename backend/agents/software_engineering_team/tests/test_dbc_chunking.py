@@ -19,6 +19,7 @@ from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.code_review_agent.chunking import build_review_chunks
 from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+from software_engineering_team.technical_writers.dbc_comments_agent import agent as dbc_mod
 from software_engineering_team.technical_writers.dbc_comments_agent.agent import (
     DbcCommentsAgent,
 )
@@ -221,3 +222,44 @@ def test_dbc_run_small_input_still_yields_exactly_one_chunk() -> None:
 
     assert len(client.calls) == 1
     assert out.already_compliant is True
+
+
+def test_dbc_run_chunk_preparation_failure_fails_loud(monkeypatch) -> None:
+    """A failure while preparing chunks (e.g. compute_code_review_map_chunk_chars
+    hitting the network via self.llm.get_max_context_tokens()) must fail the
+    whole run loud, the same as an exhausted per-chunk LLM call -- never a
+    silent fail-open, and the LLM is never called at all since there's no
+    chunk yet to review."""
+
+    def _boom(llm):
+        raise RuntimeError("context lookup failed")
+
+    monkeypatch.setattr(dbc_mod, "compute_code_review_map_chunk_chars", _boom)
+
+    client = _RepeatingClient({"insertions": [], "already_compliant": True})
+    statuses: List[DbcCommentsStatus] = []
+    out = DbcCommentsAgent(llm_client=client).run(
+        DbcCommentsInput(code="def f(): pass"), on_status=lambda s, d: statuses.append(s)
+    )
+
+    assert out.already_compliant is False
+    assert "preparing chunks" in out.summary
+    assert DbcCommentsStatus.FAILED in statuses
+    assert client.calls == []
+
+
+def test_dbc_run_dedupes_identical_summaries_across_chunks() -> None:
+    """Multiple chunks reporting the identical summary text collapse to one
+    occurrence in the joined output, instead of repeating verbatim."""
+    code, chunks = _expected_chunks()
+    assert len(chunks) > 1
+
+    responses = [
+        {"insertions": [], "already_compliant": True, "summary": "No changes needed."}
+        for _ in chunks
+    ]
+    client = _SequencedClient(responses)
+    out = DbcCommentsAgent(llm_client=client).run(DbcCommentsInput(code=code))
+
+    assert out.summary == "No changes needed."
+    assert out.summary.count("No changes needed.") == 1
