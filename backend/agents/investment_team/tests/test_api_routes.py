@@ -59,9 +59,16 @@ class _InMemoryDict:
         return key in self._d
 
     def __delitem__(self, key: str) -> None:
-        self._d.pop(key, None)
+        """Preconditions: none. Postconditions: removes ``key``; raises ``KeyError`` if absent."""
+        del self._d[key]
 
     def pop(self, key: str, *args: Any) -> Any:
+        """Preconditions: at most one default in ``args`` (else ``TypeError``, matching
+        ``dict.pop``). Postconditions: removes and returns ``key``'s value, or the sole
+        default if provided and ``key`` is absent; raises ``KeyError`` if absent and no
+        default was given."""
+        if len(args) > 1:
+            raise TypeError(f"pop expected at most 2 arguments, got {1 + len(args)}")
         if args:
             return self._d.pop(key, args[0])
         return self._d.pop(key)
@@ -93,6 +100,18 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api_main, "_workflow_state", WorkflowState())
 
     return TestClient(api_main.app)
+
+
+def test_inmemorydict_delitem_raises_keyerror_for_missing_key() -> None:
+    d = _InMemoryDict()
+    with pytest.raises(KeyError):
+        del d["missing"]
+
+
+def test_inmemorydict_pop_raises_typeerror_for_extra_defaults() -> None:
+    d = _InMemoryDict()
+    with pytest.raises(TypeError):
+        d.pop("missing", "default1", "default2")
 
 
 # ---------------------------------------------------------------------------
@@ -351,12 +370,13 @@ def test_create_strategy_rejects_unknown_field(api_client) -> None:
 def test_create_strategy_unsupported_asset_class_returns_422(api_client) -> None:
     """An off-vocabulary asset_class trips StrategySpec's validator at
     construction inside the handler; that must surface as a 422 client error,
-    not an unhandled 500."""
+    not an unhandled 500, with the structured error body naming the field."""
     payload = _strategy_body()
     payload["asset_class"] = "bonds"
     resp = api_client.post("/strategies", json=payload)
     assert resp.status_code == 422
-    assert "asset_class" in str(resp.json()).lower()
+    body = resp.json()
+    assert any("asset_class" in err.get("loc", []) for err in body["detail"])
 
 
 def test_validate_strategy_404_when_missing(api_client) -> None:
