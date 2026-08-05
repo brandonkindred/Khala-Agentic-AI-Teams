@@ -512,6 +512,19 @@ describe('ProcessDesignerChatComponent', () => {
     );
   });
 
+  it('ignores a suggested-question click while a send is already in flight', () => {
+    const send$ = new Subject<unknown>();
+    api.sendMessage.mockReturnValueOnce(send$.asObservable() as never);
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit(); // first send now in flight
+
+    component.onSuggestedQuestion('another question'); // must be ignored
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(component.messages().map((m) => m.content)).toEqual(['hi']);
+  });
+
   // ── createNewProcess: create + link to the active conversation ─────────────
 
   it('createNewProcess creates the process and links it to the active conversation', () => {

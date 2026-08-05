@@ -469,7 +469,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   private sendMessage(message: string): void {
-    if (!this.conversationId) return;
+    // Guard here (not just in onSubmit) so onSuggestedQuestion — which bypasses
+    // the form — can't fire a second concurrent send while one is in flight.
+    if (!this.conversationId || this.loading()) return;
 
     this.form.reset({ message: '' });
     const optimisticMessage: AgenticConversationMessage = {

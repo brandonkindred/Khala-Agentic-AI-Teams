@@ -286,9 +286,11 @@ def _save_agents_and_process(
         (``ValueError``, ``TypeError``, ``AttributeError``, ``KeyError``,
         pydantic ``ValidationError`` — e.g. malformed LLM ``agents_data``)
         propagates as itself, since retrying an identical malformed request
-        cannot succeed. Any other failure (e.g. a registry or database
-        outage) is raised as ``HTTPException(503)`` instead of the underlying
-        exception, so the caller gets a clear "try again" signal.
+        cannot succeed. An ``HTTPException`` already raised by a callee also
+        propagates unchanged (it is an intentional status, not an outage).
+        Any other failure (e.g. a registry or database outage) is raised as
+        ``HTTPException(503)`` instead of the underlying exception, so the
+        caller gets a clear "try again" signal.
     """
     try:
         _save_agents_from_llm(team_id, agents_data)
@@ -317,6 +319,11 @@ def _save_agents_and_process(
             team_id,
             conversation_id,
         )
+        raise
+    except HTTPException:
+        # An intentionally raised HTTP status (e.g. a client error) is neither
+        # of the two categories above — propagate it unchanged rather than
+        # relabeling it a retryable 503.
         raise
     except Exception as exc:
         logger.exception(

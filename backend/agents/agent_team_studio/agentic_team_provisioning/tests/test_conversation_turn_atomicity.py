@@ -12,6 +12,7 @@ roster/process saves have succeeded.
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
@@ -144,6 +145,46 @@ def test_send_message_propagates_non_retryable_errors_instead_of_503(
     with pytest.raises(ValueError, match="malformed agents_data"):
         client.post(f"/conversations/{conversation_id}/messages", json={"message": "hi"})
 
+    assert AgenticTeamStore().get_messages(conversation_id) == []
+
+
+def test_send_message_propagates_httpexception_instead_of_503(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """An HTTPException raised by a callee must not be relabeled a 503.
+
+    Preconditions: ``_agent.respond`` returns an ``agents`` block, and
+        ``register_team_manifests`` is patched to raise ``HTTPException(400,
+        ...)`` directly (an intentional client-error status, not an outage).
+    Postconditions: the response is the original 400 with its own detail —
+        not swallowed into ``HTTPException(503)`` — and no messages were
+        persisted.
+    """
+    import agent_team_studio.agentic_team_provisioning.api.main as main_mod
+
+    team_id = _new_team()
+    conversation_id = AgenticTeamStore().create_conversation(team_id=team_id)
+
+    monkeypatch.setattr(
+        main_mod._agent,
+        "respond",
+        lambda **kwargs: (
+            "Sure, let's design that.",
+            None,
+            ["What's next?"],
+            [{"agent_name": "Planner", "role": "Plans things"}],
+        ),
+    )
+
+    def _boom(*args, **kwargs):
+        raise HTTPException(status_code=400, detail="rejected by registry")
+
+    monkeypatch.setattr(main_mod, "register_team_manifests", _boom)
+
+    resp = client.post(f"/conversations/{conversation_id}/messages", json={"message": "hi"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "rejected by registry"
     assert AgenticTeamStore().get_messages(conversation_id) == []
 
 
