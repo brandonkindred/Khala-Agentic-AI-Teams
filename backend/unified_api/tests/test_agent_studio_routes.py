@@ -4,9 +4,9 @@ Agent Studio is Temporal-only: each handler dispatches its operation as a workfl
 activity. These tests exercise the full router → dispatch → activity → service →
 response path **in-process, without a Temporal cluster**, by:
 
-  * patching ``agent_studio.runtime.get_studio_service`` so the activities delegate to
+  * patching ``agent_team_studio.agent_studio.runtime.get_studio_service`` so the activities delegate to
     a scripted assistant + fake registry (no live LLM / Postgres), and
-  * patching ``agent_studio.temporal.dispatch.execute_workflow_sync`` with an inline
+  * patching ``agent_team_studio.agent_studio.temporal.dispatch.execute_workflow_sync`` with an inline
     stand-in that runs the workflow's single activity directly and reproduces
     Temporal's exception wrapping, so the dispatch layer's ``ValueError`` → 400 /
     ``LookupError`` → 404 translation is genuinely exercised.
@@ -25,11 +25,11 @@ from fastapi.testclient import TestClient
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 
-import agent_studio.temporal.dispatch as dispatch_mod
-from agent_studio.assistant import AgentDesignerAgent
-from agent_studio.service import AgentStudioService
-from agent_studio.store import AgentStudioConversationStore
-from agent_studio.temporal.workflows import (
+import agent_team_studio.agent_studio.temporal.dispatch as dispatch_mod
+from agent_team_studio.agent_studio.assistant import AgentDesignerAgent
+from agent_team_studio.agent_studio.service import AgentStudioService
+from agent_team_studio.agent_studio.store import AgentStudioConversationStore
+from agent_team_studio.agent_studio.temporal.workflows import (
     CloneFromRegistryWorkflow,
     SaveAgentWorkflow,
     SendMessageWorkflow,
@@ -39,7 +39,7 @@ from agent_studio.temporal.workflows import (
     send_message_activity,
     start_conversation_activity,
 )
-from agent_studio.testing import FakeRegistry, seed_manifest
+from agent_team_studio.agent_studio.testing import FakeRegistry, seed_manifest
 from unified_api.routes.agent_studio import router
 
 _DRAFT_REPLY = """\
@@ -108,7 +108,7 @@ def make_client(monkeypatch: pytest.MonkeyPatch):
     """
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
-        monkeypatch.setattr("agent_studio.runtime.get_studio_service", lambda: service)
+        monkeypatch.setattr("agent_team_studio.agent_studio.runtime.get_studio_service", lambda: service)
         monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _inline_execute)
         app = FastAPI()
         app.include_router(router)

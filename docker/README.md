@@ -164,7 +164,7 @@ When running in this stack, the **khala** service uses the **stack’s Postgres*
 
 Agent Console sandboxes run as **per-sandbox docker compose projects** — each agent invocation gets its own isolated stack containing the agent container, **plus its own Postgres, Temporal, Prometheus, and Grafana**. Nothing in those stacks joins this `khala-stack` compose network, so the agent runs as if it were in a live environment but cannot touch the long-lived services here. (Permission tiers were removed in #456: every sandbox is provisioned with full access on its own services.)
 
-- The compose template lives at `backend/agent_sandbox_image/sandbox-stack.yml`. The provisioner (`backend/agents/agent_provisioning_team/sandbox/provisioner.py`) renders it into `${AGENT_CACHE}/agent_provisioning/sandboxes/stacks/<project>/` and runs `docker compose -p <project> -f <rendered> up -d`.
+- The compose template lives at `backend/agent_sandbox_image/sandbox-stack.yml`. The provisioner (`backend/agents/agent_team_studio/agent_provisioning_team/sandbox/provisioner.py`) renders it into `${AGENT_CACHE}/agent_provisioning/sandboxes/stacks/<project>/` and runs `docker compose -p <project> -f <rendered> up -d`.
 - The Postgres password is freshly generated per sandbox; Postgres / Temporal / Prometheus / Grafana speak to one another over the project's private bridge. Only the agent's `8090/tcp` is published to the host on a loopback-bound ephemeral port so the unified API can proxy invokes.
 - Idle sandboxes are torn down with `docker compose down -v` (named volumes go too) after `AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES` (default 5) — no run inherits state from a previous one.
 

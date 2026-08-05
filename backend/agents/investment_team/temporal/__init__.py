@@ -1,6 +1,6 @@
 """Temporal workflows + worker wiring for the investment team.
 
-Mirrors ``user_agent_founder.temporal``: workflow/activity definitions live in
+Mirrors ``agent_team_studio.user_agent_founder.temporal``: workflow/activity definitions live in
 :mod:`workflows` (sandbox-safe), and worker startup lives in :mod:`worker`,
 invoked by the generic team_service entrypoint at boot via the
 ``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC`` env vars.

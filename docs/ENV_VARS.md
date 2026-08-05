@@ -570,7 +570,7 @@ blocking all provisioning/deprovisioning traffic on a visibility-RPC hiccup.
 ## Agentic Team Provisioning
 
 WAIT-state reliability for Agent Studio pipeline test runs
-(`agentic_team_provisioning/runtime/pipeline_runner.py`). All three parse
+(`agent_team_studio/agentic_team_provisioning/runtime/pipeline_runner.py`). All three parse
 defensively (garbage → default) and are read once when the `PipelineRunner`
 singleton is constructed.
 
