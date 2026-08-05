@@ -53,7 +53,7 @@ def test_store_inactive_inside_a_sandbox(monkeypatch: pytest.MonkeyPatch) -> Non
     # Inside a sandbox POSTGRES_HOST points at the sandbox's own empty DB — the
     # dynamic store must be OFF there even though Postgres "looks" configured.
     monkeypatch.setenv("POSTGRES_HOST", "sandbox-postgres")
-    monkeypatch.setenv("SANDBOX_AGENT_ID", "agent_studio.x-1")
+    monkeypatch.setenv("SANDBOX_AGENT_ID", "agent_team_studio.agent_studio.x-1")
     assert ds._store_active() is False
 
 
@@ -146,7 +146,7 @@ def test_upsert_ensures_schema_before_writing(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(ds, "_ensure_schema", lambda: order.append("ensure"))
     monkeypatch.setattr(ds, "_with_retry", lambda fn: order.append("write"))
     monkeypatch.setattr(ds, "clear_cache", lambda: order.append("clear"))
-    ds.upsert(_manifest("agent_studio.x-1"))
+    ds.upsert(_manifest("agent_team_studio.agent_studio.x-1"))
     assert order == ["ensure", "write", "clear"]
 
 
@@ -174,37 +174,40 @@ class TestLivePostgres:
         ds.clear_cache()
 
     def test_upsert_get_round_trips_full_manifest(self) -> None:
-        original = _manifest("agent_studio.rt-1")
+        original = _manifest("agent_team_studio.agent_studio.rt-1")
         ds.upsert(original)
-        got = ds.get("agent_studio.rt-1")
+        got = ds.get("agent_team_studio.agent_studio.rt-1")
         assert got is not None
         # Round-trip fidelity across every rich sub-object.
         assert got.model_dump(mode="json") == original.model_dump(mode="json")
 
     def test_get_unknown_returns_none(self) -> None:
-        assert ds.get("agent_studio.missing") is None
+        assert ds.get("agent_team_studio.agent_studio.missing") is None
 
     def test_upsert_is_idempotent_by_id(self) -> None:
-        ds.upsert(_manifest("agent_studio.same"))
-        m2 = _manifest("agent_studio.same")
+        ds.upsert(_manifest("agent_team_studio.agent_studio.same"))
+        m2 = _manifest("agent_team_studio.agent_studio.same")
         m2.name = "Renamed"
         ds.upsert(m2)
-        got = ds.get("agent_studio.same")
+        got = ds.get("agent_team_studio.agent_studio.same")
         assert got is not None and got.name == "Renamed"
         assert len(ds.all()) == 1
 
     def test_delete_removes_row(self) -> None:
-        ds.upsert(_manifest("agent_studio.del"))
-        ds.delete("agent_studio.del")
-        assert ds.get("agent_studio.del") is None
+        ds.upsert(_manifest("agent_team_studio.agent_studio.del"))
+        ds.delete("agent_team_studio.agent_studio.del")
+        assert ds.get("agent_team_studio.agent_studio.del") is None
 
     def test_delete_unknown_is_noop(self) -> None:
-        ds.delete("agent_studio.nope")  # must not raise
+        ds.delete("agent_team_studio.agent_studio.nope")  # must not raise
 
     def test_all_returns_every_row(self) -> None:
-        ds.upsert(_manifest("agent_studio.a"))
-        ds.upsert(_manifest("agent_studio.b"))
-        assert {m.id for m in ds.all()} == {"agent_studio.a", "agent_studio.b"}
+        ds.upsert(_manifest("agent_team_studio.agent_studio.a"))
+        ds.upsert(_manifest("agent_team_studio.agent_studio.b"))
+        assert {m.id for m in ds.all()} == {
+            "agent_team_studio.agent_studio.a",
+            "agent_team_studio.agent_studio.b",
+        }
 
     def test_manifests_with_prefix_scopes_by_prefix(self) -> None:
         ds.upsert(_manifest("agentic.team-x.gen-1", team="agentic_team_provisioning"))
@@ -214,21 +217,28 @@ class TestLivePostgres:
 
     def test_manifests_with_prefix_escapes_like_metachars(self) -> None:
         # An id containing LIKE metachars ('_' / '%') must match literally, not as wildcards.
-        ds.upsert(_manifest("agent_studio.a_b"))
-        ds.upsert(_manifest("agent_studio.axb"))
-        ds.upsert(_manifest("agent_studio.a%b"))
-        ds.upsert(_manifest("agent_studio.aXb"))
-        assert {m.id for m in ds.manifests_with_prefix("agent_studio.a_")} == {"agent_studio.a_b"}
-        assert {m.id for m in ds.manifests_with_prefix("agent_studio.a%")} == {"agent_studio.a%b"}
+        ds.upsert(_manifest("agent_team_studio.agent_studio.a_b"))
+        ds.upsert(_manifest("agent_team_studio.agent_studio.axb"))
+        ds.upsert(_manifest("agent_team_studio.agent_studio.a%b"))
+        ds.upsert(_manifest("agent_team_studio.agent_studio.aXb"))
+        assert {m.id for m in ds.manifests_with_prefix("agent_team_studio.agent_studio.a_")} == {
+            "agent_team_studio.agent_studio.a_b"
+        }
+        assert {m.id for m in ds.manifests_with_prefix("agent_team_studio.agent_studio.a%")} == {
+            "agent_team_studio.agent_studio.a%b"
+        }
 
     def test_replace_manifests_is_atomic(self) -> None:
-        keep = _manifest("agent_studio.keep")
-        drop = _manifest("agent_studio.drop")
+        keep = _manifest("agent_team_studio.agent_studio.keep")
+        drop = _manifest("agent_team_studio.agent_studio.drop")
         ds.upsert(keep)
         ds.upsert(drop)
-        new = _manifest("agent_studio.new")
+        new = _manifest("agent_team_studio.agent_studio.new")
         ds.replace_manifests([new], [drop.id])
         assert ds.get(drop.id) is None
         assert ds.get(new.id) is not None
         assert ds.get(keep.id) is not None
-        assert {m.id for m in ds.all()} == {"agent_studio.keep", "agent_studio.new"}
+        assert {m.id for m in ds.all()} == {
+            "agent_team_studio.agent_studio.keep",
+            "agent_team_studio.agent_studio.new",
+        }

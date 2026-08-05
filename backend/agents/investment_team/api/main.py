@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from investment_team.agents import (
     FinancialAdvisorAgent,
@@ -1347,7 +1347,18 @@ def delete_backtest_job(job_id: str) -> Dict[str, Any]:
 
 @app.get("/backtests", response_model=ListBacktestsResponse)
 def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
-    """List recorded backtests, optionally filtered by strategy ID."""
+    """List recorded backtests, optionally filtered by strategy ID.
+
+    Postconditions:
+        Returns a ``_lock``-protected snapshot of ``_backtests``, with each
+        stored record rehydrated via ``BacktestRecord.parse_persisted``. When
+        ``strategy_id`` is given, only records whose ``strategy_id`` matches
+        are kept — an unknown ``strategy_id`` yields an empty list, not a
+        404, since no existence check is performed. Results are sorted
+        newest-first by ``completed_at``. ``count`` is always
+        ``len(items)`` after filtering, so it can never drift from the
+        returned list.
+    """
     with _lock:
         raw = list(_backtests.values())
 
@@ -1477,7 +1488,19 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
 
 @app.get("/workflow/status", response_model=WorkflowStatusResponse)
 def workflow_status() -> WorkflowStatusResponse:
-    """Get the current workflow state."""
+    """Get the current workflow state.
+
+    Postconditions:
+        Takes no inputs; always returns 200. Returns a ``_lock``-protected,
+        internally consistent snapshot of ``_workflow_state``: ``mode``,
+        ``audit_log``, and ``queue_counts`` are all read together under the
+        same lock acquisition. ``audit_log`` is a shallow copy, safe from
+        later mutation of the underlying state. ``queue_counts`` maps each
+        queue name to its current length only — not its entries; see
+        ``workflow_queues`` for the entries themselves. ``_workflow_state``
+        is mutated elsewhere (e.g. by ``promotion_decision``), so repeated
+        calls may return different snapshots.
+    """
     with _lock:
         mode = _workflow_state.mode.value
         audit_log = list(_workflow_state.audit_log)
@@ -1488,7 +1511,16 @@ def workflow_status() -> WorkflowStatusResponse:
 
 @app.get("/workflow/queues", response_model=QueuesResponse)
 def workflow_queues() -> QueuesResponse:
-    """Get the contents of all workflow queues."""
+    """Get the contents of all workflow queues.
+
+    Postconditions:
+        Takes no inputs; always returns 200. Returns a ``_lock``-protected
+        snapshot of every queue name currently present in
+        ``_workflow_state.queues`` — an empty dict if none have been
+        populated yet, since queues are created lazily (e.g. by
+        ``promotion_decision``'s escalation path). Each queue name maps to
+        its full ordered list of items, converted to ``QueueItemResponse``.
+    """
     with _lock:
         queues = {}
         for q_name, items in _workflow_state.queues.items():
@@ -1507,13 +1539,20 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
     """Generate an investment committee memo (runs as a Temporal workflow).
 
     Postconditions:
-        - On success, returns a ``CreateMemoResponse`` containing a validated
+        - Delegates entirely to ``_execute_advisory("committee_memo", ...)``
+          with ``key=request.user_id`` as the idempotency/ordering key; no
+          local precondition checks are performed (no user/IPS existence
+          check, unlike ``promotion_decision``). On success, returns a
+          ``CreateMemoResponse`` containing a validated
           ``InvestmentCommitteeMemo`` produced by the advisory workflow.
 
     Raises:
+        - ``HTTPException(503)`` when Temporal is disabled/unavailable.
         - ``HTTPException(502)`` if the advisory workflow returns a result
           that is not a dict, is missing ``memo``, or whose ``memo`` value
           is not a dict.
+        - On any other workflow failure, raises the ``HTTPException``
+          :func:`_translate_advisory_failure` maps it to.
     """
     result = _execute_advisory(
         "committee_memo",
@@ -3978,10 +4017,11 @@ class RunPaperTradingRequest(BaseModel):
     """Start a paper trading session for a winning strategy.
 
     Live-mode fields (``provider_id``, ``min_fills``, ``max_hours``,
-    ``warmup_bars``, ``timeframe``) take effect only when
-    ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the flag is off (the
-    default), the legacy recent-OHLCV path runs and the new fields are
-    ignored so existing clients and tests remain unaffected.
+    ``warmup_bars``, ``timeframe``) are validated at the API boundary and
+    take effect only when ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the
+    flag is off (the default), the legacy recent-OHLCV path runs and the
+    new fields are not used by the trading logic, but invalid values are
+    still rejected to keep request validation consistent.
     """
 
     lab_record_id: str = Field(..., description="ID of a winning StrategyLabRecord to paper trade")
@@ -4034,12 +4074,14 @@ class RunPaperTradingRequest(BaseModel):
         le=5_000,
         description="Historical bars to replay as ctx.is_warmup=True before the live feed starts.",
     )
-    timeframe: Optional[str] = Field(
-        default=None,
-        description=(
-            "Override the strategy's declared timeframe. Must be one of "
-            "{'1s','15s','30s','1m','5m','15m','30m','1h','4h','1d'}."
-        ),
+    timeframe: Optional[Literal["1s", "15s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"]] = (
+        Field(
+            default=None,
+            description=(
+                "Override the strategy's declared timeframe. Must be one of "
+                "{'1s','15s','30s','1m','5m','15m','30m','1h','4h','1d'}."
+            ),
+        )
     )
 
 
@@ -4053,6 +4095,23 @@ class PaperTradingResultsResponse(BaseModel):
     count: int = 0
     ready_for_live_count: int = 0
     not_performant_count: int = 0
+
+    @model_validator(mode="after")
+    def _derive_counts_from_items(self) -> "PaperTradingResultsResponse":
+        """Recompute the count fields from ``items`` so they can never drift apart.
+
+        Postconditions: ``count == len(items)``, ``ready_for_live_count`` and
+        ``not_performant_count`` equal the number of items with the matching
+        ``verdict``, regardless of what was passed in for those fields.
+        """
+        self.count = len(self.items)
+        self.ready_for_live_count = sum(
+            1 for i in self.items if i.verdict == PaperTradingVerdict.READY_FOR_LIVE
+        )
+        self.not_performant_count = sum(
+            1 for i in self.items if i.verdict == PaperTradingVerdict.NOT_PERFORMANT
+        )
+        return self
 
 
 def _run_paper_trading_background(
@@ -4131,6 +4190,23 @@ def _run_paper_trading_background(
             transaction_cost_bps=transaction_cost_bps,
             slippage_bps=slippage_bps,
         )
+        # Enforce the postcondition this function documents: run_session must
+        # return a terminal session with completed_at set. A violation here is
+        # a bug in the callee, not something to coerce around — raising lets
+        # the except block below turn it into a FAILED record, same as any
+        # other in-worker crash. Explicit raises (not ``assert``) so the guard
+        # stays active under ``python -O``/``-OO``.
+        if result_session.status not in (
+            PaperTradingStatus.COMPLETED,
+            PaperTradingStatus.FAILED,
+        ):
+            raise ValueError(
+                f"PaperTradingAgent.run_session returned non-terminal status {result_session.status!r}"
+            )
+        if not result_session.completed_at:
+            raise ValueError(
+                "PaperTradingAgent.run_session returned a session with no completed_at"
+            )
         # Preserve the session_id and lab_record_id that the caller committed to.
         result_session.session_id = session_id
         result_session.lab_record_id = lab_record_id
@@ -4668,11 +4744,29 @@ class ProvidersListResponse(BaseModel):
 
 @app.get("/providers", response_model=ProvidersListResponse)
 def list_providers() -> ProvidersListResponse:
-    """Enumerate registered market-data providers and their capabilities."""
+    """Enumerate registered market-data providers and their capabilities.
+
+    Postconditions:
+        Takes no inputs. Iterates ``registry.describe_all()`` from the
+        process-wide ``default_registry()`` singleton
+        (``investment_team.trading_service.providers``), constructing one
+        ``ProviderDescriptor`` per row. Raises ``HTTPException(500,
+        "Provider registry contains invalid data")`` if any row fails
+        Pydantic validation (logged via ``logger.exception`` before being
+        raised). On success, returns a ``ProvidersListResponse`` with
+        ``providers`` set to the constructed rows and
+        ``live_paper_enabled`` from ``_live_paper_enabled()``.
+    """
     from investment_team.trading_service.providers import default_registry
 
     registry = default_registry()
-    rows = [ProviderDescriptor(**row) for row in registry.describe_all()]
+    try:
+        rows = [ProviderDescriptor(**row) for row in registry.describe_all()]
+    except ValidationError as exc:
+        logger.exception("Provider registry returned invalid data")
+        raise HTTPException(
+            status_code=500, detail="Provider registry contains invalid data"
+        ) from exc
     return ProvidersListResponse(
         live_paper_enabled=_live_paper_enabled(),
         providers=rows,
@@ -4681,11 +4775,16 @@ def list_providers() -> ProvidersListResponse:
 
 @app.get("/strategy-lab/paper-trade/results", response_model=PaperTradingResultsResponse)
 def get_paper_trading_results(
-    verdict: Optional[str] = None,
+    verdict: Optional[PaperTradingVerdict] = None,
 ) -> PaperTradingResultsResponse:
     """
     Return all paper trading sessions, sorted newest-first.
-    Filter by verdict with ?verdict=ready_for_live or ?verdict=not_performant.
+    Filter by verdict with ?verdict=ready_for_live or ?verdict=not_performant;
+    an unrecognized value is rejected with a 422 rather than silently matching
+    nothing. The response's ``count``, ``ready_for_live_count``, and
+    ``not_performant_count`` are derived from the returned ``items`` by
+    ``PaperTradingResultsResponse`` itself, so they always match the
+    (possibly filtered) list.
     """
     with _lock:
         raw = list(_paper_trading_sessions.values())
@@ -4693,18 +4792,12 @@ def get_paper_trading_results(
     items = [PaperTradingSession.parse_persisted(r) for r in raw]
     items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
 
-    ready_count = sum(1 for s in items if s.verdict == PaperTradingVerdict.READY_FOR_LIVE)
-    not_perf_count = sum(1 for s in items if s.verdict == PaperTradingVerdict.NOT_PERFORMANT)
-
     if verdict is not None:
-        items = [s for s in items if s.verdict and s.verdict.value == verdict]
+        items = [s for s in items if s.verdict == verdict]
 
-    return PaperTradingResultsResponse(
-        items=items,
-        count=len(items),
-        ready_for_live_count=ready_count,
-        not_performant_count=not_perf_count,
-    )
+    # Counts are derived from ``items`` by the response model itself, so they
+    # always match whatever list (filtered or not) is returned here.
+    return PaperTradingResultsResponse(items=items)
 
 
 @app.get("/strategy-lab/paper-trade/{session_id}", response_model=PaperTradingResponse)

@@ -82,6 +82,33 @@ def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.resolve_base_url() == "https://ollama.com"
 
 
+def test_resolve_base_url_whitespace_runtime_falls_through_to_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only runtime value must not win the fallback chain as truthy."""
+    monkeypatch.setattr(config, "_runtime", lambda key: "   ")
+    monkeypatch.setenv("LLM_BASE_URL", "http://ollama-env:11434")
+    assert config.resolve_base_url() == "http://ollama-env:11434"
+
+
+def test_resolve_base_url_whitespace_runtime_and_env_falls_through_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace-only runtime and env values both fall through to the default."""
+    monkeypatch.setattr(config, "_runtime", lambda key: "   ")
+    monkeypatch.setenv("LLM_BASE_URL", "   ")
+    assert config.resolve_base_url() == "https://ollama.com"
+
+
+def test_resolve_base_url_whitespace_env_only_falls_through_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only env value (no runtime) falls through to the default."""
+    monkeypatch.setattr(config, "_runtime", lambda key: "")
+    monkeypatch.setenv("LLM_BASE_URL", "   ")
+    assert config.resolve_base_url() == "https://ollama.com"
+
+
 def test_resolve_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_TIMEOUT", raising=False)
     assert config.resolve_timeout() == 3600.0

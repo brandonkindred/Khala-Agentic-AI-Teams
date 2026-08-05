@@ -177,6 +177,42 @@ def test_resolve_claude_model_warns_once_per_candidate(monkeypatch, caplog):
     assert len(warnings) == 1
 
 
+def test_resolve_claude_model_warning_text_does_not_claim_default_used(monkeypatch, caplog):
+    """The warning must describe skipping the candidate and falling back to the
+    next one, not claim the default was already used — the loop may still pick a
+    later valid candidate before ever reaching the default."""
+    monkeypatch.setenv("LLM_MODEL_backend", "deepseek-v4-flash:cloud")
+    monkeypatch.setattr(
+        c, "_runtime", lambda key: "opus-prod-alias" if key == "claude_model" else ""
+    )
+    c._warned_non_claude_models.discard("deepseek-v4-flash:cloud")
+    with caplog.at_level("WARNING"):
+        # The per-agent candidate is rejected as non-Claude, but the runtime
+        # candidate is trusted and still wins — the default is never reached.
+        assert c.resolve_claude_model("backend") == "opus-prod-alias"
+    warnings = [r for r in caplog.records if "Ignoring non-Claude model" in r.getMessage()]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "falling back to the next candidate" in message
+    assert "using default" not in message
+
+
+def test_resolve_claude_model_non_agent_warning_text_does_not_claim_default_used(
+    monkeypatch, caplog
+):
+    """Same wording fix applies to the non-agent (global env) warning site."""
+    monkeypatch.setattr(c, "_runtime", lambda key: "")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
+    c._warned_non_claude_models.discard("deepseek-v4-pro:cloud")
+    with caplog.at_level("WARNING"):
+        assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+    warnings = [r for r in caplog.records if "Ignoring non-Claude model" in r.getMessage()]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "falling back to the next candidate" in message
+    assert "using default" not in message
+
+
 def test_resolve_model_for_provider_dispatches(monkeypatch):
     """resolve_model_for_provider dispatches by active provider (ollama vs claude)."""
     # Ollama provider -> resolve_model; Claude provider -> resolve_claude_model.
