@@ -1136,22 +1136,27 @@ or changes the rest of the review.
 Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
 for moving spec/acceptance-criteria compliance checking out of every chunk's
 prompt and into one dedicated post-merge pass. Design decision recorded in
-`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`; not
-yet implemented.
+`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`
+(see that ADR's Amendment section for how the implementation below deviates
+from its original Decision).
 
 When unset or any value other than `true`/`1`/`yes`/`on`, behavior is
 unchanged from today: `acceptance_criteria` and `spec_excerpt` are rendered
 into every chunk's review prompt, and per-chunk `spec_compliance_notes` are
-synthesized into the final narrative exactly as they are now. When enabled,
-the per-chunk prompt omits the acceptance-criteria/spec-excerpt blocks
-(architecture overview and sibling-surface context are unaffected — out of
-scope for this toggle), and a new once-per-submission tail pass evaluates
-spec/acceptance-criteria compliance against the full changed-code content
-instead, feeding a single consolidated note into the existing narrative
-synthesis step in place of the per-chunk notes. Restricted to the
-`CODE_REVIEW` profile. Any setup or LLM failure is fail-safe: it is logged
-and yields an empty compliance note, never blocking or changing the rest of
-the review.
+synthesized into the final narrative exactly as they are now. When enabled
+**and** the review profile is `CODE_REVIEW`, the per-chunk prompt omits the
+acceptance-criteria/spec-excerpt blocks (architecture overview and
+sibling-surface context are unaffected — out of scope for this toggle), and
+`synthesize_spec_compliance` (`code_review_agent/synthesis.py`) runs once,
+after the final issue list is deduped, over the full spec/acceptance-criteria
+text plus the deduped findings list — **no source code is inlined into this
+pass**, unlike the sibling architecture/side-effect tail pass. It runs in the
+reduce phase (alongside `synthesize_review_findings`), not inside the
+concurrent tail-pass set with the false-positive filter/architecture pass,
+since it needs the final, post-dedupe issue list. Its note feeds into the
+existing narrative synthesis step in place of the per-chunk notes. Any setup
+or LLM failure is fail-safe: it is logged and yields an empty compliance
+note, never blocking or changing the rest of the review.
 
 ---
 
