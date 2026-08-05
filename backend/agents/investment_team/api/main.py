@@ -2656,10 +2656,16 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
           a ``WorkflowAlreadyStartedError`` or a transport-level error (client not
           connected, RPC timeout).
     Postconditions:
-        - Returns (does not raise) an ``HTTPException``: the mapped 404/400 for a
-          well-known ``ApplicationError`` type (found by walking ``exc``'s cause
-          chain), 409 for a workflow-id collision, or 502 for anything else — so
-          a route caller never sees an opaque unhandled 500 with no detail.
+        - Returns (does not raise) an ``HTTPException``, found by walking ``exc``'s
+          cause chain: the mapped 404/400 for an ``ApplicationError`` whose
+          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 500 (with the
+          error's own message as detail) for an ``ApplicationError`` whose
+          ``type`` is NOT a recognized key (``_ADVISORY_ERROR_TYPE_STATUS.get``'s
+          fallback); 409 for a ``WorkflowAlreadyStartedError`` (workflow-id
+          collision); or 502 when the cause chain contains neither (e.g. a bare
+          transport-level error) — the only case this function has no
+          error-specific detail to surface, unlike the 500 case above, which
+          always carries the underlying ``ApplicationError``'s message.
     """
     from temporalio.exceptions import ApplicationError as _AppErr
     from temporalio.exceptions import WorkflowAlreadyStartedError
