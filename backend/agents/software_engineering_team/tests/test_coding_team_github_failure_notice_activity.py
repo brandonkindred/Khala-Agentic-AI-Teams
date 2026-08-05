@@ -153,13 +153,18 @@ def test_failure_notice_activity_invalid_kind_raises_value_error(
     monkeypatch: pytest.MonkeyPatch, api: Any
 ) -> None:
     """An unrecognized `kind` value raises `ValueError` naming the bad value, before
-    any GitHub/job-store call runs."""
+    any GitHub/job-store call runs. The error must never include the request payload
+    or the GitHub token, because activity exceptions are recorded in Temporal history."""
+    request = {**BASE_REQUEST, "kind": "bogus"}
     store, get_client = _install(monkeypatch, api, "job-1")
 
     with pytest.raises(ValueError, match="kind") as exc_info:
-        _activity()({**BASE_REQUEST, "kind": "bogus"})
+        _activity()(request)
 
-    assert "bogus" in str(exc_info.value)
+    msg = str(exc_info.value)
+    assert "bogus" in msg
+    assert repr(request) not in msg
+    assert "tok-123" not in msg
     assert store.jobs["job-1"] == {}
 
 
