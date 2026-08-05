@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -102,10 +102,16 @@ class _ScriptedClient(DummyLLMClient):
     ``complete_json`` call. Replaces the Wave 1/2/3 pre-migration pattern of
     ``mock.complete_json.side_effect = [...]`` for scripted DevOps pipelines."""
 
-    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        responses: List[Dict[str, Any]],
+        *,
+        default_factory: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
         super().__init__()
         self._responses = list(responses)
         self._idx = 0
+        self._default_factory = default_factory
 
     def complete_json(
         self,
@@ -121,8 +127,13 @@ class _ScriptedClient(DummyLLMClient):
             resp = self._responses[self._idx]
             self._idx += 1
             return resp
-        # After the scripted list is exhausted, fall back to the last entry
-        # so extra pipeline steps don't crash the test.
+        # After the scripted list is exhausted, use the caller-supplied
+        # neutral default when given (so drift onto this fallback is an
+        # obviously-generic response, not a real step's payload silently
+        # overloaded with extra fields); otherwise fall back to the last
+        # entry so extra pipeline steps don't crash the test.
+        if self._default_factory is not None:
+            return self._default_factory()
         return self._responses[-1] if self._responses else {}
 
 
@@ -219,7 +230,17 @@ def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _Script
                 "summary": "validation ok",
             },
             {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
-        ]
+        ],
+        # Once the scripted list is exhausted, any further call (e.g. an
+        # unrelated upstream corrective retry -- a chunk-review bisection,
+        # say -- consuming an extra slot and shifting a later named step
+        # onto an overrun call) gets this DevSecOps-shaped clean-approval
+        # fallback instead of the real (and now schema-validated)
+        # doc_runbook payload silently overloaded with extra fields. This
+        # keeps DevSecOpsReviewAgent from crashing the test on such drift
+        # while still making non-DevSecOps drift landing here fail schema
+        # validation loudly, rather than masking every step's drift equally.
+        default_factory=lambda: {"approved": True, "findings": [], "summary": "fallback"},
     )
 
 
@@ -893,6 +914,68 @@ class TestDevSecOpsReviewAgent:
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved
 
+    def test_recovers_from_malformed_first_response(self) -> None:
+        """A schema-invalid first reply (missing the required ``summary``
+        key) drives ``run_single_shot_review``'s corrective retry; a valid
+        second reply is used instead of falling back."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _ScriptedClient(
+            [
+                {"findings": []},  # missing required "summary" -- schema-invalid
+                {"approved": True, "findings": [], "summary": "recovered on retry"},
+            ]
+        )
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.summary == "recovered on retry"
+        assert client._idx == 2
+
+    def test_recovers_from_malformed_finding(self) -> None:
+        """A finding dict missing its required ``finding_id`` used to crash
+        ``run()`` via a bare ``ReviewFinding(**f)`` call -- it now fails
+        schema validation and drives a corrective retry instead."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _ScriptedClient(
+            [
+                {
+                    "approved": False,
+                    "findings": [{"severity": "high", "issue": "no finding_id here"}],
+                    "summary": "malformed finding",
+                },
+                {"approved": True, "findings": [], "summary": "clean on retry"},
+            ]
+        )
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.findings == []
+        assert out.summary == "clean on retry"
+        assert client._idx == 2
+
+    def test_falls_back_when_retries_exhausted(self) -> None:
+        """A reply that stays schema-invalid across the corrective retry
+        still yields the safe fallback -- never raises out of ``run()``."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _StubClient({"findings": []})  # missing required "summary" every call
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is False
+        assert out.findings == []
+        assert "DevSecOps review failed" in out.summary
+
 
 class TestDevOpsTestValidationAgent:
     def test_aggregates_gates(self) -> None:
@@ -1445,9 +1528,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         # Without this, hosts with a working terraform CLI skip debug and consume
         # 8 LLM calls while hosts without it consume 9 — which desynchronizes a
         # chained two-run script. Use the full 9-response happy-path script twice.
-        per_run = list(_scripted_llm_for_happy_path()._responses)
+        happy_path = _scripted_llm_for_happy_path()
+        per_run = list(happy_path._responses)
         assert len(per_run) == 9
-        chained = _ScriptedClient(per_run + per_run)
+        chained = _ScriptedClient(per_run + per_run, default_factory=happy_path._default_factory)
         agent = DevOpsTeamLeadAgent(chained)
 
         def _failing_exec(_repo: str, _artifacts: dict) -> list:
@@ -2599,6 +2683,13 @@ def _check_fenced_task_clarifier(out) -> None:
     assert out.approved_for_execution is True
 
 
+# DevSecOpsReviewAgent is deliberately absent from this list: it no longer
+# builds a Strands Agent or calls complete_json_with_continuation (see
+# devsecops_review_agent/agent.py), so this Strands-Agent-double-based
+# fenced-markdown-recovery harness no longer applies to it. Fenced-JSON
+# recovery for its new run_single_shot_review/complete_json call path is
+# each concrete LLMClient's own extract_json_from_response usage, already
+# covered by llm_service's own tests -- not a per-agent concern here.
 _FENCED_RECOVERY_CASES = [
     (
         "iac",
@@ -2679,7 +2770,8 @@ _FENCED_RECOVERY_CASES = [
 
 
 class TestDevOpsAgentsRecoverFencedJson:
-    """Markdown-fenced LLM JSON must recover for every DevOps LLM agent."""
+    """Markdown-fenced LLM JSON must recover for each DevOps LLM agent that
+    still uses ``complete_json_with_continuation``."""
 
     @pytest.mark.parametrize(
         "build,payload,check",
@@ -2687,7 +2779,7 @@ class TestDevOpsAgentsRecoverFencedJson:
         ids=[case[0] for case in _FENCED_RECOVERY_CASES],
     )
     def test_recovers_fenced_json(self, monkeypatch, build, payload, check) -> None:
-        """Each DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
+        """Each remaining DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
         _patch_fenced_response(monkeypatch, payload)
         agent, inp = build()
         check(agent.run(inp))
