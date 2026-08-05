@@ -45,8 +45,18 @@ def test_factory_isolates_distinct_teams():
 
 
 def test_factory_rejects_empty_team():
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="non-empty string"):
         get_job_service_client("")
+
+
+def test_factory_rejects_none_team():
+    with pytest.raises(ValueError, match="non-empty string"):
+        get_job_service_client(None)  # type: ignore[arg-type]
+
+
+def test_factory_rejects_non_string_team():
+    with pytest.raises(ValueError, match="non-empty string"):
+        get_job_service_client(123)  # type: ignore[arg-type]
 
 
 def test_clear_cache_forces_fresh_instance():
@@ -146,3 +156,24 @@ def test_base_store_reset_job(store: _Store):
     assert job["status"] == JOB_STATUS_PENDING
     assert job["progress"] == 0
     assert job["error"] is None
+
+
+def test_base_store_reset_job_clears_pause_envelope(store: _Store):
+    """A reset must also clear the HITL pause envelope, not just status/progress/error,
+    so a reset paused job doesn't trip pending-pause re-entry on next orchestrator run."""
+    store.create_job(
+        "j1",
+        status=JOB_STATUS_RUNNING,
+        waiting_for_answers=True,
+        pending_questions=["what next?"],
+        resume_token="tok-123",
+        pause_kind="clarification",
+        pause_context={"foo": "bar"},
+    )
+    store.reset_job("j1")
+    job = store.get_job("j1")
+    assert job["waiting_for_answers"] is False
+    assert job["pending_questions"] == []
+    assert job["resume_token"] is None
+    assert job["pause_kind"] is None
+    assert job["pause_context"] is None
