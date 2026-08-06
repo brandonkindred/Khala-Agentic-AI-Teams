@@ -1013,10 +1013,11 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
 
-    api_main._run_backtest_background("job-1", strategy, config, "tester", [])
+    status = api_main._run_backtest_background("job-1", strategy, config, "tester", [])
     # Final state update is to COMPLETED.
     assert state.get("status") == "completed"
     assert state.get("backtest_id", "").startswith("bt-")
+    assert status == api_main._BT_JOB_STATUS_COMPLETED
 
 
 def test_run_backtest_background_handles_backtest_execution_error(
@@ -1045,9 +1046,10 @@ def test_run_backtest_background_handles_backtest_execution_error(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-2", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-2", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert state.get("error") == "bad strategy"
+    assert status == api_main._BT_JOB_STATUS_FAILED
 
 
 def test_run_backtest_background_handles_generic_exception(
@@ -1076,9 +1078,10 @@ def test_run_backtest_background_handles_generic_exception(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-3", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-3", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert "network down" in (state.get("error") or "")
+    assert status == api_main._BT_JOB_STATUS_FAILED
 
 
 def test_run_backtest_background_early_cancellation(
@@ -1107,9 +1110,10 @@ def test_run_backtest_background_early_cancellation(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-4", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-4", strategy, config, "tester", None)
     # No update calls — early return.
     assert state == {}
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
 
 
 def test_run_backtest_background_retry_reuses_backtest_id(
@@ -1157,15 +1161,17 @@ def test_run_backtest_background_retry_reuses_backtest_id(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
 
-    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    status1 = api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
     first_backtest_id = state["backtest_id"]
 
-    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    status2 = api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
     second_backtest_id = state["backtest_id"]
 
     assert first_backtest_id == second_backtest_id
     # The second run overwrote the same record rather than adding a duplicate.
     assert len(api_main._backtests.values()) == 1
+    assert status1 == api_main._BT_JOB_STATUS_COMPLETED
+    assert status2 == api_main._BT_JOB_STATUS_COMPLETED
 
 
 # ---------------------------------------------------------------------------
