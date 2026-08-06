@@ -206,25 +206,46 @@ def test_recovery_leaves_terminal_sessions_untouched() -> None:
 def test_recovery_logs_and_skips_unparseable_session(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Unparseable rows are skipped with a debug log; valid orphans still recover."""
-    _paper_trading_sessions["pt-bad"] = {"not": "a-paper-trading-session"}
+    """Unparseable rows are skipped with a warning log (not debug, which is
+    typically disabled in production and would let corrupted records go
+    unnoticed) that includes the session id when the raw record still has a
+    readable one; valid orphans still recover.
+
+    Written directly via the underlying job-service client's ``data`` field
+    (bypassing ``_PersistentDict.__setitem__``, which would wrap a plain dict
+    as ``{"value": ...}`` instead of storing it flat the way a real
+    ``PaperTradingSession.model_dump()`` -- corrupted by, e.g., a schema
+    migration dropping a required field -- would be).
+    """
+    _paper_trading_sessions._client.create_job(
+        "pt-bad", status="stored", data={"not": "a-paper-trading-session"}
+    )
+    _paper_trading_sessions._client.create_job(
+        "pt-bad-with-id", status="stored", data={"session_id": "pt-bad-with-id"}
+    )
     valid = _make_session("pt-good", PaperTradingStatus.OPENING)
     _install_session(valid)
     try:
-        with caplog.at_level(logging.DEBUG, logger="investment_team.api.main"):
+        with caplog.at_level(logging.WARNING, logger="investment_team.api.main"):
             _recover_orphaned_paper_trading_sessions()
         skip_records = [
             r
             for r in caplog.records
             if "Paper-trade recovery: skipping unparseable session record" in r.getMessage()
         ]
-        assert len(skip_records) == 1
-        assert skip_records[0].exc_info is not None
+        assert len(skip_records) == 2
+        assert all(r.levelno == logging.WARNING for r in skip_records)
+        assert all(r.exc_info is not None for r in skip_records)
+        messages = [r.getMessage() for r in skip_records]
+        assert any("session_id=unknown" in m for m in messages)
+        assert any("session_id=pt-bad-with-id" in m for m in messages)
         assert _fetch_session("pt-good").status == PaperTradingStatus.FAILED
-        # Corrupt row remains present and is not rewritten into a valid session.
+        # Corrupt rows remain present and are not rewritten into valid sessions.
         assert "pt-bad" in _paper_trading_sessions
+        assert "pt-bad-with-id" in _paper_trading_sessions
     finally:
         _paper_trading_sessions.pop("pt-bad", None)
+        _paper_trading_sessions.pop("pt-bad-with-id", None)
         _paper_trading_sessions.pop("pt-good", None)
 
 
