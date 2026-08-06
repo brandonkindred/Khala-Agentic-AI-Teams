@@ -5044,8 +5044,17 @@ def _recover_orphaned_paper_trading_sessions() -> None:
                 try:
                     session = PaperTradingSession.parse_persisted(raw)
                 except Exception:
-                    logger.debug(
-                        "Paper-trade recovery: skipping unparseable session record",
+                    # ``warning``, not ``debug`` — debug logs are typically
+                    # disabled in production, which would let corrupted
+                    # records go unnoticed indefinitely. Best-effort session
+                    # id: ``raw`` failed to parse as a PaperTradingSession, so
+                    # it's whatever malformed shape the store handed back
+                    # (usually still a dict with a readable id, but not
+                    # guaranteed).
+                    raw_session_id = raw.get("session_id") if isinstance(raw, dict) else None
+                    logger.warning(
+                        "Paper-trade recovery: skipping unparseable session record (session_id=%s)",
+                        raw_session_id or "unknown",
                         exc_info=True,
                     )
                     continue
