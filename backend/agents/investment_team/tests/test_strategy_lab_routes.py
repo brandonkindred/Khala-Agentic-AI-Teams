@@ -341,6 +341,41 @@ def test_run_strategy_lab_locked_recheck_catches_race_past_early_check(
     assert set(api_main._active_runs.keys()) == {"already-running"}
 
 
+def test_run_strategy_lab_cleans_up_active_runs_when_persist_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """If ``_persist_run_state`` raises after the in-memory ``_active_runs``
+    entry is set, that entry must be removed before the exception
+    propagates -- otherwise every future ``/strategy-lab/run`` request would
+    409 forever (``_ensure_no_active_run``/``_no_active_run_locked`` both
+    read ``_active_runs``) over a run that was never actually persisted or
+    dispatched.
+    """
+    from investment_team.api import main as api_main
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _boom)
+
+    with pytest.raises(RuntimeError, match="job service unreachable"):
+        api_client.post(
+            "/strategy-lab/run",
+            json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+        )
+
+    # No orphaned entry left behind blocking future runs.
+    assert api_main._active_runs == {}
+
+    # A subsequent request must be free to start a fresh run, not 409.
+    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+    assert resp.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # resume_strategy_lab_run + restart_strategy_lab_run
 # ---------------------------------------------------------------------------
