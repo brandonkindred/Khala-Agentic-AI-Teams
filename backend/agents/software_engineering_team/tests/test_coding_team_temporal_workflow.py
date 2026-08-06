@@ -533,3 +533,77 @@ async def test_workflow_pauses_then_resumes_to_completion_via_signal() -> None:
     # workflow (it mutates/reuses `request` across a signal-driven loop), so this
     # replay check is worth keeping.
     await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_github_path_prep_pipeline_publish() -> None:
+    """Acceptance: GitHub-issue job runs branch prep → pipeline → publish via Temporal."""
+    from temporalio import activity
+    from temporalio.worker import Replayer
+
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
+
+    calls: list[str] = []
+
+    @activity.defn(name="coding_team_github_branch_prep")
+    def _fake_prep(request: dict) -> dict:
+        calls.append("prep")
+        assert request["job_id"] == "gh-job-1"
+        assert "token" not in request
+        return {"ok": True, "error": None, "notes": []}
+
+    @activity.defn(name="coding_team_run_pipeline")
+    def _fake_pipeline(request: dict) -> dict:
+        calls.append("pipeline")
+        assert request.get("github")
+        return {"job_id": "gh-job-1", "status": "completed"}
+
+    @activity.defn(name="coding_team_github_publish")
+    def _fake_publish(request: dict) -> dict:
+        calls.append("publish")
+        assert "token" not in request
+        assert request["integration_branch"] == "khala/issue-9"
+        return {
+            "job_id": "gh-job-1",
+            "status": "completed",
+            "github_pr_url": "https://example/pull/9",
+        }
+
+    @activity.defn(name="coding_team_github_failure_notice")
+    def _fake_failure(request: dict) -> dict:  # pragma: no cover - must not run
+        calls.append("failure")
+        raise AssertionError("failure notice must not run on happy path")
+
+    request = {
+        "job_id": "gh-job-1",
+        "repo_path": "/tmp/repo",
+        "plan_input": {"objective": "ship it"},
+        "github": {
+            "owner": "acme",
+            "repo": "widgets",
+            "issue_number": 9,
+            "issue_title": "Fix the widget",
+            "remote": "origin",
+            "base": "main",
+            "integration_branch": "khala/issue-9",
+            "cleanup_checkout_on_success": False,
+        },
+    }
+
+    async with _workflow_environment_worker(
+        activities=[_fake_prep, _fake_pipeline, _fake_publish, _fake_failure]
+    ) as env:
+        handle = await env.client.start_workflow(
+            CodingTeamWorkflow.run,
+            request,
+            id="coding-team-workflow-github-happy-path",
+            task_queue=TASK_QUEUE,
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=30)
+        history = await handle.fetch_history()
+
+    assert calls == ["prep", "pipeline", "publish"]
+    assert result["github_pr_url"] == "https://example/pull/9"
+    await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)
