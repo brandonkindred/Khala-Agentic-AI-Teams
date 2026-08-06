@@ -3156,11 +3156,13 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
           response validation with a 500. A job-service
           connection/transport failure (``httpx.HTTPError``) or an
           unconfigured ``JOB_SERVICE_URL`` (``RuntimeError``) is caught and
-          logged, and the response falls back to the in-memory-only list; in
-          that case this endpoint still returns 200. A programming error in
-          the merge logic itself (e.g. ``TypeError``, ``AttributeError``) is
-          NOT caught here and propagates, surfacing as a 500 instead of being
-          silently swallowed.
+          logged around the ``list_jobs()`` call only, and the response falls
+          back to the in-memory-only list; in that case this endpoint still
+          returns 200. Each persisted record is then converted to an
+          ``InvestmentJobSummary`` independently: a failure building any one
+          record (e.g. a ``ValidationError`` from genuinely malformed data)
+          is logged and that record is skipped -- it does not discard the
+          other persisted records, nor the in-memory ones already collected.
     """
     jobs: List[InvestmentJobSummary] = []
 
@@ -3215,15 +3217,35 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             )
         )
 
-    # Persisted runs from job service (completed runs not in memory)
+    # Persisted runs from job service (completed runs not in memory). The
+    # list_jobs() call itself is the only part wrapped in the narrowed
+    # except below -- an expected, transient/environmental failure there
+    # (job-service down, or JOB_SERVICE_URL unconfigured) legitimately means
+    # "no persisted data available at all", so falling back to the
+    # in-memory-only list for the whole block is correct. Once persisted
+    # has been fetched, each record is converted independently (see the
+    # per-record try/except inside the loop) so one malformed record can't
+    # discard the rest.
     try:
         client = _get_lab_run_job_client()
         persisted = client.list_jobs() or []
-        in_memory_ids = {s["run_id"] for s in active_states}
-        for job in persisted:
-            jid = job.get("job_id", "")
-            if jid in in_memory_ids:
-                continue  # already included from in-memory
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # httpx.HTTPError: transport/connection/HTTP-status failures from the
+        # job-service client. RuntimeError: JobServiceClient raises this when
+        # JOB_SERVICE_URL is unconfigured. Both are expected, transient/
+        # environmental failure modes -- fall back to the in-memory-only
+        # list. Anything else (e.g. a TypeError/AttributeError from the
+        # client itself) is a programming error and must propagate instead
+        # of being silently swallowed here.
+        logger.warning("Failed to load persisted strategy lab runs: %s", exc, exc_info=True)
+        persisted = []
+
+    in_memory_ids = {s["run_id"] for s in active_states}
+    for job in persisted:
+        jid = job.get("job_id", "")
+        if jid in in_memory_ids:
+            continue  # already included from in-memory
+        try:
             data = job.get("data", job)
             if not isinstance(data, dict):
                 # A malformed persisted record (e.g. "data" is a string/list/
@@ -3243,15 +3265,14 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
                     created_at=data.get("started_at"),
                 )
             )
-    except (httpx.HTTPError, RuntimeError) as exc:
-        # httpx.HTTPError: transport/connection/HTTP-status failures from the
-        # job-service client. RuntimeError: JobServiceClient raises this when
-        # JOB_SERVICE_URL is unconfigured. Both are expected, transient/
-        # environmental failure modes -- fall back to the in-memory-only
-        # list. Anything else (e.g. a TypeError/AttributeError in the merge
-        # logic above) is a programming error and must propagate instead of
-        # being silently swallowed here.
-        logger.warning("Failed to load persisted strategy lab runs: %s", exc, exc_info=True)
+        except Exception:
+            # A failure converting THIS ONE persisted record (e.g. a
+            # genuinely malformed payload the isinstance guard above didn't
+            # anticipate) must not discard every other persisted/in-memory
+            # job already collected -- log distinctly and move on.
+            logger.warning(
+                "Skipping malformed persisted strategy lab job %s", jid, exc_info=True
+            )
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]

@@ -1289,6 +1289,48 @@ def test_list_strategy_lab_jobs_merges_persisted_completed_runs(
     assert "persisted-c" not in ids2
 
 
+def test_list_strategy_lab_jobs_one_malformed_persisted_record_does_not_drop_the_rest(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A single malformed persisted record must not discard every OTHER
+    persisted (or in-memory) job -- exceptions are handled per-record, not
+    around the whole merge loop.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["mem-r"] = {
+        "run_id": "mem-r",
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "persisted-good-1",
+                "status": "completed",
+                "data": {"started_at": "2024-01-01T00:00:00Z", "total_cycles": 2, "completed_cycles": 2},
+            },
+            # A non-string job_id fails InvestmentJobSummary's `job_id: str`
+            # validation -- a stand-in for a genuinely malformed record.
+            {"job_id": 12345, "status": "completed"},
+            {
+                "job_id": "persisted-good-2",
+                "status": "completed",
+                "data": {"started_at": "2024-01-02T00:00:00Z", "total_cycles": 1, "completed_cycles": 1},
+            },
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    ids = {j["job_id"] for j in resp.json()["jobs"]}
+    assert ids == {"mem-r", "persisted-good-1", "persisted-good-2"}
+
+
 def test_list_strategy_lab_jobs_same_id_reconciles_terminal_and_dedupes(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
