@@ -4328,7 +4328,25 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             status_code=404, detail=f"Strategy lab record '{request.lab_record_id}' not found."
         )
 
-    lab_record = StrategyLabRecord.parse_persisted(raw_record)
+    try:
+        lab_record = StrategyLabRecord.parse_persisted(raw_record)
+    except Exception as exc:
+        # The record exists but is internally corrupt (schema drift, a
+        # missing required field, malformed JSON, ...) -- a server-side data
+        # integrity problem, not a client input error, so this is a 500
+        # rather than a 4xx. Log the full exception (which may include raw
+        # persisted field values) server-side only; the client-facing detail
+        # stays generic so it can't leak internal schema/validation details.
+        logger.error(
+            "Strategy lab record %s failed to parse: %s",
+            request.lab_record_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Strategy lab record '{request.lab_record_id}' is corrupted and cannot be loaded.",
+        ) from exc
 
     if not lab_record.is_winning:
         raise HTTPException(
