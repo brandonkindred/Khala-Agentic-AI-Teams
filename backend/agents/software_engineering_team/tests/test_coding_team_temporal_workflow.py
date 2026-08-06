@@ -237,6 +237,156 @@ def test_run_request_declares_acknowledged_resume_token() -> None:
     assert parsed.acknowledged_resume_token == "j1:1"
 
 
+_GITHUB = {
+    "owner": "acme",
+    "repo": "widgets",
+    "issue_number": 9,
+    "issue_title": "Fix the widget",
+    "remote": "origin",
+    "base": "main",
+    "integration_branch": "khala/issue-9",
+    "cleanup_checkout_on_success": False,
+}
+
+
+def _github_request(**overrides):
+    req = {
+        "job_id": "job-1",
+        "repo_path": "/repo",
+        "plan_input": {"objective": "ship"},
+        "github": dict(_GITHUB),
+    }
+    req.update(overrides)
+    return req
+
+
+def test_github_run_calls_prep_then_pipeline_then_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": True, "error": None, "notes": []},
+        {"job_id": "job-1", "status": "completed"},
+        {"job_id": "job-1", "status": "completed", "github_pr_url": "https://example/pull/1"},
+    ]
+    calls, snapshots = _patch_execute(monkeypatch, results)
+
+    async def _no_wait(*_a, **_kw):
+        raise AssertionError("wait_condition must not be called")
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
+
+    result = asyncio.run(workflow_obj.run(_github_request()))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_publish_activity,
+    ]
+    assert snapshots[0]["job_id"] == "job-1"
+    assert snapshots[0]["default_branch"] == "main"
+    assert snapshots[0]["integration_branch"] == "khala/issue-9"
+    assert "token" not in snapshots[0]
+    assert snapshots[2]["issue_title"] == "Fix the widget"
+    assert "token" not in snapshots[2]
+    assert result["github_pr_url"] == "https://example/pull/1"
+
+
+def test_github_prep_failure_calls_failure_notice_skips_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": False, "error": "unsafe ref", "notes": []},
+        {"job_id": "job-1", "status": "failed"},
+    ]
+    calls, snapshots = _patch_execute(monkeypatch, results)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    result = asyncio.run(workflow_obj.run(_github_request()))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    ]
+    assert snapshots[1]["kind"] == "failure"
+    assert "unsafe" in snapshots[1]["message"]
+    assert snapshots[1]["number"] == 9
+    assert "token" not in snapshots[1]
+    assert result["status"] == "failed"
+
+
+def test_github_pipeline_exception_calls_failure_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            raise RuntimeError("orchestrator boom")
+        if fn is github_failure_notice_activity:
+            return {"job_id": "job-1", "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="orchestrator boom"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_failure_notice_activity,
+    ]
+
+
+def test_github_failed_pipeline_status_skips_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": True, "error": None, "notes": []},
+        {"job_id": "job-1", "status": "failed", "error": "timed out"},
+    ]
+    calls, _ = _patch_execute(monkeypatch, results)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    result = asyncio.run(workflow_obj.run(_github_request()))
+
+    assert [c[0] for c in calls] == [github_branch_prep_activity, run_pipeline_activity]
+    assert result["status"] == "failed"
+
+
 # --------------------------------------------------------------------------- WorkflowEnvironment (#3988)
 
 

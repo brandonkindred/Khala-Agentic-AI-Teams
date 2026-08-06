@@ -193,14 +193,31 @@ class CodingTeamWorkflow:
             - ``request`` is a dict whose ``repo_path``/``plan_input`` keys
               form a serialized ``RunRequest`` (see
               ``run_pipeline_activity``'s contract).
+            - When supplied, ``request["github"]`` is a dict carrying the
+              GitHub branch/PR coordinates needed by the GitHub activities:
+              ``owner``, ``repo``, ``issue_number``, ``issue_title``,
+              ``base``, and ``integration_branch``. ``remote`` defaults to
+              ``"origin"`` when blank or absent.
+            - Any GitHub token or credential stays outside workflow activity
+              arguments. This workflow passes only repository coordinates and
+              issue metadata to GitHub activities; a ``"token"`` key must
+              never appear in activity args.
 
         Postconditions:
-            - Returns the activity's result dict. ``run_pipeline_activity``
-              now always requests ``pause_strategy="return"`` and emits
+            - Without GitHub metadata, returns the activity's result dict.
+              With GitHub metadata, prepares the integration branch before
+              running the pipeline, skips the pipeline and posts a failure
+              notice when branch prep reports ``ok=False``, posts a failure
+              notice and re-raises when the pipeline activity raises, returns
+              failed/cancelled/waiting-for-user pipeline results unchanged,
+              and publishes the integration branch after successful terminal
+              pipeline results.
+            - ``run_pipeline_activity`` now always requests
+              ``pause_strategy="return"`` and emits
               ``{"outcome": "paused", ...}`` whenever a HITL gate pauses, or
               a pre-work activity retry re-emits an already-persisted pause,
               so this method loops (executing the activity more than once)
-              until a non-``"paused"`` outcome is returned — production
+              until a non-``"paused"`` outcome is returned; production
               behavior is no longer "call the activity once."
             - When an activity result's ``"outcome"`` key IS
               ``"paused"``, this validates ``result["resume_token"]`` is a
@@ -225,12 +242,9 @@ class CodingTeamWorkflow:
               ``request["acknowledged_resume_token"]`` once that call
               returns (its job is done whether or not that call consumed
               it). Repeats until a non-``"paused"`` outcome.
-            - Deliberately NOT implemented here (tracked as future work, not
-              #3988 — that issue's scope is limited to an integration test
-              proving the existing pause/resume cycle): although the
-              activity-side pause payload (``pending_questions``,
-              ``pause_kind``, ``pause_context``) now exists on every paused
-              result, this
+            - Deliberately NOT implemented here: although the activity-side
+              pause payload (``pending_questions``, ``pause_kind``,
+              ``pause_context``) now exists on every paused result, this
               method does not yet APPLY resolved answers into
               ``request["plan_input"]["resolved_questions"]`` /
               ``task_decision_overrides`` — resume for the entry/tech-lead
@@ -242,33 +256,101 @@ class CodingTeamWorkflow:
               paused doesn't strand this workflow in ``wait_condition``
               forever).
         """
-        result = await workflow.execute_activity(
-            run_pipeline_activity,
-            request,
-            start_to_close_timeout=timedelta(hours=4),
-        )
-        while result.get("outcome") == "paused":
-            resume_token = result.get("resume_token")
-            if not isinstance(resume_token, str) or not resume_token:
-                # The contract guarantees a paused result always carries a resume_token; a
-                # missing/malformed one means the activity-side contract broke. Fail fast and
-                # deterministically here rather than assign None and let wait_condition's
-                # predicate become permanently unsatisfiable (submit_answers drops every signal
-                # while self._active_resume_token is None) -- an unresolvable hang is a much
-                # worse failure mode than an immediate, diagnosable workflow-task error.
-                raise ValueError(f"Paused activity result missing a valid resume_token: {result!r}")
-            self._active_resume_token = resume_token
-            self._submitted_answers = None
-            await workflow.wait_condition(lambda: self._submitted_answers is not None)
-            request["acknowledged_resume_token"] = self._active_resume_token
-            self._submitted_answers = None
-            self._active_resume_token = None
+        github = request.get("github")
+        activity_timeout = timedelta(hours=4)
+        github_timeout = timedelta(minutes=30)
+
+        if isinstance(github, dict) and github:
+            prep = await workflow.execute_activity(
+                github_branch_prep_activity,
+                {
+                    "job_id": request["job_id"],
+                    "repo_path": request["repo_path"],
+                    "remote": github.get("remote") or "origin",
+                    "default_branch": github["base"],
+                    "integration_branch": github["integration_branch"],
+                    "issue_number": github.get("issue_number"),
+                },
+                start_to_close_timeout=github_timeout,
+            )
+            if not prep.get("ok"):
+                return await workflow.execute_activity(
+                    github_failure_notice_activity,
+                    {
+                        "job_id": request["job_id"],
+                        "owner": github["owner"],
+                        "repo": github["repo"],
+                        "number": github["issue_number"],
+                        "message": f"branch prep failed: {prep.get('error')}",
+                        "kind": "failure",
+                    },
+                    start_to_close_timeout=github_timeout,
+                )
+
+        try:
             result = await workflow.execute_activity(
                 run_pipeline_activity,
                 request,
-                start_to_close_timeout=timedelta(hours=4),
+                start_to_close_timeout=activity_timeout,
             )
-            request.pop("acknowledged_resume_token", None)
+            while result.get("outcome") == "paused":
+                resume_token = result.get("resume_token")
+                if not isinstance(resume_token, str) or not resume_token:
+                    # The contract guarantees a paused result always carries a resume_token; a
+                    # missing/malformed one means the activity-side contract broke. Fail fast and
+                    # deterministically here rather than assign None and let wait_condition's
+                    # predicate become permanently unsatisfiable (submit_answers drops every signal
+                    # while self._active_resume_token is None) -- an unresolvable hang is a much
+                    # worse failure mode than an immediate, diagnosable workflow-task error.
+                    raise ValueError(f"Paused activity result missing a valid resume_token: {result!r}")
+                self._active_resume_token = resume_token
+                self._submitted_answers = None
+                await workflow.wait_condition(lambda: self._submitted_answers is not None)
+                request["acknowledged_resume_token"] = self._active_resume_token
+                self._submitted_answers = None
+                self._active_resume_token = None
+                result = await workflow.execute_activity(
+                    run_pipeline_activity,
+                    request,
+                    start_to_close_timeout=activity_timeout,
+                )
+                request.pop("acknowledged_resume_token", None)
+        except Exception as exc:
+            if isinstance(github, dict) and github:
+                await workflow.execute_activity(
+                    github_failure_notice_activity,
+                    {
+                        "job_id": request["job_id"],
+                        "owner": github["owner"],
+                        "repo": github["repo"],
+                        "number": github["issue_number"],
+                        "message": str(exc),
+                        "kind": "failure",
+                    },
+                    start_to_close_timeout=github_timeout,
+                )
+            raise
+
+        if isinstance(github, dict) and github:
+            status = result.get("status")
+            if status in ("failed", "cancelled", "waiting_for_user"):
+                return result
+            return await workflow.execute_activity(
+                github_publish_activity,
+                {
+                    "job_id": request["job_id"],
+                    "owner": github["owner"],
+                    "repo": github["repo"],
+                    "repo_path": request["repo_path"],
+                    "issue_number": github["issue_number"],
+                    "issue_title": github["issue_title"],
+                    "base": github["base"],
+                    "integration_branch": github["integration_branch"],
+                    "remote": github.get("remote") or "origin",
+                    "cleanup_checkout_on_success": bool(github.get("cleanup_checkout_on_success")),
+                },
+                start_to_close_timeout=github_timeout,
+            )
         return result
 
 
