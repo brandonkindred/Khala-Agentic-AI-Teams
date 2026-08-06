@@ -7,8 +7,9 @@ bounded, pre-numbered review input suitable for ``CodeReviewInput`` with
 headers).
 
 This module locks types, signatures, and empty/no-op builder contracts.
-``expand_touched_ranges`` implements the Python AST expansion path; non-Python
-fallback and surface assembly are owned by follow-on work.
+``expand_touched_ranges`` expands touched lines via Python AST when possible,
+otherwise a heuristic start or capped context window. Surface assembly is
+owned by follow-on work.
 
 Pure helpers: no I/O, no LLM clients, no package-level side effects.
 """
@@ -20,16 +21,25 @@ import os
 from dataclasses import dataclass, field
 from typing import Collection, Mapping, Optional, Sequence
 
-from .function_boundaries import enclosing_construct
+from .function_boundaries import (
+    enclosing_construct,
+    enclosing_construct_start_heuristic,
+)
 
 __all__ = [
     "ChangeSurface",
+    "DEFAULT_EXPANSION_CONTEXT_LINES",
     "LineRange",
     "build_change_surface_from_pairs",
     "build_change_surface_from_patches",
     "expand_touched_ranges",
     "format_change_surface_code",
 ]
+
+# Max inclusive line span for heuristic / centered fallback ranges. AST hits
+# keep full construct bounds; this cap only applies when falling back so a
+# missing construct never expands to the whole file.
+DEFAULT_EXPANSION_CONTEXT_LINES = 20
 
 
 @dataclass(frozen=True)
@@ -226,14 +236,50 @@ def _should_use_python_ast(content: str, path: str) -> bool:
         - ``.py`` / ``.pyi`` paths always use the AST path (unparseable content
           then yields an empty result rather than a non-Python fallback).
         - Empty ``path`` uses the AST path only when ``content`` parses.
-        - Other extensions return False so callers keep ``NotImplementedError``
-          until the non-Python fallback lands.
+        - Other extensions return False so the capped heuristic / context-window
+          fallback is used instead of AST.
     """
     if _path_is_python(path):
         return True
     if not path:
         return _content_parses_as_python(content)
     return False
+
+
+def _capped_fallback_range(
+    content: str, line: int, *, cap: int = DEFAULT_EXPANSION_CONTEXT_LINES
+) -> LineRange:
+    """Bounded range for a touched line when AST cannot resolve a construct.
+
+    Preconditions:
+        - ``line`` >= 1.
+        - ``cap`` >= 1.
+
+    Postconditions:
+        - Returned range is inclusive, 1-based, within ``[1, total_lines]``,
+          contains ``line`` (clamped into the file), and spans at most
+          ``min(cap, total_lines)`` lines — never the whole file solely because
+          a construct was missing when ``total_lines > cap``.
+        - When ``enclosing_construct_start_heuristic`` finds a start and
+          ``line - start + 1 <= cap``, the range begins at that start and
+          extends at most ``cap`` lines (through at least ``line``).
+        - Otherwise returns a window of at most ``cap`` lines centered on
+          ``line`` (re-anchored near EOF as needed).
+        - Never raises.
+    """
+    assert cap >= 1, "cap must be positive"
+    total = len(content.splitlines()) or 1
+    line = min(max(1, line), total)
+    start = enclosing_construct_start_heuristic(content, line)
+    if start is not None and line - start + 1 <= cap:
+        end = min(total, max(line, start + cap - 1))
+        return LineRange(start_line=start, end_line=end)
+    # Centered window of at most ``cap`` lines containing ``line``.
+    radius = (cap - 1) // 2
+    lo = max(1, line - radius)
+    hi = min(total, lo + cap - 1)
+    lo = max(1, hi - cap + 1)
+    return LineRange(start_line=lo, end_line=hi)
 
 
 def _expand_touched_ranges_python(
@@ -248,8 +294,9 @@ def _expand_touched_ranges_python(
         - Returns sorted unique inclusive ``LineRange`` values for every touched
           line that has an enclosing function/class (decorators included via
           ``enclosing_construct`` / ``node_start_line``).
-        - Module-level lines and unparseable content contribute no ranges
-          (never expand to the whole file solely because a construct is missing).
+        - Module-level lines and unparseable content fall through to the
+          capped heuristic / context-window fallback (never the whole file
+          solely because a construct is missing when the file exceeds the cap).
         - Never raises.
     """
     found: dict[tuple[int, int], LineRange] = {}
@@ -257,10 +304,37 @@ def _expand_touched_ranges_python(
         if line < 1:
             continue
         construct = enclosing_construct(content, line)
-        if construct is None:
+        if construct is not None:
+            key = (construct.start_line, construct.end_line)
+            found[key] = LineRange(
+                start_line=construct.start_line, end_line=construct.end_line
+            )
             continue
-        key = (construct.start_line, construct.end_line)
-        found[key] = LineRange(start_line=construct.start_line, end_line=construct.end_line)
+        fb = _capped_fallback_range(content, line)
+        found[(fb.start_line, fb.end_line)] = fb
+    return tuple(found[key] for key in sorted(found))
+
+
+def _expand_touched_ranges_fallback(
+    content: str, touched_lines: Collection[int]
+) -> Sequence[LineRange]:
+    """Map touched lines via heuristic start or capped centered windows.
+
+    Preconditions:
+        - ``touched_lines`` is non-empty.
+
+    Postconditions:
+        - Every emitted range spans at most ``DEFAULT_EXPANSION_CONTEXT_LINES``
+          lines (or the full file when shorter than the cap).
+        - Ranges are unique and sorted by ``(start_line, end_line)``.
+        - Never raises.
+    """
+    found: dict[tuple[int, int], LineRange] = {}
+    for line in sorted({int(n) for n in touched_lines}):
+        if line < 1:
+            continue
+        fb = _capped_fallback_range(content, line)
+        found[(fb.start_line, fb.end_line)] = fb
     return tuple(found[key] for key in sorted(found))
 
 
@@ -283,20 +357,19 @@ def expand_touched_ranges(
         - Empty ``touched_lines`` → empty sequence ``()``.
         - For Python paths (``.py`` / ``.pyi``) or empty ``path`` with
           parseable Python content: returns unique inclusive ``LineRange``
-          values for enclosing function/class constructs (decorators included
-          consistently with ``function_boundaries`` / ``code_boundaries``).
-          Module-level or unparseable lines are omitted — never the whole file
-          solely because a construct was missing. Multi-hunk collapse across
-          shared constructs beyond range dedupe is owned by later work.
-        - Non-Python paths with non-empty ``touched_lines`` raise
-          ``NotImplementedError`` until the heuristic / capped-context fallback
-          is implemented.
+          values for enclosing function/class constructs when AST resolves
+          them (decorators included consistently with ``function_boundaries``
+          / ``code_boundaries``). Lines without a construct (module-level or
+          unparsable) use the capped heuristic / context-window fallback.
+        - Non-Python paths use the same capped fallback for every touched line.
+        - Fallback ranges never span more than
+          ``DEFAULT_EXPANSION_CONTEXT_LINES`` lines (or the full file when it
+          is shorter) — never the whole file solely because a construct was
+          missing when the file is larger than the cap.
+        - Never raises.
     """
     if not touched_lines:
         return ()
     if _should_use_python_ast(content, path):
         return _expand_touched_ranges_python(content, touched_lines)
-    raise NotImplementedError(
-        "expand_touched_ranges non-Python / capped-context fallback is not "
-        "implemented yet (change-surface expansion)"
-    )
+    return _expand_touched_ranges_fallback(content, touched_lines)
