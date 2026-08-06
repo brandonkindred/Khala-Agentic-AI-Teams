@@ -1971,11 +1971,24 @@ class DummyLLMClient(LLMClient):
             )
             class_name = "".join(w.capitalize() for w in slug.split("-")) + "Component"
             selector = f"app-{slug}"
+            # task_hint is free-form prompt text and may contain quote characters
+            # or newlines; keep the template static (derived only from the
+            # already-sanitized class_name) and put the hint in a json.dumps()
+            # comment — always a single-line, escaped string literal — so the
+            # generated source stays valid TypeScript regardless of what the
+            # hint contains. Mirrors the senior-backend branch's repr() comment.
+            hint_comment = json.dumps(task_hint)
+            code = (
+                f"import {{ Component }} from '@angular/core';\n"
+                f"// Task: {hint_comment}\n"
+                f"@Component({{ selector: '{selector}', template: '<div>{class_name}</div>' }})\n"
+                f"export class {class_name} {{}}\n"
+            )
             return {
-                "code": f"import {{ Component }} from '@angular/core';\n@Component({{ selector: '{selector}', template: '<div>{task_hint}</div>' }})\nexport class {class_name} {{}}\n",
+                "code": code,
                 "summary": f"Frontend component for: {task_hint}",
                 "files": {
-                    f"src/app/components/{slug}/{slug}.component.ts": f"import {{ Component }} from '@angular/core';\n@Component({{ selector: '{selector}', template: '<div>{task_hint}</div>' }})\nexport class {class_name} {{}}\n",
+                    f"src/app/components/{slug}/{slug}.component.ts": code,
                     f"src/app/components/{slug}/{slug}.component.spec.ts": f"import {{ {class_name} }} from './{slug}.component';\ndescribe('{class_name}', () => {{ it('should create', () => {{}}); }});\n",
                 },
                 "components": [class_name],
