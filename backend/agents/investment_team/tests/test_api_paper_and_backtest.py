@@ -1031,6 +1031,37 @@ def test_fail_paper_trading_session_handles_unparseable_data(monkeypatch) -> Non
     api_main._fail_paper_trading_session("pt-bad", "irrelevant")  # must not raise
 
 
+def test_fail_paper_trading_session_never_raises_on_store_write_failure(monkeypatch) -> None:
+    """The mutations and the persisted-store write (which round-trips through
+    JobServiceClient in production) are unguarded operations beyond
+    parse_persisted() that can themselves raise (e.g. a store RPC failure) —
+    the documented "Never raises" postcondition must hold end to end, not
+    just across the parse step."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    live = _live_session("pt-broken-store", strategy, PaperTradingStatus.LIVE)
+
+    class _BrokenStore(dict):
+        def __setitem__(self, key, value):
+            raise RuntimeError("job service unavailable")
+
+    store = _BrokenStore({"pt-broken-store": live})
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    # Must not raise.
+    api_main._fail_paper_trading_session("pt-broken-store", "dispatch failed")
+
+
 # ---------------------------------------------------------------------------
 # run_paper_trading concurrency guard (live mode)
 # ---------------------------------------------------------------------------

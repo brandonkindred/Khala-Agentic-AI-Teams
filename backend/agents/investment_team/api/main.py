@@ -4786,10 +4786,23 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             # (e.g. the workflow actually completed while this caller was
             # deciding to mark it failed).
             return
-        session.status = PaperTradingStatus.FAILED
-        session.error = error
-        session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-        _paper_trading_sessions[session_id] = session
+        try:
+            session.status = PaperTradingStatus.FAILED
+            session.error = error
+            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            _paper_trading_sessions[session_id] = session
+        except Exception:
+            # The mutations above and the dict write (which round-trips
+            # through JobServiceClient) are unguarded operations that can
+            # themselves raise (e.g. a store RPC failure) — catch here so
+            # this best-effort helper's documented "Never raises" contract
+            # holds end to end, not just across the parse_persisted() call
+            # above.
+            logger.exception(
+                "Paper-trade session %s: failed to persist FAILED status "
+                "(mutation or store write raised); leaving it untouched.",
+                session_id,
+            )
 
 
 # Default fees used when the request omits explicit overrides. Sits at module
