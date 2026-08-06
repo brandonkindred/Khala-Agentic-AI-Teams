@@ -3660,6 +3660,48 @@ def test_spec_compliance_single_pass_restricted_to_code_review_profile(monkeypat
     assert not calls, "synthesize_spec_compliance must not run outside the CODE_REVIEW profile"
 
 
+def test_spec_compliance_single_pass_failure_falls_back_to_per_chunk_notes(monkeypatch) -> None:
+    """When the dedicated ``synthesize_spec_compliance`` pass raises, the coordinator
+    must not abort: ``single_pass_spec_notes`` stays ``None`` so ``_merge_narrative``
+    falls back to per-chunk-sourced behavior (documented on the call site).
+    """
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("spec-compliance single pass exploded")
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _boom)
+
+    merge_kwargs: list = []
+    original_merge = coord._merge_narrative
+
+    def _merge_spy(*args, **kwargs):
+        merge_kwargs.append(kwargs)
+        return original_merge(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "_merge_narrative", _merge_spy)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "x = 1\n"},
+            task_description="t",
+            profile=ReviewProfile.CODE_REVIEW,
+            skip_tail_passes=True,
+        ),
+    )
+
+    assert isinstance(result, CodeReviewOutput)
+    assert merge_kwargs, "_merge_narrative must still run after a failed single pass"
+    assert merge_kwargs[-1].get("single_pass_spec_notes") is None, (
+        "failed synthesize_spec_compliance must leave single_pass_spec_notes as None "
+        "so _merge_narrative falls back to per-chunk notes"
+    )
+
+
 def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:
     """``input_data.skip_tail_passes=True`` returns the genuine issues unchanged
     with ``has_additive_findings`` False and no tail-pass LLM calls at all --
