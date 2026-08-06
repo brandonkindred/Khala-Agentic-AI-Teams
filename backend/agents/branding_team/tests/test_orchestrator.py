@@ -21,7 +21,7 @@ from branding_team import (
 )
 from branding_team.models import (
     AudienceMessageMapOutput,
-    AudienceSegment,
+    AudienceSegmentOutput,
     AudienceSegmentsOutput,
     Brand,
     BrandArchetypeOutput,
@@ -876,7 +876,15 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
         ),
         "audience_segmenter": _phase1_leaf_node(
             AudienceSegmentsOutput(
-                target_audience_segments=[AudienceSegment(name="Enterprise product leaders")]
+                target_audience_segments=[
+                    AudienceSegmentOutput(
+                        name="Enterprise product leaders",
+                        description="VP/Director-level buyers at mid-market SaaS companies.",
+                        pain_points=["Inconsistent brand touchpoints"],
+                        goals=["Ship cohesive experiences"],
+                        decision_drivers=["Proven execution speed"],
+                    )
+                ]
             )
         ),
         "differentiation_mapper": _phase1_leaf_node(

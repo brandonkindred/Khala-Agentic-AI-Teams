@@ -20,7 +20,7 @@ from pydantic import ValidationError
 
 from branding_team.models import (
     AudienceMessageMapOutput,
-    AudienceSegment,
+    AudienceSegmentOutput,
     AudienceSegmentsOutput,
     BrandArchetypeOutput,
     BrandArchetypesOutput,
@@ -141,7 +141,13 @@ def test_core_value_output_rejects_blank_content() -> None:
 
 def test_audience_segments_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "1-3 target audience segments"."""
-    segment = AudienceSegment(name="Enterprise leaders")
+    segment = AudienceSegmentOutput(
+        name="Enterprise leaders",
+        description="VP/Director-level buyers at mid-market SaaS companies.",
+        pain_points=["Inconsistent brand touchpoints"],
+        goals=["Ship cohesive experiences"],
+        decision_drivers=["Proven execution speed"],
+    )
     with pytest.raises(ValidationError):
         AudienceSegmentsOutput(target_audience_segments=[])  # below min of 1
     with pytest.raises(ValidationError):
@@ -149,6 +155,31 @@ def test_audience_segments_output_enforces_stated_cardinality() -> None:
 
     output = AudienceSegmentsOutput(target_audience_segments=[segment])
     assert len(output.target_audience_segments) == 1
+
+
+def test_audience_segment_output_rejects_blank_content() -> None:
+    """A blank name, description, or list item must fail validation."""
+    valid_kwargs = dict(
+        name="Enterprise leaders",
+        description="VP/Director-level buyers at mid-market SaaS companies.",
+        pain_points=["Inconsistent brand touchpoints"],
+        goals=["Ship cohesive experiences"],
+        decision_drivers=["Proven execution speed"],
+    )
+
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "name": ""})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "description": ""})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "pain_points": [""]})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "goals": []})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "decision_drivers": [""]})
+
+    output = AudienceSegmentOutput(**valid_kwargs)
+    assert output.name == "Enterprise leaders"
 
 
 def test_differentiation_pillars_output_enforces_stated_cardinality() -> None:

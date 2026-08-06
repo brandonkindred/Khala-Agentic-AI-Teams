@@ -195,6 +195,26 @@ class AudienceSegment(BaseModel):
     decision_drivers: List[str] = Field(default_factory=list)
 
 
+class AudienceSegmentOutput(BaseModel):
+    """Agent-facing audience segment; requires non-empty fields.
+
+    Field-for-field twin of ``AudienceSegment`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``,
+    ``DifferentiationPillarOutput``) — ``AudienceSegment`` itself must stay
+    soft (only ``name`` required) since it also backs
+    ``StrategicCoreOutput.target_audience_segments``'s merge target.
+    """
+
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    pain_points: List[NonEmptyStr] = Field(min_length=1)
+    goals: List[NonEmptyStr] = Field(min_length=1)
+    decision_drivers: List[NonEmptyStr] = Field(min_length=1)
+
+
 class DifferentiationPillar(BaseModel):
     """Competitive differentiation pillar with proof points."""
 
@@ -272,9 +292,12 @@ class AudienceSegmentsOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
+    Uses ``AudienceSegmentOutput`` (not the soft ``AudienceSegment``) so each
+    segment's fields are individually required — a blank-name segment must
+    fail validation instead of silently passing.
     """
 
-    target_audience_segments: List[AudienceSegment] = Field(min_length=1, max_length=3)
+    target_audience_segments: List[AudienceSegmentOutput] = Field(min_length=1, max_length=3)
 
 
 class DifferentiationPillarsOutput(BaseModel):
