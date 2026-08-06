@@ -268,11 +268,12 @@ def test_run_backtest_activity_reconstructs_models_and_runs_worker(monkeypatch) 
     monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
 
     calls = []
-    monkeypatch.setattr(
-        api_main,
-        "_run_backtest_background",
-        lambda *a: calls.append(a),
-    )
+
+    def _bg(*a):
+        calls.append(a)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
 
     result = run_backtest_activity(
         "job-1", {"strategy_id": "s"}, {"start_date": "2024-01-01"}, "agent-x", ["note"]
@@ -305,10 +306,12 @@ def test_run_backtest_activity_raises_when_job_failed(monkeypatch) -> None:
 
     monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
     monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
-    # Not completed at entry, failed after the worker runs.
-    statuses = iter([None, api_main._BT_JOB_STATUS_FAILED])
-    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: next(statuses))
-    monkeypatch.setattr(api_main, "_run_backtest_background", lambda *a: None)
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_FAILED,
+    )
 
     from temporalio.exceptions import ApplicationError
 
@@ -325,10 +328,12 @@ def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
 
     monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
     monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
-    # Not completed at entry, cancelled after the worker runs.
-    statuses = iter([None, api_main._BT_JOB_STATUS_CANCELLED])
-    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: next(statuses))
-    monkeypatch.setattr(api_main, "_run_backtest_background", lambda *a: None)
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_CANCELLED,
+    )
 
     result = run_backtest_activity("job-cancelled", {}, {}, "agent", [])
 
