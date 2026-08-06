@@ -5038,7 +5038,7 @@ def _run_live_paper_trading_background(
             session.provider_id = run_result.provider_id
             session.terminated_reason = run_result.terminated_reason
             session.warnings = run_result.warnings
-            session.error = (run_result.error or "") or None
+            session.error = run_result.error or None
             session.symbols_traded = symbols
             session.data_source = f"live:{run_result.provider_id}"
             # Issue #376 — surface the warm-up snapshot fingerprint on the
