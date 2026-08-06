@@ -1309,7 +1309,7 @@ def export_test_chat_session(team_id: str, session_id: str):
 @app.put("/teams/{team_id}/test-chat/messages/{message_id}/rating")
 def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageRequest):
     """Rate an assistant message (thumbs up/thumbs down)."""
-    if not _test_store.update_message_rating(message_id, req.rating.value):
+    if not _test_store.update_message_rating(team_id, message_id, req.rating.value):
         raise HTTPException(status_code=404, detail="Message not found")
     return {"message_id": message_id, "rating": req.rating.value}
 
