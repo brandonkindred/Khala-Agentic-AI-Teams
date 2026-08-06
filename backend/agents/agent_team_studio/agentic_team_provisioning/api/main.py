@@ -1347,22 +1347,28 @@ def _dispatch_pipeline_run(
     team_agents: list[AgenticTeamAgent],
     process_def: ProcessDefinition,
     initial_input: Optional[str],
+    *,
+    temporal_owned: bool,
 ) -> str:
     """Dispatch a pipeline run via Temporal when enabled, else a daemon thread.
 
     Preconditions:
-        - ``run_id`` refers to a run already created in the store (with
-          ``temporal_owned`` matching the dispatch path chosen here).
+        - ``run_id`` refers to a run already created in the store with
+          ``temporal_owned`` set to the same value passed here.
+        - ``temporal_owned`` is the single ``_temporal_enabled()`` reading the caller
+          used for the run's stored flag — computed once and passed in, never
+          recomputed here, so the dispatch path can't diverge from what was persisted
+          if Temporal availability changes between the two checks.
 
     Postconditions:
-        - Starts exactly one execution path and returns its label ("Temporal" or
-          "thread"). With ``TEMPORAL_ADDRESS`` set the run is started as a durable
-          ``AgenticPipelineWorkflow``; otherwise the legacy daemon-thread path runs
-          unchanged.
+        - Starts exactly one execution path, selected by ``temporal_owned``, and
+          returns its label ("Temporal" or "thread"). When true the run is started as
+          a durable ``AgenticPipelineWorkflow``; otherwise the legacy daemon-thread
+          path runs unchanged.
         - Any failure while starting the workflow propagates to the caller, which marks
           the run FAILED — a Temporal-enabled run is never silently downgraded.
     """
-    if _temporal_enabled():
+    if temporal_owned:
         from agent_team_studio.agentic_team_provisioning.temporal.start_workflow import (
             start_agentic_pipeline_workflow,
         )
@@ -1411,7 +1417,7 @@ def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
 
     try:
         dispatch_method = _dispatch_pipeline_run(
-            run_id, team_agents, process_def, req.initial_input
+            run_id, team_agents, process_def, req.initial_input, temporal_owned=temporal_owned
         )
     except Exception as exc:
         logger.exception("Failed to dispatch agentic pipeline run %s", run_id)

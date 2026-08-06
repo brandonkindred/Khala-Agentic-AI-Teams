@@ -1073,7 +1073,25 @@ export type StrategyLabStreamEvent =
 // Paper Trading Models
 // ---------------------------------------------------------------------------
 
-export type PaperTradingStatus = 'running' | 'completed' | 'failed';
+/**
+ * Mirrors the backend's `PaperTradingStatus` enum
+ * (`backend/agents/investment_team/models.py`): `'running'` is the legacy
+ * value; `'opening'` | `'warming_up'` | `'live'` are the PR-2 live-mode
+ * in-progress states a session steps through before `run_paper_trading`
+ * ever writes `'running'` again. All four are non-terminal.
+ */
+export type PaperTradingStatus = 'opening' | 'warming_up' | 'live' | 'running' | 'completed' | 'failed';
+
+/**
+ * Terminal `PaperTradingStatus` values — anything else is still in flight.
+ * Mirrors `_ACTIVE_PT_STATES` in `backend/agents/investment_team/api/main.py`,
+ * which treats every other status as active.
+ */
+export const PAPER_TRADING_TERMINAL_STATUSES: ReadonlySet<PaperTradingStatus> = new Set(['completed', 'failed']);
+
+export function isPaperTradingStatusTerminal(status: PaperTradingStatus): boolean {
+  return PAPER_TRADING_TERMINAL_STATUSES.has(status);
+}
 
 export type PaperTradingVerdict = 'ready_for_live' | 'not_performant';
 
