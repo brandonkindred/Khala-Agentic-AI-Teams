@@ -492,17 +492,17 @@ def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
 
 
-_BRANDING_PHASE2_SYSTEM_PROMPTS = [
+_BRANDING_PHASE2_MODEL_CASES = [
     (
-        "brand_story and boilerplate_variants for the brand story specialist",
+        "BrandStoryOutput",
         {"brand_story", "hero_narrative", "boilerplate_variants"},
     ),
     (
-        "personality_traits — carry forward brand_story for the archetype specialist",
+        "BrandArchetypesOutput",
         {"brand_story", "hero_narrative", "boilerplate_variants", "brand_archetypes"},
     ),
     (
-        "tagline_rationale and elevator_pitches for the tagline specialist",
+        "TaglineOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -514,7 +514,7 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
         },
     ),
     (
-        "messaging_framework and audience_message_maps for the messaging specialist",
+        "MessagingFrameworkOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -528,7 +528,7 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
         },
     ),
     (
-        "jobs_to_be_done and media_habits for the persona specialist",
+        "PersonaProfilesOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -543,7 +543,7 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
         },
     ),
     (
-        "writing_guidelines and editorial_quality_bar for the voice specialist",
+        "WritingGuidelinesOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -561,16 +561,23 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
 ]
 
 
-@pytest.mark.parametrize("system_prompt,expected_keys", _BRANDING_PHASE2_SYSTEM_PROMPTS)
+@pytest.mark.parametrize("model_name,expected_keys", _BRANDING_PHASE2_MODEL_CASES)
 def test_branding_phase2_branches_return_cumulative_keys(
-    system_prompt: str, expected_keys: set[str]
+    model_name: str, expected_keys: set[str]
 ) -> None:
-    """Each Phase 2 branding specialist must carry forward exactly the keys
-    its predecessors introduced, plus its own — pinning the incremental
-    ``_branding_phase2_narrative_*`` helper composition against silent
-    branch desync."""
+    """Each Phase 2 branding specialist stub must carry forward exactly the
+    keys its predecessors introduced, plus its own — pinned by explicit
+    ``structured_output_model`` class name, not system-prompt substrings.
+    """
+    import branding_team.models as branding_models
+
+    output_model = getattr(branding_models, model_name)
     c = DummyLLMClient()
-    j = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    j = c.complete_json(
+        "dummy prompt",
+        temperature=0.0,
+        structured_output_model=output_model,
+    )
     assert set(j.keys()) == expected_keys
 
 
@@ -578,10 +585,15 @@ def test_branding_phase2_branch_results_do_not_share_mutable_state() -> None:
     """Each ``complete_json`` call must hand back independent objects so
     mutating one response's nested lists/dicts can't leak into another call's
     response."""
+    from branding_team.models import BrandStoryOutput
+
     c = DummyLLMClient()
-    system_prompt = _BRANDING_PHASE2_SYSTEM_PROMPTS[0][0]
-    first = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
-    second = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    first = c.complete_json(
+        "dummy prompt", temperature=0.0, structured_output_model=BrandStoryOutput
+    )
+    second = c.complete_json(
+        "dummy prompt", temperature=0.0, structured_output_model=BrandStoryOutput
+    )
     first["boilerplate_variants"].append("mutated")
     assert "mutated" not in second["boilerplate_variants"]
 
@@ -659,22 +671,17 @@ def test_accessibility_branch_not_shadowed_by_code_review_catch_all() -> None:
 
 
 def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelines() -> None:
-    """The VoicePrinciplesDrafter branch must return ``editorial_quality_bar``
-    nested inside ``writing_guidelines`` (matching ``WritingGuidelinesBody``),
-    not as a sibling top-level key.
+    """WritingGuidelinesOutput stub must nest ``editorial_quality_bar`` inside
+    ``writing_guidelines``, not as a sibling top-level key.
     """
+    from branding_team.models import WritingGuidelinesOutput
+
     c = DummyLLMClient()
-    system_prompt = (
-        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs "
-        "from previous nodes and the mission's desired_voice, carry the prior fields forward "
-        "unchanged and produce writing_guidelines:\n"
-        "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
-        "2. style_dos — 3-4 writing best practices\n"
-        "3. style_donts — 3-4 things to avoid\n"
-        "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
-        "This is the final step in narrative development."
+    j = c.complete_json(
+        "go",
+        temperature=0.0,
+        structured_output_model=WritingGuidelinesOutput,
     )
-    j = c.complete_json("go", system_prompt=system_prompt, temperature=0.0)
     assert isinstance(j["writing_guidelines"], dict)
     guidelines = j["writing_guidelines"]
     for field in ("voice_principles", "style_dos", "style_donts", "editorial_quality_bar"):
