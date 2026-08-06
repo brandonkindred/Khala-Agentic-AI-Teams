@@ -31,6 +31,45 @@ from temporalio import activity
 _REQUIRED_FIELDS = ("repo_path", "remote", "default_branch", "integration_branch")
 
 
+def _require_activity_github_token(request: dict[str, Any]) -> str:
+    """Resolve a GitHub token for a Temporal GitHub-hook activity.
+
+    Preconditions:
+        - ``request`` is a dict (the activity request payload).
+    Postconditions:
+        - Raises ``ValueError`` if ``\"token\"`` is present in ``request`` (plain-text
+          tokens must not appear in Temporal activity arguments).
+        - Raises ``ValueError`` if ``job_id`` is missing/falsy, the job cannot be
+          loaded, or neither ``github_token_encrypted`` nor ``GITHUB_TOKEN`` yields
+          a usable token. Messages name field names / reasons only — never the
+          request payload, ciphertext, or plaintext secrets.
+        - Returns the plaintext token for in-activity use only (never place it in
+          the activity return value).
+    """
+    if "token" in request:
+        raise ValueError(
+            "github activity request must not include 'token'; "
+            "resolve the token activity-side from the job record or GITHUB_TOKEN"
+        )
+    job_id = request.get("job_id")
+    if not job_id:
+        raise ValueError("github activity missing required fields: ['job_id']")
+
+    import os
+
+    from software_engineering_team.api import coding_team_main as _main
+    from software_engineering_team.token_crypto import decrypt_token
+
+    job = _main.get_job(job_id)
+    if job is None:
+        raise ValueError("github activity job_id not found")
+
+    token = decrypt_token(job.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise ValueError("github activity has no usable GitHub token")
+    return token
+
+
 @activity.defn(name="coding_team_github_branch_prep")
 def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
     """Prepare development + integration branches for a GitHub-issue-driven run.
