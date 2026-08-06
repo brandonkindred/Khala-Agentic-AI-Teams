@@ -251,7 +251,7 @@ Logs go to the `shared.postgres.metrics` logger:
 
 ## Tests
 
-CI runs `shared/postgres/tests/` against a `postgres:18` service
+CI runs `shared/postgres/tests/` against a `postgres:16-alpine` service
 container; the job runs `register_all_team_schemas()` first to catch
 cross-team DDL conflicts before any per-team test. Local contributors
 run `docker compose -f docker/docker-compose.yml up -d postgres` and
