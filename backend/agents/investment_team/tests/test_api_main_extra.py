@@ -1688,6 +1688,85 @@ def test_delete_strategy_lab_record_preserves_record_when_paper_cleanup_fails(
     assert api_main._backtests.get("bt-lab-Z") is not None
 
 
+def test_delete_strategy_lab_record_preserves_record_when_list_jobs_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    api_client,
+) -> None:
+    """list_jobs transport failure must yield 503 and leave lab state intact
+    so a retry can re-attempt paper-session cleanup."""
+    import job_service_client as jsc_mod
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Y",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Y",
+        strategy_id="strat-lab-Y",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Y",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Y"] = record
+    api_main._strategies["strat-lab-Y"] = strat
+    api_main._backtests["bt-lab-Y"] = bt
+
+    class _BrokenListClient(_FakeJobClient):
+        def list_jobs(self, *, statuses=None):
+            raise httpx.ConnectError("job service unreachable")
+
+    # Patch only after seeding so PersistentDict writes during setup succeed.
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda team=None: _BrokenListClient(team=team or "x")
+    )
+
+    with pytest.raises(HTTPException) as ei:
+        api_main.delete_strategy_lab_record("lab-Y")
+    assert ei.value.status_code == 503
+
+    assert api_main._strategy_lab_records.get("lab-Y") is not None
+    assert api_main._strategies.get("strat-lab-Y") is not None
+    assert api_main._backtests.get("bt-lab-Y") is not None
+
+
 # ---------------------------------------------------------------------------
 # _recover_orphaned_paper_trading_sessions startup hook
 # ---------------------------------------------------------------------------
