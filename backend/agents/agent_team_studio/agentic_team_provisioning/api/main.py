@@ -889,6 +889,19 @@ def _build_state_response(
 
 @app.post("/conversations", response_model=ConversationStateResponse)
 def create_conversation(req: CreateConversationRequest):
+    """Start a new conversation for a team, optionally seeded with an initial message.
+
+    Preconditions: ``req.team_id`` refers to an existing team.
+    Postconditions: ``200`` with the conversation's state; ``404`` if the team is
+        unknown (nothing persisted). When ``req.initial_message`` is given, the
+        user/assistant chat turn is appended to the store *before* the LLM's
+        roster is saved via ``_save_agents_from_llm``; if that save fails because
+        the agent registry is unavailable, this raises ``503`` instead of an
+        opaque ``500`` — but the conversation is left with the chat turn already
+        persisted and the roster/registry write rolled back (partial state). A
+        client retrying the same message re-processes it against a conversation
+        that already contains the prior turn.
+    """
     # Validate team exists
     team = _store.get_team(req.team_id)
     if not team:
@@ -912,7 +925,16 @@ def create_conversation(req: CreateConversationRequest):
         )
 
         _store.append_message(conversation_id, "assistant", reply)
-        _save_agents_from_llm(req.team_id, agents_data)
+        try:
+            _save_agents_from_llm(req.team_id, agents_data)
+        except Exception as e:
+            logger.warning(
+                "Roster save failed for team %s after conversation %s turn: %s",
+                req.team_id,
+                conversation_id,
+                e,
+            )
+            raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
         if process:
             _store.save_process(req.team_id, process)
             _store.set_conversation_process(conversation_id, process.process_id)
@@ -927,6 +949,19 @@ def create_conversation(req: CreateConversationRequest):
 
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
 def send_message(conversation_id: str, req: SendMessageRequest):
+    """Send a user message on an existing conversation and get the assistant's reply.
+
+    Preconditions: ``conversation_id`` refers to an existing conversation.
+    Postconditions: ``200`` with the conversation's updated state; ``404`` if the
+        conversation is unknown (nothing persisted). The user/assistant chat turn
+        is appended to the store *before* the LLM's roster is saved via
+        ``_save_agents_from_llm``; if that save fails because the agent registry
+        is unavailable, this raises ``503`` instead of an opaque ``500`` — but the
+        conversation is left with the chat turn already persisted and the
+        roster/registry write rolled back (partial state). A client retrying the
+        same message re-processes it against a conversation that already contains
+        the prior turn.
+    """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -951,7 +986,16 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     )
 
     _store.append_message(conversation_id, "assistant", reply)
-    _save_agents_from_llm(team_id, agents_data)
+    try:
+        _save_agents_from_llm(team_id, agents_data)
+    except Exception as e:
+        logger.warning(
+            "Roster save failed for team %s after conversation %s turn: %s",
+            team_id,
+            conversation_id,
+            e,
+        )
+        raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
 
     effective_process = current_process
     if updated_process:
