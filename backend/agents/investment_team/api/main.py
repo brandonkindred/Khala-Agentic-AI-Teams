@@ -2793,15 +2793,24 @@ def _require_temporal() -> None:
         None.
     Postconditions:
         Returns ``None`` when Temporal is enabled; otherwise raises
-        ``HTTPException(503)``.
+        ``HTTPException(503)`` -- including when ``is_temporal_enabled()``
+        itself raises (e.g. a misconfigured Temporal client), which is
+        mapped to the same 503 rather than propagating as an unhandled 500.
     """
     try:
         from shared.temporal import is_temporal_enabled
+
+        temporal_enabled = is_temporal_enabled()
     except ImportError as exc:  # pragma: no cover - shared.temporal always present
         raise HTTPException(
             status_code=503, detail="Temporal support is unavailable for this endpoint."
         ) from exc
-    if not is_temporal_enabled():
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="This endpoint requires a running Temporal worker (TEMPORAL_ADDRESS unset).",
+        ) from exc
+    if not temporal_enabled:
         raise HTTPException(
             status_code=503,
             detail="This endpoint requires a running Temporal worker (TEMPORAL_ADDRESS unset).",
