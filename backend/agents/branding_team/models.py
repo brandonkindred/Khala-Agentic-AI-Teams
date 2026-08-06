@@ -303,6 +303,23 @@ class BrandArchetype(BaseModel):
     personality_traits: List[str] = Field(default_factory=list)
 
 
+class BrandArchetypeOutput(BaseModel):
+    """Agent-facing brand archetype; requires non-empty fields.
+
+    Field-for-field twin of ``BrandArchetype`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``) — ``BrandArchetype``
+    itself must stay soft (only ``archetype`` required) since it also backs
+    ``NarrativeMessagingOutput.brand_archetypes``'s merge target.
+    """
+
+    archetype: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    personality_traits: List[NonEmptyStr] = Field(min_length=1)
+
+
 class MessagingPillar(BaseModel):
     """A messaging pillar with proof points."""
 
@@ -429,9 +446,12 @@ class BrandArchetypesOutput(BrandStoryOutput):
     ``structured_output`` already exposes the brand story to TaglineWriter
     (Strands Graph node inputs only include direct dependency results, and
     multi-in edges use OR-ready semantics so cumulative fan-in is unsafe).
+    Uses ``BrandArchetypeOutput`` (not the soft ``BrandArchetype``) so each
+    archetype's fields are individually required — a blank archetype must
+    fail validation instead of silently passing.
     """
 
-    brand_archetypes: List[BrandArchetype] = Field(min_length=1, max_length=2)
+    brand_archetypes: List[BrandArchetypeOutput] = Field(min_length=1, max_length=2)
 
 
 class TaglineOutput(BrandArchetypesOutput):
