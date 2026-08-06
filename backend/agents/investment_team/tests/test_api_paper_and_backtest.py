@@ -1403,6 +1403,39 @@ def test_run_paper_trading_step_propagates_agent_errors(
         )
 
 
+@pytest.mark.parametrize(
+    "overrides,match",
+    [
+        ({"strategy_code": ""}, "strategy_code"),
+        ({"lookback_days": 0}, "lookback_days"),
+        ({"lookback_days": -1}, "lookback_days"),
+        ({"initial_capital": -1.0}, "initial_capital"),
+        ({"transaction_cost_bps": -1.0}, "transaction_cost_bps"),
+        ({"slippage_bps": -1.0}, "slippage_bps"),
+    ],
+)
+def test_run_paper_trading_step_asserts_preconditions(overrides, match) -> None:
+    """Each documented precondition (non-empty strategy_code, positive
+    lookback_days, non-negative capital/cost values) is enforced with an
+    assert at the start of the function, before any market-data fetch."""
+    from investment_team.api import main as api_main
+
+    strategy, bt = _step_strategy_and_record()
+    kwargs = dict(
+        strategy=strategy,
+        strategy_code="def x(): pass",
+        backtest_record=bt,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+        lookback_days=30,
+    )
+    kwargs.update(overrides)
+
+    with pytest.raises(AssertionError, match=match):
+        api_main._run_paper_trading_step(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # _run_paper_trading_background — happy path (agent construction + persist)
 # ---------------------------------------------------------------------------
