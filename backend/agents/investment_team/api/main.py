@@ -4624,19 +4624,27 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                         ),
                     )
 
-        running_session = PaperTradingSession(
-            session_id=session_id,
-            lab_record_id=request.lab_record_id,
-            strategy=strategy,
-            status=PaperTradingStatus.OPENING if use_live else PaperTradingStatus.RUNNING,
-            initial_capital=request.initial_capital,
-            current_capital=request.initial_capital,
-            symbols_traded=[],
-            data_source="live" if use_live else "yahoo_finance",
-            data_period_start="",
-            data_period_end="",
-            started_at=now,
-        )
+        try:
+            running_session = PaperTradingSession(
+                session_id=session_id,
+                lab_record_id=request.lab_record_id,
+                strategy=strategy,
+                status=PaperTradingStatus.OPENING if use_live else PaperTradingStatus.RUNNING,
+                initial_capital=request.initial_capital,
+                current_capital=request.initial_capital,
+                symbols_traded=[],
+                data_source="live" if use_live else "yahoo_finance",
+                data_period_start="",
+                data_period_end="",
+                started_at=now,
+            )
+        except ValidationError as exc:
+            # Mirrors create_profile's handling of the same failure mode: a
+            # derived-field validation failure here is a 422 (bad/unbuildable
+            # request-derived data), not an unhandled 500.
+            raise HTTPException(
+                status_code=422, detail=exc.errors(include_url=False, include_context=False)
+            ) from exc
         _paper_trading_sessions[session_id] = running_session
 
     # 3 — Dispatch the durable paper-trading workflow (Temporal-only). The live

@@ -850,6 +850,32 @@ def test_stop_surfaces_genuine_signal_delivery_failure(
     assert "pt-race" in resp.json()["detail"]
 
 
+def test_run_paper_trading_session_construction_validation_error_returns_422(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A ValidationError while constructing the initial PaperTradingSession
+    must return a controlled 422, mirroring create_profile's handling of the
+    same failure mode, not an unhandled 500."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession as _RealPaperTradingSession
+
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    class _BrokenPaperTradingSession:
+        def __new__(cls, **kwargs):
+            # Triggers a genuine pydantic ValidationError (missing required
+            # fields) rather than a hand-built one, so this exercises the
+            # real except ValidationError branch.
+            return _RealPaperTradingSession.model_validate({})
+
+    monkeypatch.setattr(api_main, "PaperTradingSession", _BrokenPaperTradingSession)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 422
+    assert isinstance(resp.json()["detail"], list)  # exc.errors() shape
+
+
 def test_run_paper_trading_marks_failed_when_dispatch_raises_http(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
