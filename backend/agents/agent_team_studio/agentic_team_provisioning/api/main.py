@@ -1195,8 +1195,18 @@ def get_test_chat_session(team_id: str, session_id: str):
             prompts = generate_starter_prompts(
                 agent_def.agent_name, agent_def.role, agent_def.skills, agent_def.expertise
             )
-        except HTTPException:
-            pass
+        except HTTPException as exc:
+            # Only the genuine "agent not on roster" case falls back to an empty
+            # prompt list. Anything else (e.g. a registry 500) is a real failure
+            # worth surfacing to the caller, not silently swallowing.
+            if exc.status_code != 404:
+                raise
+            logger.warning(
+                "Could not generate starter prompts for session %s (agent=%s): %s",
+                session_id,
+                session.agent_name,
+                exc.detail,
+            )
 
     return TestChatSessionDetail(
         session=session,
