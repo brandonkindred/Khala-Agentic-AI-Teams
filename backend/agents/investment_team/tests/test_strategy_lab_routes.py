@@ -1788,6 +1788,7 @@ def test_delete_strategy_lab_run_success(monkeypatch: pytest.MonkeyPatch, api_cl
     assert resp.json()["deleted"] is True
     # And the in-memory entry was popped.
     assert "delete-me" not in api_main._active_runs
+    assert stub.deleted == ["delete-me"]
 
 
 def test_delete_strategy_lab_run_409_when_transition_lock_held(
