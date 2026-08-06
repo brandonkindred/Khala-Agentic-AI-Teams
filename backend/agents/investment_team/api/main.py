@@ -1852,7 +1852,9 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
 # The timeframe values StrategySpec.timeframe (a strict Literal) accepts.
 # Derived from the field itself so this can never drift out of sync with
 # models.py.
-_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(get_args(StrategySpec.model_fields["timeframe"].annotation))
+_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(
+    get_args(StrategySpec.model_fields["timeframe"].annotation)
+)
 
 
 def _coerce_strategy_lab_timeframe(raw: object) -> str:
@@ -2598,7 +2600,11 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
                     _active_runs.pop(run_id, None)
                 cleanup_job(run_id)
             except Exception:
-                logger.warning("Failed to clean up strategy-lab run %s after failure timeout", run_id, exc_info=True)
+                logger.warning(
+                    "Failed to clean up strategy-lab run %s after failure timeout",
+                    run_id,
+                    exc_info=True,
+                )
 
         timer = threading.Timer(900.0, _cleanup)
         timer.daemon = True
@@ -3258,7 +3264,9 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     # since it acquires `_lock` internally (it is not reentrant).
     with _lock:
         running_ids = [
-            rid for rid, r in _active_runs.items() if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
+            rid
+            for rid, r in _active_runs.items()
+            if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
         ]
     for rid in running_ids:
         _reconcile_run_progress(rid)
@@ -3355,9 +3363,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             # genuinely malformed payload the isinstance guard above didn't
             # anticipate) must not discard every other persisted/in-memory
             # job already collected -- log distinctly and move on.
-            logger.warning(
-                "Skipping malformed persisted strategy lab job %s", jid, exc_info=True
-            )
+            logger.warning("Skipping malformed persisted strategy lab job %s", jid, exc_info=True)
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]
@@ -3860,7 +3866,9 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         for job in persisted_list:
             rid = job.get("job_id") or job.get("run_id", "")
             if rid and rid not in in_memory:
-                in_memory[rid] = _normalize_persisted_job(job, fallback_status="running", run_id=rid)
+                in_memory[rid] = _normalize_persisted_job(
+                    job, fallback_status="running", run_id=rid
+                )
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         in_memory = _in_memory_runs_by_id()
@@ -5004,7 +5012,9 @@ def _default_tx_cost_bps() -> float:
     ``_DEFAULT_TX_COST_BPS``) on every call rather than once at import time,
     so operators can retune this business parameter without a redeploy.
     """
-    return env_float("INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0)
+    return env_float(
+        "INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0
+    )
 
 
 def _default_slippage_bps() -> float:
@@ -5015,7 +5025,9 @@ def _default_slippage_bps() -> float:
     ``_DEFAULT_SLIPPAGE_BPS``) on every call rather than once at import time,
     so operators can retune this business parameter without a redeploy.
     """
-    return env_float("INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0)
+    return env_float(
+        "INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0
+    )
 
 
 def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
@@ -5717,11 +5729,11 @@ def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
     Preconditions:
         - `session_id` must identify a previously started advisor session.
-        
+
     Postconditions:
         - Returns the session if found.
         - Otherwise, returns `found=False` with `session=None`.
-        
+
     Raises:
         - None (intentionally avoids standard 404 errors for missing sessions).
     """

@@ -2134,9 +2134,7 @@ def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         api_main, "_bt_mark_all_running_jobs_failed", lambda reason: calls.append(reason)
     )
-    monkeypatch.setattr(
-        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
-    )
+    monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", lambda: None, raising=False)
 
     api_main._run_investment_service_shutdown()
 
@@ -2157,9 +2155,7 @@ def test_shutdown_hook_swallows_job_store_error(
         raise RuntimeError("job service unreachable")
 
     monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", _boom)
-    monkeypatch.setattr(
-        "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
-    )
+    monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", lambda: None, raising=False)
 
     with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
         api_main._run_investment_service_shutdown()  # must not raise
