@@ -151,6 +151,7 @@ from .models import (
     CodeReviewOutput,
     CodeReviewUnavailableError,
     ReviewProgressCallback,
+    _normalized_severity,
     notify_review_progress,
 )
 from .profiles import ReviewProfile
@@ -365,7 +366,7 @@ def _cap_issues(
         enumerate(issues),
         key=lambda pair: (
             _CAP_SEVERITY_RANK.get(
-                (pair[1].severity or "").strip().lower(), _CAP_UNKNOWN_SEVERITY_RANK
+                _normalized_severity(pair[1].severity), _CAP_UNKNOWN_SEVERITY_RANK
             ),
             pair[0],
         ),
@@ -400,7 +401,9 @@ def _reconcile_approval(
           it mixes every chunk's text, so synthesizing a rejection from it
           could attribute an approving chunk's words to a rejecting chunk.
     """
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [
+        i for i in issues if _normalized_severity(i.severity) in ("critical", "high")
+    ]
     approved = llm_approved and not critical_or_high
     if not approved and not critical_or_high:
         if issues:
