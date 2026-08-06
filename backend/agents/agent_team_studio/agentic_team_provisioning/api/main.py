@@ -310,12 +310,24 @@ def create_team(req: CreateTeamRequest):
 
 @app.get("/teams", response_model=list[TeamSummary])
 def list_teams():
+    """List all agentic teams.
+
+    Preconditions: none.
+    Postconditions: ``200`` with a ``TeamSummary`` for every persisted team, in the
+        store's default order; an empty list if no teams exist.
+    """
     rows = _store.list_teams()
     return [TeamSummary(**r) for r in rows]
 
 
 @app.get("/teams/{team_id}", response_model=TeamDetailResponse)
 def get_team(team_id: str):
+    """Retrieve a single agentic team by id.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the full ``TeamDetailResponse`` when the team
+        exists; ``404`` if no team with the given id is found.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
