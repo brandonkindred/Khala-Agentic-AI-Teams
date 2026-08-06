@@ -343,7 +343,14 @@ def get_team(team_id: str):
 
 @app.get("/teams/{team_id}/agents", response_model=list[AgenticTeamAgent])
 def list_team_agents(team_id: str):
-    """Named agents pool (roster) for this team."""
+    """Named agents pool (roster) for this team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the team's roster as a list of
+        ``AgenticTeamAgent`` (empty if no agents have been added yet); ``404``
+        if the team is not found.
+    Invariants: none.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -394,7 +401,19 @@ def list_team_agent_manifests(team_id: str):
 
 @app.get("/teams/{team_id}/roster/validation", response_model=RosterValidationResult)
 def validate_team_roster(team_id: str):
-    """Validate whether the roster fully covers the team's process needs."""
+    """Validate whether the roster fully covers the team's process needs.
+
+    Runs every process's step/agent requirements against the roster (each
+    referenced agent must exist and be assigned), flags roster agents unused by
+    any process, and flags agents whose profile is too sparse (missing most of
+    skills/capabilities/tools/expertise) — see ``roster_validation.validate_roster``.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``RosterValidationResult`` summarizing
+        coverage gaps (empty ``gaps`` and ``is_fully_staffed=True`` when the
+        roster fully covers every process); ``404`` if the team is not found.
+    Invariants: none — a read-only check, no roster or process state changes.
+    """
     from agent_team_studio.agentic_team_provisioning.roster_validation import validate_roster
 
     team = _store.get_team(team_id)
