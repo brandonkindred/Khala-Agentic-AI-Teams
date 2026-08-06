@@ -1106,7 +1106,7 @@ def update_team_form_record(
 ):
     """Update an existing form record."""
     infra = _get_infra_or_404(team_id)
-    if not infra.form_store.update_record(record_id, req.data):
+    if not infra.form_store.update_record(form_key, record_id, req.data):
         raise HTTPException(status_code=404, detail="Record not found")
     record = infra.form_store.get_record(record_id)
     if not record:
@@ -1118,7 +1118,7 @@ def update_team_form_record(
 def delete_team_form_record(team_id: str, form_key: str, record_id: str):
     """Delete a form record."""
     infra = _get_infra_or_404(team_id)
-    if not infra.form_store.delete_record(record_id):
+    if not infra.form_store.delete_record(form_key, record_id):
         raise HTTPException(status_code=404, detail="Record not found")
 
 
