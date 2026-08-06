@@ -894,6 +894,13 @@ def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
 
     assert resp.status_code == 200  # not a 500
     thread_ctor.assert_called_once()  # fell back to the thread path
+    thread_ctor.return_value.start.assert_called_once()
+    _, kwargs = thread_ctor.call_args
+    assert kwargs["target"] is api_main._run_backtest_background
+    args = kwargs["args"]
+    assert args[0] == resp.json()["job_id"]
+    assert args[1] is strat
+    assert args[3] == "agent-1"
 
 
 def test_rehydrate_active_run_offset_repopulates_from_job_store(monkeypatch) -> None:
