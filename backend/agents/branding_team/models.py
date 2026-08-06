@@ -436,7 +436,7 @@ class BrandStoryOutput(BaseModel):
 
     brand_story: str = Field(min_length=1)
     hero_narrative: str = Field(min_length=1)
-    boilerplate_variants: List[str] = Field(min_length=3, max_length=3)
+    boilerplate_variants: List[NonEmptyStr] = Field(min_length=3, max_length=3)
 
 
 class BrandArchetypesOutput(BrandStoryOutput):
