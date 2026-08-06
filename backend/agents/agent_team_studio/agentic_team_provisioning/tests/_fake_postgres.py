@@ -248,7 +248,9 @@ def _dispatch() -> DispatchTable:
         cur.rowcount = 1
 
     def match_insert_team_agent(norm: str) -> bool:
-        return norm.startswith("insert into agentic_team_agents")
+        # Exclude ON CONFLICT upserts so this stays mutually exclusive with
+        # match_upsert_team_agent even if dispatch order changes.
+        return norm.startswith("insert into agentic_team_agents") and "on conflict" not in norm
 
     def handle_insert_team_agent(cur: FakeCursor, params: tuple) -> None:
         team_id, agent_name, data_json, created_at, updated_at = params
