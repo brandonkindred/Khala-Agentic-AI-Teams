@@ -15,6 +15,7 @@ dict and the ``_get_lab_run_job_client`` shim:
 * ``get_strategy_lab_run_status`` — terminal-status reconciliation +
   load-from-job-service fallback.
 * ``stream_strategy_lab_run`` — terminal-state short-circuit + 404.
+* ``stream_strategy_lab_run`` — async_lock regression (no threading-lock stall).
 
 Every test patches the JobService shim and the Temporal dispatch so no real
 strategy-lab cycles execute.
@@ -22,6 +23,8 @@ strategy-lab cycles execute.
 
 from __future__ import annotations
 
+import inspect
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -236,7 +239,9 @@ def test_no_active_run_locked_raises_409_when_running_entry_present(
 
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_active_runs", {"run-1": {"run_id": "run-1", "status": "running"}})
+    monkeypatch.setattr(
+        api_main, "_active_runs", {"run-1": {"run_id": "run-1", "status": "running"}}
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         api_main._no_active_run_locked()
@@ -361,7 +366,12 @@ def test_run_strategy_lab_cleans_up_active_runs_when_persist_fails(
     with pytest.raises(RuntimeError, match="job service unreachable"):
         api_client.post(
             "/strategy-lab/run",
-            json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+            json={
+                "batch_size": 2,
+                "batch_count": 1,
+                "max_parallel": 1,
+                "paper_trading_enabled": False,
+            },
         )
 
     # No orphaned entry left behind blocking future runs.
@@ -475,7 +485,9 @@ def test_resume_strategy_lab_run_carries_forward_tracker_merge_error_count(
     api_main._active_runs["run-h"] = _resumable_state(
         "run-h",
         errored_cycles=3,
-        errored_details=[{"cycle_index": 1, "error": "merge boom", "reason": "tracker_merge_failed"}],
+        errored_details=[
+            {"cycle_index": 1, "error": "merge boom", "reason": "tracker_merge_failed"}
+        ],
         tracker_merge_error_count=3,
     )
     resp = api_client.post("/strategy-lab/runs/run-h/resume")
@@ -721,7 +733,9 @@ def test_resume_strategy_lab_run_returns_409_when_transition_lock_held(
     run_id = "run-lock-held-resume"
     api_main._active_runs[run_id] = _resumable_state(run_id)
     dispatch_calls: List[Any] = []
-    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", lambda *a, **k: dispatch_calls.append(a))
+    monkeypatch.setattr(
+        api_main, "_dispatch_strategy_lab_run", lambda *a, **k: dispatch_calls.append(a)
+    )
 
     held_lock = _run_state.acquire_run_transition_lock(run_id)
     assert held_lock is not None
@@ -799,7 +813,9 @@ def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
     import shared.temporal
 
     monkeypatch.setattr(
-        shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: terminate_calls.append(a)
+        shared.temporal,
+        "terminate_and_await_workflow_sync",
+        lambda *a, **k: terminate_calls.append(a),
     )
 
     held_lock = _run_state.acquire_run_transition_lock(run_id)
@@ -958,7 +974,9 @@ def test_restart_strategy_lab_run_serializes_concurrent_restarts_for_same_run_id
     thread_a = threading.Thread(target=_call_a)
     thread_a.start()
     try:
-        assert entered.wait(timeout=5.0), "request A never entered terminate_and_await_workflow_sync"
+        assert entered.wait(timeout=5.0), (
+            "request A never entered terminate_and_await_workflow_sync"
+        )
 
         # Request B races in while A still holds the transition lock inside
         # the (stubbed) blocking termination call.
@@ -1310,7 +1328,11 @@ def test_list_strategy_lab_jobs_one_malformed_persisted_record_does_not_drop_the
             {
                 "job_id": "persisted-good-1",
                 "status": "completed",
-                "data": {"started_at": "2024-01-01T00:00:00Z", "total_cycles": 2, "completed_cycles": 2},
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 2,
+                    "completed_cycles": 2,
+                },
             },
             # A non-string job_id fails InvestmentJobSummary's `job_id: str`
             # validation -- a stand-in for a genuinely malformed record.
@@ -1318,7 +1340,11 @@ def test_list_strategy_lab_jobs_one_malformed_persisted_record_does_not_drop_the
             {
                 "job_id": "persisted-good-2",
                 "status": "completed",
-                "data": {"started_at": "2024-01-02T00:00:00Z", "total_cycles": 1, "completed_cycles": 1},
+                "data": {
+                    "started_at": "2024-01-02T00:00:00Z",
+                    "total_cycles": 1,
+                    "completed_cycles": 1,
+                },
             },
         ]
     )
@@ -2172,6 +2198,115 @@ def test_stream_strategy_lab_run_terminal_short_circuit_completed_with_errors(
     assert "done" in body
 
 
+def test_stream_strategy_lab_run_source_uses_async_lock() -> None:
+    """Guard the three ``_active_runs`` sites against regressing to ``with _lock:``.
+
+    Preconditions:
+        - ``stream_strategy_lab_run`` is defined on ``investment_team.api.main``.
+
+    Postconditions:
+        - Source contains ``async with _async_lock`` and no ``with _lock:``.
+    """
+    from investment_team.api import main as api_main
+
+    src = inspect.getsource(api_main.stream_strategy_lab_run)
+    assert "async with _async_lock" in src
+    assert "with _lock:" not in src
+
+
+def test_stream_strategy_lab_run_does_not_block_on_threading_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_active_runs`` reads on the SSE path must not wait on threading ``_lock``.
+
+    Holds the process-wide threading lock on the test thread and drives the
+    live stream coroutine on a worker thread. If connect-time / snapshot reads
+    still used ``with _lock:``, the worker would block until join timeout.
+    ``_reconcile_run_progress`` is stubbed so a held ``_lock`` cannot stall via
+    that helper's own lock acquisition — this isolates the three sites in
+    ``stream_strategy_lab_run`` itself.
+
+    Preconditions:
+        - An in-memory non-terminal run exists; the event bus is faked with a
+          terminal ``complete`` already queued.
+
+    Postconditions:
+        - The worker finishes within the join timeout and the streamed body
+          includes snapshot + complete + done.
+    """
+    import asyncio
+    from collections import deque
+
+    from investment_team.api import job_event_bus
+    from investment_team.api import main as api_main
+
+    run_id = "stream-async-lock"
+    monkeypatch.setitem(
+        api_main._active_runs,
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2024-01-01T00:00:00Z",
+            "total_cycles": 1,
+            "completed_cycles": 0,
+        },
+    )
+    monkeypatch.setattr(api_main, "_reconcile_run_progress", lambda rid: None)
+
+    pre_events = deque([{"type": "complete", "summary": "ok"}])
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = pre_events
+            self.closed = False
+
+        def touch(self) -> None:
+            pass
+
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
+
+    result: Dict[str, Any] = {}
+    errors: List[BaseException] = []
+
+    def _drive() -> None:
+        async def _consume() -> str:
+            resp = await api_main.stream_strategy_lab_run(run_id)
+            chunks: List[str] = []
+            async for chunk in resp.body_iterator:
+                text = chunk if isinstance(chunk, str) else chunk.decode()
+                chunks.append(text)
+                joined = "".join(chunks)
+                if '"type": "done"' in joined or '"type":"done"' in joined:
+                    return joined
+            return "".join(chunks)
+
+        try:
+            result["body"] = asyncio.run(_consume())
+        except BaseException as exc:  # noqa: BLE001 — surface to joining thread
+            errors.append(exc)
+
+    assert api_main._lock.acquire(blocking=False)
+    worker = threading.Thread(target=_drive, name="sse-while-threading-lock-held")
+    try:
+        worker.start()
+        worker.join(timeout=2.0)
+        assert not worker.is_alive(), (
+            "stream_strategy_lab_run blocked on threading _lock while it was held; "
+            "expected _async_lock so SSE _active_runs reads can proceed"
+        )
+        assert not errors, f"worker raised: {errors!r}"
+        body = result["body"]
+        assert '"type": "snapshot"' in body
+        assert '"type": "complete"' in body
+        assert '"type": "done"' in body
+    finally:
+        api_main._lock.release()
+        if worker.is_alive():
+            worker.join(timeout=2.0)
+
+
 # ---------------------------------------------------------------------------
 # stream_strategy_lab_run — active (non-terminal) event_generator path
 # ---------------------------------------------------------------------------
@@ -2382,7 +2517,9 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
 
     segments = [s for s in body.split("\n\n") if s.strip()]
     snapshot_seg = next(s for s in segments if '"type": "snapshot"' in s)
-    data_lines = [line[len("data: ") :] for line in snapshot_seg.splitlines() if line.startswith("data: ")]
+    data_lines = [
+        line[len("data: ") :] for line in snapshot_seg.splitlines() if line.startswith("data: ")
+    ]
     snapshot = json.loads("\n".join(data_lines))
     assert snapshot["completed_cycles"] == 6
     assert snapshot["skipped_cycles"] == 1
