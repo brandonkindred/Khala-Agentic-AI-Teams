@@ -1516,8 +1516,9 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         check, unlike ``promotion_decision``). Raises ``HTTPException(503)``
         when Temporal is disabled/unavailable; on any other workflow
         failure, raises the ``HTTPException`` that
-        ``_translate_advisory_failure`` maps it to. On success, returns the
-        generated ``InvestmentCommitteeMemo``.
+        ``_translate_advisory_failure`` maps it to. Raises
+        ``HTTPException(502)`` when the advisory result lacks a ``memo``
+        payload. On success, returns the generated ``InvestmentCommitteeMemo``.
     """
     result = _execute_advisory(
         "committee_memo",
@@ -1529,7 +1530,11 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(result["memo"]))
+    memo_data = result.get("memo")
+    if not memo_data:
+        logger.error("committee_memo activity returned no memo: %r", result)
+        raise HTTPException(status_code=502, detail="Memo generation result is missing")
+    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(memo_data))
 
 
 # ---------------------------------------------------------------------------
