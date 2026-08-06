@@ -1029,6 +1029,39 @@ def test_restart_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fai
     assert api_main._active_runs["run-restart-revalidate-fail"]["status"] == "failed"
 
 
+def test_restart_strategy_lab_run_returns_503_when_persisting_reset_state_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """_persist_run_state is documented to propagate job-service failures
+    uncaught rather than swallow them -- restart's write of the optimistic
+    reset state must translate that into the same documented 503 every
+    other job-service failure in this function produces, and mark the run
+    "failed" (state was already written in-memory by this point) rather
+    than leak a raw 500 or leave the run wedged "running" with no durably
+    persisted/dispatched workflow."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-restart-persist-fail"] = {
+        "run_id": "run-restart-persist-fail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-persist-fail", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    def _persist_raises(*args, **kwargs):
+        raise RuntimeError("job service down")
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _persist_raises)
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-persist-fail/restart")
+
+    assert resp.status_code == 503
+    assert "persist" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-restart-persist-fail"]["status"] == "failed"
+
+
 def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -2542,6 +2575,30 @@ def test_get_strategy_lab_run_status_loads_from_job_service_when_absent(
     resp = api_client.get("/strategy-lab/runs/loaded/status")
     body = resp.json()
     assert body["status"] == "completed"
+
+
+def test_get_strategy_lab_run_status_loads_generation_from_job_service_when_absent(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The job-service fallback path (no in-memory entry) must also carry the
+    persisted generation through to the response, not just the in-memory
+    path covered by test_get_strategy_lab_run_status_includes_generation."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs.clear()
+    monkeypatch.setattr(
+        api_main,
+        "_load_run_from_job_service",
+        lambda rid: {
+            "run_id": rid,
+            "status": "completed",
+            "started_at": "2024-01-01T00:00:00Z",
+            "total_cycles": 1,
+            "generation": 7,
+        },
+    )
+    resp = api_client.get("/strategy-lab/runs/loaded/status")
+    assert resp.json()["generation"] == 7
 
 
 # ---------------------------------------------------------------------------

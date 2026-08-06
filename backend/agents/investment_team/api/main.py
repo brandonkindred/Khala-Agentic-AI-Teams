@@ -2468,16 +2468,18 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
           fencing has since superseded.
         - Skips the write entirely (a no-op, not an error) when the durable
           generation has already advanced past this ``state`` snapshot's
-          generation: excluding ``"generation"`` from the write protects the
-          fencing token itself, but ``status``/``error``/``current_cycle``
-          are still written unconditionally otherwise — a stale write from
-          this call could mark a legitimately newer, already-dispatched
-          incarnation "failed" out from under it, which a still-running
-          workflow would observe (via ``strategy_lab_external_terminal_status``)
-          and abort itself over. A durable-read failure here is treated as
-          "can't confirm a newer generation exists" and does not block the
-          write (this function is documented never to raise; the write it
-          guards is itself best-effort).
+          generation — a stale write from this call could otherwise mark a
+          legitimately newer, already-dispatched incarnation "failed" out
+          from under it, which a still-running workflow would observe (via
+          ``strategy_lab_external_terminal_status``) and abort itself over.
+          Otherwise (the durable generation has NOT advanced), the write
+          proceeds: ``status``/``error``/``current_cycle`` are written
+          unconditionally, while ``"generation"`` itself is excluded from
+          the write to protect the fencing token (see the bullet above). A
+          durable-read failure while checking for a newer generation is
+          treated as "can't confirm a newer generation exists" and does not
+          block the write (this function is documented never to raise; the
+          write it guards is itself best-effort).
         - Also skips the write (a no-op) if, after re-acquiring the lock to
           perform the write, the run's in-memory generation no longer
           matches the generation observed at the start of this call: a
@@ -2602,6 +2604,16 @@ def _dispatch_strategy_lab_run(
           path is not thread-free, only free of any *new* Temporal dispatch.
     """
     try:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+    except ImportError:
+        # If temporalio itself is missing, ``_require_temporal()``/the dispatch
+        # below will fail anyway; this bare `()` just ensures the isinstance
+        # check further down can never itself raise mid-exception-handling and
+        # mask the real failure behind an unwrapped ImportError instead of the
+        # documented HTTPException(503).
+        WorkflowAlreadyStartedError = ()  # type: ignore[assignment]
+
+    try:
         _require_temporal()
         from investment_team.strategy_lab.temporal.start_workflow import (
             start_strategy_lab_batch_workflow,
@@ -2609,8 +2621,6 @@ def _dispatch_strategy_lab_run(
 
         start_strategy_lab_batch_workflow(run_id, request, generation)
     except Exception as exc:
-        from temporalio.exceptions import WorkflowAlreadyStartedError
-
         if isinstance(exc, WorkflowAlreadyStartedError):
             if allow_already_started:
                 # The durable workflow for this run_id is already running
@@ -3582,17 +3592,19 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           back in this case, see Postconditions).
         - ``HTTPException`` 503: Temporal is disabled/unavailable, the prior
           execution couldn't be resolved due to a Temporal-side error,
-          minting the new generation failed, or the pre-dispatch
-          revalidation read of it failed (job service unavailable in any
-          case). "Minting failed" covers both ways ``apply_and_get`` can
-          fail: it raises on a transport error, or returns a falsy value
-          when the job no longer exists in the job service — the latter
-          also 503s rather than some other status, since the prior workflow
-          was already confirmed terminated above and the run cannot safely
-          be left without a fencing generation. The revalidation failure
-          additionally marks the run ``"failed"`` (state was already written
-          by this point, so leaving it ``"running"`` with no workflow ever
-          dispatched would wedge it).
+          minting the new generation failed, persisting the optimistic reset
+          state failed, or the pre-dispatch revalidation read of the
+          generation failed (job service unavailable in any case). "Minting
+          failed" covers both ways ``apply_and_get`` can fail: it raises on a
+          transport error, or returns a falsy value when the job no longer
+          exists in the job service — the latter also 503s rather than some
+          other status, since the prior workflow was already confirmed
+          terminated above and the run cannot safely be left without a
+          fencing generation. The persist-failure and revalidation-failure
+          cases both additionally mark the run ``"failed"`` (state was
+          already written in-memory by this point, so leaving it
+          ``"running"`` with no durably-persisted/dispatched workflow would
+          wedge it).
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
@@ -3802,7 +3814,21 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # legitimately newer, already-running incarnation -- the exact
         # regression the rollback path below already guards against for its
         # own write; this is the same guard for the non-collision path.
-        _persist_run_state(run_id, restarted_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+        try:
+            _persist_run_state(run_id, restarted_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+        except Exception as exc:
+            # _persist_run_state is documented to propagate job-service
+            # failures uncaught rather than swallow them -- this call site
+            # must translate that into the same documented 503 every other
+            # job-service failure in this function produces, not let it
+            # escape as a raw 500. _fail_strategy_lab_run is itself
+            # best-effort/never-raises, so it's safe to call even though the
+            # durable write we're reacting to just failed.
+            _fail_strategy_lab_run(run_id, f"Failed to persist restarted run state: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to persist restarted run state; job service unavailable.",
+            ) from exc
 
         # Revalidate the generation immediately before dispatch: `new_generation`
         # above is a snapshot from this restart's own mint, and a DIFFERENT
