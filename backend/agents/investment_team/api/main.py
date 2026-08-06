@@ -2418,14 +2418,21 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
     Postconditions:
         - Returns ``True`` iff the workflow was started — in which case the
           caller must NOT also run its thread path. Returns ``False`` when
-          Temporal is disabled/unavailable or the dispatch raised; the failure
-          is logged. Never raises.
+          Temporal is disabled/unavailable, the enablement check itself
+          raises, or the dispatch raised; every failure case is logged
+          (except the expected "Temporal support not installed" ``ImportError``,
+          which is silent). Never raises.
     """
     try:
         from shared.temporal import is_temporal_enabled
+
+        temporal_enabled = is_temporal_enabled()
     except ImportError:
         return False
-    if not is_temporal_enabled():
+    except Exception:
+        logger.exception("Temporal enablement check failed; falling back to in-process execution")
+        return False
+    if not temporal_enabled:
         return False
     try:
         starter()
