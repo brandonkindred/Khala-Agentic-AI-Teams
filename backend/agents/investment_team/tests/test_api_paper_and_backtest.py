@@ -286,6 +286,130 @@ def test_run_paper_trading_background_marks_failed_on_empty_market_data(
     assert "Failed to fetch market data" in (updated.error or "")
 
 
+def _tripwire_market_data_service(monkeypatch: pytest.MonkeyPatch) -> List[bool]:
+    """Track whether the worker ever reached MarketDataService construction —
+    used to prove the entry-precondition check returns before any of the
+    expensive work (market-data fetch, sandbox execution) starts.
+
+    Returns the (initially empty) list of construction attempts; a raised
+    AssertionError alone isn't reliable here since it would just be caught
+    and logged by the worker's own top-level crash handler rather than
+    failing the test, so this records the attempt explicitly instead.
+    """
+    import investment_team.market_data_service as mds
+
+    calls: List[bool] = []
+
+    def _track_and_raise():
+        calls.append(True)
+        raise AssertionError("MarketDataService must not be constructed")
+
+    monkeypatch.setattr(mds, "MarketDataService", _track_and_raise)
+    return calls
+
+
+def test_run_paper_trading_background_returns_early_when_session_missing(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The documented precondition (session exists in _paper_trading_sessions
+    with status RUNNING) is validated at the top of the worker — a missing
+    session returns early instead of doing 2-3 minutes of work for a session
+    that was never there."""
+    from investment_team.api import main as api_main
+
+    strategy, bt = _step_strategy_and_record()
+    calls = _tripwire_market_data_service(monkeypatch)
+
+    # Must not raise; "pt-missing" was never inserted into the store.
+    api_main._run_paper_trading_background(
+        "pt-missing",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    assert calls == [], "worker must return before constructing MarketDataService"
+    assert "pt-missing" not in api_main._paper_trading_sessions
+
+
+def test_run_paper_trading_background_returns_early_when_session_not_running(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A session that exists but isn't RUNNING (e.g. something else already
+    moved it to a terminal state before the worker started) returns early
+    rather than clobbering it after 2-3 minutes of wasted work."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy, bt = _step_strategy_and_record()
+    already_failed = PaperTradingSession(
+        session_id="pt-not-running",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        started_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T00:01:00Z",
+        error="pre-existing failure",
+    )
+    api_main._paper_trading_sessions["pt-not-running"] = already_failed
+    calls = _tripwire_market_data_service(monkeypatch)
+
+    api_main._run_paper_trading_background(
+        "pt-not-running",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    assert calls == [], "worker must return before constructing MarketDataService"
+    persisted = api_main._paper_trading_sessions.get("pt-not-running")
+    assert persisted.status == PaperTradingStatus.FAILED
+    assert persisted.error == "pre-existing failure"
+
+
+def test_run_paper_trading_background_returns_early_when_session_unparseable(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An unparseable persisted record at worker start returns early (logged)
+    rather than raising or doing wasted work."""
+    from investment_team.api import main as api_main
+
+    strategy, bt = _step_strategy_and_record()
+    api_main._paper_trading_sessions["pt-corrupt-start"] = {"session_id": "pt-corrupt-start"}
+    calls = _tripwire_market_data_service(monkeypatch)
+
+    # Must not raise.
+    api_main._run_paper_trading_background(
+        "pt-corrupt-start",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    assert calls == [], "worker must return before constructing MarketDataService"
+    # Left untouched: the corrupt record could not be re-parsed.
+    assert api_main._paper_trading_sessions.get("pt-corrupt-start") == {
+        "session_id": "pt-corrupt-start"
+    }
+
+
 def test_run_paper_trading_background_crashes_into_failed(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
