@@ -539,9 +539,19 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         legacy single-batch record predating multi-batch support, so it falls
         back to ``total_cycles`` (the whole run was one batch) rather than to
         ``1`` (which would misreport it as ``total_cycles`` batches of size 1).
-        Pure: ``state`` is not mutated.
+        Pure: ``state`` is not mutated. A ``current_cycle`` that is not a
+        dict, or is a dict whose fields fail ``StrategyLabCycleProgress``
+        validation, degrades to ``None`` instead of raising -- ``state`` can
+        be job-service data reconciled with no shape check (see
+        ``_reconcile_run_progress``), so it is not assumed well-formed.
     """
     cc = state.get("current_cycle")
+    current_cycle: Optional[StrategyLabCycleProgress] = None
+    if isinstance(cc, dict):
+        try:
+            current_cycle = StrategyLabCycleProgress(**cc)
+        except ValidationError:
+            current_cycle = None
     return StrategyLabRunStatusResponse(
         run_id=state["run_id"],
         status=state.get("status", "unknown"),
@@ -552,7 +562,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         errored_cycles=state.get("errored_cycles", 0),
         errored_details=state.get("errored_details", []),
         tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
-        current_cycle=StrategyLabCycleProgress(**cc) if cc else None,
+        current_cycle=current_cycle,
         completed_record_ids=state.get("completed_record_ids", []),
         error=state.get("error"),
         batch_size=state.get("batch_size", state.get("total_cycles", 1)),
