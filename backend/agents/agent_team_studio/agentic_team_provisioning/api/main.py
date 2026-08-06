@@ -1364,7 +1364,13 @@ def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
 
 @app.get("/teams/{team_id}/test-chat/sessions", response_model=List[TestChatSession])
 def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
-    """List chat test sessions for a team, optionally filtered by agent."""
+    """List chat test sessions for a team, optionally filtered by agent.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``TestChatSession`` for each session belonging
+        to ``team_id`` (filtered to ``agent_name`` when given); ``404`` if
+        ``team_id`` is unknown, consistent with the sibling test-chat endpoints.
+    """
     _get_team_or_404(team_id)
     rows = _test_store.list_chat_sessions(team_id, agent_name=agent_name)
     return [TestChatSession(**r) for r in rows]
@@ -1372,7 +1378,17 @@ def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
 
 @app.get("/teams/{team_id}/test-chat/sessions/{session_id}", response_model=TestChatSessionDetail)
 def get_test_chat_session(team_id: str, session_id: str):
-    """Get a chat session with full message history and suggested prompts."""
+    """Get a chat session with full message history and suggested prompts.
+
+    Preconditions: ``team_id`` and ``session_id`` are non-empty strings.
+    Postconditions: ``200`` with the session, its messages, and starter prompts
+        (only generated when the session has no messages yet); ``404`` if the
+        session doesn't exist or belongs to a different team. If starter-prompt
+        generation raises a 404 because the session's agent isn't on the
+        roster, the prompts list is empty rather than failing the request; any
+        other failure (e.g. a registry outage) propagates instead of being
+        swallowed.
+    """
     session_row = _test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1432,9 +1448,16 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     """Send a message to an agent and get a synchronous response.
 
     The full conversation history is sent to the agent for multi-turn context.
-    The user and assistant messages are persisted together as a single turn
-    only after the agent call succeeds — a failed invocation raises 502 and
-    leaves no orphaned user message for a retry to duplicate.
+
+    Preconditions: ``team_id``/``session_id`` refer to an existing session;
+        ``req.content`` is non-empty (enforced by the request model).
+    Postconditions: ``200`` with the session and its full message list,
+        including the new user/assistant turn; ``404`` if the session is
+        unknown or belongs to a different team; ``502`` if the agent
+        invocation fails. The user and assistant messages are persisted
+        together as a single turn only after the agent call succeeds, so a
+        failed invocation leaves no orphaned user message for a retry to
+        duplicate.
     """
     session_row = _test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
