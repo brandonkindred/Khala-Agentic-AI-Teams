@@ -217,6 +217,69 @@ def test_stub_lab_client_get_job_returns_copy_for_known_id() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _no_active_run_locked
+# ---------------------------------------------------------------------------
+
+
+def test_no_active_run_locked_noop_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No entries at all -- must not raise."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {})
+    api_main._no_active_run_locked()  # must not raise
+
+
+def test_no_active_run_locked_raises_409_when_running_entry_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {"run-1": {"run_id": "run-1", "status": "running"}})
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_main._no_active_run_locked()
+    assert exc_info.value.status_code == 409
+
+
+def test_no_active_run_locked_tolerates_entry_missing_status_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An _active_runs entry lacking the "status" key entirely must not raise
+    KeyError -- it's treated as not-running (via .get()'s default), so this
+    conflict guard still works instead of itself crashing into a 500."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {"malformed": {"run_id": "malformed"}})
+
+    api_main._no_active_run_locked()  # must not raise KeyError
+
+
+def test_no_active_run_locked_detects_running_entry_alongside_malformed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed sibling entry (missing "status") must not mask a genuine
+    running entry -- the guard still correctly raises 409 for it."""
+    from fastapi import HTTPException
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_active_runs",
+        {
+            "malformed": {"run_id": "malformed"},
+            "run-1": {"run_id": "run-1", "status": "running"},
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_main._no_active_run_locked()
+    assert exc_info.value.status_code == 409
+
+
+# ---------------------------------------------------------------------------
 # run_strategy_lab
 # ---------------------------------------------------------------------------
 

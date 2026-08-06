@@ -2584,10 +2584,11 @@ def _no_active_run_locked() -> None:
         - Returns ``None`` when no entry in ``_active_runs`` has status
           ``"running"``; otherwise raises ``HTTPException(409)``. Does not
           mutate ``_active_runs`` and does not itself acquire or release
-          ``_lock``.
+          ``_lock``. An entry missing a ``"status"`` key is treated as not
+          running (``.get()`` default) rather than raising ``KeyError`` --
+          a malformed entry must not defeat this conflict guard.
     """
-    active = [r for r in _active_runs.values() if r["status"] == "running"]
-    if active:
+    if any(r.get("status") == "running" for r in _active_runs.values()):
         raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
 
 
