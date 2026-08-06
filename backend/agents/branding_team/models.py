@@ -755,9 +755,9 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated cardinalities.
     """
 
-    brand_experience_principles: List[str] = Field(min_length=3, max_length=5)
-    signature_moments: List[str] = Field(min_length=3, max_length=5)
-    sensory_elements: List[str] = Field(min_length=2, max_length=4)
+    brand_experience_principles: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    signature_moments: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    sensory_elements: List[NonEmptyStr] = Field(min_length=2, max_length=4)
 
 
 class BrandArchitectureRuleOutput(BaseModel):
