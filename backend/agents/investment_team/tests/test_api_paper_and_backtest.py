@@ -816,6 +816,78 @@ def test_stop_rpc_not_found_returns_fresh_state_not_stale_snapshot(
     assert body["session"]["current_capital"] == 123_456.0
 
 
+def test_stop_returns_404_when_post_signal_record_unparseable(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A parse failure on the post-signal re-read (concurrent corruption or a
+    serialization issue) must not raise an unhandled exception after the
+    signal has already been sent — apply the same parse guard used for the
+    missing-record case just above it, reporting the session as unavailable
+    (404) instead."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-corrupt-after-signal"] = _live_session(
+        "pt-corrupt-after-signal", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _corrupt_during_signal(session_id):
+        # Simulate concurrent corruption (e.g. a partial/failed write) racing
+        # with the in-flight stop signal.
+        api_main._paper_trading_sessions[session_id] = {"session_id": session_id}
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _corrupt_during_signal)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-corrupt-after-signal/stop")
+
+    assert resp.status_code == 404
+
+
+def test_stop_rpc_not_found_returns_404_when_post_signal_record_unparseable(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Same parse guard on the RPCError(NOT_FOUND) branch's post-signal
+    re-read."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-race-corrupt"] = _live_session(
+        "pt-race-corrupt", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _corrupt_then_not_found(session_id):
+        api_main._paper_trading_sessions[session_id] = {"session_id": session_id}
+        raise RPCError("workflow execution already completed", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _corrupt_then_not_found)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-race-corrupt/stop")
+
+    assert resp.status_code == 404
+
+
 def test_stop_surfaces_genuine_signal_delivery_failure(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

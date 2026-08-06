@@ -5128,7 +5128,19 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
                         status_code=404,
                         detail=f"Paper trading session '{session_id}' not found.",
                     ) from exc
-                fresh_session = PaperTradingSession.parse_persisted(fresh_raw)
+                try:
+                    fresh_session = PaperTradingSession.parse_persisted(fresh_raw)
+                except Exception as parse_exc:
+                    logger.warning(
+                        "Stop signal for paper-trading session %s: persisted record "
+                        "could not be re-parsed after a NOT_FOUND signal response.",
+                        session_id,
+                        exc_info=True,
+                    )
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Paper trading session '{session_id}' not found.",
+                    ) from parse_exc
             return PaperTradingResponse(
                 session=fresh_session,
                 message="Session already finished; nothing to stop.",
@@ -5157,7 +5169,23 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
             raise HTTPException(
                 status_code=404, detail=f"Paper trading session '{session_id}' not found."
             )
-        fresh_session = PaperTradingSession.parse_persisted(fresh_raw)
+        try:
+            fresh_session = PaperTradingSession.parse_persisted(fresh_raw)
+        except Exception as exc:
+            # Concurrent corruption or a serialization issue here must not
+            # raise an unhandled exception after the signal has already been
+            # sent — apply the same parse guard the missing-record branch
+            # above already gets, reporting the session as unavailable
+            # rather than 500ing on a stop request that already succeeded.
+            logger.warning(
+                "Stop signal delivered for paper-trading session %s, but the "
+                "persisted record could not be re-parsed afterward.",
+                session_id,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=404, detail=f"Paper trading session '{session_id}' not found."
+            ) from exc
         fresh_session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
         _paper_trading_sessions[session_id] = fresh_session
     return PaperTradingResponse(
