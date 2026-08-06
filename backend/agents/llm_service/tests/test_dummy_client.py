@@ -28,6 +28,7 @@ from llm_service.clients.dummy import (
     _extract_name_from_hint,
     _last_user_text,
     _placeholder_slug,
+    is_dummy_llm_client_wrapped,
 )
 
 
@@ -657,6 +658,29 @@ def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelin
     for field in ("voice_principles", "style_dos", "style_donts", "editorial_quality_bar"):
         assert len(guidelines[field]) == 3
     assert "editorial_quality_bar" not in j
+
+
+def test_is_dummy_llm_client_wrapped_for_bare_client() -> None:
+    """A bare DummyLLMClient is detected directly."""
+    assert is_dummy_llm_client_wrapped(DummyLLMClient()) is True
+
+
+def test_is_dummy_llm_client_wrapped_for_non_dummy() -> None:
+    """A non-dummy client (or None) is not mistaken for a DummyLLMClient."""
+    assert is_dummy_llm_client_wrapped(object()) is False
+    assert is_dummy_llm_client_wrapped(None) is False
+
+
+def test_is_dummy_llm_client_wrapped_unwraps_client_attribute() -> None:
+    """A Strands ``LLMClientModel``-style wrapper exposing ``.client`` is unwrapped
+    so a DummyLLMClient reached through it is still detected."""
+
+    class _FakeWrapper:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+
+    assert is_dummy_llm_client_wrapped(_FakeWrapper(DummyLLMClient())) is True
+    assert is_dummy_llm_client_wrapped(_FakeWrapper(object())) is False
 
 
 # ---------------------------------------------------------------------------

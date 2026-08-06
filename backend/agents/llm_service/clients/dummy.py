@@ -2377,3 +2377,27 @@ class DummyLLMClient(LLMClient):
             # suite continues to hold.
             return json.dumps(data) if isinstance(data, dict) else str(data)
         return data
+
+
+def is_dummy_llm_client_wrapped(llm: Any) -> bool:
+    """True when ``llm`` is (or wraps) a :class:`DummyLLMClient`.
+
+    Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response
+    index, so callers fanning work out concurrently must detect one and fall
+    back to sequential execution instead (see
+    ``software_engineering_team.shared.v2_review._review_steps_run_sequentially``
+    and ``software_engineering_team.code_review_agent.coordinator._tail_passes_run_sequentially``,
+    the two call sites this helper was extracted from).
+
+    Production callers may pass a Strands ``LLMClientModel`` wrapper around a
+    real (or dummy) client, which survives various clone paths. A bare
+    ``isinstance(llm, DummyLLMClient)`` misses a dummy reached through that
+    wrapper, so this also checks ``llm.client``.
+
+    Preconditions: none -- ``llm`` may be any object, including ``None``.
+    Postconditions: returns ``True`` iff ``llm`` or ``llm.client`` is a
+    ``DummyLLMClient`` instance. Pure.
+    """
+    if isinstance(llm, DummyLLMClient):
+        return True
+    return isinstance(getattr(llm, "client", None), DummyLLMClient)
