@@ -1158,6 +1158,35 @@ existing narrative synthesis step in place of the per-chunk notes. Any setup
 or LLM failure is fail-safe: it is logged and yields an empty compliance
 note, never blocking or changing the rest of the review.
 
+**Measured token/cost delta.** Measured directly against the production
+prompt-construction code (`ChunkReviewAgent.run` for the per-chunk prompts,
+`synthesis._build_spec_compliance_framing`/`build_findings_digest` for the
+single dedicated pass) on a representative fixture: a ~15,880-character spec
+excerpt, 6 acceptance criteria, and an 8-issue post-dedupe finding list —
+close to ADR-010's own "~14K chars, 15 chunks" illustrative example. Prompt
+character counts (a ~4-chars/token rule of thumb converts these to an
+approximate token figure; the *relative* delta between modes is what
+matters, not the exact tokenizer):
+
+| Chunks | Per-chunk mode (chars) | Single-pass mode (chars) | Delta |
+|---|---|---|---|
+| 1  | 18,143  | 19,279 | single-pass sends **6.3% more** |
+| 2  | 36,286  | 20,968 | single-pass sends 42.2% less |
+| 5  | 90,715  | 26,035 | single-pass sends 71.3% less |
+| 15 | 272,160 | 42,940 | single-pass sends 84.2% less |
+| 30 | 544,350 | 68,320 | single-pass sends 87.4% less |
+
+The dedicated single-pass prompt has a fixed overhead (~17,590 chars in this
+fixture, independent of chunk count) from carrying the full spec/AC text plus
+the findings digest in one call. Below that fixed cost, single-pass mode
+*loses* — this refines ADR-010's Risks section, which estimated savings as
+merely "close to zero" on 1-2 chunk submissions; measured, a single-chunk
+submission is a small net loss, and the crossover to a real win happens
+between 1 and 2 chunks. Every submission with 2+ chunks measured here shows a
+net reduction, growing toward the fixed-overhead floor as chunk count rises.
+This is descriptive data for a future decision on the default, not a
+recommendation to flip it (deliberately out of scope here).
+
 ---
 
 ## Shared Infrastructure and Storage
