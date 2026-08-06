@@ -669,6 +669,42 @@ def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_
     assert run_state["status"] == "failed"
 
 
+def test_strategy_lab_dispatch_503_survives_workflow_already_started_error_import_failure(
+    monkeypatch, api_client
+) -> None:
+    """If importing ``WorkflowAlreadyStartedError`` itself fails (e.g. a
+    broken ``temporalio`` install), that ImportError must not mask the
+    dispatch failure it's meant to help classify -- the endpoint still 503s
+    instead of surfacing an unhandled ImportError.
+
+    Regression test for the bug where this import lived inside the dispatch
+    `except Exception` handler: an ImportError raised there would propagate
+    straight out of the except block, in place of the intended 503.
+    """
+    import sys
+
+    import shared.temporal
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    # Force `from temporalio.exceptions import WorkflowAlreadyStartedError` to
+    # raise ImportError, regardless of whether the real module is already
+    # cached -- the standard `sys.modules[name] = None` technique.
+    monkeypatch.setitem(sys.modules, "temporalio.exceptions", None)
+
+    def _boom(run_id, request):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _boom)
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 1, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+
+    assert resp.status_code == 503
+
+
 def test_strategy_lab_dispatch_treats_already_started_workflow_as_success(
     monkeypatch, api_client
 ) -> None:

@@ -148,6 +148,7 @@ from job_service_client import (
 )
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
+from shared.env_config import env_float
 from shared.sse import sse_job_stream_async, sse_line
 
 logging.basicConfig(level=logging.INFO)
@@ -2575,6 +2576,17 @@ def _dispatch_strategy_lab_run(
           ``HTTPException(503)``.
     """
     try:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+    except ImportError:  # pragma: no cover - temporalio always installed
+        # Import outside the dispatch try/except below (not inside its
+        # `except Exception`) so a hypothetical ImportError here can't mask
+        # the dispatch failure that block is meant to translate into a 503.
+        # `()` as an isinstance target always resolves False, so the
+        # WorkflowAlreadyStartedError branch below simply never matches --
+        # every dispatch failure then falls through to the generic 503 path.
+        WorkflowAlreadyStartedError = ()  # type: ignore[assignment]
+
+    try:
         _require_temporal()
         from investment_team.strategy_lab.temporal.start_workflow import (
             start_strategy_lab_batch_workflow,
@@ -2582,8 +2594,6 @@ def _dispatch_strategy_lab_run(
 
         start_strategy_lab_batch_workflow(run_id, request)
     except Exception as exc:
-        from temporalio.exceptions import WorkflowAlreadyStartedError
-
         if isinstance(exc, WorkflowAlreadyStartedError):
             if allow_already_started:
                 # The durable workflow for this run_id is already running
@@ -2793,15 +2803,24 @@ def _require_temporal() -> None:
         None.
     Postconditions:
         Returns ``None`` when Temporal is enabled; otherwise raises
-        ``HTTPException(503)``.
+        ``HTTPException(503)`` -- including when ``is_temporal_enabled()``
+        itself raises (e.g. a misconfigured Temporal client), which is
+        mapped to the same 503 rather than propagating as an unhandled 500.
     """
     try:
         from shared.temporal import is_temporal_enabled
+
+        temporal_enabled = is_temporal_enabled()
     except ImportError as exc:  # pragma: no cover - shared.temporal always present
         raise HTTPException(
             status_code=503, detail="Temporal support is unavailable for this endpoint."
         ) from exc
-    if not is_temporal_enabled():
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="This endpoint requires a running Temporal worker (TEMPORAL_ADDRESS unset).",
+        ) from exc
+    if not temporal_enabled:
         raise HTTPException(
             status_code=503,
             detail="This endpoint requires a running Temporal worker (TEMPORAL_ADDRESS unset).",
@@ -3054,14 +3073,21 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     """
     Return all strategy lab records, sorted newest-first.
     Filter by winning/losing with ?winning=true or ?winning=false.
+
+    Postconditions:
+        - ``winning_count``/``losing_count`` are computed from the same
+          (already-filtered, when ``winning`` is given) list as ``items``/
+          ``count``, so ``winning_count + losing_count == count`` always
+          holds -- a ``?winning=true`` request reports ``losing_count == 0``
+          rather than the unfiltered global losing count.
     """
     items = _snapshot_prior_records(reverse=True)
 
-    winning_count = sum(1 for r in items if r.is_winning)
-    losing_count = len(items) - winning_count
-
     if winning is not None:
         items = [r for r in items if r.is_winning == winning]
+
+    winning_count = sum(1 for r in items if r.is_winning)
+    losing_count = len(items) - winning_count
 
     return StrategyLabResultsResponse(
         items=items,
@@ -4327,13 +4353,21 @@ def _run_paper_trading_background(
     Postconditions:
         - On the success path, ``_paper_trading_sessions[session_id]`` is always written
           (COMPLETED or FAILED with ``completed_at`` set), which can recreate a concurrently
-          deleted session
+          deleted session — UNLESS the session is already terminal at write time (see below).
         - Import failures for ``MarketDataService``/``PaperTradingAgent`` (e.g. a missing
           dependency or circular import) are caught by the same handler as any other
           in-worker exception and also transition the session to FAILED
         - On the empty-data and exception paths, the terminal write runs only when the session
           entry still exists at write time; concurrent deletion (e.g. via
           ``DELETE /strategy-lab/records/{lab_record_id}``) then leaves no terminal record
+        - Every terminal write (empty-data, success, crash) first checks
+          ``_paper_trading_session_already_terminal`` and refuses to overwrite a
+          session that's already COMPLETED/FAILED (logged, not silently
+          skipped). This guards against a dispatch-failure-declared FAILED
+          session (``run_paper_trading``'s ``_fail_paper_trading_session`` call)
+          being clobbered by this worker landing late — e.g. an orphaned
+          Temporal workflow that the dispatch failure's best-effort stop
+          signal also failed to reach.
 
     Raises:
         - None. All failures, including import errors for the two lazily-imported
@@ -4363,6 +4397,14 @@ def _run_paper_trading_background(
 
         if not market_data:
             with _lock:
+                if _paper_trading_session_already_terminal(session_id):
+                    logger.warning(
+                        "Paper trade %s: session already terminal when the "
+                        "empty-market-data write was about to run; leaving it "
+                        "untouched (a concurrent writer already finalized it).",
+                        session_id,
+                    )
+                    return
                 raw = _paper_trading_sessions.get(session_id)
                 if raw is not None:
                     session = PaperTradingSession.parse_persisted(raw)
@@ -4405,14 +4447,22 @@ def _run_paper_trading_background(
         result_session.lab_record_id = lab_record_id
 
         with _lock:
-            _paper_trading_sessions[session_id] = result_session
-        logger.info(
-            "Paper trade %s: completed (status=%s, verdict=%s, trades=%d)",
-            session_id,
-            result_session.status,
-            result_session.verdict,
-            len(result_session.trades),
-        )
+            if _paper_trading_session_already_terminal(session_id):
+                logger.warning(
+                    "Paper trade %s: session already terminal when this worker's "
+                    "result was about to be written; discarding the result instead "
+                    "of clobbering it (a concurrent writer already finalized it).",
+                    session_id,
+                )
+            else:
+                _paper_trading_sessions[session_id] = result_session
+                logger.info(
+                    "Paper trade %s: completed (status=%s, verdict=%s, trades=%d)",
+                    session_id,
+                    result_session.status,
+                    result_session.verdict,
+                    len(result_session.trades),
+                )
     except Exception as exc:
         logger.exception("Paper trade %s: background worker crashed", session_id)
         # Nested try/except: parse_persisted() below can itself raise (e.g. a
@@ -4425,14 +4475,22 @@ def _run_paper_trading_background(
         # worker over a failure to report a failure.
         try:
             with _lock:
-                raw = _paper_trading_sessions.get(session_id)
-                if raw is not None:
-                    session = PaperTradingSession.parse_persisted(raw)
-                    session.status = PaperTradingStatus.FAILED
-                    session.error = f"Paper trading crashed: {exc}"
-                    session.divergence_analysis = f"Paper trading crashed: {exc}"
-                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                    _paper_trading_sessions[session_id] = session
+                if _paper_trading_session_already_terminal(session_id):
+                    logger.warning(
+                        "Paper trade %s: session already terminal when the crash "
+                        "handler's write was about to run; leaving it untouched "
+                        "(a concurrent writer already finalized it).",
+                        session_id,
+                    )
+                else:
+                    raw = _paper_trading_sessions.get(session_id)
+                    if raw is not None:
+                        session = PaperTradingSession.parse_persisted(raw)
+                        session.status = PaperTradingStatus.FAILED
+                        session.error = f"Paper trading crashed: {exc}"
+                        session.divergence_analysis = f"Paper trading crashed: {exc}"
+                        session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                        _paper_trading_sessions[session_id] = session
         except Exception:
             logger.exception(
                 "Paper trade %s: failed to persist FAILED status for the crashed "
@@ -4614,12 +4672,13 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         except Exception:
             # Best-effort: if the workflow really did start server-side despite
             # the client-side timeout, and this stop signal ALSO fails to
-            # deliver, it runs unsupervised — if it later reaches its own
-            # terminal state, that write can silently overwrite the ``failed``
-            # status set just below. No automatic reconciliation catches this
-            # narrow compound-failure case (the startup orphan sweep only
-            # covers a crashed process, not a live unreachable workflow); log
-            # so it's at least visible to operators instead of silent.
+            # deliver, it runs unsupervised. If it later reaches its own
+            # terminal state, that write no longer silently overwrites the
+            # ``failed`` status set just below — both background workers'
+            # terminal writes check _paper_trading_session_already_terminal
+            # first and refuse to clobber an already-terminal session. Still
+            # log here so the compound failure is visible to operators, not
+            # just silently absorbed.
             logger.warning(
                 "Best-effort stop signal for possibly-orphaned paper-trading "
                 "session %s failed to deliver; the session is marked failed but "
@@ -4681,6 +4740,41 @@ _ACTIVE_PT_STATES = {
 }
 
 
+def _paper_trading_session_already_terminal(session_id: str) -> bool:
+    """Whether the currently-persisted session for ``session_id`` is already
+    in a terminal status (``COMPLETED``/``FAILED``).
+
+    Guards every terminal-status write below against clobbering a session an
+    orphaned/delayed writer shouldn't be able to override — e.g. a dispatch
+    failure declares a session FAILED via ``_fail_paper_trading_session``
+    while its Temporal workflow may still be running server-side (the start
+    RPC and the best-effort stop signal both failed); if that orphaned
+    workflow later completes, its own terminal write must not silently
+    overwrite the FAILED status already recorded.
+
+    Preconditions:
+        - Caller holds ``_lock`` for the duration of both this check and
+          whatever conditional write it gates — checking without holding the
+          lock across both would let a concurrent writer land in between.
+    Postconditions:
+        - Returns ``False`` when no session is persisted for ``session_id``.
+        - Returns ``False`` when the persisted record fails to parse — an
+          unparseable record can't be confirmed terminal, and a well-formed
+          new terminal write is a strict improvement over leaving corrupt
+          data in place, so callers should proceed with their write.
+        - Otherwise returns whether the persisted status is not in
+          ``_ACTIVE_PT_STATES``.
+    """
+    raw = _paper_trading_sessions.get(session_id)
+    if raw is None:
+        return False
+    try:
+        session = PaperTradingSession.parse_persisted(raw)
+    except Exception:
+        return False
+    return session.status not in _ACTIVE_PT_STATES
+
+
 def _fail_paper_trading_session(session_id: str, error: str) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
@@ -4717,10 +4811,32 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
         _paper_trading_sessions[session_id] = session
 
 
-# Default fees used when the request omits explicit overrides. Sits at module
-# scope so tests can exercise the resolution logic directly.
+# Fallback values for the env vars below — also what a caller sees if the
+# operator hasn't set either var.
 _DEFAULT_TX_COST_BPS = 5.0
 _DEFAULT_SLIPPAGE_BPS = 2.0
+
+
+def _default_tx_cost_bps() -> float:
+    """Operator-tunable fallback ``transaction_cost_bps`` (basis points) used
+    when a paper-trading request omits an explicit override.
+
+    Read from ``INVESTMENT_DEFAULT_TX_COST_BPS`` (falls back to
+    ``_DEFAULT_TX_COST_BPS``) on every call rather than once at import time,
+    so operators can retune this business parameter without a redeploy.
+    """
+    return env_float("INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0)
+
+
+def _default_slippage_bps() -> float:
+    """Operator-tunable fallback ``slippage_bps`` (basis points) used when a
+    paper-trading request omits an explicit override.
+
+    Read from ``INVESTMENT_DEFAULT_SLIPPAGE_BPS`` (falls back to
+    ``_DEFAULT_SLIPPAGE_BPS``) on every call rather than once at import time,
+    so operators can retune this business parameter without a redeploy.
+    """
+    return env_float("INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0)
 
 
 def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
@@ -4733,9 +4849,9 @@ def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, fl
     tx = (
         request.transaction_cost_bps
         if request.transaction_cost_bps is not None
-        else _DEFAULT_TX_COST_BPS
+        else _default_tx_cost_bps()
     )
-    slip = request.slippage_bps if request.slippage_bps is not None else _DEFAULT_SLIPPAGE_BPS
+    slip = request.slippage_bps if request.slippage_bps is not None else _default_slippage_bps()
     return tx, slip
 
 
@@ -4749,6 +4865,14 @@ def _run_live_paper_trading_background(
 
     Resolves a provider, opens the live stream, drives ``TradingService``
     until termination, then writes the final ``PaperTradingSession``.
+
+    Postconditions:
+        Both the success and crash-handler terminal writes first check
+        ``_paper_trading_session_already_terminal`` and refuse to overwrite a
+        session that's already COMPLETED/FAILED (logged, not silently
+        skipped) — see ``_run_paper_trading_background``'s docstring for why
+        this guard exists (a dispatch-failure-declared FAILED session must
+        survive an orphaned workflow landing late).
 
     Raises:
         - None. All failures are caught and logged; the session is marked
@@ -4817,6 +4941,16 @@ def _run_live_paper_trading_background(
             if raw is None:
                 return
             session = PaperTradingSession.parse_persisted(raw)
+            if session.status not in _ACTIVE_PT_STATES:
+                logger.warning(
+                    "Live paper trade %s: session already terminal (%s) when this "
+                    "worker's result was about to be written; discarding the "
+                    "result instead of clobbering it (a concurrent writer already "
+                    "finalized it).",
+                    session_id,
+                    session.status,
+                )
+                return
             session.trades = run_result.trades
             session.fill_count = run_result.fill_count
             session.cutover_ts = run_result.cutover_ts
@@ -4861,13 +4995,21 @@ def _run_live_paper_trading_background(
         # worker over a failure to report a failure.
         try:
             with _lock:
-                raw = _paper_trading_sessions.get(session_id)
-                if raw is not None:
-                    session = PaperTradingSession.parse_persisted(raw)
-                    session.status = PaperTradingStatus.FAILED
-                    session.error = str(exc)
-                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                    _paper_trading_sessions[session_id] = session
+                if _paper_trading_session_already_terminal(session_id):
+                    logger.warning(
+                        "Live paper trade %s: session already terminal when the crash "
+                        "handler's write was about to run; leaving it untouched (a "
+                        "concurrent writer already finalized it).",
+                        session_id,
+                    )
+                else:
+                    raw = _paper_trading_sessions.get(session_id)
+                    if raw is not None:
+                        session = PaperTradingSession.parse_persisted(raw)
+                        session.status = PaperTradingStatus.FAILED
+                        session.error = str(exc)
+                        session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                        _paper_trading_sessions[session_id] = session
         except Exception:
             logger.exception(
                 "Live paper trade %s: failed to persist FAILED status for the "
