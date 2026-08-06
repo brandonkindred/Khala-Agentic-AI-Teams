@@ -47,6 +47,7 @@ from code_review_agent.models import (
     CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
+    _normalized_severity,
     is_no_op_suggestion,
 )
 from pydantic import ValidationError
@@ -88,6 +89,22 @@ def _issue(severity: str, description: str, *, line: int = 1) -> CodeReviewIssue
         description=description,
         suggestion="fix it",
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ""),
+        ("", ""),
+        ("high", "high"),
+        ("High", "high"),
+        ("HIGH", "high"),
+        (" critical ", "critical"),
+        ("Medium", "medium"),
+    ],
+)
+def test_normalized_severity_folds_case_and_whitespace(raw: str | None, expected: str) -> None:
+    assert _normalized_severity(raw) == expected
 
 
 def test_cap_issues_under_limit_preserves_order() -> None:
@@ -146,6 +163,24 @@ def test_cap_then_reconcile_keeps_critical_and_rejects() -> None:
     approved, out = _reconcile_approval(True, capped)
     assert approved is False
     assert any(i.severity == "critical" for i in out)
+
+
+@pytest.mark.parametrize("severity", ["High", "HIGH", " critical "])
+def test_reconcile_approval_treats_mixed_case_critical_high_as_blocking(
+    severity: str,
+) -> None:
+    """Blocking membership must match ``_cap_issues`` fold, not raw equality."""
+    approved, out = _reconcile_approval(True, [_issue(severity, "blocker")])
+    assert approved is False
+    assert len(out) == 1
+    assert _normalized_severity(out[0].severity) in {"critical", "high"}
+
+
+def test_reconcile_approval_mixed_case_medium_still_auto_approves() -> None:
+    """Non-blocking severities remain non-blocking after case fold."""
+    approved, out = _reconcile_approval(False, [_issue("Medium", "nit")])
+    assert approved is True
+    assert len(out) == 1
 
 
 def test_parse_code_into_file_blocks_single_file() -> None:
