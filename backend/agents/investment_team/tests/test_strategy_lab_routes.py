@@ -1766,6 +1766,144 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
     assert not churn_errors, f"cleanup churn raised: {churn_errors[0]!r}"
 
 
+def _parse_test_source(source: str) -> Any:
+    """Parse a function source string into an AST module.
+
+    Preconditions:
+        ``source`` is a non-empty Python function (or module) source string.
+    Postconditions:
+        Returns an ``ast.AST`` for ``textwrap.dedent(source)``.
+    """
+    import ast
+    import textwrap
+
+    assert isinstance(source, str) and source.strip(), "source must be non-empty"
+    return ast.parse(textwrap.dedent(source))
+
+
+def _calls_switchinterval(source: str) -> bool:
+    """Return whether ``source`` calls ``setswitchinterval`` / ``getswitchinterval``.
+
+    Preconditions:
+        ``source`` is parseable Python.
+    Postconditions:
+        ``True`` iff any ``Call`` targets those names (docstring mentions alone
+        do not count).
+    """
+    import ast
+
+    banned = {"setswitchinterval", "getswitchinterval"}
+    tree = _parse_test_source(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in banned:
+            return True
+        if isinstance(func, ast.Name) and func.id in banned:
+            return True
+    return False
+
+
+def _uses_threading_barrier(source: str) -> bool:
+    """Return whether ``source`` constructs a ``threading.Barrier`` (or ``Barrier``).
+
+    Preconditions:
+        ``source`` is parseable Python.
+    Postconditions:
+        ``True`` iff a ``Barrier`` name/attribute appears in a ``Call``.
+    """
+    import ast
+
+    tree = _parse_test_source(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "Barrier":
+            return True
+        if isinstance(func, ast.Name) and func.id == "Barrier":
+            return True
+    return False
+
+
+def _asserts_popper_not_alive(source: str) -> bool:
+    """Return whether ``source`` asserts ``not popper.is_alive()``.
+
+    Preconditions:
+        ``source`` is parseable Python.
+    Postconditions:
+        ``True`` iff an ``assert`` test unparses to a ``not popper.is_alive()``
+        form (message kwargs/args on the assert are ignored).
+    """
+    import ast
+
+    tree = _parse_test_source(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        text = ast.unparse(node.test)
+        if "popper.is_alive()" in text and text.lstrip().startswith("not "):
+            return True
+    return False
+
+
+def test_switchinterval_detector_flags_legacy_concurrent_cleanup_body() -> None:
+    """The regression detector must fail the pre-fix setswitchinterval pattern.
+
+    Locks the "would fail before the fix" half of the parent acceptance
+    criteria: a body that mutates ``sys.setswitchinterval`` and joins without
+    asserting the churn thread stopped is flagged.
+    """
+    legacy = '''
+def test_list_strategy_lab_jobs_survives_concurrent_cleanup():
+    """Mentions setswitchinterval only in a docstring — must not count."""
+    import sys
+    import threading
+
+    prev_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-4)
+    stop = threading.Event()
+    popper = threading.Thread(target=lambda: None, daemon=True)
+    popper.start()
+    try:
+        pass
+    finally:
+        stop.set()
+        popper.join(timeout=5.0)
+        sys.setswitchinterval(prev_interval)
+'''
+    assert _calls_switchinterval(legacy)
+    assert not _uses_threading_barrier(legacy)
+    assert not _asserts_popper_not_alive(legacy)
+
+
+def test_concurrent_cleanup_test_avoids_setswitchinterval_and_joins_churn_thread() -> None:
+    """``test_list_strategy_lab_jobs_survives_concurrent_cleanup`` stays hygienic.
+
+    Regression guard for the parent finding: no process-wide switch-interval
+    mutation, deterministic ``threading.Barrier`` interleaving, and an explicit
+    ``assert not popper.is_alive()`` after join.
+
+    Preconditions:
+        ``test_list_strategy_lab_jobs_survives_concurrent_cleanup`` is defined
+        in this module.
+    Postconditions:
+        Its source satisfies the three hygiene predicates above.
+    """
+    import inspect
+
+    src = inspect.getsource(test_list_strategy_lab_jobs_survives_concurrent_cleanup)
+    assert not _calls_switchinterval(src), (
+        "concurrent cleanup test must not call sys.setswitchinterval/getswitchinterval"
+    )
+    assert _uses_threading_barrier(src), (
+        "concurrent cleanup test must use threading.Barrier for deterministic sync"
+    )
+    assert _asserts_popper_not_alive(src), (
+        "concurrent cleanup test must assert not popper.is_alive() after join"
+    )
+
 
 # ---------------------------------------------------------------------------
 # get_strategy_lab_run_status — reconciliation + load fallback
