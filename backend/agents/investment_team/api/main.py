@@ -4020,8 +4020,19 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         - ``lab_record_id`` may or may not resolve to a known lab record.
 
     Postconditions:
-        - ``_strategy_lab_records[lab_record_id]`` is always removed (its
-          existence is the 404 gate above).
+        - Paper-trading session cleanup (``_delete_paper_sessions_for_lab_record``,
+          a job-service network call) runs *before* the lab record is removed
+          from memory. If it raises or times out, the lab record and its linked
+          strategy/backtest are left intact and the exception propagates
+          (surfacing as a 500) instead of being silently swallowed — a retry
+          then re-attempts the same cleanup rather than 404ing against an
+          already-deleted record while paper sessions sit orphaned in the job
+          service.
+        - ``_strategy_lab_records[lab_record_id]`` is removed only if it is
+          still present by the time the in-memory-mutation step runs — a
+          concurrent delete of the same ``lab_record_id`` may have already
+          removed it while this call was doing paper-session cleanup, in
+          which case this call reports no strategy/backtest deletion for it.
         - ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless
           the corresponding entry actually existed in ``_strategies``/
           ``_backtests`` *before* this call — ``_PersistentDict.__delitem__``
@@ -4052,18 +4063,25 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         strategy_id = record.strategy.strategy_id
         backtest_id = record.backtest.backtest_id
 
-        del _strategy_lab_records[lab_record_id]
-        # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
-        # these deletes also remove the investment_strategies/investment_backtests
-        # job-service rows, not just a process-local cache entry.
-        strategy_deleted = strategy_id in _strategies
-        if strategy_deleted:
-            del _strategies[strategy_id]
-        backtest_deleted = backtest_id in _backtests
-        if backtest_deleted:
-            del _backtests[backtest_id]
-
+    # External cleanup (job-service network I/O) runs before any in-memory
+    # mutation: if this raises, nothing below has been deleted yet, so the
+    # record stays retryable instead of becoming an orphan-producing 404.
     paper_deleted = _delete_paper_sessions_for_lab_record(lab_record_id)
+
+    with _lock:
+        strategy_deleted = False
+        backtest_deleted = False
+        if lab_record_id in _strategy_lab_records:
+            del _strategy_lab_records[lab_record_id]
+            # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
+            # these deletes also remove the investment_strategies/investment_backtests
+            # job-service rows, not just a process-local cache entry.
+            strategy_deleted = strategy_id in _strategies
+            if strategy_deleted:
+                del _strategies[strategy_id]
+            backtest_deleted = backtest_id in _backtests
+            if backtest_deleted:
+                del _backtests[backtest_id]
 
     return DeleteStrategyLabRecordResponse(
         lab_record_id=lab_record_id,

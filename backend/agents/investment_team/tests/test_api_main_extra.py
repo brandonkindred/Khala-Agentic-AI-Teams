@@ -1296,6 +1296,81 @@ def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backte
     assert api_main._strategy_lab_records.get("lab-Y") is None
 
 
+def test_delete_strategy_lab_record_preserves_record_when_paper_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """If paper-session cleanup fails, the lab record/strategy/backtest must NOT
+    be deleted -- a retry should re-attempt cleanup, not 404 against an
+    already-deleted record while paper sessions sit orphaned in the job service."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Z",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Z",
+        strategy_id="strat-lab-Z",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Z",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Z"] = record
+    api_main._strategies["strat-lab-Z"] = strat
+    api_main._backtests["bt-lab-Z"] = bt
+
+    def _broken_cleanup(lab_id: str) -> int:
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", _broken_cleanup)
+
+    with pytest.raises(RuntimeError, match="job service unreachable"):
+        api_main.delete_strategy_lab_record("lab-Z")
+
+    # Nothing was deleted: the record stays retryable instead of becoming an
+    # orphan-producing 404.
+    assert api_main._strategy_lab_records.get("lab-Z") is not None
+    assert api_main._strategies.get("strat-lab-Z") is not None
+    assert api_main._backtests.get("bt-lab-Z") is not None
+
+
 # ---------------------------------------------------------------------------
 # _recover_orphaned_paper_trading_sessions startup hook
 # ---------------------------------------------------------------------------
