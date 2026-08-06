@@ -302,6 +302,23 @@ def test_extract_name_from_hint_all_stripped_returns_unique_placeholder() -> Non
     assert re.fullmatch(r"item_[0-9a-f]+", b)
 
 
+def test_extract_name_from_hint_rejects_non_string_hint() -> None:
+    with pytest.raises(TypeError, match="hint must be a string"):
+        _extract_name_from_hint(cast(Any, 123))
+
+
+@pytest.mark.parametrize("bad_separator", ["", cast(Any, 5)])
+def test_extract_name_from_hint_rejects_invalid_separator(bad_separator: Any) -> None:
+    with pytest.raises(ValueError, match="separator must be a non-empty string"):
+        _extract_name_from_hint("some hint", separator=bad_separator)
+
+
+@pytest.mark.parametrize("bad_max_length", [0, -1, cast(Any, "25")])
+def test_extract_name_from_hint_rejects_invalid_max_length(bad_max_length: Any) -> None:
+    with pytest.raises(ValueError, match="max_length must be a positive integer"):
+        _extract_name_from_hint("some hint", max_length=bad_max_length)
+
+
 def test_placeholder_slug_never_exceeds_max_length() -> None:
     """Fallback must respect max_length even when truncation strips result to ""."""
     assert _placeholder_slug("some hint", "-", 25) == "item-3082b299"
@@ -556,6 +573,30 @@ def test_senior_backend_branch_generates_valid_python_for_quote_laden_hint() -> 
     compile(j["tests"], "<tests>", "exec")
     for path, content in j["files"].items():
         compile(content, path, "exec")
+
+
+def test_senior_frontend_branch_generates_safe_typescript_for_quote_laden_hint() -> None:
+    """A task_hint with quotes/backslashes must not corrupt the generated TS source.
+
+    task_hint is always a single line (see ``_extract_task_hint``), so only
+    quote/backslash safety is at risk here, not embedded newlines.
+    """
+    c = DummyLLMClient()
+    hint = """Build user's "profile" widget \\ with a backslash"""
+    prompt = f"You are a senior frontend software engineer.\n**Task:** {hint}"
+    j = c.complete_json(prompt, temperature=0.0)
+    code = j["code"]
+    lines = code.split("\n")
+    # The raw hint must never appear unescaped in the generated source.
+    assert hint not in code
+    comment_line = next(line for line in lines if line.startswith("// Task: "))
+    assert json.loads(comment_line.removeprefix("// Task: ")) == hint
+    # The Angular decorator/template line is derived only from the
+    # already-sanitized class name — never the raw hint.
+    decorator_line = next(line for line in lines if "@Component(" in line)
+    assert hint not in decorator_line
+    for path, content in j["files"].items():
+        assert hint not in content
 
 
 def test_security_branch_not_shadowed_by_code_review_catch_all() -> None:

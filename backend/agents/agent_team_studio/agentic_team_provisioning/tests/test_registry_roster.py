@@ -204,6 +204,58 @@ def test_from_registry_unknown_manifest_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_from_registry_registry_lookup_failure_503(
+    client: TestClient, registry: _FakeRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry lookup failure (e.g. the registry backend is unavailable) is a
+    503, not an opaque 500 — and the roster is left unchanged."""
+
+    def _boom(agent_id: str):
+        raise RuntimeError("registry backend down")
+
+    monkeypatch.setattr(registry, "get", _boom)
+    team_id = _new_team()
+    resp = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"}
+    )
+    assert resp.status_code == 503
+    assert "registry" in resp.json()["detail"].lower()
+    assert client.get(f"/teams/{team_id}/agents").json() == []
+
+
+def test_from_registry_validation_error_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pydantic ValidationError raised while projecting the manifest is a 422,
+    the same documented contract as the explicit ValueError guards in
+    ``_roster_agent_from_manifest`` — not an opaque 500."""
+    from pydantic import BaseModel, ValidationError
+
+    class _Probe(BaseModel):
+        x: int
+
+    try:
+        _Probe(x="not-an-int")
+        raise AssertionError("expected _Probe construction to fail")
+    except ValidationError as captured:
+        validation_error = captured
+
+    from agent_team_studio.agentic_team_provisioning.api import main
+
+    def _raise_validation_error(manifest):
+        raise validation_error
+
+    monkeypatch.setattr(main, "_roster_agent_from_manifest", _raise_validation_error)
+
+    team_id = _new_team()
+    resp = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"}
+    )
+    assert resp.status_code == 422
+    assert "manifest" in resp.json()["detail"].lower()
+    assert client.get(f"/teams/{team_id}/agents").json() == []
+
+
 def test_from_registry_unknown_team_404(client: TestClient) -> None:
     """Adding to an unknown team is a 404."""
     resp = client.post(
