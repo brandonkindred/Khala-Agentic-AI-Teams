@@ -1667,8 +1667,12 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
     ``except Exception`` around the persisted-merge, so the *observable* symptom
     is silent: the whole persisted block is skipped and persisted-only jobs
     vanish from the result. This asserts the persisted job is never dropped.
+
+    Interleaving is forced with a ``threading.Barrier`` that releases the
+    reader and cleanup thread together at the start of each iteration —
+    deterministic contention on ``_lock``, with no process-wide
+    ``sys.setswitchinterval`` mutation.
     """
-    import sys
     import threading
 
     from investment_team.api import main as api_main
@@ -1697,6 +1701,9 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
         ]
     )
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # Keep each iteration on the locked snapshot path under test; unlocked
+    # per-run reconciliation is unrelated and would dominate runtime.
+    monkeypatch.setattr(api_main, "_reconcile_run_progress", lambda _rid: None)
 
     def _make_state(rid: str) -> Dict[str, Any]:
         return {
@@ -1712,24 +1719,23 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
     for rid in run_ids:
         shared_runs[rid] = _make_state(rid)
 
-    # Force frequent thread switches so the reader is reliably preempted
-    # mid-iteration (the default 5ms interval almost never collides on a fast
-    # comprehension, masking the regression). A moderate 1e-4s interval is
-    # enough to trigger the race across 2000 iterations without the
-    # excessive scheduling overhead (and consequent CI flakiness/slowness)
-    # of a 1e-6s interval. Restored in ``finally``.
-    prev_interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-4)
-
+    # Two-party barrier: each iteration both threads pass ``wait()`` then the
+    # reader lists while the cleanup thread mutates — no lock is held across
+    # the barrier, so this cannot deadlock with ``_lock``.
+    critical = threading.Barrier(2, timeout=5.0)
     stop = threading.Event()
     churn_errors: List[BaseException] = []
 
     def _churn() -> None:
         # Mirror the worker ``finally``'s ``_cleanup`` body: pop under the lock,
-        # then re-insert — hammering the same keys the reader iterates so the
-        # dict size oscillates continuously.
+        # then re-insert — hammering the same keys the reader snapshots so the
+        # dict size would change mid-iteration without the lock guard.
         try:
             while not stop.is_set():
+                try:
+                    critical.wait()
+                except threading.BrokenBarrierError:
+                    return
                 for rid in run_ids:
                     with _run_state.lock:
                         shared_runs.pop(rid, None)
@@ -1742,6 +1748,10 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
     popper.start()
     try:
         for _ in range(2000):
+            try:
+                critical.wait()
+            except threading.BrokenBarrierError:
+                break
             resp = api_main.list_strategy_lab_jobs()
             ids = {j.job_id for j in resp.jobs}
             # The persisted job must survive every read; its absence means the
@@ -1749,10 +1759,12 @@ def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
             assert persisted_id in ids
     finally:
         stop.set()
+        critical.abort()
         popper.join(timeout=5.0)
-        sys.setswitchinterval(prev_interval)
 
+    assert not popper.is_alive(), "cleanup churn thread did not stop after join"
     assert not churn_errors, f"cleanup churn raised: {churn_errors[0]!r}"
+
 
 
 # ---------------------------------------------------------------------------
