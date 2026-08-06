@@ -970,7 +970,9 @@ def set_conversation_process(conversation_id: str, req: SetConversationProcessRe
     Preconditions: ``req.process_id`` is non-empty (enforced by the request model;
         a missing/blank value is a ``422`` before this handler runs).
     Postconditions: ``200`` with the linked ``conversation_id``/``process_id`` pair;
-        ``404`` if the conversation or the process is unknown (link unchanged).
+        ``404`` if the conversation or the process is unknown (link unchanged); ``403``
+        if the process belongs to a different team than the conversation (link
+        unchanged) — a conversation may only be linked to its own team's processes.
     """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
@@ -978,6 +980,10 @@ def set_conversation_process(conversation_id: str, req: SetConversationProcessRe
     process = _store.get_process(req.process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
+    if _store.get_process_team_id(req.process_id) != team_id:
+        raise HTTPException(
+            status_code=403, detail="Process does not belong to this conversation's team"
+        )
     _store.set_conversation_process(conversation_id, req.process_id)
     return {"conversation_id": conversation_id, "process_id": req.process_id}
 

@@ -80,3 +80,33 @@ def test_set_conversation_process_unknown_process_404(client: TestClient):
 
     resp = client.put(f"/conversations/{conversation_id}/process", json={"process_id": "nope"})
     assert resp.status_code == 404
+
+
+def test_set_conversation_process_rejects_another_teams_process(client: TestClient):
+    """A conversation may only be linked to a process owned by its own team,
+    even if the process_id is otherwise valid (belongs to a different team)."""
+    store = AgenticTeamStore()
+    _, conversation_id, _ = _seed_team_conversation_and_process()
+
+    other_team = store.create_team(name="Other Team", description="")
+    other_process = ProcessDefinition(
+        process_id="proc-other-team",
+        name="Other",
+        steps=[
+            ProcessStep(
+                step_id="s1",
+                name="Do work",
+                step_type=StepType.ACTION,
+                agents=[ProcessStepAgent(agent_name="worker", role="doer")],
+            )
+        ],
+    )
+    store.save_process(other_team.team_id, other_process)
+
+    resp = client.put(
+        f"/conversations/{conversation_id}/process",
+        json={"process_id": other_process.process_id},
+    )
+    assert resp.status_code == 403
+    # Link left unchanged (still unset).
+    assert store.get_conversation_process_id(conversation_id) is None
