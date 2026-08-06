@@ -422,6 +422,44 @@ def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _persist_strategy_lab_record
+# ---------------------------------------------------------------------------
+
+
+def test_persist_strategy_lab_record_rejects_missing_strategy() -> None:
+    """A record with strategy=None (bypassing Pydantic's own field validation
+    via model_construct, as a stray in-process mutation elsewhere might) must
+    raise ValueError before acquiring the lock -- not an AttributeError from
+    inside the locked write."""
+    from investment_team.api.main import _persist_strategy_lab_record
+    from investment_team.models import BacktestRecord, StrategyLabRecord
+
+    record = StrategyLabRecord.model_construct(
+        lab_record_id="lab-missing-strategy",
+        strategy=None,
+        backtest=BacktestRecord.model_construct(backtest_id="bt-1"),
+    )
+
+    with pytest.raises(ValueError, match="record.strategy must be populated"):
+        _persist_strategy_lab_record(record)
+
+
+def test_persist_strategy_lab_record_rejects_missing_backtest() -> None:
+    """Same contract check for a missing backtest."""
+    from investment_team.api.main import _persist_strategy_lab_record
+    from investment_team.models import StrategyLabRecord, StrategySpec
+
+    record = StrategyLabRecord.model_construct(
+        lab_record_id="lab-missing-backtest",
+        strategy=StrategySpec.model_construct(strategy_id="strat-1"),
+        backtest=None,
+    )
+
+    with pytest.raises(ValueError, match="record.backtest must be populated"):
+        _persist_strategy_lab_record(record)
+
+
+# ---------------------------------------------------------------------------
 # _PersistentDict (in-process FakeJobClient roundtrip)
 # ---------------------------------------------------------------------------
 

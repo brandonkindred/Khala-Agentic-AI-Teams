@@ -1902,13 +1902,23 @@ def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
         ``_strategies`` / ``_backtests`` stores, keyed by their respective
         ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
         activity can reuse the identical write without duplicating it.
+
+    Raises:
+        ``ValueError``: ``record.strategy`` or ``record.backtest`` is
+        ``None``. Checked before acquiring ``_lock``, so a caller that
+        violates the precondition gets a clear contract failure instead of
+        an opaque ``AttributeError`` from inside the locked section.
     """
     # StrategySpec/BacktestRecord are required (non-Optional) fields, but
     # Pydantic doesn't validate on assignment here, so a stray `record.strategy
     # = None` elsewhere would otherwise surface as an opaque AttributeError
-    # below instead of a clear precondition failure at this boundary.
-    assert record.strategy is not None, "record.strategy must be populated before persisting"
-    assert record.backtest is not None, "record.backtest must be populated before persisting"
+    # below instead of a clear precondition failure at this boundary. A bare
+    # `assert` would be stripped under `python -O`, silently admitting a None
+    # value; raise explicitly so this precondition always holds.
+    if record.strategy is None:
+        raise ValueError("record.strategy must be populated before persisting")
+    if record.backtest is None:
+        raise ValueError("record.backtest must be populated before persisting")
     with _lock:
         _strategy_lab_records[record.lab_record_id] = record
         _strategies[record.strategy.strategy_id] = record.strategy
