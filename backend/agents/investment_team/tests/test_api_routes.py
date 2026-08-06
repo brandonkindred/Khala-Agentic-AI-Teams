@@ -654,15 +654,23 @@ def test_strategy_lab_results_filter_by_winning(
     assert body["losing_count"] == 1
     assert body["count"] == 2
 
-    # Filter winning=true → just the winner.
+    # Filter winning=true → just the winner. Regression coverage: counts must
+    # be derived from the same filtered list as `items`/`count`, not the
+    # unfiltered global set -- winning_count + losing_count == count always.
     resp_w = api_client.get("/strategy-lab/results?winning=true")
     body_w = resp_w.json()
     assert [r["lab_record_id"] for r in body_w["items"]] == ["w"]
+    assert body_w["count"] == 1
+    assert body_w["winning_count"] == 1
+    assert body_w["losing_count"] == 0
 
-    # Filter winning=false → just the loser.
+    # Filter winning=false → just the loser, with matching counts.
     resp_l = api_client.get("/strategy-lab/results?winning=false")
     body_l = resp_l.json()
     assert [r["lab_record_id"] for r in body_l["items"]] == ["l"]
+    assert body_l["count"] == 1
+    assert body_l["winning_count"] == 0
+    assert body_l["losing_count"] == 1
 
 
 # ---------------------------------------------------------------------------

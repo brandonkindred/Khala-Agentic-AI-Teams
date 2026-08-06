@@ -3044,14 +3044,21 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     """
     Return all strategy lab records, sorted newest-first.
     Filter by winning/losing with ?winning=true or ?winning=false.
+
+    Postconditions:
+        - ``winning_count``/``losing_count`` are computed from the same
+          (already-filtered, when ``winning`` is given) list as ``items``/
+          ``count``, so ``winning_count + losing_count == count`` always
+          holds -- a ``?winning=true`` request reports ``losing_count == 0``
+          rather than the unfiltered global losing count.
     """
     items = _snapshot_prior_records(reverse=True)
 
-    winning_count = sum(1 for r in items if r.is_winning)
-    losing_count = len(items) - winning_count
-
     if winning is not None:
         items = [r for r in items if r.is_winning == winning]
+
+    winning_count = sum(1 for r in items if r.is_winning)
+    losing_count = len(items) - winning_count
 
     return StrategyLabResultsResponse(
         items=items,
