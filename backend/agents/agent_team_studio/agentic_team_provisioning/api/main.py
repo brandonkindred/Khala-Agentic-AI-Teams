@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Optional
+from urllib.parse import quote
 
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -58,6 +59,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     RosterValidationResult,
     SendMessageRequest,
     SendTestChatMessageRequest,
+    SetConversationProcessRequest,
     SetTeamModeRequest,
     StartPipelineRunRequest,
     SubmitPipelineInputRequest,
@@ -343,7 +345,14 @@ def get_team(team_id: str):
 
 @app.get("/teams/{team_id}/agents", response_model=list[AgenticTeamAgent])
 def list_team_agents(team_id: str):
-    """Named agents pool (roster) for this team."""
+    """Named agents pool (roster) for this team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the team's roster as a list of
+        ``AgenticTeamAgent`` (empty if no agents have been added yet); ``404``
+        if the team is not found.
+    Invariants: none.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -394,7 +403,19 @@ def list_team_agent_manifests(team_id: str):
 
 @app.get("/teams/{team_id}/roster/validation", response_model=RosterValidationResult)
 def validate_team_roster(team_id: str):
-    """Validate whether the roster fully covers the team's process needs."""
+    """Validate whether the roster fully covers the team's process needs.
+
+    Runs every process's step/agent requirements against the roster (each
+    referenced agent must exist and be assigned), flags roster agents unused by
+    any process, and flags agents whose profile is too sparse (missing most of
+    skills/capabilities/tools/expertise) — see ``roster_validation.validate_roster``.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``RosterValidationResult`` summarizing
+        coverage gaps (empty ``gaps`` and ``is_fully_staffed=True`` when the
+        roster fully covers every process); ``404`` if the team is not found.
+    Invariants: none — a read-only check, no roster or process state changes.
+    """
     from agent_team_studio.agentic_team_provisioning.roster_validation import validate_roster
 
     team = _store.get_team(team_id)
@@ -693,6 +714,13 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
 
 @app.get("/teams/{team_id}/processes", response_model=list[ProcessDefinition])
 def list_processes(team_id: str):
+    """List all processes defined for a team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the team's processes as a list of
+        ``ProcessDefinition`` (empty if none have been created yet); ``404``
+        if the team is not found.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -701,6 +729,16 @@ def list_processes(team_id: str):
 
 @app.get("/processes/{process_id}", response_model=ProcessDefinition)
 def get_process(process_id: str):
+    """Retrieve a single process definition by id.
+
+    Note: unlike the team-scoped routes, this one is looked up globally by
+    ``process_id`` alone (no ``team_id`` in the path) — the visual editor and
+    conversation flows address a process directly once they know its id.
+
+    Preconditions: ``process_id`` is a non-empty string.
+    Postconditions: ``200`` with the ``ProcessDefinition``; ``404`` if no
+        process with that id exists.
+    """
     process = _store.get_process(process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -709,7 +747,15 @@ def get_process(process_id: str):
 
 @app.post("/teams/{team_id}/processes", response_model=ProcessDefinition, status_code=201)
 def create_process(team_id: str):
-    """Create a new blank process for the team."""
+    """Create a new blank process for the team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``201`` with a fresh ``ProcessDefinition`` (a new UUID
+        ``process_id``, name "New Process", no steps, ``status=DRAFT``)
+        persisted under the team; ``404`` if the team is not found (no process
+        created). Side effect: inserts a new process row via
+        ``_store.save_process``.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -728,7 +774,19 @@ def create_process(team_id: str):
 
 @app.put("/processes/{process_id}", response_model=ProcessDefinition)
 def update_process(process_id: str, process: ProcessDefinition):
-    """Update a process definition (visual editor saves)."""
+    """Update a process definition (visual editor saves).
+
+    Preconditions: ``process_id`` is a non-empty string identifying an
+        existing process; ``process.process_id`` must equal ``process_id``.
+    Postconditions: ``200`` with the saved ``ProcessDefinition`` (the full
+        body replaces the stored definition — this is a whole-document save,
+        not a partial patch); ``404`` if the process (or its owning team) is
+        not found; ``400`` if ``process.process_id`` doesn't match the URL
+        (process unchanged in both error cases). Side effect: calls
+        ``_after_process_saved``, which schedules background provisioning of
+        per-step agent environments (``schedule_provision_step_agents``) for
+        the updated process — this runs even for a no-op-looking save.
+    """
     existing = _store.get_process(process_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -748,7 +806,21 @@ def update_process(process_id: str, process: ProcessDefinition):
     response_model=RecommendAgentsResponse,
 )
 def recommend_agents_for_step(process_id: str, step_id: str):
-    """Recommend agents for a specific process step based on its description."""
+    """Recommend roster agents for a specific process step based on its description.
+
+    Scoring is a simple token-overlap heuristic, not semantic matching:
+    lowercased words (length > 2) from the step's ``name``/``description`` are
+    intersected against each roster agent's combined
+    skills/capabilities/tools/expertise; the overlap *count* is the
+    ``match_score``. Agents with zero overlap are omitted entirely, and the
+    remaining ones are sorted by descending score and capped to the top 10.
+
+    Preconditions: ``process_id`` and ``step_id`` are non-empty strings.
+    Postconditions: ``200`` with a ``RecommendAgentsResponse`` (``recommended_agents``
+        is empty when the process's team has no matching agents, or is
+        unresolvable); ``404`` if the process is unknown, or the process has
+        no step with ``step_id``.
+    """
     process = _store.get_process(process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -892,19 +964,22 @@ def send_message(conversation_id: str, req: SendMessageRequest):
 
 
 @app.put("/conversations/{conversation_id}/process")
-def set_conversation_process(conversation_id: str, body: dict):
-    """Link a process to the active conversation so chat stays in sync with the visual editor."""
+def set_conversation_process(conversation_id: str, req: SetConversationProcessRequest):
+    """Link a process to the active conversation so chat stays in sync with the visual editor.
+
+    Preconditions: ``req.process_id`` is non-empty (enforced by the request model;
+        a missing/blank value is a ``422`` before this handler runs).
+    Postconditions: ``200`` with the linked ``conversation_id``/``process_id`` pair;
+        ``404`` if the conversation or the process is unknown (link unchanged).
+    """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    process_id = body.get("process_id")
-    if not process_id:
-        raise HTTPException(status_code=400, detail="process_id is required")
-    process = _store.get_process(process_id)
+    process = _store.get_process(req.process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
-    _store.set_conversation_process(conversation_id, process_id)
-    return {"conversation_id": conversation_id, "process_id": process_id}
+    _store.set_conversation_process(conversation_id, req.process_id)
+    return {"conversation_id": conversation_id, "process_id": req.process_id}
 
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
@@ -1080,13 +1155,27 @@ def list_team_assets(team_id: str):
 
 @app.get("/teams/{team_id}/assets/{name}")
 def download_team_asset(team_id: str, name: str):
-    """Download a specific asset file."""
+    """Download a specific asset file.
+
+    Preconditions: none beyond ``team_id``/``name`` being valid path segments.
+    Postconditions: ``200`` streaming the file's bytes with an RFC 5987-encoded
+        ``Content-Disposition`` header (safe for names containing quotes or
+        non-ASCII characters, which would otherwise malform a raw ``filename=``
+        header); ``404`` if ``name`` sanitizes to an invalid asset name, the
+        resolved path escapes ``assets_dir`` (e.g. a symlink inside the
+        directory pointing elsewhere on the host), or no such file exists.
+    """
     infra = _get_infra_or_404(team_id)
     safe_name = _safe_asset_name(name)
-    path = infra.assets_dir / safe_name
-    if not path.is_file():
+    assets_root = infra.assets_dir.resolve()
+    path = (infra.assets_dir / safe_name).resolve()
+    if not path.is_relative_to(assets_root) or not path.is_file():
         raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(str(path), filename=safe_name)
+    encoded_name = quote(safe_name)
+    return FileResponse(
+        str(path),
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
 
 
 @app.post("/teams/{team_id}/assets", response_model=AssetInfo)
