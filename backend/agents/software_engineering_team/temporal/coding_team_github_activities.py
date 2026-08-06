@@ -172,9 +172,11 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
         - Delegates to ``_finish_already_complete`` or ``_publish_merged_work``
           exactly as thread mode does, then returns the job's resulting
           record (``get_job(job_id)``), or ``{"job_id": job_id, "status":
-          "unknown"}`` when the job store has nothing for it -- matching
-          ``run_pipeline_activity``'s existing return contract so a future
-          workflow caller can branch on ``status``/``github_pr_url``/``error``.
+          "unknown"}`` when the job store has nothing for it -- deliberately
+          the FULL record here, not the small fixed-shape summary
+          ``run_pipeline_activity`` returns on a terminal state: a future
+          workflow caller needs ``github_pr_url`` (and other publish-specific
+          fields) that only the full record carries.
         - Does NOT catch exceptions the wrapped functions raise -- they
           propagate uncaught, exactly as they do today through
           ``_run_with_github_hooks``'s call sites (no surrounding try/except
@@ -289,8 +291,9 @@ def github_failure_notice_activity(request: dict[str, Any]) -> dict[str, Any]:
           is enabled -- this activity does not re-check that gate itself.
         - Returns the job's resulting record (``get_job(job_id)``), or
           ``{"job_id": job_id, "status": "unknown"}`` when the job store has
-          nothing for it -- matching ``github_publish_activity``'s and
-          ``run_pipeline_activity``'s existing return contract.
+          nothing for it -- matching ``github_publish_activity``'s return
+          contract (the full record, not ``run_pipeline_activity``'s small
+          fixed-shape terminal summary).
         - Does NOT catch exceptions the wrapped functions raise -- they
           propagate uncaught, exactly as they do today through their
           thread-mode call sites (``_run_with_github_hooks``,
