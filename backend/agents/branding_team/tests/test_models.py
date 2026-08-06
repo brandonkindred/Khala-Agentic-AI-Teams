@@ -29,7 +29,7 @@ from branding_team.models import (
     BrandDiscoveryAuditOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
-    CoreValue,
+    CoreValueOutput,
     CoreValuesOutput,
     DifferentiationPillar,
     DifferentiationPillarsOutput,
@@ -104,7 +104,11 @@ def test_positioning_output_rejects_missing_and_empty_fields() -> None:
 
 def test_core_values_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "3-5 core values"."""
-    value = CoreValue(value="clarity")
+    value = CoreValueOutput(
+        value="clarity",
+        behavioral_definition="We demonstrate clarity in every decision.",
+        observable_behaviors=["Plain-language docs"],
+    )
     with pytest.raises(ValidationError):
         CoreValuesOutput(core_values=[value, value])  # below min of 3
     with pytest.raises(ValidationError):
@@ -112,6 +116,27 @@ def test_core_values_output_enforces_stated_cardinality() -> None:
 
     output = CoreValuesOutput(core_values=[value] * 3)
     assert len(output.core_values) == 3
+
+
+def test_core_value_output_rejects_blank_content() -> None:
+    """A blank value, behavioral definition, or observable behavior must fail validation."""
+    valid_kwargs = dict(
+        value="clarity",
+        behavioral_definition="We demonstrate clarity in every decision.",
+        observable_behaviors=["Plain-language docs"],
+    )
+
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "value": ""})
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "behavioral_definition": ""})
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "observable_behaviors": [""]})
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "observable_behaviors": []})
+
+    output = CoreValueOutput(**valid_kwargs)
+    assert output.value == "clarity"
 
 
 def test_audience_segments_output_enforces_stated_cardinality() -> None:
