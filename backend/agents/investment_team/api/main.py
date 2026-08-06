@@ -4367,7 +4367,11 @@ def _run_paper_trading_background(
     take 2-3 minutes), so this runs off the request thread to avoid proxy timeouts.
 
     Preconditions:
-        - ``session_id`` must already exist in ``_paper_trading_sessions`` with status RUNNING
+        - ``session_id`` must already exist in ``_paper_trading_sessions`` with status
+          RUNNING — validated at the top of the worker (before any market-data fetch
+          or agent execution): a missing, unparseable, or non-RUNNING session logs a
+          warning and returns early instead of doing the expensive work for a session
+          that can't accept its result.
         - ``strategy`` must be a valid StrategySpec with resolvable symbols
         - ``backtest_record`` must contain valid backtest results for divergence analysis
 
@@ -4399,6 +4403,40 @@ def _run_paper_trading_background(
           than letting the parse error escape in place of the original crash.
     """
     try:
+        # Validate the documented precondition — a missing, unparseable, or
+        # non-RUNNING session — before doing any of the expensive work below
+        # (market-data fetch, sandbox execution, LLM divergence analysis).
+        # Without this check the worker would spend 2-3 minutes producing a
+        # result for a session that was never RUNNING to begin with (e.g. it
+        # was concurrently deleted, or something else already moved it to a
+        # terminal state), then discover on write-back that there's nowhere
+        # to persist it.
+        with _lock:
+            raw = _paper_trading_sessions.get(session_id)
+            if raw is None:
+                logger.warning(
+                    "Paper trade %s: no session found at worker start; nothing to run.",
+                    session_id,
+                )
+                return
+            try:
+                current_status = PaperTradingSession.parse_persisted(raw).status
+            except Exception:
+                logger.warning(
+                    "Paper trade %s: session unparseable at worker start; nothing to run.",
+                    session_id,
+                    exc_info=True,
+                )
+                return
+            if current_status != PaperTradingStatus.RUNNING:
+                logger.warning(
+                    "Paper trade %s: session status is %s (expected RUNNING) at worker "
+                    "start; nothing to run.",
+                    session_id,
+                    current_status,
+                )
+                return
+
         from investment_team.market_data_service import MarketDataService
         from investment_team.paper_trading_agent import PaperTradingAgent
 
