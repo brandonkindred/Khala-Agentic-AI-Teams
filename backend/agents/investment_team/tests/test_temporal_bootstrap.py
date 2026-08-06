@@ -321,7 +321,7 @@ def test_run_backtest_activity_raises_when_job_failed(monkeypatch) -> None:
 
 def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
     """A user-cancelled backtest must be reported as ``cancelled``, not the
-    default ``completed`` — the job store's actual terminal status wins."""
+    default ``completed`` — outcome comes from the worker return value."""
     from investment_team import models as inv_models
     from investment_team.api import main as api_main
     from investment_team.temporal.workflows import run_backtest_activity

@@ -22,7 +22,9 @@ retry (which fires on worker crash / start_to_close timeout):
 * it rehydrates the in-memory job entry from the durable job store, so progress is
   tracked even when the retry lands in a fresh process after a restart;
 * it short-circuits a job that already completed — so a retry does not duplicate
-  work;
+  work (entry short-circuit reads the job store);
+* outcome determination (completed / cancelled / failed) uses the worker return
+  value from ``_run_backtest_background``, not a post-run job-store read;
 * a worker-level failure is re-raised as an ``ApplicationError`` so Temporal sees
   the failure (and retries within the bounded policy) instead of the swallowed
   exception being reported as success.
