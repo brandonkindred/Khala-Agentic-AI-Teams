@@ -505,6 +505,34 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
     assert len(strategy.exit_rules) == 1
 
 
+def test_build_strategy_from_ideation_recovers_single_dict_rule() -> None:
+    """A single dict emitted in place of a one-element list must be
+    recovered, not silently discarded. ``strategy_data.get("entry_rules") or
+    []`` previously evaluated a truthy dict to itself, and iterating a dict
+    yields its string keys (none of which are dicts) -- filtering those out
+    left an empty rule set with no warning, a silent data-loss path for
+    otherwise-recoverable LLM output.
+    """
+    from investment_team.api.main import _build_strategy_from_ideation
+    from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate
+
+    entry_rule = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
+    ).model_dump()
+    data = {
+        "asset_class": "stocks",
+        "timeframe": "1d",
+        "entry_rules": entry_rule,  # a bare dict, not wrapped in a list
+        "exit_rules": {"kind": "stop_loss", "pct": 0.1},  # likewise
+    }
+    strategy, _ = _build_strategy_from_ideation(data)
+    assert len(strategy.entry_rules) == 1
+    assert strategy.entry_rules[0].side == "long"
+    assert len(strategy.exit_rules) == 1
+    assert strategy.exit_rules[0].pct == 0.1
+
+
 def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
     from investment_team.api.main import _build_strategy_from_ideation
 
