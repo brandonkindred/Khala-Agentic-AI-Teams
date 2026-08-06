@@ -3814,8 +3814,10 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
     """Snapshot of a single run's progress. Use for polling when SSE is unavailable.
 
     Preconditions:
-        - ``run_id`` must resolve to a state via ``_active_runs`` or the
-          job-service fallback (``_load_run_from_job_service``).
+        - None. ``run_id`` may or may not resolve to a state in either
+          ``_active_runs`` or the job-service fallback -- a missing id is
+          normal input this function itself handles (see ``Raises``), not a
+          caller obligation.
 
     Postconditions:
         - Side effect: delegates to ``_reconcile_run_progress(run_id)``,
