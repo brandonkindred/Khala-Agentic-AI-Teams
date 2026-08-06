@@ -1825,6 +1825,30 @@ def _coerce_strategy_lab_timeframe(raw: object) -> str:
     return raw if raw in _STRATEGY_SPEC_TIMEFRAMES else "1d"
 
 
+def _normalize_strategy_lab_rule_list(raw: Any) -> List[Dict[str, Any]]:
+    """Coerce a raw ideation ``entry_rules``/``exit_rules`` field to a list of dict entries.
+
+    Preconditions:
+        ``raw`` may be any type: absent (``None``), a list, a single dict
+        (the LLM occasionally collapses a one-rule list to a bare dict), or
+        something else entirely.
+    Postconditions:
+        - A ``dict`` is wrapped in a one-element list -- without this, ``dict
+          or []`` evaluates truthy to the dict itself, and iterating a dict
+          yields its string keys (none of which are dicts), so the entire
+          rule set was silently discarded instead of recovered.
+        - A ``list`` is filtered to its dict-valued entries (non-dict / non-DSL
+          items are discarded so a malformed ideation LLM response doesn't
+          crash the cycle).
+        - Anything else (``None``, a string, a number, ...) returns ``[]``.
+    """
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
 def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[StrategySpec, str]:
     """Build a StrategySpec + strategy_id from raw ideation output.
 
@@ -1858,11 +1882,8 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         # clearly-resolvable omission/typo instead of raising a strict
         # pydantic ValidationError deep inside StrategySpec construction.
         timeframe=_coerce_strategy_lab_timeframe(strategy_data.get("timeframe")),
-        # Issue #551/#554: pass structured rule payloads through to
-        # Pydantic; non-dict / non-DSL items are discarded so a malformed
-        # ideation LLM response doesn't crash the cycle.
-        entry_rules=[r for r in (strategy_data.get("entry_rules") or []) if isinstance(r, dict)],
-        exit_rules=[r for r in (strategy_data.get("exit_rules") or []) if isinstance(r, dict)],
+        entry_rules=_normalize_strategy_lab_rule_list(strategy_data.get("entry_rules")),
+        exit_rules=_normalize_strategy_lab_rule_list(strategy_data.get("exit_rules")),
         sizing=sizing,
         risk_limits=strategy_data.get("risk_limits") or {},
         speculative=bool(strategy_data.get("speculative", False)),
