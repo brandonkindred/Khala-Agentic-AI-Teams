@@ -3719,6 +3719,21 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # increment amount itself accounts for a legacy (pre-fencing) run's
         # missing "generation" field -- see
         # `_legacy_generation_bootstrap_increment`'s own docstring.
+        #
+        # get_job (below) and apply_and_get (further down) are deliberately
+        # two separate, non-atomic job-service calls -- not a bug. get_job's
+        # result ONLY decides which increment amount apply_and_get applies
+        # (+1 ordinary vs +2 legacy-bootstrap); it never supplies a value
+        # apply_and_get treats as authoritative. apply_and_get's own
+        # increment-and-read-back is what's atomic, and it always increments
+        # from whatever the durable value actually is at the moment it runs,
+        # regardless of what get_job saw. So a race in this gap (another
+        # restart's apply_and_get already advanced the generation, or the
+        # job was deleted) can only affect which increment amount THIS call
+        # applies -- never which direction the generation moves (always up)
+        # or whether the result is still a valid, monotonically-newer
+        # fencing token. A deleted-job race is caught by apply_and_get's own
+        # falsy-result handling below.
         client = _get_lab_run_job_client()
         try:
             durable_job = client.get_job(run_id)
