@@ -6,8 +6,9 @@ These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput`
 ``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``
 (and its nested ``MessagingPillarOutput``/``AudienceMessageMapOutput``),
 ``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 4's
-``ChannelGuidelineOutput`` and ``BrandArchitectureOutput``) must reject
-empty/omitted content so Strands' structured-output tool retries the LLM
+``ChannelGuidelineOutput``, ``BrandArchitectureOutput``, and
+``BrandExperiencePrinciplesOutput``) must reject empty/omitted content so
+Strands' structured-output tool retries the LLM
 instead of silently accepting a blank or under-cardinality response (see
 ``structured_output_tool.py``: a ``ValidationError`` becomes a tool error
 the model is asked to fix).
@@ -27,6 +28,7 @@ from branding_team.models import (
     BrandArchitectureOutput,
     BrandArchitectureRuleOutput,
     BrandDiscoveryAuditOutput,
+    BrandExperiencePrinciplesOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
     CoreValueOutput,
@@ -573,4 +575,30 @@ def test_brand_architecture_output_rejects_blank_naming_conventions_and_glossary
                     "Blank value": "",
                 },
             }
+        )
+
+
+_EXPERIENCE_PRINCIPLES_KWARGS = dict(
+    brand_experience_principles=["Consistency", "Intentionality", "Warmth"],
+    signature_moments=["First visit", "Onboarding", "Renewal"],
+    sensory_elements=["Signature sound", "Motion easing"],
+)
+
+
+def test_brand_experience_principles_output_rejects_blank_list_items() -> None:
+    """``brand_experience_principles``/``signature_moments``/``sensory_elements`` reject blanks."""
+    output = BrandExperiencePrinciplesOutput(**_EXPERIENCE_PRINCIPLES_KWARGS)
+    assert len(output.brand_experience_principles) == 3
+
+    with pytest.raises(ValidationError):
+        BrandExperiencePrinciplesOutput(
+            **{**_EXPERIENCE_PRINCIPLES_KWARGS, "brand_experience_principles": ["", "", ""]}
+        )
+    with pytest.raises(ValidationError):
+        BrandExperiencePrinciplesOutput(
+            **{**_EXPERIENCE_PRINCIPLES_KWARGS, "signature_moments": ["", "", ""]}
+        )
+    with pytest.raises(ValidationError):
+        BrandExperiencePrinciplesOutput(
+            **{**_EXPERIENCE_PRINCIPLES_KWARGS, "sensory_elements": ["", ""]}
         )
