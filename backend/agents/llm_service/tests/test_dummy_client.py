@@ -105,6 +105,28 @@ def test_structured_output_model_routes_by_class_despite_misleading_prompt() -> 
     TaglineOutput.model_validate(j)
 
 
+def test_phase2_system_prompt_without_model_does_not_route_by_text_anchors() -> None:
+    """Phase 2 stubs must not be selected from system-prompt substrings alone.
+
+    A MessageMapper-shaped system prompt (messaging_framework +
+    audience_message_maps) previously returned a MessagingFrameworkOutput
+    payload via text-anchor fallback. Without structured_output_model, that
+    path must not fire — incidental field-name mentions must not choose a
+    schema.
+    """
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt=(
+            "messaging_framework and audience_message_maps for the messaging specialist"
+        ),
+        temperature=0.0,
+    )
+    assert "messaging_framework" not in j
+    assert "audience_message_maps" not in j
+    assert "brand_story" not in j
+
+
 def test_structured_output_model_none_preserves_text_routing() -> None:
     """Omitting structured_output_model must not change any existing behavior."""
     c = DummyLLMClient()
