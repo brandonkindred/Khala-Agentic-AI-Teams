@@ -1399,6 +1399,58 @@ def test_run_paper_trading_live_mode_kicks_off_thread(
     assert started == [True]
 
 
+def test_run_paper_trading_session_id_collision_retries_instead_of_overwriting(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A session_id collision (uuid4() returning an id already present in
+    _paper_trading_sessions) must not silently overwrite the existing
+    session — the route retries until it lands on a free id."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s-collide",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    colliding_hex = "aaaa1111aaaa1111aaaa1111aaaa1111"
+    existing = PaperTradingSession(
+        session_id=f"pt-{colliding_hex}",
+        lab_record_id="lab-existing",
+        strategy=strategy,
+        status=PaperTradingStatus.LIVE,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions[f"pt-{colliding_hex}"] = existing
+
+    record = _winning_record()
+    api_main._strategy_lab_records["lab-w"] = record
+    monkeypatch.setattr(api_main, "_run_paper_trading_background", lambda *a, **k: None)
+
+    class _CollidingHex:
+        def __init__(self, value):
+            self.hex = value
+
+    uuids = iter([_CollidingHex(colliding_hex), _CollidingHex("bbbb2222bbbb2222bbbb2222bbbb2222")])
+    monkeypatch.setattr(api_main.uuid, "uuid4", lambda: next(uuids))
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 200
+    new_session_id = resp.json()["session"]["session_id"]
+    assert new_session_id == "pt-bbbb2222bbbb2222bbbb2222bbbb2222"
+    # The pre-existing session at the colliding id must be untouched.
+    untouched = api_main._paper_trading_sessions.get(f"pt-{colliding_hex}")
+    assert untouched.lab_record_id == "lab-existing"
+    assert untouched.status == PaperTradingStatus.LIVE
+
+
 def test_run_paper_trading_concurrent_starts_same_strategy_only_one_wins(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

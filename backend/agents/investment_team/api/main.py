@@ -4636,7 +4636,6 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
     # 2 — Create the initial session (OPENING for the live path, RUNNING for
     # the legacy recent-OHLCV path) and persist immediately
-    session_id = f"pt-{uuid.uuid4().hex[:8]}"
     now = datetime.now(tz=timezone.utc).isoformat()
     use_live = _live_paper_enabled()
 
@@ -4683,6 +4682,16 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                             f"starting a new one."
                         ),
                     )
+
+        # Full UUID hex (128 bits of entropy) makes a collision astronomically
+        # unlikely on its own, but this loop closes the gap completely: a
+        # colliding id would otherwise silently overwrite an existing
+        # active/terminal session's dict entry. Generated and checked while
+        # already holding _lock so the check-then-insert below is atomic
+        # against a concurrent request minting the same id.
+        session_id = f"pt-{uuid.uuid4().hex}"
+        while session_id in _paper_trading_sessions:
+            session_id = f"pt-{uuid.uuid4().hex}"
 
         try:
             running_session = PaperTradingSession(
