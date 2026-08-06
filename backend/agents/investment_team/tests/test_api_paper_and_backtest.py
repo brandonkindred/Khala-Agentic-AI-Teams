@@ -1521,6 +1521,187 @@ def test_run_paper_trading_background_happy_path(
     assert persisted.lab_record_id == "lab-ok"
 
 
+def test_run_paper_trading_background_does_not_clobber_already_terminal_session_on_success(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """If the session was already declared FAILED (e.g. by
+    ``run_paper_trading``'s dispatch-failure path, ``_fail_paper_trading_session``)
+    while this worker was an orphaned Temporal workflow still running
+    server-side, the worker's own late-arriving success write must not
+    clobber that FAILED status."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        PaperTradingSession,
+        PaperTradingStatus,
+        PaperTradingVerdict,
+    )
+
+    strategy, bt = _step_strategy_and_record()
+    failed_session = PaperTradingSession(
+        session_id="pt-orphan-success",
+        lab_record_id="lab-ok",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T00:05:00Z",
+        error="Failed to start the paper-trading workflow (Temporal unavailable).",
+    )
+    api_main._paper_trading_sessions["pt-orphan-success"] = failed_session
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(
+        mds, "MarketDataService", lambda: _FakeMarketService({"AAA": [{"close": 1.0}]})
+    )
+
+    returned = PaperTradingSession(
+        session_id="placeholder",
+        lab_record_id="placeholder",
+        strategy=strategy,
+        status=PaperTradingStatus.COMPLETED,
+        initial_capital=100_000.0,
+        current_capital=120_000.0,
+        symbols_traded=["AAA"],
+        data_source="fake",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z",
+        completed_at="2024-06-01T00:05:00Z",
+        verdict=PaperTradingVerdict.READY_FOR_LIVE,
+    )
+
+    class _FakeAgent:
+        def run_session(self, **kwargs):
+            return returned
+
+    import investment_team.paper_trading_agent as pta
+
+    monkeypatch.setattr(pta, "PaperTradingAgent", lambda: _FakeAgent())
+
+    api_main._run_paper_trading_background(
+        "pt-orphan-success",
+        "lab-ok",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    persisted = api_main._paper_trading_sessions.get("pt-orphan-success")
+    assert persisted.status == PaperTradingStatus.FAILED
+    assert persisted.error == "Failed to start the paper-trading workflow (Temporal unavailable)."
+    assert persisted.completed_at == "2024-01-01T00:05:00Z"
+    # The orphaned run's result must not have been persisted onto the session.
+    assert persisted.verdict is None
+
+
+def test_run_paper_trading_background_does_not_clobber_already_terminal_session_on_empty_market_data(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Same guard on the empty-market-data terminal write."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy, bt = _step_strategy_and_record()
+    failed_session = PaperTradingSession(
+        session_id="pt-orphan-empty",
+        lab_record_id="lab-ok",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T00:05:00Z",
+        error="Failed to start the paper-trading workflow (Temporal unavailable).",
+    )
+    api_main._paper_trading_sessions["pt-orphan-empty"] = failed_session
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService({}))
+
+    api_main._run_paper_trading_background(
+        "pt-orphan-empty",
+        "lab-ok",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    persisted = api_main._paper_trading_sessions.get("pt-orphan-empty")
+    assert persisted.status == PaperTradingStatus.FAILED
+    assert persisted.error == "Failed to start the paper-trading workflow (Temporal unavailable)."
+    assert persisted.completed_at == "2024-01-01T00:05:00Z"
+
+
+def test_run_paper_trading_background_does_not_clobber_already_terminal_session_on_crash(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Same guard on the crash-handler's terminal write."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy, bt = _step_strategy_and_record()
+    failed_session = PaperTradingSession(
+        session_id="pt-orphan-crash",
+        lab_record_id="lab-ok",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T00:05:00Z",
+        error="Failed to start the paper-trading workflow (Temporal unavailable).",
+    )
+    api_main._paper_trading_sessions["pt-orphan-crash"] = failed_session
+
+    import investment_team.market_data_service as mds
+
+    class _Broken:
+        def resolve_strategy_symbols(self, s):
+            raise RuntimeError("boom in resolve")
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _Broken())
+
+    api_main._run_paper_trading_background(
+        "pt-orphan-crash",
+        "lab-ok",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    persisted = api_main._paper_trading_sessions.get("pt-orphan-crash")
+    assert persisted.status == PaperTradingStatus.FAILED
+    assert persisted.error == "Failed to start the paper-trading workflow (Temporal unavailable)."
+    assert persisted.completed_at == "2024-01-01T00:05:00Z"
+
+
 def test_run_paper_trading_background_guards_non_terminal_agent_result(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
