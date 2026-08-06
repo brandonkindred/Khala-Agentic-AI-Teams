@@ -386,6 +386,59 @@ def test_resolve_fee_overrides_defaults_fall_back_on_invalid_env(
 
 
 # ---------------------------------------------------------------------------
+# _parse_iso_timestamp_for_sort
+# ---------------------------------------------------------------------------
+
+
+def test_parse_iso_timestamp_for_sort_empty_string_sorts_last() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("") == datetime.min.replace(tzinfo=timezone.utc)
+
+
+def test_parse_iso_timestamp_for_sort_unparseable_falls_back_like_empty() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("not-a-timestamp") == datetime.min.replace(
+        tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_accepts_z_suffix() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("2024-01-01T12:00:00Z") == datetime(
+        2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_naive_string_assumed_utc() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("2024-01-01T12:00:00") == datetime(
+        2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_respects_non_utc_offset() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    # 2024-01-02T00:30:00+02:00 is 2024-01-01T22:30:00 UTC.
+    parsed = _parse_iso_timestamp_for_sort("2024-01-02T00:30:00+02:00")
+    assert parsed == datetime(2024, 1, 1, 22, 30, 0, tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
 # _normalize_strategy_lab_asset_class + _build_strategy_from_ideation
 # ---------------------------------------------------------------------------
 

@@ -5301,6 +5301,37 @@ def list_providers() -> ProvidersListResponse:
     )
 
 
+def _parse_iso_timestamp_for_sort(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp string for use as a sort key.
+
+    Comparing raw ISO-8601 strings lexicographically only matches
+    chronological order when every timestamp shares the same timezone
+    offset. This repo's own writers always stamp UTC via
+    ``datetime.now(tz=timezone.utc).isoformat()``, but persisted or
+    hand-constructed records could carry a different offset (or the "Z"
+    UTC designator, which ``datetime.fromisoformat`` doesn't accept on
+    Python versions before 3.11), so lexicographic order isn't a safe
+    assumption to build the sort on.
+
+    Postconditions:
+        Returns a timezone-aware ``datetime`` reflecting ``value``'s actual
+        instant regardless of its offset notation. An empty or unparseable
+        ``value`` returns ``datetime.min`` (UTC) so such records sort last
+        under ``reverse=True`` (oldest) rather than raising or corrupting
+        their siblings' order. A parsed-but-naive value (no offset in the
+        string) is assumed UTC, matching this codebase's sole convention.
+    """
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 @app.get("/strategy-lab/paper-trade/results", response_model=PaperTradingResultsResponse)
 def get_paper_trading_results(
     verdict: Optional[PaperTradingVerdict] = None,
@@ -5329,7 +5360,10 @@ def get_paper_trading_results(
         Terminal sessions (status not in ``_ACTIVE_PT_STATES``) are grouped
         first and sorted by ``completed_at`` descending; active sessions are
         grouped after and sorted by ``started_at`` descending. Each group's
-        own sort is independent of the other's timestamps.
+        own sort is independent of the other's timestamps. Both sorts key on
+        ``_parse_iso_timestamp_for_sort`` rather than comparing the raw
+        strings, so a mix of timezone offsets across records can't produce a
+        lexicographic order that disagrees with chronological order.
     """
     with _lock:
         raw = list(_paper_trading_sessions.values())
@@ -5345,8 +5379,8 @@ def get_paper_trading_results(
             )
     terminal_items = [s for s in items if s.status not in _ACTIVE_PT_STATES]
     active_items = [s for s in items if s.status in _ACTIVE_PT_STATES]
-    terminal_items.sort(key=lambda s: s.completed_at, reverse=True)
-    active_items.sort(key=lambda s: s.started_at, reverse=True)
+    terminal_items.sort(key=lambda s: _parse_iso_timestamp_for_sort(s.completed_at), reverse=True)
+    active_items.sort(key=lambda s: _parse_iso_timestamp_for_sort(s.started_at), reverse=True)
     items = terminal_items + active_items
 
     if verdict is not None:
