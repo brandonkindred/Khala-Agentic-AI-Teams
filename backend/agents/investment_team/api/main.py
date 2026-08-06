@@ -4866,9 +4866,21 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                 session_id,
                 exc_info=True,
             )
-        _fail_paper_trading_session(
-            session_id, "Failed to start the paper-trading workflow (Temporal unavailable)."
-        )
+        # Best-effort failure recording must not mask the original dispatch
+        # error (especially an HTTPException with the intended status/detail).
+        # If the session was concurrently removed or is unparseable,
+        # _fail_paper_trading_session can raise — log and continue so the
+        # caller still receives the original exception.
+        try:
+            _fail_paper_trading_session(
+                session_id,
+                "Failed to start the paper-trading workflow (Temporal unavailable).",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to mark paper-trading session %s as failed",
+                session_id,
+            )
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(
