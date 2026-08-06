@@ -236,6 +236,39 @@ def test_live_paper_background_handles_crash_and_clears_controller(
     assert "pt-3" not in api_state._live_paper_stop_controllers
 
 
+def test_live_paper_background_unparseable_record_does_not_escape_crash_handler(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """The crash handler's own ``PaperTradingSession.parse_persisted(raw)``
+    call can itself raise (e.g. a corrupt persisted record) — that secondary
+    exception must not escape the worker in place of the original crash,
+    contradicting the documented ``Raises: None`` contract. The record is
+    left as-is (logged, not updated) rather than propagating."""
+    # A raw dict missing required fields -> parse_persisted raises when the
+    # crash handler tries to re-parse it.
+    api_state._paper_trading_sessions["pt-crash-corrupt"] = {"session_id": "pt-crash-corrupt"}
+    strategy = _winning_strategy()
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(monkeypatch, RuntimeError("provider exploded"))
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+
+    # Must not raise.
+    _run_live_paper_trading_background("pt-crash-corrupt", "lab-w", strategy, req)
+
+    # Left as-is: the corrupt record could not be re-parsed, so it was logged
+    # rather than overwritten with a FAILED status.
+    assert api_state._paper_trading_sessions.get("pt-crash-corrupt") == {
+        "session_id": "pt-crash-corrupt"
+    }
+    assert "pt-crash-corrupt" not in api_state._live_paper_stop_controllers
+
+
 def test_live_paper_background_raises_when_no_symbols(
     monkeypatch: pytest.MonkeyPatch, api_state
 ) -> None:
