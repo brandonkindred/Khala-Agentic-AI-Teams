@@ -626,6 +626,24 @@ def test_dispatch_via_temporal_false_when_disabled(monkeypatch) -> None:
     assert called == []  # starter not invoked when Temporal is disabled
 
 
+def test_dispatch_via_temporal_downgrades_enablement_check_error_to_false(monkeypatch) -> None:
+    """``is_temporal_enabled()`` raising (not just the import failing) must
+    also be swallowed to False -- regression test for the gap where only
+    ``ImportError`` from the import statement was caught, leaving an
+    exception from the enablement check itself free to propagate and break
+    this function's documented "Never raises" contract."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    def _boom() -> bool:
+        raise RuntimeError("enablement check backend unavailable")
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", _boom)
+    called = []
+    assert api_main._dispatch_via_temporal(lambda: called.append(1)) is False
+    assert called == []  # starter not invoked when the enablement check itself fails
+
+
 def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_client) -> None:
     """A RuntimeError from the starter must not 500 or leave a stuck 'running'
     entry — Temporal-only dispatch rolls the run to 'failed' and 503s (no
