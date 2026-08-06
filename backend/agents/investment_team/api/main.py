@@ -523,11 +523,13 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
 
     Preconditions:
         ``state`` is an ``_active_runs`` entry (or a persisted job dict of the
-        same shape); ``state["run_id"]`` is present. Every other field —
-        including ``status``, ``started_at``, and ``total_cycles`` — is read
-        with a default, so a partially-populated merged/resume/snapshot dict
-        (e.g. a job-service entry that only guarantees ``run_id``/``status``)
-        is safe.
+        same shape). Every field, including ``run_id``, ``status``,
+        ``started_at``, and ``total_cycles``, is read with a default, so a
+        partially-populated merged/resume/snapshot dict (e.g. a job-service
+        entry with unexpected gaps) is safe -- this defends the same
+        currently-enforced-by-construction invariant (every writer of
+        ``_active_runs`` sets ``run_id``) that ``status`` already defended
+        against, rather than assuming it can never be violated.
     Postconditions:
         Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
         field, defaulting each absent field to its response default
@@ -554,7 +556,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         except ValidationError:
             current_cycle = None
     return StrategyLabRunStatusResponse(
-        run_id=state["run_id"],
+        run_id=state.get("run_id", ""),
         status=state.get("status", "unknown"),
         started_at=state.get("started_at", ""),
         total_cycles=state.get("total_cycles", 0),

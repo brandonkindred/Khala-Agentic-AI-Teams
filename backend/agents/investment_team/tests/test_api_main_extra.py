@@ -1996,3 +1996,22 @@ def test_reconcile_run_progress_tolerates_none_data(monkeypatch: pytest.MonkeyPa
     # since the fallback ("data" -> the persisted record itself) contains
     # none of _STRATEGY_LAB_PROGRESS_FIELDS.
     assert api_main._active_runs[run_id]["completed_cycles"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _run_state_to_response: missing run_id tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_run_state_to_response_tolerates_missing_run_id() -> None:
+    """A state dict without a ``run_id`` key must not raise ``KeyError`` --
+    every other field in this function already degrades to a default, and
+    ``run_id`` (guaranteed by construction today, but not schema-validated)
+    should be defended the same way instead of assuming the invariant can
+    never be violated."""
+    from investment_team.api.main import _run_state_to_response
+
+    resp = _run_state_to_response({"status": "running"})
+
+    assert resp.run_id == ""
+    assert resp.status == "running"
