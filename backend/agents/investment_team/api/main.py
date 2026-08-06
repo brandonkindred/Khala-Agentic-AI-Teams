@@ -155,7 +155,8 @@ logger = logging.getLogger(__name__)
 
 
 def _startup() -> None:
-    """Start the Temporal worker backstop (best-effort).
+    """Start the Temporal worker backstop and recover orphaned paper-trading
+    sessions (both best-effort).
 
     The team_service entrypoint normally starts the worker via
     ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
@@ -167,8 +168,14 @@ def _startup() -> None:
 
     Postconditions:
         - Starts the worker thread when Temporal is enabled; a no-op when
-          ``TEMPORAL_ADDRESS`` is unset. Never raises — failures are logged
-          so they cannot abort app boot (this runs as an ``on_startup`` hook).
+          ``TEMPORAL_ADDRESS`` is unset. Marks any paper-trading session left
+          in an active status by a previous process as ``failed`` (see
+          ``_recover_orphaned_paper_trading_sessions``). Never raises —
+          failures are logged so they cannot abort app boot (this runs as
+          ``create_team_app``'s ``on_startup`` hook, inside its custom
+          ``lifespan=``; the deprecated ``@app.on_event("startup")``
+          decorator is never invoked once a custom lifespan is set, so
+          startup work belongs here, not on a separately decorated function).
     """
     try:
         from investment_team.temporal.worker import (
@@ -181,6 +188,7 @@ def _startup() -> None:
             "investment_team Temporal worker start (lifespan backstop) failed",
             exc_info=True,
         )
+    _recover_orphaned_paper_trading_sessions()
 
 
 def _run_investment_service_shutdown() -> (
@@ -4984,7 +4992,6 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
     return PaperTradingResponse(session=session)
 
 
-@app.on_event("startup")
 def _recover_orphaned_paper_trading_sessions() -> None:
     """Mark sessions left in an active status by a previous process as ``failed``.
 
@@ -4994,6 +5001,12 @@ def _recover_orphaned_paper_trading_sessions() -> None:
     for it, but SIGKILL/crashes can still orphan a session. Without this recovery
     pass, such sessions would sit in an active status forever and clients would
     poll indefinitely with no terminal transition.
+
+    Called from ``_startup()`` (``create_team_app``'s ``on_startup`` hook) rather
+    than decorated with ``@app.on_event("startup")`` — a custom ``lifespan=`` (set
+    by ``create_team_app``) replaces FastAPI's default lifespan context that
+    ``on_event`` handlers rely on, so an ``on_event``-registered handler here would
+    silently never run.
     """
     now_iso = datetime.now(tz=timezone.utc).isoformat()
     recovered = 0
