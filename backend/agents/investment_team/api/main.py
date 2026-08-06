@@ -16,6 +16,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from investment_team.agents import (
     FinancialAdvisorAgent,
@@ -147,6 +148,7 @@ from job_service_client import (
 )
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
+from shared.sse import sse_job_stream_async, sse_line
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3737,10 +3739,18 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     window. The streaming generator itself remains async so it doesn't block
     Uvicorn worker threads once connected.
     """
-    from starlette.concurrency import run_in_threadpool
-
+    # Deliberately local (not module-level): tests substitute a fake
+    # subscribe/unsubscribe by monkeypatching them directly on the
+    # investment_team.api.job_event_bus module object (not on this module),
+    # relying on this import re-executing -- and so re-binding these names to
+    # whatever job_event_bus.subscribe/unsubscribe currently are -- on every
+    # call. A module-level `from ... import subscribe, unsubscribe` would
+    # freeze these names to the real functions at main.py's own import time,
+    # silently breaking that test-doubling and stalling the SSE stream in
+    # requests that expect the fake driving it (verified: this exact swap
+    # deadlocks test_stream_strategy_lab_run_emits_snapshot_update_and_terminates
+    # and its siblings).
     from investment_team.api.job_event_bus import subscribe, unsubscribe
-    from shared.sse import sse_job_stream_async, sse_line
 
     with _lock:
         state = _active_runs.get(run_id)
