@@ -1412,6 +1412,39 @@ def test_list_strategy_lab_jobs_tolerates_malformed_current_cycle(
     assert entry["label"] == "Strategy batch (1/4)"
 
 
+def test_list_strategy_lab_jobs_tolerates_non_string_phase(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A ``current_cycle["phase"]`` that isn't a string doesn't 500 the
+    response-model validation for ``InvestmentJobSummary.current_phase``.
+
+    ``current_cycle`` is reconciled verbatim from unvalidated job-service
+    data, so a malformed record could carry a non-string ``phase`` (e.g. an
+    int or a dict) straight into the summary; the endpoint must degrade that
+    to ``None`` instead of raising a Pydantic validation error.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "non-string-phase-run"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+        "current_cycle": {"phase": 42},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == run_id]
+    assert len(matches) == 1
+    assert matches[0]["current_phase"] is None
+
+
 def test_list_strategy_lab_jobs_tolerates_non_dict_persisted_data(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
