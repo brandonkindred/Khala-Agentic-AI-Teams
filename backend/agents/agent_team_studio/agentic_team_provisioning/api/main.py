@@ -33,6 +33,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_REGISTRY,
     AddAgentFromRegistryRequest,
     AgentEnvProvisionSummary,
+    AgenticTeam,
     AgenticTeamAgent,
     AgentQualityScore,
     AssetInfo,
@@ -929,6 +930,19 @@ def _get_infra_or_404(team_id: str) -> TeamInfrastructure:
     return get_team_infrastructure(team_id)
 
 
+def _get_team_or_404(team_id: str) -> AgenticTeam:
+    """Look up a team, raising 404 if it doesn't exist.
+
+    Preconditions: none.
+    Postconditions: returns the team when found; otherwise raises HTTPException(404)
+        and never returns.
+    """
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return team
+
+
 # ---------------------------------------------------------------------------
 # Team / Job Status
 # ---------------------------------------------------------------------------
@@ -1152,6 +1166,7 @@ def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
 @app.get("/teams/{team_id}/test-chat/sessions", response_model=List[TestChatSession])
 def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
     """List chat test sessions for a team, optionally filtered by agent."""
+    _get_team_or_404(team_id)
     rows = _test_store.list_chat_sessions(team_id, agent_name=agent_name)
     return [TestChatSession(**r) for r in rows]
 
@@ -1207,8 +1222,10 @@ def delete_test_chat_session(team_id: str, session_id: str):
 def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessageRequest):
     """Send a message to an agent and get a synchronous response.
 
-    The full conversation history is sent to the agent for multi-turn
-    context. Both user and assistant messages are stored.
+    The full conversation history is sent to the agent for multi-turn context.
+    The user and assistant messages are persisted together as a single turn
+    only after the agent call succeeds — a failed invocation raises 502 and
+    leaves no orphaned user message for a retry to duplicate.
     """
     session_row = _test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
@@ -1217,14 +1234,12 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     agent_name = session_row["agent_name"]
     agent_def = _find_agent_in_roster(team_id, agent_name)
 
-    # Store user message
-    user_msg_id = str(uuid.uuid4())
-    _test_store.create_chat_message(user_msg_id, session_id, "user", req.content)
-
-    # Build conversation context from history
+    # Build conversation context from history plus the pending message. The
+    # user message isn't persisted yet, so it's appended directly here rather
+    # than read back from the store.
     history = _test_store.list_chat_messages(session_id)
     context_parts = []
-    for msg in history[:-1]:  # Exclude the just-added user message (will add below)
+    for msg in history:
         prefix = "User" if msg["role"] == "user" else "Assistant"
         context_parts.append(f"{prefix}: {msg['content']}")
     context_parts.append(f"User: {req.content}")
@@ -1235,17 +1250,23 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     # uses the plain runtime rather than the cognition-aware wrapper — advisory
     # rules + memory digest are rendered on the gated sandbox invoke path, where
     # the shim opens the channel.
-    agent_instance = _build_test_agent(
-        agent_def.agent_name,
-        agent_def.role,
-        agent_def.skills,
-        agent_def.capabilities,
-        agent_def.tools,
-        agent_def.expertise,
-    )
-    response_text = _call_test_agent(agent_instance, full_context)
+    try:
+        agent_instance = _build_test_agent(
+            agent_def.agent_name,
+            agent_def.role,
+            agent_def.skills,
+            agent_def.capabilities,
+            agent_def.tools,
+            agent_def.expertise,
+        )
+        response_text = _call_test_agent(agent_instance, full_context)
+    except Exception as exc:
+        logger.exception("Agent invocation failed for test-chat session %s", session_id)
+        raise HTTPException(status_code=502, detail="Agent invocation failed") from exc
 
-    # Store assistant message
+    # Persist the user and assistant messages together as a complete turn.
+    user_msg_id = str(uuid.uuid4())
+    _test_store.create_chat_message(user_msg_id, session_id, "user", req.content)
     asst_msg_id = str(uuid.uuid4())
     _test_store.create_chat_message(asst_msg_id, session_id, "assistant", response_text)
 
@@ -1296,6 +1317,7 @@ def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageReques
 @app.get("/teams/{team_id}/test-chat/quality-scores", response_model=List[AgentQualityScore])
 def get_agent_quality_scores(team_id: str):
     """Get aggregated quality scores per agent based on chat ratings."""
+    _get_team_or_404(team_id)
     rows = _test_store.get_agent_quality_scores(team_id)
     return [AgentQualityScore(**r) for r in rows]
 
@@ -1403,6 +1425,7 @@ def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
 @app.get("/teams/{team_id}/test-pipeline/runs", response_model=List[TestPipelineRun])
 def list_pipeline_runs(team_id: str):
     """List pipeline test runs for a team."""
+    _get_team_or_404(team_id)
     rows = _test_store.list_pipeline_runs(team_id)
     return [TestPipelineRun(**r) for r in rows]
 

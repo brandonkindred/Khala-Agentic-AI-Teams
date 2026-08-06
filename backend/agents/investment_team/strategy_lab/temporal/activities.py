@@ -747,19 +747,24 @@ def compute_signal_brief_activity(benchmark_symbol: str) -> Dict[str, Any]:
 
 @activity.defn(name="strategy_lab_is_run_cancelled")
 def is_run_cancelled_activity(run_id: str) -> bool:
-    """Return True if the run has been externally cancelled (terminal job status).
+    """Return True if the run has stopped for any external reason (terminal job status).
+
+    Despite the activity name (kept for wire-protocol/replay compatibility),
+    this is a general "should the workflow stop" check, not a cancellation-
+    specific one -- it also fires for an externally-recorded failure or
+    interruption, not just a genuine user cancellation.
 
     Preconditions:
         ``run_id`` is the strategy-lab run identifier.
     Postconditions:
-        Returns ``investment_team.api.main._is_strategy_lab_run_cancelled``'s
+        Returns ``investment_team.api.main._is_strategy_lab_run_externally_stopped``'s
         result verbatim — True for a ``cancelled``/``failed``/``interrupted``
         job status, False otherwise. That helper never raises, so this activity
         never raises either.
     """
-    from investment_team.api.main import _is_strategy_lab_run_cancelled
+    from investment_team.api.main import _is_strategy_lab_run_externally_stopped
 
-    return _is_strategy_lab_run_cancelled(run_id)
+    return _is_strategy_lab_run_externally_stopped(run_id)
 
 
 @activity.defn(name="strategy_lab_external_terminal_status")

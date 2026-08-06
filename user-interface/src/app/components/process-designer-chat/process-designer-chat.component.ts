@@ -45,8 +45,6 @@ import type {
   UpdateAgentRequest,
 } from '../../models';
 
-let _stepCounter = 0;
-
 /** A roster agent's fields, editable via the inline "Edit" affordance. */
 interface AgentEditDraft {
   role: string;
@@ -128,6 +126,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   private rosterRefreshSeq = 0;
 
   private conversationId: string | null = null;
+  /** Monotonic stamp for `startConversation`; guards against out-of-order createConversation results. */
+  private conversationSeq = 0;
+  private _stepCounter = 0;
 
   form = this.fb.nonNullable.group({
     message: ['', [Validators.required, Validators.minLength(1)]],
@@ -181,6 +182,12 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   private startConversation(): void {
+    // Sequence token: startConversation can be invoked again (e.g. rapid team
+    // switching) before a prior createConversation call resolves. Stamp each
+    // call and drop any callback whose stamp is no longer the latest, so a
+    // slow older response can't complete last and overwrite the active
+    // conversationId/messages/process state with stale data.
+    const seq = ++this.conversationSeq;
     this.error.set(null);
     this.conversationId = null;
     this.messages.set([]);
@@ -190,8 +197,14 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.selectedStep.set(null);
 
     this.api.createConversation(this.team.team_id).subscribe({
-      next: (res) => this.applyState(res),
-      error: (err) => this.error.set(err?.error?.detail ?? 'Failed to start conversation'),
+      next: (res) => {
+        if (seq !== this.conversationSeq) return; // superseded by a newer call
+        this.applyState(res);
+      },
+      error: (err) => {
+        if (seq !== this.conversationSeq) return;
+        this.error.set(err?.error?.detail ?? 'Failed to start conversation');
+      },
     });
   }
 
@@ -502,9 +515,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const process = this.currentProcess();
     if (!process) return;
 
-    _stepCounter++;
+    this._stepCounter++;
     const newStep: ProcessStep = {
-      step_id: `step_${Date.now()}_${_stepCounter}`,
+      step_id: `step_${Date.now()}_${this._stepCounter}`,
       name: stepType === 'decision' ? 'New Decision' : 'New Step',
       description: '',
       step_type: stepType,
@@ -626,7 +639,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   // ---------------------------------------------------------------------------
 
   /**
-   * Build a Mermaid-style flowchart as inline SVG from the process definition.
+   * Build a custom interactive SVG flowchart from the process definition.
    * Nodes are interactive — clicking them opens the step editor.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {

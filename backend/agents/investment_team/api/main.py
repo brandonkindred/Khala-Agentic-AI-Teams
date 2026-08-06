@@ -10,11 +10,13 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, get_args
 
+import httpx
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from investment_team.agents import (
     FinancialAdvisorAgent,
@@ -152,6 +154,7 @@ from job_service_client import (
 )
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
+from shared.sse import sse_job_stream_async, sse_line
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1199,8 +1202,12 @@ def _run_backtest_background(
 
     Postconditions:
         - On the success path: job status becomes RUNNING then COMPLETED with a
-          serialized ``RunBacktestResponse``; a new ``BacktestRecord`` is stored
-          under ``_backtests[backtest_id]``
+          serialized ``RunBacktestResponse``; a ``BacktestRecord`` is stored under
+          ``_backtests[backtest_id]``, where ``backtest_id`` is derived
+          deterministically from ``job_id``. A second invocation for the same
+          ``job_id`` (e.g. a Temporal activity retry that lands after a worker
+          crash left the job at RUNNING) therefore overwrites the same record
+          instead of orphaning a duplicate.
         - On ``BacktestExecutionError`` or other exceptions: job status becomes
           FAILED with an error string, unless a cancel check already returned
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
@@ -1216,7 +1223,10 @@ def _run_backtest_background(
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
             return
-        backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
+        # Deterministic (not random) so a retry of the same job_id — e.g. a
+        # Temporal activity retry after a worker crash left the job RUNNING —
+        # overwrites the same record instead of minting a duplicate.
+        backtest_id = f"bt-{hashlib.sha256(job_id.encode()).hexdigest()[:8]}"
         now = _now()
         record = BacktestRecord(
             backtest_id=backtest_id,
@@ -1852,6 +1862,23 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
     return normalize_asset_class(raw)
 
 
+# The timeframe values StrategySpec.timeframe (a strict Literal) accepts.
+# Derived from the field itself so this can never drift out of sync with
+# models.py.
+_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(get_args(StrategySpec.model_fields["timeframe"].annotation))
+
+
+def _coerce_strategy_lab_timeframe(raw: object) -> str:
+    """Return ``raw`` if it's a timeframe ``StrategySpec`` accepts, else ``"1d"``.
+
+    Preconditions: ``raw`` may be any value, including ``None`` or an
+    unrecognized/malformed string — no type check required of the caller.
+    Postconditions: returns ``raw`` unchanged when it's a member of
+    ``_STRATEGY_SPEC_TIMEFRAMES``; otherwise returns ``"1d"``. Never raises.
+    """
+    return raw if raw in _STRATEGY_SPEC_TIMEFRAMES else "1d"
+
+
 def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[StrategySpec, str]:
     """Build a StrategySpec + strategy_id from raw ideation output.
 
@@ -1878,11 +1905,13 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
         asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
         hypothesis=str(strategy_data.get("hypothesis", "")),
         signal_definition=str(strategy_data.get("signal_definition", "")),
-        # Issue #537: ideation must declare a timeframe. Default to "1d"
-        # only when the LLM forgot the field — the prompt makes it
-        # mandatory; this fallback keeps the cycle alive rather than
-        # forcing a re-run for a clearly-resolvable omission.
-        timeframe=strategy_data.get("timeframe") or "1d",
+        # Ideation must declare a timeframe StrategySpec accepts. Default to
+        # "1d" when the LLM omitted the field or returned a value outside
+        # the allowed set (e.g. "1x") -- the prompt makes a valid timeframe
+        # mandatory, but this fallback keeps the cycle alive on a
+        # clearly-resolvable omission/typo instead of raising a strict
+        # pydantic ValidationError deep inside StrategySpec construction.
+        timeframe=_coerce_strategy_lab_timeframe(strategy_data.get("timeframe")),
         # Issue #551/#554: pass structured rule payloads through to
         # Pydantic; non-dict / non-DSL items are discarded so a malformed
         # ideation LLM response doesn't crash the cycle.
@@ -1964,19 +1993,28 @@ def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
         paper-trading step) with ``record.strategy`` / ``record.backtest``
         populated.
     Postconditions:
-        ``record`` / ``record.strategy`` / ``record.backtest`` are stored in
-        the module-level ``_strategy_lab_records`` / ``_strategies`` /
-        ``_backtests`` dictionaries under ``_lock``, keyed by their
-        respective ids. Extracted from ``_run_one_strategy_lab_cycle`` so a
-        Temporal activity can reuse the identical write without duplicating
-        it.
+        ``record`` / ``record.strategy`` / ``record.backtest`` are written to
+        the ``JobServiceClient``-backed ``_strategy_lab_records`` /
+        ``_strategies`` / ``_backtests`` stores, keyed by their respective
+        ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
+        activity can reuse the identical write without duplicating it.
+
+    Raises:
+        ``ValueError``: ``record.strategy`` or ``record.backtest`` is
+        ``None``. Checked before acquiring ``_lock``, so a caller that
+        violates the precondition gets a clear contract failure instead of
+        an opaque ``AttributeError`` from inside the locked section.
     """
     # StrategySpec/BacktestRecord are required (non-Optional) fields, but
     # Pydantic doesn't validate on assignment here, so a stray `record.strategy
     # = None` elsewhere would otherwise surface as an opaque AttributeError
-    # below instead of a clear precondition failure at this boundary.
-    assert record.strategy is not None, "record.strategy must be populated before persisting"
-    assert record.backtest is not None, "record.backtest must be populated before persisting"
+    # below instead of a clear precondition failure at this boundary. A bare
+    # `assert` would be stripped under `python -O`, silently admitting a None
+    # value; raise explicitly so this precondition always holds.
+    if record.strategy is None:
+        raise ValueError("record.strategy must be populated before persisting")
+    if record.backtest is None:
+        raise ValueError("record.backtest must be populated before persisting")
     with _lock:
         _strategy_lab_records[record.lab_record_id] = record
         _strategies[record.strategy.strategy_id] = record.strategy
@@ -2103,6 +2141,18 @@ def _finalize_strategy_lab_cycle_record(
 
 
 def _strategy_lab_signal_expert_enabled() -> bool:
+    """Return whether the per-batch signal-intelligence expert is enabled.
+
+    Gates ``_compute_signal_brief_snapshot`` (used by the Temporal
+    ``compute_signal_brief_activity``): when disabled, that function skips
+    the market-data fetch and ``SignalIntelligenceExpert`` call entirely and
+    fails open with a ``{"skipped": True, ...}`` brief instead.
+
+    Reads the ``STRATEGY_LAB_SIGNAL_EXPERT_ENABLED`` env var, defaulting to
+    enabled (``"true"``) when unset. Case-insensitive; ``"true"``, ``"1"``,
+    and ``"yes"`` are treated as enabled -- any other explicit value
+    (including an empty string) is treated as disabled.
+    """
     return os.environ.get("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "true").lower() in (
         "true",
         "1",
@@ -2121,14 +2171,27 @@ def _compute_signal_brief_snapshot(
     Preconditions:
         ``benchmark_symbol`` is the run's benchmark ticker.
     Postconditions:
-        Returns ``(brief, storage)``. Fail-open: on disabled expert / market-fetch
-        failure / expert failure it returns ``(None, {"skipped": True, ...})`` (or a
-        degraded-market brief) rather than raising.
+        Returns ``(brief, storage)``. Fail-open: on disabled expert /
+        provider-initialization failure / market-fetch failure / expert
+        (including its own initialization) failure / provider-cleanup
+        failure, it returns ``(None, {"skipped": True, ...})`` (or a
+        degraded-market brief) rather than raising -- every step from
+        provider construction through cleanup is guarded, not just
+        ``expert.produce_signal_brief``'s body.
     """
     if not _strategy_lab_signal_expert_enabled():
         return None, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
-    provider = FreeTierMarketDataProvider()
+    try:
+        provider = FreeTierMarketDataProvider()
+    except Exception as exc:
+        logger.warning("Failed to initialize market data provider: %s", exc)
+        return None, {
+            "skipped": True,
+            "skipped_reason": "provider_init_failed",
+            "error": str(exc),
+        }
+
     try:
         try:
             market_ctx = provider.fetch_context(
@@ -2144,9 +2207,9 @@ def _compute_signal_brief_snapshot(
             )
         prior_for_brief = _snapshot_prior_records()
 
-        expert = SignalIntelligenceExpert()
-        t0 = datetime.now(tz=timezone.utc)
         try:
+            expert = SignalIntelligenceExpert()
+            t0 = datetime.now(tz=timezone.utc)
             brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
             storage = brief.model_dump(mode="json")
             prov_text = market_ctx.as_prompt_text()
@@ -2165,6 +2228,9 @@ def _compute_signal_brief_snapshot(
             )
             return brief, storage
         except Exception as exc:
+            # Covers both SignalIntelligenceExpert() construction and
+            # produce_signal_brief() itself -- either is an "expert
+            # subsystem failed" outcome from the caller's perspective.
             logger.warning("Signal intelligence expert failed: %s", exc)
             return None, {
                 "skipped": True,
@@ -2172,13 +2238,19 @@ def _compute_signal_brief_snapshot(
                 "error": str(exc),
             }
     finally:
-        provider.close()
+        # A cleanup failure here must not replace whatever the try block
+        # already decided to return (a brief, or a skipped-with-reason
+        # tuple) with an unhandled exception -- log and swallow instead.
+        try:
+            provider.close()
+        except Exception as exc:
+            logger.warning("Failed to close market data provider: %s", exc)
 
 
 # Narrower than ``STRATEGY_LAB_TERMINAL_STATUSES`` (defined above): a run that
-# reached ``completed``/``completed_with_errors`` is NOT an external cancellation,
-# so those are deliberately excluded from the cancel check.
-_STRATEGY_LAB_CANCEL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
+# reached ``completed``/``completed_with_errors`` ended on its own, not via an
+# external stop signal, so those are deliberately excluded here.
+_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
 
 
 def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
@@ -2189,7 +2261,7 @@ def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
     Postconditions:
         Returns the persisted job's exact ``status`` string ("cancelled",
         "failed", or "interrupted") when it is one of
-        ``_STRATEGY_LAB_CANCEL_STATUSES``; ``None`` on any read error or a
+        ``_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES``; ``None`` on any read error or a
         non-terminal/absent status (never raises). Callers that need to
         distinguish a genuine user cancellation from another external stop
         (e.g. a service-wide "mark all interrupted" reconciliation, or an
@@ -2201,17 +2273,23 @@ def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
         persisted = client.get_job(run_id)
         if persisted:
             status = persisted.get("status", "")
-            if status in _STRATEGY_LAB_CANCEL_STATUSES:
+            if status in _STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES:
                 return status
     except Exception:
         logger.debug("Failed to fetch external terminal status for run %s", run_id, exc_info=True)
     return None
 
 
-def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
-    """Return True if the run's job-store status is terminal (external cancel).
+def _is_strategy_lab_run_externally_stopped(run_id: str) -> bool:
+    """Return True if the run's job-store status is any external stop signal.
 
-    Used by the Temporal ``is_run_cancelled_activity``.
+    NOT limited to a genuine user cancellation -- True for
+    ``cancelled``/``failed``/``interrupted`` alike (see
+    ``_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES``). Used by the Temporal
+    ``is_run_cancelled_activity`` (whose activity name predates this rename
+    and still reads "cancelled", but whose own docstring already documents
+    this broader contract: the workflow uses it as a general "should I stop"
+    check, not a cancellation-specific one).
 
     Preconditions:
         ``run_id`` is the strategy-lab run identifier.
@@ -2221,9 +2299,28 @@ def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
         non-terminal/absent status (never raises). Callers that need to know
         WHICH of those three statuses triggered this (to avoid mislabeling
         one as another) should call ``_strategy_lab_external_terminal_status``
-        directly instead.
+        directly instead; callers that need a genuine cancellation-only check
+        should use ``_is_strategy_lab_run_cancelled`` instead.
     """
     return _strategy_lab_external_terminal_status(run_id) is not None
+
+
+def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
+    """Return True only if the run's job-store status is exactly "cancelled".
+
+    Precise counterpart to ``_is_strategy_lab_run_externally_stopped``: use
+    this when a caller must distinguish a genuine user cancellation from a
+    failure or interruption, both of which also stop a run externally but
+    are not cancellations.
+
+    Preconditions:
+        ``run_id`` is the strategy-lab run identifier.
+    Postconditions:
+        Returns True when the persisted job's ``status`` is exactly
+        ``"cancelled"``; False for ``"failed"``/``"interrupted"``/any
+        non-terminal/absent status, or on any read error (never raises).
+    """
+    return _strategy_lab_external_terminal_status(run_id) == "cancelled"
 
 
 def _persist_run_state(
@@ -2532,21 +2629,39 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
             state["status"] = "failed"
             state["error"] = error
             state["current_cycle"] = None
-            _persist_run_state(run_id, state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+            # Snapshot for persistence outside the lock: _persist_run_state
+            # performs a synchronous job-service RPC, and _lock is the
+            # process-wide lock also used by run-status queries, dispatch,
+            # and reconciliation -- holding it across network I/O would
+            # block all of those for the RPC's duration. A shallow copy is
+            # enough (_persist_run_state only reads top-level keys) and
+            # protects the persisted snapshot from a concurrent mutator of
+            # this same dict object racing the now-unlocked persist call.
+            persisted_state = dict(state)
+        _persist_run_state(run_id, persisted_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
 
         from investment_team.api.job_event_bus import cleanup_job
 
         def _cleanup() -> None:
-            with _lock:
-                # resume/restart always replace the entry with a new dict
-                # rather than mutate this one in place, so an identity check
-                # reliably detects a run that got resumed within this delay
-                # window — pop/cleanup would otherwise tear down a live,
-                # freshly-resumed run's tracking state.
-                if _active_runs.get(run_id) is not state:
-                    return
-                _active_runs.pop(run_id, None)
-            cleanup_job(run_id)
+            # Runs on threading.Timer's own daemon thread, 900s after this
+            # function returns -- the outer try/except below has long since
+            # exited by then, so it can't catch anything raised in here. An
+            # uncaught cleanup_job failure would otherwise surface only as an
+            # unhandled exception trace on a background thread, with the
+            # rest of this callback silently skipped.
+            try:
+                with _lock:
+                    # resume/restart always replace the entry with a new dict
+                    # rather than mutate this one in place, so an identity check
+                    # reliably detects a run that got resumed within this delay
+                    # window — pop/cleanup would otherwise tear down a live,
+                    # freshly-resumed run's tracking state.
+                    if _active_runs.get(run_id) is not state:
+                        return
+                    _active_runs.pop(run_id, None)
+                cleanup_job(run_id)
+            except Exception:
+                logger.warning("Failed to clean up strategy-lab run %s after failure timeout", run_id, exc_info=True)
 
         timer = threading.Timer(STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS, _cleanup)
         timer.daemon = True
@@ -2678,9 +2793,11 @@ def _no_active_run_locked() -> None:
         - Returns ``None`` when no entry in ``_active_runs`` has status
           ``"running"``; otherwise raises ``HTTPException(409)``. Does not
           mutate ``_active_runs`` and does not itself acquire or release
-          ``_lock``.
+          ``_lock``. An entry missing a ``"status"`` key is treated as not
+          running (``.get()`` default) rather than raising ``KeyError`` --
+          a malformed entry must not defeat this conflict guard.
     """
-    if any(r["status"] == "running" for r in _active_runs.values()):
+    if any(r.get("status") == "running" for r in _active_runs.values()):
         raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
 
 
@@ -3031,9 +3148,13 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     Raises ``HTTPException(409)`` when another run is already active, or
     (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
     when another transition for this freshly-minted run_id is already in
-    flight (#4028). The global check runs before minting a run_id/acquiring
+    flight. An early, unlocked check runs before minting a run_id/acquiring
     its transition lock, so a rejected request never allocates a registry
-    entry that would otherwise never be looked up again.
+    entry that would otherwise never be looked up again -- but that check
+    alone can't stop two concurrent requests from both minting a run_id and
+    reaching the ``_active_runs`` write before either observes the other, so
+    the authoritative check is re-run atomically with that write, inside the
+    same ``_lock`` acquisition (mirroring ``resume_strategy_lab_run``).
     """
     _ensure_no_active_run()
 
@@ -3052,6 +3173,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
             request_payload=request.model_dump(),
         )
         with _lock:
+            _no_active_run_locked()
             _active_runs[run_id] = initial_state
         _persist_run_state(run_id, initial_state, create=True)
 
@@ -3163,12 +3285,22 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         - Entries are sorted by ``created_at`` descending.
 
     Raises:
-        - None. ``current_cycle``/``strategy`` reconciled from job-service data
-          are not schema-validated at ingestion, so their shape is checked
-          defensively before use rather than assumed. Job-service
-          merge/reconciliation failures are caught and logged, and the
-          response falls back to the in-memory-only list; this endpoint
-          always returns 200.
+        - None on an expected job-service failure. ``current_cycle``/
+          ``strategy`` reconciled from job-service data, and each persisted
+          job's ``"data"`` field itself (defaulting to ``{}`` when it isn't a
+          mapping), are not schema-validated at ingestion, so their shape is
+          checked defensively before use rather than assumed -- including
+          ``current_cycle["phase"]``, which is coerced to ``None`` unless it
+          is already a ``str`` (the type ``InvestmentJobSummary.current_phase``
+          requires), since a non-string value would otherwise fail Pydantic
+          response validation with a 500. A job-service
+          connection/transport failure (``httpx.HTTPError``) or an
+          unconfigured ``JOB_SERVICE_URL`` (``RuntimeError``) is caught and
+          logged, and the response falls back to the in-memory-only list; in
+          that case this endpoint still returns 200. A programming error in
+          the merge logic itself (e.g. ``TypeError``, ``AttributeError``) is
+          NOT caught here and propagates, surfacing as a 500 instead of being
+          silently swallowed.
     """
     jobs: List[InvestmentJobSummary] = []
 
@@ -3202,6 +3334,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         cycle = state.get("current_cycle")
         cycle = cycle if isinstance(cycle, dict) else None
         phase = cycle.get("phase") if cycle else None
+        phase = phase if isinstance(phase, str) else None
         hypothesis = ""
         if cycle:
             strategy = cycle.get("strategy")
@@ -3232,6 +3365,11 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             if jid in in_memory_ids:
                 continue  # already included from in-memory
             data = job.get("data", job)
+            if not isinstance(data, dict):
+                # A malformed persisted record (e.g. "data" is a string/list/
+                # None instead of a mapping) must degrade to sensible
+                # defaults below, not raise AttributeError out of this route.
+                data = {}
             completed = data.get("completed_cycles", 0)
             total = data.get("total_cycles", 1)
             progress = _job_progress_percent(completed, total)
@@ -3245,8 +3383,15 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
                     created_at=data.get("started_at"),
                 )
             )
-    except Exception as exc:
-        logger.warning("Failed to load persisted strategy lab runs: %s", exc)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # httpx.HTTPError: transport/connection/HTTP-status failures from the
+        # job-service client. RuntimeError: JobServiceClient raises this when
+        # JOB_SERVICE_URL is unconfigured. Both are expected, transient/
+        # environmental failure modes -- fall back to the in-memory-only
+        # list. Anything else (e.g. a TypeError/AttributeError in the merge
+        # logic above) is a programming error and must propagate instead of
+        # being silently swallowed here.
+        logger.warning("Failed to load persisted strategy lab runs: %s", exc, exc_info=True)
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]
@@ -3519,23 +3664,17 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           resolves to *some* known run) runs before the lock, so a request
           for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
+        - No other run currently has status ``"running"`` — authoritatively
+          checked (and enforced) atomically with the ``_active_runs[run_id]``
+          write below, both inside the same ``_lock`` acquisition; the
+          earlier, unlocked ``_ensure_no_active_run()`` call is only a
+          fast-fail that skips the Temporal termination RPC below for an
+          obviously-doomed request, and cannot by itself prevent a
+          concurrent run/resume/restart for a DIFFERENT run_id from also
+          passing it and writing "running" before this write lands.
         - No other run/resume/restart transition for this run_id is
           currently in flight (checked first, before re-reading state or
           calling ``_ensure_no_active_run()``).
-
-    Not a caller precondition — enforced internally, not the caller's to
-    guarantee:
-        - No other run currently has status ``"running"``, checked via
-          ``_ensure_no_active_run()`` after the transition lock above is
-          held. Unlike ``resume_strategy_lab_run``'s ``_no_active_run_locked()``
-          call, this check is *not* atomic with this function's own later
-          ``_active_runs[run_id]`` write — ``_ensure_no_active_run()``
-          acquires and releases ``_lock`` on its own, and this function does
-          real work (workflow termination, generation minting) in between
-          before writing. A second run/resume for a *different* run_id could
-          in principle pass its own check in that gap; this mirrors the
-          pre-existing 409 guard's scope and is not narrowed by generation
-          fencing, which only protects a given run_id's own durable writes.
 
     Postconditions:
         - Any prior Temporal execution still running under this run_id's
@@ -3590,21 +3729,28 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           silently resume — see ``_dispatch_strategy_lab_run``'s
           ``allow_already_started`` parameter; the optimistic reset is rolled
           back in this case, see Postconditions).
-        - ``HTTPException`` 503: Temporal is disabled/unavailable, the prior
-          execution couldn't be resolved due to a Temporal-side error,
-          minting the new generation failed, persisting the optimistic reset
-          state failed, or the pre-dispatch revalidation read of the
-          generation failed (job service unavailable in any case). "Minting
-          failed" covers both ways ``apply_and_get`` can fail: it raises on a
-          transport error, or returns a falsy value when the job no longer
-          exists in the job service — the latter also 503s rather than some
-          other status, since the prior workflow was already confirmed
-          terminated above and the run cannot safely be left without a
-          fencing generation. The persist-failure and revalidation-failure
-          cases both additionally mark the run ``"failed"`` (state was
-          already written in-memory by this point, so leaving it
-          ``"running"`` with no durably-persisted/dispatched workflow would
-          wedge it).
+        - ``HTTPException`` 503: Temporal is disabled/unavailable
+          (``_require_temporal``); the prior execution couldn't be resolved
+          because the worker client never became ready (``RuntimeError``) or
+          a Temporal RPC itself failed (``temporalio.service.RPCError``) --
+          the only two failure modes ``terminate_and_await_workflow_sync``
+          raises for a genuine Temporal-side problem (besides
+          ``TimeoutError``, mapped to 409 above; any other exception, e.g. a
+          programming error in this block, is NOT caught here and propagates
+          as an unhandled 500 instead of being misreported as Temporal
+          unavailability); minting the new generation failed; persisting the
+          optimistic reset state failed; or the pre-dispatch revalidation
+          read of the generation failed (job service unavailable in any
+          case). "Minting failed" covers both ways ``apply_and_get`` can
+          fail: it raises on a transport error, or returns a falsy value
+          when the job no longer exists in the job service — the latter also
+          503s rather than some other status, since the prior workflow was
+          already confirmed terminated above and the run cannot safely be
+          left without a fencing generation. The persist-failure and
+          revalidation-failure cases both additionally mark the run
+          ``"failed"`` (state was already written in-memory by this point,
+          so leaving it ``"running"`` with no durably-persisted/dispatched
+          workflow would wedge it).
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
@@ -3684,6 +3830,8 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # let it observe that transient state and run an extra wave before a
         # dispatch collision is even detected.
         _require_temporal()
+        from temporalio.service import RPCError
+
         from investment_team.strategy_lab.temporal import WORKFLOW_ID_PREFIX
         from shared.temporal import terminate_and_await_workflow_sync
 
@@ -3697,7 +3845,17 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                 status_code=409,
                 detail="A prior execution for this run is still winding down; retry shortly.",
             ) from exc
-        except Exception as exc:
+        except (RuntimeError, RPCError) as exc:
+            # RuntimeError: the worker client never became ready (documented
+            # by terminate_and_await_workflow_sync's own docstring).
+            # RPCError: a genuine Temporal-side RPC failure (the underlying
+            # temporalio client's exception type; a NOT_FOUND status is
+            # already handled as a no-op inside terminate_and_await_workflow_sync
+            # itself, so anything that reaches here is a real transport/RPC
+            # problem). Anything else -- e.g. an ImportError from the imports
+            # above, or a programming error -- is NOT one of the documented
+            # Temporal-side failure modes and must propagate as an unhandled
+            # 500 instead of being misreported as "Temporal worker unavailable."
             logger.exception(
                 "Failed to terminate prior strategy-lab workflow for run %s before restart", run_id
             )
@@ -3816,7 +3974,15 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             contiguous_cycles=0,
             generation=new_generation,
         )
+        # Re-run the no-active-run check atomically with the write: the
+        # early call above (before the Temporal termination RPC) is only a
+        # cheap fast-fail that avoids that RPC's cost for an obviously-doomed
+        # request -- on its own it can't stop a concurrent run/resume/restart
+        # for a DIFFERENT run_id from also passing it and writing "running"
+        # before this request's write lands. This second, locked check closes
+        # that window (mirroring resume_strategy_lab_run's own pattern).
         with _lock:
+            _no_active_run_locked()
             _active_runs[run_id] = restarted_state
         # Exclude "generation" from this write: `apply_and_get` above already
         # durably persisted it atomically, so re-asserting it here is
@@ -4068,8 +4234,30 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
     Raises:
         - None. Job-service lookup/reconciliation failures are caught and
           logged (``logger.debug``), and the endpoint falls back to the
-          in-memory-only snapshot; this endpoint always returns 200.
+          in-memory-only snapshot; this endpoint always returns 200. An
+          ``_active_runs`` entry missing a truthy ``run_id`` (malformed or
+          partially-constructed) is skipped and logged rather than raising
+          ``KeyError``.
     """
+
+    def _in_memory_runs_by_id() -> Dict[str, Dict[str, Any]]:
+        """Locked snapshot of ``_active_runs``, keyed by each entry's own ``run_id``.
+
+        An entry missing (or with a falsy) ``run_id`` is skipped and logged
+        instead of raising ``KeyError`` -- this endpoint must always return
+        200, and a single malformed entry must not break the whole listing.
+        """
+        with _lock:
+            snapshot = list(_active_runs.items())
+        result: Dict[str, Dict[str, Any]] = {}
+        for key, r in snapshot:
+            rid = r.get("run_id")
+            if not rid:
+                logger.warning("Skipping _active_runs entry %r with missing/falsy run_id", key)
+                continue
+            result[rid] = r
+        return result
+
     try:
         client = _get_lab_run_job_client()
 
@@ -4084,8 +4272,7 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         for rid in running_ids:
             _reconcile_run_progress(rid)
 
-        with _lock:
-            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+        in_memory = _in_memory_runs_by_id()
 
         # Merge running/pending jobs from the persistent job service that
         # may not be in _active_runs (e.g. after a server restart).
@@ -4096,8 +4283,7 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
                 in_memory[rid] = _normalize_persisted_job(job, fallback_status="running", run_id=rid)
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
-        with _lock:
-            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+        in_memory = _in_memory_runs_by_id()
 
     runs = [_run_state_to_response(r) for r in in_memory.values()]
     return ActiveRunsResponse(runs=runs)
@@ -4160,10 +4346,18 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     window. The streaming generator itself remains async so it doesn't block
     Uvicorn worker threads once connected.
     """
-    from starlette.concurrency import run_in_threadpool
-
+    # Deliberately local (not module-level): tests substitute a fake
+    # subscribe/unsubscribe by monkeypatching them directly on the
+    # investment_team.api.job_event_bus module object (not on this module),
+    # relying on this import re-executing -- and so re-binding these names to
+    # whatever job_event_bus.subscribe/unsubscribe currently are -- on every
+    # call. A module-level `from ... import subscribe, unsubscribe` would
+    # freeze these names to the real functions at main.py's own import time,
+    # silently breaking that test-doubling and stalling the SSE stream in
+    # requests that expect the fake driving it (verified: this exact swap
+    # deadlocks test_stream_strategy_lab_run_emits_snapshot_update_and_terminates
+    # and its siblings).
     from investment_team.api.job_event_bus import subscribe, unsubscribe
-    from shared.sse import sse_job_stream_async, sse_line
 
     with _lock:
         state = _active_runs.get(run_id)
@@ -4433,8 +4627,19 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         - ``lab_record_id`` may or may not resolve to a known lab record.
 
     Postconditions:
-        - ``_strategy_lab_records[lab_record_id]`` is always removed (its
-          existence is the 404 gate above).
+        - Paper-trading session cleanup (``_delete_paper_sessions_for_lab_record``,
+          a job-service network call) runs *before* the lab record is removed
+          from memory. If it raises or times out, the lab record and its linked
+          strategy/backtest are left intact and the exception propagates
+          (surfacing as a 500) instead of being silently swallowed — a retry
+          then re-attempts the same cleanup rather than 404ing against an
+          already-deleted record while paper sessions sit orphaned in the job
+          service.
+        - ``_strategy_lab_records[lab_record_id]`` is removed only if it is
+          still present by the time the in-memory-mutation step runs — a
+          concurrent delete of the same ``lab_record_id`` may have already
+          removed it while this call was doing paper-session cleanup, in
+          which case this call reports no strategy/backtest deletion for it.
         - ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless
           the corresponding entry actually existed in ``_strategies``/
           ``_backtests`` *before* this call — ``_PersistentDict.__delitem__``
@@ -4465,18 +4670,25 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         strategy_id = record.strategy.strategy_id
         backtest_id = record.backtest.backtest_id
 
-        del _strategy_lab_records[lab_record_id]
-        # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
-        # these deletes also remove the investment_strategies/investment_backtests
-        # job-service rows, not just a process-local cache entry.
-        strategy_deleted = strategy_id in _strategies
-        if strategy_deleted:
-            del _strategies[strategy_id]
-        backtest_deleted = backtest_id in _backtests
-        if backtest_deleted:
-            del _backtests[backtest_id]
-
+    # External cleanup (job-service network I/O) runs before any in-memory
+    # mutation: if this raises, nothing below has been deleted yet, so the
+    # record stays retryable instead of becoming an orphan-producing 404.
     paper_deleted = _delete_paper_sessions_for_lab_record(lab_record_id)
+
+    with _lock:
+        strategy_deleted = False
+        backtest_deleted = False
+        if lab_record_id in _strategy_lab_records:
+            del _strategy_lab_records[lab_record_id]
+            # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
+            # these deletes also remove the investment_strategies/investment_backtests
+            # job-service rows, not just a process-local cache entry.
+            strategy_deleted = strategy_id in _strategies
+            if strategy_deleted:
+                del _strategies[strategy_id]
+            backtest_deleted = backtest_id in _backtests
+            if backtest_deleted:
+                del _backtests[backtest_id]
 
     return DeleteStrategyLabRecordResponse(
         lab_record_id=lab_record_id,
@@ -4769,7 +4981,25 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             status_code=404, detail=f"Strategy lab record '{request.lab_record_id}' not found."
         )
 
-    lab_record = StrategyLabRecord.parse_persisted(raw_record)
+    try:
+        lab_record = StrategyLabRecord.parse_persisted(raw_record)
+    except Exception as exc:
+        # The record exists but is internally corrupt (schema drift, a
+        # missing required field, malformed JSON, ...) -- a server-side data
+        # integrity problem, not a client input error, so this is a 500
+        # rather than a 4xx. Log the full exception (which may include raw
+        # persisted field values) server-side only; the client-facing detail
+        # stays generic so it can't leak internal schema/validation details.
+        logger.error(
+            "Strategy lab record %s failed to parse: %s",
+            request.lab_record_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Strategy lab record '{request.lab_record_id}' is corrupted and cannot be loaded.",
+        ) from exc
 
     if not lab_record.is_winning:
         raise HTTPException(
@@ -5200,8 +5430,21 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
                 "(already closed); treating as already-stopped.",
                 session_id,
             )
+            # Re-read under lock rather than returning the pre-signal ``session``
+            # snapshot taken above — the RPC was a real network call, and the
+            # session may have been deleted concurrently (e.g. its lab record
+            # was deleted) while it was in flight. Returning the stale snapshot
+            # would resurrect a session that no longer exists.
+            with _lock:
+                fresh_raw = _paper_trading_sessions.get(session_id)
+                if fresh_raw is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Paper trading session '{session_id}' not found.",
+                    ) from exc
+                fresh_session = PaperTradingSession.parse_persisted(fresh_raw)
             return PaperTradingResponse(
-                session=session,
+                session=fresh_session,
                 message="Session already finished; nothing to stop.",
             )
         logger.exception("Stop signal for paper-trading session %s failed to deliver", session_id)
@@ -5298,11 +5541,26 @@ def get_paper_trading_results(
     ``not_performant_count`` are derived from the returned ``items`` by
     ``PaperTradingResultsResponse`` itself, so they always match the
     (possibly filtered) list.
+
+    Postconditions:
+        A session record that fails ``PaperTradingSession.parse_persisted`` is
+        logged and excluded from ``items`` rather than raising — matching the
+        recovery pass in ``_recover_orphaned_paper_trading_sessions`` and the
+        single-session lookup in ``get_paper_trading_session``. One corrupt
+        in-memory record must not 500 this bulk endpoint for every caller.
     """
     with _lock:
         raw = list(_paper_trading_sessions.values())
 
-    items = [PaperTradingSession.parse_persisted(r) for r in raw]
+    items: List[PaperTradingSession] = []
+    for r in raw:
+        try:
+            items.append(PaperTradingSession.parse_persisted(r))
+        except Exception:
+            logger.warning(
+                "Paper-trade results: skipping unparseable session record",
+                exc_info=True,
+            )
     items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
 
     if verdict is not None:
