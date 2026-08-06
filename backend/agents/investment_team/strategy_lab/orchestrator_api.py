@@ -21,6 +21,18 @@ Invariants:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from investment_team.api.main import (
+        _compute_signal_brief_snapshot,
+        _finalize_strategy_lab_cycle_record,
+        _is_strategy_lab_run_externally_stopped,
+        _persist_run_state,
+        _snapshot_prior_records,
+        _strategy_lab_external_terminal_status,
+    )
+
 __all__ = [
     "_persist_run_state",
     "_snapshot_prior_records",
