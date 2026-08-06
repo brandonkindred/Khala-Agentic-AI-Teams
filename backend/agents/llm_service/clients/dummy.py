@@ -212,9 +212,12 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
           from a digest of ``hint`` so distinct all-stripped hints do not
           collapse onto one path.
     """
-    assert isinstance(hint, str)
-    assert isinstance(separator, str) and separator
-    assert isinstance(max_length, int) and max_length > 0
+    if not isinstance(hint, str):
+        raise TypeError("hint must be a string")
+    if not isinstance(separator, str) or not separator:
+        raise ValueError("separator must be a non-empty string")
+    if not isinstance(max_length, int) or max_length <= 0:
+        raise ValueError("max_length must be a positive integer")
 
     expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", hint)
     words = re.sub(r"[^a-z0-9\s]+", " ", expanded.lower()).split()

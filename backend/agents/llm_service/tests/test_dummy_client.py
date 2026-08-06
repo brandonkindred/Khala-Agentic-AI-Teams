@@ -302,6 +302,23 @@ def test_extract_name_from_hint_all_stripped_returns_unique_placeholder() -> Non
     assert re.fullmatch(r"item_[0-9a-f]+", b)
 
 
+def test_extract_name_from_hint_rejects_non_string_hint() -> None:
+    with pytest.raises(TypeError, match="hint must be a string"):
+        _extract_name_from_hint(cast(Any, 123))
+
+
+@pytest.mark.parametrize("bad_separator", ["", cast(Any, 5)])
+def test_extract_name_from_hint_rejects_invalid_separator(bad_separator: Any) -> None:
+    with pytest.raises(ValueError, match="separator must be a non-empty string"):
+        _extract_name_from_hint("some hint", separator=bad_separator)
+
+
+@pytest.mark.parametrize("bad_max_length", [0, -1, cast(Any, "25")])
+def test_extract_name_from_hint_rejects_invalid_max_length(bad_max_length: Any) -> None:
+    with pytest.raises(ValueError, match="max_length must be a positive integer"):
+        _extract_name_from_hint("some hint", max_length=bad_max_length)
+
+
 def test_placeholder_slug_never_exceeds_max_length() -> None:
     """Fallback must respect max_length even when truncation strips result to ""."""
     assert _placeholder_slug("some hint", "-", 25) == "item-3082b299"
