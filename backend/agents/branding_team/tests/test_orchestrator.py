@@ -36,6 +36,7 @@ from branding_team.models import (
     ColorEntry,
     CompetitiveSnapshot,
     CoreValue,
+    CoreValueOutput,
     CoreValuesOutput,
     CreativeRefinementDecision,
     DesignSystemDefinition,
@@ -855,9 +856,21 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
         "values_articulator": _phase1_leaf_node(
             CoreValuesOutput(
                 core_values=[
-                    CoreValue(value="Clarity"),
-                    CoreValue(value="Trust"),
-                    CoreValue(value="Momentum"),
+                    CoreValueOutput(
+                        value="Clarity",
+                        behavioral_definition="We demonstrate clarity in every decision.",
+                        observable_behaviors=["Plain-language docs"],
+                    ),
+                    CoreValueOutput(
+                        value="Trust",
+                        behavioral_definition="We build trust through transparency.",
+                        observable_behaviors=["Public roadmap"],
+                    ),
+                    CoreValueOutput(
+                        value="Momentum",
+                        behavioral_definition="We maintain momentum through disciplined execution.",
+                        observable_behaviors=["Weekly release cadence"],
+                    ),
                 ]
             )
         ),

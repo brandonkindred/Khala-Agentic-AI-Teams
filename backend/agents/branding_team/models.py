@@ -167,6 +167,24 @@ class CoreValue(BaseModel):
     observable_behaviors: List[str] = Field(default_factory=list)
 
 
+class CoreValueOutput(BaseModel):
+    """Agent-facing core value; requires non-empty fields.
+
+    Field-for-field twin of ``CoreValue`` with required content, matching
+    the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``,
+    ``DifferentiationPillarOutput``) — ``CoreValue`` itself must stay soft
+    (only ``value`` required) since it also backs
+    ``StrategicCoreOutput.core_values``'s merge target.
+    """
+
+    value: str = Field(min_length=1)
+    behavioral_definition: str = Field(min_length=1)
+    observable_behaviors: List[NonEmptyStr] = Field(min_length=1)
+
+
 class AudienceSegment(BaseModel):
     """A target audience segment with psychographic detail."""
 
@@ -241,9 +259,12 @@ class CoreValuesOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
+    Uses ``CoreValueOutput`` (not the soft ``CoreValue``) so each value's
+    fields are individually required — a blank value must fail validation
+    instead of silently passing.
     """
 
-    core_values: List[CoreValue] = Field(min_length=3, max_length=5)
+    core_values: List[CoreValueOutput] = Field(min_length=3, max_length=5)
 
 
 class AudienceSegmentsOutput(BaseModel):
