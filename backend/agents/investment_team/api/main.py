@@ -1620,7 +1620,21 @@ def _run_paper_trading_step(
     ``_PaperTradingDataUnavailable`` when no market data is available (caller
     converts to a non-fatal ``skipped`` outcome). Any other exception should
     propagate so the cycle records a ``failed`` status with the error message.
+
+    Preconditions:
+        - ``strategy_code`` is non-empty.
+        - ``lookback_days`` is positive.
+        - ``initial_capital``, ``transaction_cost_bps``, and ``slippage_bps``
+          are all non-negative.
     """
+    assert strategy_code, "strategy_code must be non-empty"
+    assert lookback_days > 0, f"lookback_days must be positive, got {lookback_days}"
+    assert initial_capital >= 0, f"initial_capital must be non-negative, got {initial_capital}"
+    assert transaction_cost_bps >= 0, (
+        f"transaction_cost_bps must be non-negative, got {transaction_cost_bps}"
+    )
+    assert slippage_bps >= 0, f"slippage_bps must be non-negative, got {slippage_bps}"
+
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
 
