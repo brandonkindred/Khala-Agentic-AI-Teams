@@ -869,6 +869,22 @@ def test_paper_trading_session_get_404(api_client) -> None:
     assert resp.status_code == 404
 
 
+def test_paper_trading_session_get_corrupted_record_returns_500(api_client) -> None:
+    """A corrupted persisted record must surface as a controlled 500 with a
+    generic client-facing detail, not leak the raw parse/validation
+    exception as an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    # Missing required fields (e.g. strategy, status) -> parse_persisted raises.
+    api_main._paper_trading_sessions["pt-corrupt"] = {"session_id": "pt-corrupt"}
+
+    resp = api_client.get("/strategy-lab/paper-trade/pt-corrupt")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == (
+        "Paper trading session 'pt-corrupt' is corrupted and cannot be loaded."
+    )
+
+
 def test_stop_live_paper_trading_disabled_returns_404(api_client) -> None:
     """When INVESTMENT_LIVE_PAPER_ENABLED is off, the stop endpoint must 404."""
     resp = api_client.post("/strategy-lab/paper-trade/anything/stop")
