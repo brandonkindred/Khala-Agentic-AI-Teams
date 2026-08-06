@@ -2169,9 +2169,12 @@ def _compute_signal_brief_snapshot(
                 "duration_ms": int((datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000),
             }
             logger.info(
-                "signal_intelligence brief_version=%s len=%s degraded_market=%s",
+                "signal_intelligence brief_version=%s keys=%s degraded_market=%s",
                 storage.get("brief_version"),
-                len(str(storage)),
+                # A cheap top-level-key count in place of len(str(storage)),
+                # which serialized the entire brief to a string on every
+                # call just to measure it.
+                len(storage),
                 market_ctx.degraded,
             )
             return brief, storage
