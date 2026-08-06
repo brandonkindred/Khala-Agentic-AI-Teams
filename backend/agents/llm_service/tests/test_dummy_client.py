@@ -575,6 +575,30 @@ def test_senior_backend_branch_generates_valid_python_for_quote_laden_hint() -> 
         compile(content, path, "exec")
 
 
+def test_senior_frontend_branch_generates_safe_typescript_for_quote_laden_hint() -> None:
+    """A task_hint with quotes/backslashes must not corrupt the generated TS source.
+
+    task_hint is always a single line (see ``_extract_task_hint``), so only
+    quote/backslash safety is at risk here, not embedded newlines.
+    """
+    c = DummyLLMClient()
+    hint = """Build user's "profile" widget \\ with a backslash"""
+    prompt = f"You are a senior frontend software engineer.\n**Task:** {hint}"
+    j = c.complete_json(prompt, temperature=0.0)
+    code = j["code"]
+    lines = code.split("\n")
+    # The raw hint must never appear unescaped in the generated source.
+    assert hint not in code
+    comment_line = next(line for line in lines if line.startswith("// Task: "))
+    assert json.loads(comment_line.removeprefix("// Task: ")) == hint
+    # The Angular decorator/template line is derived only from the
+    # already-sanitized class name — never the raw hint.
+    decorator_line = next(line for line in lines if "@Component(" in line)
+    assert hint not in decorator_line
+    for path, content in j["files"].items():
+        assert hint not in content
+
+
 def test_security_branch_not_shadowed_by_code_review_catch_all() -> None:
     """Security prompts include "Code to review" as an input-section header (see
     security_agent/prompts.py), which also matches the generic code-review
