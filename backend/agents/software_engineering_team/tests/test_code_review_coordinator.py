@@ -47,6 +47,7 @@ from code_review_agent.models import (
     CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
+    _normalized_severity,
     is_no_op_suggestion,
 )
 from pydantic import ValidationError
@@ -88,6 +89,22 @@ def _issue(severity: str, description: str, *, line: int = 1) -> CodeReviewIssue
         description=description,
         suggestion="fix it",
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ""),
+        ("", ""),
+        ("high", "high"),
+        ("High", "high"),
+        ("HIGH", "high"),
+        (" critical ", "critical"),
+        ("Medium", "medium"),
+    ],
+)
+def test_normalized_severity_folds_case_and_whitespace(raw: str | None, expected: str) -> None:
+    assert _normalized_severity(raw) == expected
 
 
 def test_cap_issues_under_limit_preserves_order() -> None:

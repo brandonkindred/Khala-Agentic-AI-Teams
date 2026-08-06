@@ -439,6 +439,22 @@ class CodeReviewIssue(BaseModel):
 # this type directly rather than hand-copying its values, so a change here is
 # never silently missed downstream.
 CodeReviewIssueSeverity = Literal["critical", "high", "medium", "low", "info"]
+
+
+def _normalized_severity(severity: Optional[str]) -> str:
+    """Fold a severity token for rank / blocking comparisons.
+
+    Preconditions:
+        - ``severity`` is ``None`` or a string (may be empty / padded / mixed-case).
+
+    Postconditions:
+        - Returns ``(severity or "").strip().lower()``.
+        - Never raises; empty / ``None`` → ``""``.
+        - Pure; no side effects.
+    """
+    return (severity or "").strip().lower()
+
+
 _ChunkReviewIssueCategory = Literal[
     "naming",
     "structure",
