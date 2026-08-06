@@ -1222,8 +1222,10 @@ def delete_test_chat_session(team_id: str, session_id: str):
 def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessageRequest):
     """Send a message to an agent and get a synchronous response.
 
-    The full conversation history is sent to the agent for multi-turn
-    context. Both user and assistant messages are stored.
+    The full conversation history is sent to the agent for multi-turn context.
+    The user and assistant messages are persisted together as a single turn
+    only after the agent call succeeds — a failed invocation raises 502 and
+    leaves no orphaned user message for a retry to duplicate.
     """
     session_row = _test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
@@ -1232,14 +1234,12 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     agent_name = session_row["agent_name"]
     agent_def = _find_agent_in_roster(team_id, agent_name)
 
-    # Store user message
-    user_msg_id = str(uuid.uuid4())
-    _test_store.create_chat_message(user_msg_id, session_id, "user", req.content)
-
-    # Build conversation context from history
+    # Build conversation context from history plus the pending message. The
+    # user message isn't persisted yet, so it's appended directly here rather
+    # than read back from the store.
     history = _test_store.list_chat_messages(session_id)
     context_parts = []
-    for msg in history[:-1]:  # Exclude the just-added user message (will add below)
+    for msg in history:
         prefix = "User" if msg["role"] == "user" else "Assistant"
         context_parts.append(f"{prefix}: {msg['content']}")
     context_parts.append(f"User: {req.content}")
@@ -1250,17 +1250,23 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     # uses the plain runtime rather than the cognition-aware wrapper — advisory
     # rules + memory digest are rendered on the gated sandbox invoke path, where
     # the shim opens the channel.
-    agent_instance = _build_test_agent(
-        agent_def.agent_name,
-        agent_def.role,
-        agent_def.skills,
-        agent_def.capabilities,
-        agent_def.tools,
-        agent_def.expertise,
-    )
-    response_text = _call_test_agent(agent_instance, full_context)
+    try:
+        agent_instance = _build_test_agent(
+            agent_def.agent_name,
+            agent_def.role,
+            agent_def.skills,
+            agent_def.capabilities,
+            agent_def.tools,
+            agent_def.expertise,
+        )
+        response_text = _call_test_agent(agent_instance, full_context)
+    except Exception as exc:
+        logger.exception("Agent invocation failed for test-chat session %s", session_id)
+        raise HTTPException(status_code=502, detail="Agent invocation failed") from exc
 
-    # Store assistant message
+    # Persist the user and assistant messages together as a complete turn.
+    user_msg_id = str(uuid.uuid4())
+    _test_store.create_chat_message(user_msg_id, session_id, "user", req.content)
     asst_msg_id = str(uuid.uuid4())
     _test_store.create_chat_message(asst_msg_id, session_id, "assistant", response_text)
 
@@ -1341,22 +1347,28 @@ def _dispatch_pipeline_run(
     team_agents: list[AgenticTeamAgent],
     process_def: ProcessDefinition,
     initial_input: Optional[str],
+    *,
+    temporal_owned: bool,
 ) -> str:
     """Dispatch a pipeline run via Temporal when enabled, else a daemon thread.
 
     Preconditions:
-        - ``run_id`` refers to a run already created in the store (with
-          ``temporal_owned`` matching the dispatch path chosen here).
+        - ``run_id`` refers to a run already created in the store with
+          ``temporal_owned`` set to the same value passed here.
+        - ``temporal_owned`` is the single ``_temporal_enabled()`` reading the caller
+          used for the run's stored flag — computed once and passed in, never
+          recomputed here, so the dispatch path can't diverge from what was persisted
+          if Temporal availability changes between the two checks.
 
     Postconditions:
-        - Starts exactly one execution path and returns its label ("Temporal" or
-          "thread"). With ``TEMPORAL_ADDRESS`` set the run is started as a durable
-          ``AgenticPipelineWorkflow``; otherwise the legacy daemon-thread path runs
-          unchanged.
+        - Starts exactly one execution path, selected by ``temporal_owned``, and
+          returns its label ("Temporal" or "thread"). When true the run is started as
+          a durable ``AgenticPipelineWorkflow``; otherwise the legacy daemon-thread
+          path runs unchanged.
         - Any failure while starting the workflow propagates to the caller, which marks
           the run FAILED — a Temporal-enabled run is never silently downgraded.
     """
-    if _temporal_enabled():
+    if temporal_owned:
         from agent_team_studio.agentic_team_provisioning.temporal.start_workflow import (
             start_agentic_pipeline_workflow,
         )
@@ -1405,7 +1417,7 @@ def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
 
     try:
         dispatch_method = _dispatch_pipeline_run(
-            run_id, team_agents, process_def, req.initial_input
+            run_id, team_agents, process_def, req.initial_input, temporal_owned=temporal_owned
         )
     except Exception as exc:
         logger.exception("Failed to dispatch agentic pipeline run %s", run_id)

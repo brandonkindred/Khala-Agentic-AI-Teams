@@ -425,6 +425,44 @@ def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _persist_strategy_lab_record
+# ---------------------------------------------------------------------------
+
+
+def test_persist_strategy_lab_record_rejects_missing_strategy() -> None:
+    """A record with strategy=None (bypassing Pydantic's own field validation
+    via model_construct, as a stray in-process mutation elsewhere might) must
+    raise ValueError before acquiring the lock -- not an AttributeError from
+    inside the locked write."""
+    from investment_team.api.main import _persist_strategy_lab_record
+    from investment_team.models import BacktestRecord, StrategyLabRecord
+
+    record = StrategyLabRecord.model_construct(
+        lab_record_id="lab-missing-strategy",
+        strategy=None,
+        backtest=BacktestRecord.model_construct(backtest_id="bt-1"),
+    )
+
+    with pytest.raises(ValueError, match="record.strategy must be populated"):
+        _persist_strategy_lab_record(record)
+
+
+def test_persist_strategy_lab_record_rejects_missing_backtest() -> None:
+    """Same contract check for a missing backtest."""
+    from investment_team.api.main import _persist_strategy_lab_record
+    from investment_team.models import StrategyLabRecord, StrategySpec
+
+    record = StrategyLabRecord.model_construct(
+        lab_record_id="lab-missing-backtest",
+        strategy=StrategySpec.model_construct(strategy_id="strat-1"),
+        backtest=None,
+    )
+
+    with pytest.raises(ValueError, match="record.backtest must be populated"):
+        _persist_strategy_lab_record(record)
+
+
+# ---------------------------------------------------------------------------
 # _PersistentDict (in-process FakeJobClient roundtrip)
 # ---------------------------------------------------------------------------
 
@@ -814,6 +852,62 @@ def test_run_backtest_background_early_cancellation(
     api_main._run_backtest_background("job-4", strategy, config, "tester", None)
     # No update calls — early return.
     assert state == {}
+
+
+def test_run_backtest_background_retry_reuses_backtest_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A second run for the same job_id (e.g. a Temporal activity retry after a
+    worker crash left the job RUNNING) must overwrite the same backtest record
+    instead of minting a duplicate — the defect reported for retries."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    first_backtest_id = state["backtest_id"]
+
+    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    second_backtest_id = state["backtest_id"]
+
+    assert first_backtest_id == second_backtest_id
+    # The second run overwrote the same record rather than adding a duplicate.
+    assert len(api_main._backtests.values()) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1208,6 +1302,81 @@ def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backte
     assert api_main._strategy_lab_records.get("lab-Y") is None
 
 
+def test_delete_strategy_lab_record_preserves_record_when_paper_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """If paper-session cleanup fails, the lab record/strategy/backtest must NOT
+    be deleted -- a retry should re-attempt cleanup, not 404 against an
+    already-deleted record while paper sessions sit orphaned in the job service."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Z",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Z",
+        strategy_id="strat-lab-Z",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Z",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Z"] = record
+    api_main._strategies["strat-lab-Z"] = strat
+    api_main._backtests["bt-lab-Z"] = bt
+
+    def _broken_cleanup(lab_id: str) -> int:
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", _broken_cleanup)
+
+    with pytest.raises(RuntimeError, match="job service unreachable"):
+        api_main.delete_strategy_lab_record("lab-Z")
+
+    # Nothing was deleted: the record stays retryable instead of becoming an
+    # orphan-producing 404.
+    assert api_main._strategy_lab_records.get("lab-Z") is not None
+    assert api_main._strategies.get("strat-lab-Z") is not None
+    assert api_main._backtests.get("bt-lab-Z") is not None
+
+
 # ---------------------------------------------------------------------------
 # _recover_orphaned_paper_trading_sessions startup hook
 # ---------------------------------------------------------------------------
@@ -1520,6 +1689,26 @@ def test_run_paper_trading_rejects_when_no_strategy_code(api_client) -> None:
     )
     assert resp.status_code == 400
     assert "no generated strategy code" in resp.json()["detail"]
+
+
+def test_run_paper_trading_500_on_corrupt_lab_record(api_client) -> None:
+    """A persisted record that exists but fails StrategyLabRecord.parse_persisted
+    (schema drift, missing required fields, ...) must return a controlled 500
+    with a sanitized detail, not an unhandled 500 with a raw pydantic
+    traceback leaking internal validation details to the client."""
+    from investment_team.api import main as api_main
+
+    # Missing required fields (strategy/backtest/is_winning/...) -- a raw
+    # dict that fails StrategyLabRecord's model_validate.
+    api_main._strategy_lab_records["lab-corrupt"] = {"lab_record_id": "lab-corrupt"}
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-corrupt"},
+    )
+    assert resp.status_code == 500
+    assert "lab-corrupt" in resp.json()["detail"]
+    assert "corrupted" in resp.json()["detail"]
 
 
 def test_run_paper_trading_kicks_off_background_worker(

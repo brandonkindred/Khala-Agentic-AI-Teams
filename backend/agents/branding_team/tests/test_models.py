@@ -6,8 +6,9 @@ These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput`
 ``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``
 (and its nested ``MessagingPillarOutput``/``AudienceMessageMapOutput``),
 ``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 4's
-``ChannelGuidelineOutput`` and ``BrandArchitectureOutput``) must reject
-empty/omitted content so Strands' structured-output tool retries the LLM
+``ChannelGuidelineOutput``, ``BrandArchitectureOutput``, and
+``BrandExperiencePrinciplesOutput``) must reject empty/omitted content so
+Strands' structured-output tool retries the LLM
 instead of silently accepting a blank or under-cardinality response (see
 ``structured_output_tool.py``: a ``ValidationError`` becomes a tool error
 the model is asked to fix).
@@ -20,18 +21,19 @@ from pydantic import ValidationError
 
 from branding_team.models import (
     AudienceMessageMapOutput,
-    AudienceSegment,
+    AudienceSegmentOutput,
     AudienceSegmentsOutput,
     BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
     BrandArchitectureRuleOutput,
     BrandDiscoveryAuditOutput,
+    BrandExperiencePrinciplesOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
-    CoreValue,
+    CoreValueOutput,
     CoreValuesOutput,
-    DifferentiationPillar,
+    DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
     ElevatorPitchOutput,
     MessagingFrameworkOutput,
@@ -104,7 +106,11 @@ def test_positioning_output_rejects_missing_and_empty_fields() -> None:
 
 def test_core_values_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "3-5 core values"."""
-    value = CoreValue(value="clarity")
+    value = CoreValueOutput(
+        value="clarity",
+        behavioral_definition="We demonstrate clarity in every decision.",
+        observable_behaviors=["Plain-language docs"],
+    )
     with pytest.raises(ValidationError):
         CoreValuesOutput(core_values=[value, value])  # below min of 3
     with pytest.raises(ValidationError):
@@ -114,9 +120,36 @@ def test_core_values_output_enforces_stated_cardinality() -> None:
     assert len(output.core_values) == 3
 
 
+def test_core_value_output_rejects_blank_content() -> None:
+    """A blank value, behavioral definition, or observable behavior must fail validation."""
+    valid_kwargs = dict(
+        value="clarity",
+        behavioral_definition="We demonstrate clarity in every decision.",
+        observable_behaviors=["Plain-language docs"],
+    )
+
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "value": ""})
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "behavioral_definition": ""})
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "observable_behaviors": [""]})
+    with pytest.raises(ValidationError):
+        CoreValueOutput(**{**valid_kwargs, "observable_behaviors": []})
+
+    output = CoreValueOutput(**valid_kwargs)
+    assert output.value == "clarity"
+
+
 def test_audience_segments_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "1-3 target audience segments"."""
-    segment = AudienceSegment(name="Enterprise leaders")
+    segment = AudienceSegmentOutput(
+        name="Enterprise leaders",
+        description="VP/Director-level buyers at mid-market SaaS companies.",
+        pain_points=["Inconsistent brand touchpoints"],
+        goals=["Ship cohesive experiences"],
+        decision_drivers=["Proven execution speed"],
+    )
     with pytest.raises(ValidationError):
         AudienceSegmentsOutput(target_audience_segments=[])  # below min of 1
     with pytest.raises(ValidationError):
@@ -126,9 +159,38 @@ def test_audience_segments_output_enforces_stated_cardinality() -> None:
     assert len(output.target_audience_segments) == 1
 
 
+def test_audience_segment_output_rejects_blank_content() -> None:
+    """A blank name, description, or list item must fail validation."""
+    valid_kwargs = dict(
+        name="Enterprise leaders",
+        description="VP/Director-level buyers at mid-market SaaS companies.",
+        pain_points=["Inconsistent brand touchpoints"],
+        goals=["Ship cohesive experiences"],
+        decision_drivers=["Proven execution speed"],
+    )
+
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "name": ""})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "description": ""})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "pain_points": [""]})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "goals": []})
+    with pytest.raises(ValidationError):
+        AudienceSegmentOutput(**{**valid_kwargs, "decision_drivers": [""]})
+
+    output = AudienceSegmentOutput(**valid_kwargs)
+    assert output.name == "Enterprise leaders"
+
+
 def test_differentiation_pillars_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "2-4 differentiation pillars"."""
-    pillar = DifferentiationPillar(pillar="Execution speed")
+    pillar = DifferentiationPillarOutput(
+        pillar="Execution speed",
+        proof_points=["Ship weekly release cadence"],
+        competitive_context="Competitors ship quarterly.",
+    )
     with pytest.raises(ValidationError):
         DifferentiationPillarsOutput(differentiation_pillars=[pillar])  # below min of 2
     with pytest.raises(ValidationError):
@@ -136,6 +198,27 @@ def test_differentiation_pillars_output_enforces_stated_cardinality() -> None:
 
     output = DifferentiationPillarsOutput(differentiation_pillars=[pillar] * 2)
     assert len(output.differentiation_pillars) == 2
+
+
+def test_differentiation_pillar_output_rejects_blank_content() -> None:
+    """A blank pillar, competitive context, or proof point must fail validation."""
+    valid_kwargs = dict(
+        pillar="Execution speed",
+        proof_points=["Ship weekly release cadence"],
+        competitive_context="Competitors ship quarterly.",
+    )
+
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "pillar": ""})
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "competitive_context": ""})
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "proof_points": [""]})
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "proof_points": []})
+
+    output = DifferentiationPillarOutput(**valid_kwargs)
+    assert output.pillar == "Execution speed"
 
 
 def test_brand_story_output_rejects_missing_and_enforces_cardinality() -> None:
@@ -492,4 +575,30 @@ def test_brand_architecture_output_rejects_blank_naming_conventions_and_glossary
                     "Blank value": "",
                 },
             }
+        )
+
+
+_EXPERIENCE_PRINCIPLES_KWARGS = dict(
+    brand_experience_principles=["Consistency", "Intentionality", "Warmth"],
+    signature_moments=["First visit", "Onboarding", "Renewal"],
+    sensory_elements=["Signature sound", "Motion easing"],
+)
+
+
+def test_brand_experience_principles_output_rejects_blank_list_items() -> None:
+    """``brand_experience_principles``/``signature_moments``/``sensory_elements`` reject blanks."""
+    output = BrandExperiencePrinciplesOutput(**_EXPERIENCE_PRINCIPLES_KWARGS)
+    assert len(output.brand_experience_principles) == 3
+
+    with pytest.raises(ValidationError):
+        BrandExperiencePrinciplesOutput(
+            **{**_EXPERIENCE_PRINCIPLES_KWARGS, "brand_experience_principles": ["", "", ""]}
+        )
+    with pytest.raises(ValidationError):
+        BrandExperiencePrinciplesOutput(
+            **{**_EXPERIENCE_PRINCIPLES_KWARGS, "signature_moments": ["", "", ""]}
+        )
+    with pytest.raises(ValidationError):
+        BrandExperiencePrinciplesOutput(
+            **{**_EXPERIENCE_PRINCIPLES_KWARGS, "sensory_elements": ["", ""]}
         )

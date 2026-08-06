@@ -167,6 +167,24 @@ class CoreValue(BaseModel):
     observable_behaviors: List[str] = Field(default_factory=list)
 
 
+class CoreValueOutput(BaseModel):
+    """Agent-facing core value; requires non-empty fields.
+
+    Field-for-field twin of ``CoreValue`` with required content, matching
+    the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``,
+    ``DifferentiationPillarOutput``) — ``CoreValue`` itself must stay soft
+    (only ``value`` required) since it also backs
+    ``StrategicCoreOutput.core_values``'s merge target.
+    """
+
+    value: str = Field(min_length=1)
+    behavioral_definition: str = Field(min_length=1)
+    observable_behaviors: List[NonEmptyStr] = Field(min_length=1)
+
+
 class AudienceSegment(BaseModel):
     """A target audience segment with psychographic detail."""
 
@@ -177,12 +195,50 @@ class AudienceSegment(BaseModel):
     decision_drivers: List[str] = Field(default_factory=list)
 
 
+class AudienceSegmentOutput(BaseModel):
+    """Agent-facing audience segment; requires non-empty fields.
+
+    Field-for-field twin of ``AudienceSegment`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``,
+    ``DifferentiationPillarOutput``) — ``AudienceSegment`` itself must stay
+    soft (only ``name`` required) since it also backs
+    ``StrategicCoreOutput.target_audience_segments``'s merge target.
+    """
+
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    pain_points: List[NonEmptyStr] = Field(min_length=1)
+    goals: List[NonEmptyStr] = Field(min_length=1)
+    decision_drivers: List[NonEmptyStr] = Field(min_length=1)
+
+
 class DifferentiationPillar(BaseModel):
     """Competitive differentiation pillar with proof points."""
 
     pillar: str
     proof_points: List[str] = Field(default_factory=list)
     competitive_context: str = ""
+
+
+class DifferentiationPillarOutput(BaseModel):
+    """Agent-facing differentiation pillar; requires non-empty fields.
+
+    Field-for-field twin of ``DifferentiationPillar`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``)
+    — ``DifferentiationPillar`` itself must stay soft (only ``pillar``
+    required) since it also backs
+    ``StrategicCoreOutput.differentiation_pillars``'s merge target.
+    """
+
+    pillar: str = Field(min_length=1)
+    proof_points: List[NonEmptyStr] = Field(min_length=1)
+    competitive_context: str = Field(min_length=1)
 
 
 class BrandDiscoveryAudit(BaseModel):
@@ -241,9 +297,12 @@ class CoreValuesOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
+    Uses ``CoreValueOutput`` (not the soft ``CoreValue``) so each value's
+    fields are individually required — a blank value must fail validation
+    instead of silently passing.
     """
 
-    core_values: List[CoreValue] = Field(min_length=3, max_length=5)
+    core_values: List[CoreValueOutput] = Field(min_length=3, max_length=5)
 
 
 class AudienceSegmentsOutput(BaseModel):
@@ -251,9 +310,12 @@ class AudienceSegmentsOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
+    Uses ``AudienceSegmentOutput`` (not the soft ``AudienceSegment``) so each
+    segment's fields are individually required — a blank-name segment must
+    fail validation instead of silently passing.
     """
 
-    target_audience_segments: List[AudienceSegment] = Field(min_length=1, max_length=3)
+    target_audience_segments: List[AudienceSegmentOutput] = Field(min_length=1, max_length=3)
 
 
 class DifferentiationPillarsOutput(BaseModel):
@@ -261,9 +323,12 @@ class DifferentiationPillarsOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
+    Uses ``DifferentiationPillarOutput`` (not the soft ``DifferentiationPillar``)
+    so each pillar's fields are individually required — a blank pillar must
+    fail validation instead of silently passing.
     """
 
-    differentiation_pillars: List[DifferentiationPillar] = Field(min_length=2, max_length=4)
+    differentiation_pillars: List[DifferentiationPillarOutput] = Field(min_length=2, max_length=4)
 
 
 class PositioningOutput(BaseModel):
@@ -690,9 +755,9 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated cardinalities.
     """
 
-    brand_experience_principles: List[str] = Field(min_length=3, max_length=5)
-    signature_moments: List[str] = Field(min_length=3, max_length=5)
-    sensory_elements: List[str] = Field(min_length=2, max_length=4)
+    brand_experience_principles: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    signature_moments: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    sensory_elements: List[NonEmptyStr] = Field(min_length=2, max_length=4)
 
 
 class BrandArchitectureRuleOutput(BaseModel):

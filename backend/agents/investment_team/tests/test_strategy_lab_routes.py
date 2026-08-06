@@ -217,6 +217,69 @@ def test_stub_lab_client_get_job_returns_copy_for_known_id() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _no_active_run_locked
+# ---------------------------------------------------------------------------
+
+
+def test_no_active_run_locked_noop_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No entries at all -- must not raise."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {})
+    api_main._no_active_run_locked()  # must not raise
+
+
+def test_no_active_run_locked_raises_409_when_running_entry_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {"run-1": {"run_id": "run-1", "status": "running"}})
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_main._no_active_run_locked()
+    assert exc_info.value.status_code == 409
+
+
+def test_no_active_run_locked_tolerates_entry_missing_status_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An _active_runs entry lacking the "status" key entirely must not raise
+    KeyError -- it's treated as not-running (via .get()'s default), so this
+    conflict guard still works instead of itself crashing into a 500."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {"malformed": {"run_id": "malformed"}})
+
+    api_main._no_active_run_locked()  # must not raise KeyError
+
+
+def test_no_active_run_locked_detects_running_entry_alongside_malformed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed sibling entry (missing "status") must not mask a genuine
+    running entry -- the guard still correctly raises 409 for it."""
+    from fastapi import HTTPException
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_active_runs",
+        {
+            "malformed": {"run_id": "malformed"},
+            "run-1": {"run_id": "run-1", "status": "running"},
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_main._no_active_run_locked()
+    assert exc_info.value.status_code == 409
+
+
+# ---------------------------------------------------------------------------
 # run_strategy_lab
 # ---------------------------------------------------------------------------
 
@@ -1349,6 +1412,39 @@ def test_list_strategy_lab_jobs_tolerates_malformed_current_cycle(
     assert entry["label"] == "Strategy batch (1/4)"
 
 
+def test_list_strategy_lab_jobs_tolerates_non_string_phase(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A ``current_cycle["phase"]`` that isn't a string doesn't 500 the
+    response-model validation for ``InvestmentJobSummary.current_phase``.
+
+    ``current_cycle`` is reconciled verbatim from unvalidated job-service
+    data, so a malformed record could carry a non-string ``phase`` (e.g. an
+    int or a dict) straight into the summary; the endpoint must degrade that
+    to ``None`` instead of raising a Pydantic validation error.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "non-string-phase-run"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+        "current_cycle": {"phase": 42},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == run_id]
+    assert len(matches) == 1
+    assert matches[0]["current_phase"] is None
+
+
 def test_list_strategy_lab_jobs_tolerates_non_dict_persisted_data(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -1725,6 +1821,7 @@ def test_delete_strategy_lab_run_success(monkeypatch: pytest.MonkeyPatch, api_cl
     assert resp.json()["deleted"] is True
     # And the in-memory entry was popped.
     assert "delete-me" not in api_main._active_runs
+    assert stub.deleted == ["delete-me"]
 
 
 def test_delete_strategy_lab_run_409_when_transition_lock_held(

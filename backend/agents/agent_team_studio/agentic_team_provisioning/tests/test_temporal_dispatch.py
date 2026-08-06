@@ -213,6 +213,46 @@ def test_cancel_cancels_workflow_when_temporal_owned(api_main, client, monkeypat
     assert cancelled == {"workflow_id": "agentic-pipeline-run-cancel"}
 
 
+def test_dispatch_flag_computed_once_even_if_config_changes_mid_request(
+    api_main, client, monkeypatch
+):
+    """``_temporal_enabled`` must be read exactly once per request. Previously
+    ``start_pipeline_run`` and ``_dispatch_pipeline_run`` each called it independently,
+    so a config change between the two reads could leave the persisted
+    ``temporal_owned`` flag out of sync with the dispatch path actually used."""
+    team_id, process_id = _seed_team_with_process(api_main)
+
+    readings = [True, False]
+    calls: list[bool] = []
+
+    def _flaky_temporal_enabled():
+        calls.append(True)
+        return readings.pop(0)
+
+    monkeypatch.setattr(api_main, "_temporal_enabled", _flaky_temporal_enabled)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "agent_team_studio.agentic_team_provisioning.temporal.start_workflow.start_agentic_pipeline_workflow",
+        lambda run_id, agents, proc, initial: captured.update(run_id=run_id),
+    )
+
+    def _no_thread(*_a, **_k):  # pragma: no cover - thread path must not run
+        raise AssertionError("thread path must not run when the first reading was True")
+
+    monkeypatch.setattr(api_main._pipeline_runner, "start_run", _no_thread)
+
+    resp = client.post(f"/teams/{team_id}/test-pipeline/runs", json={"process_id": process_id})
+    assert resp.status_code == 201
+    run_id = resp.json()["run_id"]
+
+    # Only one read of the flag — no second, possibly-divergent recomputation.
+    assert len(calls) == 1
+    # Dispatch used the same (first) reading that was persisted.
+    assert captured["run_id"] == run_id
+    assert api_main._test_store.is_pipeline_run_temporal_owned(run_id) is True
+
+
 def test_temporal_enabled_false_when_shared_temporal_missing(api_main, monkeypatch):
     """_temporal_enabled returns False when shared.temporal is not importable."""
     import sys

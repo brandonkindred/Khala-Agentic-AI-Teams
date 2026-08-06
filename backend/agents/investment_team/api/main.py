@@ -15,6 +15,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from investment_team.agents import (
     FinancialAdvisorAgent,
@@ -154,6 +155,7 @@ from job_service_client import (
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
 from shared.env_config import env_bool
+from shared.sse import sse_job_stream_async, sse_line
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1182,8 +1184,12 @@ def _run_backtest_background(
 
     Postconditions:
         - On the success path: job status becomes RUNNING then COMPLETED with a
-          serialized ``RunBacktestResponse``; a new ``BacktestRecord`` is stored
-          under ``_backtests[backtest_id]``
+          serialized ``RunBacktestResponse``; a ``BacktestRecord`` is stored under
+          ``_backtests[backtest_id]``, where ``backtest_id`` is derived
+          deterministically from ``job_id``. A second invocation for the same
+          ``job_id`` (e.g. a Temporal activity retry that lands after a worker
+          crash left the job at RUNNING) therefore overwrites the same record
+          instead of orphaning a duplicate.
         - On ``InvestmentBacktestError`` or other exceptions: job status becomes
           FAILED with an error string, unless a cancel check already returned
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
@@ -1199,7 +1205,10 @@ def _run_backtest_background(
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
             return
-        backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
+        # Deterministic (not random) so a retry of the same job_id — e.g. a
+        # Temporal activity retry after a worker crash left the job RUNNING —
+        # overwrites the same record instead of minting a duplicate.
+        backtest_id = f"bt-{hashlib.sha256(job_id.encode()).hexdigest()[:8]}"
         now = _now()
         record = BacktestRecord(
             backtest_id=backtest_id,
@@ -2040,13 +2049,23 @@ def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
         ``_strategies`` / ``_backtests`` stores, keyed by their respective
         ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
         activity can reuse the identical write without duplicating it.
+
+    Raises:
+        ``ValueError``: ``record.strategy`` or ``record.backtest`` is
+        ``None``. Checked before acquiring ``_lock``, so a caller that
+        violates the precondition gets a clear contract failure instead of
+        an opaque ``AttributeError`` from inside the locked section.
     """
     # StrategySpec/BacktestRecord are required (non-Optional) fields, but
     # Pydantic doesn't validate on assignment here, so a stray `record.strategy
     # = None` elsewhere would otherwise surface as an opaque AttributeError
-    # below instead of a clear precondition failure at this boundary.
-    assert record.strategy is not None, "record.strategy must be populated before persisting"
-    assert record.backtest is not None, "record.backtest must be populated before persisting"
+    # below instead of a clear precondition failure at this boundary. A bare
+    # `assert` would be stripped under `python -O`, silently admitting a None
+    # value; raise explicitly so this precondition always holds.
+    if record.strategy is None:
+        raise ValueError("record.strategy must be populated before persisting")
+    if record.backtest is None:
+        raise ValueError("record.backtest must be populated before persisting")
     with _lock:
         _strategy_lab_records[record.lab_record_id] = record
         _strategies[record.strategy.strategy_id] = record.strategy
@@ -2706,10 +2725,11 @@ def _no_active_run_locked() -> None:
         - Returns ``None`` when no entry in ``_active_runs`` has status
           ``"running"``; otherwise raises ``HTTPException(409)``. Does not
           mutate ``_active_runs`` and does not itself acquire or release
-          ``_lock``.
+          ``_lock``. An entry missing a ``"status"`` key is treated as not
+          running (``.get()`` default) rather than raising ``KeyError`` --
+          a malformed entry must not defeat this conflict guard.
     """
-    active = [r for r in _active_runs.values() if r["status"] == "running"]
-    if active:
+    if any(r.get("status") == "running" for r in _active_runs.values()):
         raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
 
 
@@ -3203,7 +3223,11 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
           ``strategy`` reconciled from job-service data, and each persisted
           job's ``"data"`` field itself (defaulting to ``{}`` when it isn't a
           mapping), are not schema-validated at ingestion, so their shape is
-          checked defensively before use rather than assumed. A job-service
+          checked defensively before use rather than assumed -- including
+          ``current_cycle["phase"]``, which is coerced to ``None`` unless it
+          is already a ``str`` (the type ``InvestmentJobSummary.current_phase``
+          requires), since a non-string value would otherwise fail Pydantic
+          response validation with a 500. A job-service
           connection/transport failure (``httpx.HTTPError``) or an
           unconfigured ``JOB_SERVICE_URL`` (``RuntimeError``) is caught and
           logged, and the response falls back to the in-memory-only list; in
@@ -3246,6 +3270,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         cycle = state.get("current_cycle")
         cycle = cycle if isinstance(cycle, dict) else None
         phase = cycle.get("phase") if cycle else None
+        phase = phase if isinstance(phase, str) else None
         hypothesis = ""
         if cycle:
             strategy = cycle.get("strategy")
@@ -3873,10 +3898,18 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     window. The streaming generator itself remains async so it doesn't block
     Uvicorn worker threads once connected.
     """
-    from starlette.concurrency import run_in_threadpool
-
+    # Deliberately local (not module-level): tests substitute a fake
+    # subscribe/unsubscribe by monkeypatching them directly on the
+    # investment_team.api.job_event_bus module object (not on this module),
+    # relying on this import re-executing -- and so re-binding these names to
+    # whatever job_event_bus.subscribe/unsubscribe currently are -- on every
+    # call. A module-level `from ... import subscribe, unsubscribe` would
+    # freeze these names to the real functions at main.py's own import time,
+    # silently breaking that test-doubling and stalling the SSE stream in
+    # requests that expect the fake driving it (verified: this exact swap
+    # deadlocks test_stream_strategy_lab_run_emits_snapshot_update_and_terminates
+    # and its siblings).
     from investment_team.api.job_event_bus import subscribe, unsubscribe
-    from shared.sse import sse_job_stream_async, sse_line
 
     with _lock:
         state = _active_runs.get(run_id)
@@ -4146,8 +4179,19 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         - ``lab_record_id`` may or may not resolve to a known lab record.
 
     Postconditions:
-        - ``_strategy_lab_records[lab_record_id]`` is always removed (its
-          existence is the 404 gate above).
+        - Paper-trading session cleanup (``_delete_paper_sessions_for_lab_record``,
+          a job-service network call) runs *before* the lab record is removed
+          from memory. If it raises or times out, the lab record and its linked
+          strategy/backtest are left intact and the exception propagates
+          (surfacing as a 500) instead of being silently swallowed — a retry
+          then re-attempts the same cleanup rather than 404ing against an
+          already-deleted record while paper sessions sit orphaned in the job
+          service.
+        - ``_strategy_lab_records[lab_record_id]`` is removed only if it is
+          still present by the time the in-memory-mutation step runs — a
+          concurrent delete of the same ``lab_record_id`` may have already
+          removed it while this call was doing paper-session cleanup, in
+          which case this call reports no strategy/backtest deletion for it.
         - ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless
           the corresponding entry actually existed in ``_strategies``/
           ``_backtests`` *before* this call — ``_PersistentDict.__delitem__``
@@ -4178,18 +4222,25 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
         strategy_id = record.strategy.strategy_id
         backtest_id = record.backtest.backtest_id
 
-        del _strategy_lab_records[lab_record_id]
-        # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
-        # these deletes also remove the investment_strategies/investment_backtests
-        # job-service rows, not just a process-local cache entry.
-        strategy_deleted = strategy_id in _strategies
-        if strategy_deleted:
-            del _strategies[strategy_id]
-        backtest_deleted = backtest_id in _backtests
-        if backtest_deleted:
-            del _backtests[backtest_id]
-
+    # External cleanup (job-service network I/O) runs before any in-memory
+    # mutation: if this raises, nothing below has been deleted yet, so the
+    # record stays retryable instead of becoming an orphan-producing 404.
     paper_deleted = _delete_paper_sessions_for_lab_record(lab_record_id)
+
+    with _lock:
+        strategy_deleted = False
+        backtest_deleted = False
+        if lab_record_id in _strategy_lab_records:
+            del _strategy_lab_records[lab_record_id]
+            # _strategies/_backtests are _PersistentDict (JobServiceClient-backed), so
+            # these deletes also remove the investment_strategies/investment_backtests
+            # job-service rows, not just a process-local cache entry.
+            strategy_deleted = strategy_id in _strategies
+            if strategy_deleted:
+                del _strategies[strategy_id]
+            backtest_deleted = backtest_id in _backtests
+            if backtest_deleted:
+                del _backtests[backtest_id]
 
     return DeleteStrategyLabRecordResponse(
         lab_record_id=lab_record_id,
@@ -4482,7 +4533,25 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             status_code=404, detail=f"Strategy lab record '{request.lab_record_id}' not found."
         )
 
-    lab_record = StrategyLabRecord.parse_persisted(raw_record)
+    try:
+        lab_record = StrategyLabRecord.parse_persisted(raw_record)
+    except Exception as exc:
+        # The record exists but is internally corrupt (schema drift, a
+        # missing required field, malformed JSON, ...) -- a server-side data
+        # integrity problem, not a client input error, so this is a 500
+        # rather than a 4xx. Log the full exception (which may include raw
+        # persisted field values) server-side only; the client-facing detail
+        # stays generic so it can't leak internal schema/validation details.
+        logger.error(
+            "Strategy lab record %s failed to parse: %s",
+            request.lab_record_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Strategy lab record '{request.lab_record_id}' is corrupted and cannot be loaded.",
+        ) from exc
 
     if not lab_record.is_winning:
         raise HTTPException(
