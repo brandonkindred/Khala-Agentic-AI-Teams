@@ -3073,7 +3073,11 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
           ``strategy`` reconciled from job-service data, and each persisted
           job's ``"data"`` field itself (defaulting to ``{}`` when it isn't a
           mapping), are not schema-validated at ingestion, so their shape is
-          checked defensively before use rather than assumed. A job-service
+          checked defensively before use rather than assumed -- including
+          ``current_cycle["phase"]``, which is coerced to ``None`` unless it
+          is already a ``str`` (the type ``InvestmentJobSummary.current_phase``
+          requires), since a non-string value would otherwise fail Pydantic
+          response validation with a 500. A job-service
           connection/transport failure (``httpx.HTTPError``) or an
           unconfigured ``JOB_SERVICE_URL`` (``RuntimeError``) is caught and
           logged, and the response falls back to the in-memory-only list; in
@@ -3114,6 +3118,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
         cycle = state.get("current_cycle")
         cycle = cycle if isinstance(cycle, dict) else None
         phase = cycle.get("phase") if cycle else None
+        phase = phase if isinstance(phase, str) else None
         hypothesis = ""
         if cycle:
             strategy = cycle.get("strategy")
