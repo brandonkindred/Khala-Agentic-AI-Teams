@@ -22,7 +22,7 @@ from branding_team.models import (
     AudienceMessageMapOutput,
     AudienceSegment,
     AudienceSegmentsOutput,
-    BrandArchetype,
+    BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
     BrandArchitectureRuleOutput,
@@ -160,7 +160,9 @@ _STORY = dict(
     hero_narrative="Punchy hero.",
     boilerplate_variants=["short", "medium", "long"],
 )
-_ARCHETYPE = BrandArchetype(archetype="The Creator")
+_ARCHETYPE = BrandArchetypeOutput(
+    archetype="The Creator", rationale="Inventive.", personality_traits=["Imaginative", "Original"]
+)
 _PITCHES = [
     ElevatorPitchOutput(tier="5-second", pitch="a"),
     ElevatorPitchOutput(tier="30-second", pitch="b"),
@@ -203,6 +205,23 @@ def test_brand_archetypes_output_enforces_stated_cardinality() -> None:
     output = BrandArchetypesOutput(**_STORY, brand_archetypes=[_ARCHETYPE])
     assert len(output.brand_archetypes) == 1
     assert output.brand_story == "Origin story."
+
+
+def test_brand_archetype_output_rejects_blank_content() -> None:
+    """A blank archetype, rationale, or personality trait must fail validation."""
+    valid_kwargs = _ARCHETYPE.model_dump()
+
+    with pytest.raises(ValidationError):
+        BrandArchetypeOutput(**{**valid_kwargs, "archetype": ""})
+    with pytest.raises(ValidationError):
+        BrandArchetypeOutput(**{**valid_kwargs, "rationale": ""})
+    with pytest.raises(ValidationError):
+        BrandArchetypeOutput(**{**valid_kwargs, "personality_traits": [""]})
+    with pytest.raises(ValidationError):
+        BrandArchetypeOutput(**{**valid_kwargs, "personality_traits": []})
+
+    output = BrandArchetypeOutput(**valid_kwargs)
+    assert output.archetype == "The Creator"
 
 
 def test_tagline_output_rejects_missing_and_enforces_cardinality() -> None:

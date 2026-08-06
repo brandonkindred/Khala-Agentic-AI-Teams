@@ -24,7 +24,7 @@ from branding_team.models import (
     AudienceSegment,
     AudienceSegmentsOutput,
     Brand,
-    BrandArchetype,
+    BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandCheckRequest,
     BrandDiscoveryAuditOutput,
@@ -921,7 +921,13 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         hero_narrative="Brand that ships with the product.",
         boilerplate_variants=["short bio", "medium bio", "long bio"],
     )
-    _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
+    _archetypes = [
+        BrandArchetypeOutput(
+            archetype="The Creator",
+            rationale="Inventive.",
+            personality_traits=["Imaginative", "Original"],
+        )
+    ]
     _pitches = [
         ElevatorPitchOutput(tier="5-second", pitch="On-brand, shipped weekly."),
         ElevatorPitchOutput(tier="30-second", pitch="Keep every touchpoint intentional."),
@@ -1080,7 +1086,13 @@ def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
         hero_narrative="Rewritten hero.",
         boilerplate_variants=["v-short", "v-medium", "v-long"],
     )
-    _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
+    _archetypes = [
+        BrandArchetypeOutput(
+            archetype="The Creator",
+            rationale="Inventive.",
+            personality_traits=["Imaginative", "Original"],
+        )
+    ]
     _pitches = [
         ElevatorPitchOutput(tier="5-second", pitch="a"),
         ElevatorPitchOutput(tier="30-second", pitch="b"),
