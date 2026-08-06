@@ -20,11 +20,11 @@ from branding_team import (
     WorkflowStatus,
 )
 from branding_team.models import (
-    AudienceMessageMap,
-    AudienceSegment,
+    AudienceMessageMapOutput,
+    AudienceSegmentOutput,
     AudienceSegmentsOutput,
     Brand,
-    BrandArchetype,
+    BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandCheckRequest,
     BrandDiscoveryAuditOutput,
@@ -36,18 +36,19 @@ from branding_team.models import (
     ColorEntry,
     CompetitiveSnapshot,
     CoreValue,
+    CoreValueOutput,
     CoreValuesOutput,
     CreativeRefinementDecision,
     DesignSystemDefinition,
-    DifferentiationPillar,
+    DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
-    ElevatorPitch,
+    ElevatorPitchOutput,
     GovernanceOutput,
     MessagingFrameworkOutput,
-    MessagingPillar,
+    MessagingPillarOutput,
     MoodBoardConcept,
     NarrativeMessagingOutput,
-    PersonaProfile,
+    PersonaProfileOutput,
     PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
@@ -855,22 +856,50 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
         "values_articulator": _phase1_leaf_node(
             CoreValuesOutput(
                 core_values=[
-                    CoreValue(value="Clarity"),
-                    CoreValue(value="Trust"),
-                    CoreValue(value="Momentum"),
+                    CoreValueOutput(
+                        value="Clarity",
+                        behavioral_definition="We demonstrate clarity in every decision.",
+                        observable_behaviors=["Plain-language docs"],
+                    ),
+                    CoreValueOutput(
+                        value="Trust",
+                        behavioral_definition="We build trust through transparency.",
+                        observable_behaviors=["Public roadmap"],
+                    ),
+                    CoreValueOutput(
+                        value="Momentum",
+                        behavioral_definition="We maintain momentum through disciplined execution.",
+                        observable_behaviors=["Weekly release cadence"],
+                    ),
                 ]
             )
         ),
         "audience_segmenter": _phase1_leaf_node(
             AudienceSegmentsOutput(
-                target_audience_segments=[AudienceSegment(name="Enterprise product leaders")]
+                target_audience_segments=[
+                    AudienceSegmentOutput(
+                        name="Enterprise product leaders",
+                        description="VP/Director-level buyers at mid-market SaaS companies.",
+                        pain_points=["Inconsistent brand touchpoints"],
+                        goals=["Ship cohesive experiences"],
+                        decision_drivers=["Proven execution speed"],
+                    )
+                ]
             )
         ),
         "differentiation_mapper": _phase1_leaf_node(
             DifferentiationPillarsOutput(
                 differentiation_pillars=[
-                    DifferentiationPillar(pillar="Execution speed"),
-                    DifferentiationPillar(pillar="Hands-on partnership"),
+                    DifferentiationPillarOutput(
+                        pillar="Execution speed",
+                        proof_points=["Ship weekly release cadence"],
+                        competitive_context="Competitors ship quarterly.",
+                    ),
+                    DifferentiationPillarOutput(
+                        pillar="Hands-on partnership",
+                        proof_points=["Dedicated strategist per account"],
+                        competitive_context="Competitors use ticket-based support.",
+                    ),
                 ]
             )
         ),
@@ -921,19 +950,59 @@ def test_extract_phase_output_merges_every_phase2_fragment() -> None:
         hero_narrative="Brand that ships with the product.",
         boilerplate_variants=["short bio", "medium bio", "long bio"],
     )
-    _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
+    _archetypes = [
+        BrandArchetypeOutput(
+            archetype="The Creator",
+            rationale="Inventive.",
+            personality_traits=["Imaginative", "Original"],
+        )
+    ]
     _pitches = [
-        ElevatorPitch(tier="5-second", pitch="On-brand, shipped weekly."),
-        ElevatorPitch(tier="30-second", pitch="Keep every touchpoint intentional."),
-        ElevatorPitch(tier="2-minute", pitch="Turn strategy into a workable system."),
+        ElevatorPitchOutput(tier="5-second", pitch="On-brand, shipped weekly."),
+        ElevatorPitchOutput(tier="30-second", pitch="Keep every touchpoint intentional."),
+        ElevatorPitchOutput(tier="2-minute", pitch="Turn strategy into a workable system."),
     ]
     _pillars = [
-        MessagingPillar(pillar="Cohesion"),
-        MessagingPillar(pillar="Speed"),
-        MessagingPillar(pillar="Clarity"),
+        MessagingPillarOutput(
+            pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
+        ),
+        MessagingPillarOutput(
+            pillar="Speed", key_message="Ship weekly.", proof_points=["Release cadence"]
+        ),
+        MessagingPillarOutput(
+            pillar="Clarity", key_message="Say it simply.", proof_points=["Plain-language copy"]
+        ),
     ]
-    _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
-    _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
+    _maps = [
+        AudienceMessageMapOutput(
+            audience_segment="Enterprise product leaders",
+            primary_message="Ship on-brand, faster.",
+            supporting_messages=["Consistent across every touchpoint"],
+            tone_adjustments="Confident, outcome-focused",
+        )
+    ]
+    _personas = [
+        PersonaProfileOutput(
+            name="Alex Rivera",
+            role="VP of Product",
+            demographics="35-44, urban, enterprise SaaS",
+            psychographics="Outcome-driven, skeptical of hype",
+            goals=["Ship cohesive experiences"],
+            frustrations=["Inconsistent brand touchpoints"],
+            media_habits=["Industry newsletters"],
+            jobs_to_be_done=["Align teams on brand voice"],
+        ),
+        PersonaProfileOutput(
+            name="Jordan Lee",
+            role="Head of Marketing",
+            demographics="28-34, remote, mid-market",
+            psychographics="Data-driven, values clarity",
+            goals=["Grow brand recall"],
+            frustrations=["Fragmented messaging"],
+            media_habits=["Design newsletters"],
+            jobs_to_be_done=["Brief agencies quickly"],
+        ),
+    ]
     voice_leaf = _phase1_leaf_node(
         WritingGuidelinesOutput(
             **_story,
@@ -1046,19 +1115,59 @@ def test_extract_phase_output_phase2_prefers_upstream_owned_fields() -> None:
         hero_narrative="Rewritten hero.",
         boilerplate_variants=["v-short", "v-medium", "v-long"],
     )
-    _archetypes = [BrandArchetype(archetype="The Creator", rationale="Inventive.")]
+    _archetypes = [
+        BrandArchetypeOutput(
+            archetype="The Creator",
+            rationale="Inventive.",
+            personality_traits=["Imaginative", "Original"],
+        )
+    ]
     _pitches = [
-        ElevatorPitch(tier="5-second", pitch="a"),
-        ElevatorPitch(tier="30-second", pitch="b"),
-        ElevatorPitch(tier="2-minute", pitch="c"),
+        ElevatorPitchOutput(tier="5-second", pitch="a"),
+        ElevatorPitchOutput(tier="30-second", pitch="b"),
+        ElevatorPitchOutput(tier="2-minute", pitch="c"),
     ]
     _pillars = [
-        MessagingPillar(pillar="Cohesion"),
-        MessagingPillar(pillar="Speed"),
-        MessagingPillar(pillar="Clarity"),
+        MessagingPillarOutput(
+            pillar="Cohesion", key_message="One voice everywhere.", proof_points=["Style guide"]
+        ),
+        MessagingPillarOutput(
+            pillar="Speed", key_message="Ship weekly.", proof_points=["Release cadence"]
+        ),
+        MessagingPillarOutput(
+            pillar="Clarity", key_message="Say it simply.", proof_points=["Plain-language copy"]
+        ),
     ]
-    _maps = [AudienceMessageMap(audience_segment="Enterprise product leaders")]
-    _personas = [PersonaProfile(name="Alex Rivera"), PersonaProfile(name="Jordan Lee")]
+    _maps = [
+        AudienceMessageMapOutput(
+            audience_segment="Enterprise product leaders",
+            primary_message="Ship on-brand, faster.",
+            supporting_messages=["Consistent across every touchpoint"],
+            tone_adjustments="Confident, outcome-focused",
+        )
+    ]
+    _personas = [
+        PersonaProfileOutput(
+            name="Alex Rivera",
+            role="VP of Product",
+            demographics="35-44, urban, enterprise SaaS",
+            psychographics="Outcome-driven, skeptical of hype",
+            goals=["Ship cohesive experiences"],
+            frustrations=["Inconsistent brand touchpoints"],
+            media_habits=["Industry newsletters"],
+            jobs_to_be_done=["Align teams on brand voice"],
+        ),
+        PersonaProfileOutput(
+            name="Jordan Lee",
+            role="Head of Marketing",
+            demographics="28-34, remote, mid-market",
+            psychographics="Data-driven, values clarity",
+            goals=["Grow brand recall"],
+            frustrations=["Fragmented messaging"],
+            media_habits=["Design newsletters"],
+            jobs_to_be_done=["Brief agencies quickly"],
+        ),
+    ]
     guidelines = WritingGuidelinesBody(
         voice_principles=["Confident", "Human", "Concrete"],
         style_dos=["Lead with outcome", "Use active voice", "Name the audience"],

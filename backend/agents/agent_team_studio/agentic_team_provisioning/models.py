@@ -332,6 +332,10 @@ class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
 
+class SetConversationProcessRequest(BaseModel):
+    process_id: str = Field(..., min_length=1)
+
+
 class ConversationStateResponse(BaseModel):
     conversation_id: str
     team_id: str

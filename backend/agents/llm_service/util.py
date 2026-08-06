@@ -44,6 +44,30 @@ _DEFAULT_EXPECTED_KEYS = frozenset(
 logger = logging.getLogger(__name__)
 
 
+def _flatten_system_prompt_content(system_prompt_content: Optional[list] = None) -> str:
+    """Flatten Strands ``system_prompt_content`` blocks into a single string.
+
+    Shared by ``clients.dummy`` and ``strands_adapter`` — both accept Strands'
+    structured system-prompt form (a list of content blocks, e.g.
+    ``[{"text": "..."}]``) alongside a plain ``system_prompt`` string.
+
+    Preconditions:
+        - ``system_prompt_content`` is ``None`` or a list of content blocks.
+
+    Postconditions:
+        - Returns the concatenated block text (``""`` when absent/empty).
+    """
+    if not system_prompt_content:
+        return ""
+    parts: list = []
+    for block in system_prompt_content:
+        if isinstance(block, dict):
+            parts.append(str(block.get("text", "") or ""))
+        else:
+            parts.append(str(block))
+    return "".join(parts)
+
+
 def sha256_fingerprint(text: str, *, length: int = 16) -> str:
     """Short, stable sha256 hex digest of ``text`` for log/receipt correlation.
 
