@@ -124,8 +124,10 @@ export class StrategyLabPaperTradingService {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          // Backend returns a "running" session immediately; runService stores it
-          // so the UI shows in-progress state, then polls until the worker finishes.
+          // Backend returns a non-terminal session immediately ('opening' when
+          // live paper trading is enabled, 'running' on the legacy path);
+          // runService stores it so the UI shows in-progress state, then polls
+          // until the worker finishes.
           this.runService.trackPaperTradingSession(record.lab_record_id, res.session);
           this.startingPaperTrade.set(null);
         },

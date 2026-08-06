@@ -400,6 +400,57 @@ describe('StrategyLabRunService', () => {
       expect(service.paperTradingSessions()['rec-1'].current_capital).toBe(10500);
     });
 
+    it('keeps polling through the live-mode opening/warming_up/live states, not just "running"', async () => {
+      vi.useFakeTimers();
+      const openingSession: PaperTradingSession = { ...runningSession, status: 'opening' };
+      api.getPaperTradingSession
+        .mockReturnValueOnce(of({ session: { ...runningSession, status: 'opening' }, message: 'ok' } as PaperTradingResponse))
+        .mockReturnValueOnce(of({ session: { ...runningSession, status: 'warming_up' }, message: 'ok' } as PaperTradingResponse))
+        .mockReturnValueOnce(of({ session: { ...runningSession, status: 'live' }, message: 'ok' } as PaperTradingResponse))
+        .mockReturnValueOnce(of({ session: { ...runningSession, status: 'completed' }, message: 'ok' } as PaperTradingResponse));
+
+      service.trackPaperTradingSession('rec-1', openingSession);
+
+      // First poll response is 'opening' — an inclusive-but-wrong takeWhile
+      // predicate keyed on 'running' would stop right here.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(service.paperTradingSessions()['rec-1'].status).toBe('opening');
+      expect(service.paperTradingLabRecordId()).toBe('rec-1');
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(service.paperTradingSessions()['rec-1'].status).toBe('warming_up');
+      expect(service.paperTradingLabRecordId()).toBe('rec-1');
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(service.paperTradingSessions()['rec-1'].status).toBe('live');
+      expect(service.paperTradingLabRecordId()).toBe('rec-1');
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(service.paperTradingSessions()['rec-1'].status).toBe('completed');
+      expect(service.paperTradingLabRecordId()).toBeNull();
+
+      expect(api.getPaperTradingSession).toHaveBeenCalledTimes(4);
+    });
+
+    it('hydratePaperTradingSessions resumes polling for opening/warming_up/live sessions, not just "running"', async () => {
+      vi.useFakeTimers();
+      const openingSession: PaperTradingSession = {
+        ...runningSession,
+        session_id: 'pt-opening',
+        lab_record_id: 'rec-opening',
+        status: 'opening',
+      };
+      api.getPaperTradingSession.mockReturnValue(
+        of({ session: { ...openingSession, status: 'warming_up' }, message: 'ok' } as PaperTradingResponse),
+      );
+
+      service.hydratePaperTradingSessions({ 'rec-opening': openingSession });
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(api.getPaperTradingSession).toHaveBeenCalledWith('pt-opening');
+      expect(service.paperTradingSessions()['rec-opening'].status).toBe('warming_up');
+    });
+
     it('clears paperTradingLabRecordId and stops polling once the session reaches a terminal status', async () => {
       vi.useFakeTimers();
       api.getPaperTradingSession.mockReturnValue(
