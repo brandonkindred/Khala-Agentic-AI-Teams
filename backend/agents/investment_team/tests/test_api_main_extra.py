@@ -35,7 +35,9 @@ import threading
 import uuid
 from typing import Any, Dict, List
 
+import httpx
 import pytest
+from fastapi import HTTPException
 
 
 @pytest.fixture(autouse=True)
@@ -1251,6 +1253,59 @@ def test_delete_paper_sessions_for_lab_record_many_jobs_concurrent(
     # Only the matching jobs were removed; the others survive.
     remaining = {j["job_id"] for j in fake.list_jobs()}
     assert remaining == {f"pt-other-{i}" for i in range(20)}
+
+
+def test_delete_paper_sessions_list_jobs_http_error_raises_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Job-service transport failure while listing sessions must surface as 503
+    (fail closed) — not a bare exception and not a silent skip."""
+    import job_service_client as jsc_mod
+
+    class _BrokenListClient(_FakeJobClient):
+        def list_jobs(self, *, statuses=None):
+            raise httpx.ConnectError("job service unreachable")
+
+        def delete_job(self, job_id: str) -> bool:
+            raise AssertionError("delete_job must not run when list_jobs fails")
+
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda team=None: _BrokenListClient(team=team or "x")
+    )
+
+    from investment_team.api.main import _delete_paper_sessions_for_lab_record
+
+    with pytest.raises(HTTPException) as ei:
+        _delete_paper_sessions_for_lab_record("lab-1")
+    assert ei.value.status_code == 503
+    assert "temporarily unavailable" in str(ei.value.detail).lower()
+
+
+def test_delete_paper_sessions_list_jobs_runtime_error_raises_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unconfigured JOB_SERVICE_URL (RuntimeError from JobServiceClient) must
+    also surface as 503 so delete_strategy_lab_record can leave state intact."""
+    import job_service_client as jsc_mod
+
+    class _UnconfiguredClient(_FakeJobClient):
+        def list_jobs(self, *, statuses=None):
+            raise RuntimeError("JOB_SERVICE_URL is not configured")
+
+        def delete_job(self, job_id: str) -> bool:
+            raise AssertionError("delete_job must not run when list_jobs fails")
+
+    monkeypatch.setattr(
+        jsc_mod,
+        "JobServiceClient",
+        lambda team=None: _UnconfiguredClient(team=team or "x"),
+    )
+
+    from investment_team.api.main import _delete_paper_sessions_for_lab_record
+
+    with pytest.raises(HTTPException) as ei:
+        _delete_paper_sessions_for_lab_record("lab-1")
+    assert ei.value.status_code == 503
 
 
 def test_purge_strategy_lab_job_storage_many_jobs_concurrent(
