@@ -155,6 +155,28 @@ def test_brand_story_output_rejects_missing_and_enforces_cardinality() -> None:
     assert output.hero_narrative == "Punchy hero."
 
 
+def test_brand_story_output_rejects_blank_boilerplate_variant() -> None:
+    """A blank short/medium/long variant must fail validation, not just wrong count."""
+    with pytest.raises(ValidationError):
+        BrandStoryOutput(
+            brand_story="Origin story.",
+            hero_narrative="Punchy hero.",
+            boilerplate_variants=["", "medium", "long"],
+        )
+    with pytest.raises(ValidationError):
+        BrandStoryOutput(
+            brand_story="Origin story.",
+            hero_narrative="Punchy hero.",
+            boilerplate_variants=["short", "", "long"],
+        )
+    with pytest.raises(ValidationError):
+        BrandStoryOutput(
+            brand_story="Origin story.",
+            hero_narrative="Punchy hero.",
+            boilerplate_variants=["short", "medium", ""],
+        )
+
+
 _STORY = dict(
     brand_story="Origin story.",
     hero_narrative="Punchy hero.",
