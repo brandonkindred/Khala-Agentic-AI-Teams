@@ -345,6 +345,46 @@ def test_resolve_fee_overrides_defaults_when_none() -> None:
     assert slip == 2.0  # _DEFAULT_SLIPPAGE_BPS
 
 
+def test_resolve_fee_overrides_defaults_are_operator_tunable_via_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback defaults are business parameters operators may need to
+    retune without a redeploy — read from env vars, not hardcoded."""
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    monkeypatch.setenv("INVESTMENT_DEFAULT_TX_COST_BPS", "12.5")
+    monkeypatch.setenv("INVESTMENT_DEFAULT_SLIPPAGE_BPS", "7.5")
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=None,
+        slippage_bps=None,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 12.5
+    assert slip == 7.5
+
+
+def test_resolve_fee_overrides_defaults_fall_back_on_invalid_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A garbage env value falls back to the documented default rather than
+    raising or silently propagating an unparseable value."""
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    monkeypatch.setenv("INVESTMENT_DEFAULT_TX_COST_BPS", "not-a-number")
+    monkeypatch.setenv("INVESTMENT_DEFAULT_SLIPPAGE_BPS", "-5")
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=None,
+        slippage_bps=None,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 5.0  # unparseable -> falls back to the documented default
+    assert slip == 0.0  # -5 is out of [0, 1000] -> clamped to the floor
+
+
 # ---------------------------------------------------------------------------
 # _normalize_strategy_lab_asset_class + _build_strategy_from_ideation
 # ---------------------------------------------------------------------------
