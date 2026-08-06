@@ -4085,12 +4085,33 @@ def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
         - Returns the number of those jobs for which ``delete_job`` returned a
           truthy value. The count equals the number of jobs successfully deleted
           and is independent of the order in which the concurrent deletes finish.
+
+    Raises:
+        - ``HTTPException`` 503: ``list_jobs`` failed with ``httpx.HTTPError``
+          (transport/HTTP) or ``RuntimeError`` (e.g. unconfigured
+          ``JOB_SERVICE_URL``). Callers must leave lab state intact so a retry
+          can re-attempt cleanup.
     """
     from job_service_client import JobServiceClient
 
     client = JobServiceClient(team="investment_paper_trading_sessions")
+    try:
+        jobs = client.list_jobs() or []
+    except (httpx.HTTPError, RuntimeError):
+        # Narrow environmental failures only — same pair sibling list endpoints
+        # use. Soft-failing here would orphan paper sessions after the lab
+        # record is deleted; fail closed with 503 instead.
+        logger.warning(
+            "list_jobs failed for paper trading sessions; cleanup unavailable",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Paper-trading session cleanup is temporarily unavailable; retry later.",
+        ) from None
+
     matching_ids: list[str] = []
-    for job in client.list_jobs() or []:
+    for job in jobs:
         jid = job.get("job_id")
         if not jid:
             continue
