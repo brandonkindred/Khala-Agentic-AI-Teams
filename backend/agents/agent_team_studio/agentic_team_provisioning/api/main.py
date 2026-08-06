@@ -537,14 +537,20 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
         if the manifest is a *generated* roster agent (any team's — see below; roster
         unchanged); ``422`` if the resolved manifest is too malformed to project (e.g.
         blank name/id), so a bad registry entry surfaces as a client error rather than
-        an unhandled 500.
+        an unhandled 500; ``503`` if the registry lookup itself fails (e.g. the
+        registry is unavailable), so an outage surfaces as a clear service-unavailable
+        response rather than an opaque 500.
     """
     from agent_registry import get_registry
 
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    manifest = get_registry().get(req.manifest_id)
+    try:
+        manifest = get_registry().get(req.manifest_id)
+    except Exception as e:
+        logger.warning("Registry lookup failed for manifest %s: %s", req.manifest_id, e)
+        raise HTTPException(status_code=503, detail="Agent registry unavailable")
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
     # Reject adding a *generated* roster manifest via the registry. Generated agents
@@ -570,7 +576,7 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
         )
     try:
         agent = _roster_agent_from_manifest(manifest)
-    except ValueError as e:
+    except (ValueError, ValidationError) as e:
         logger.warning(
             "Malformed registered manifest %s for team %s: %s", req.manifest_id, team_id, e
         )
