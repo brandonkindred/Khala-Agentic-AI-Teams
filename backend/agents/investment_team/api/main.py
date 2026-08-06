@@ -2966,6 +2966,13 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     reaching the ``_active_runs`` write before either observes the other, so
     the authoritative check is re-run atomically with that write, inside the
     same ``_lock`` acquisition (mirroring ``resume_strategy_lab_run``).
+
+    If ``_persist_run_state`` raises after ``_active_runs[run_id]`` is set,
+    the entry is removed before the exception propagates -- otherwise this
+    run_id would stay advertised as active (``_ensure_no_active_run``/
+    ``_no_active_run_locked`` both read ``_active_runs``) despite never
+    having been persisted or dispatched, permanently 409ing every future
+    request until process restart.
     """
     _ensure_no_active_run()
 
@@ -2986,7 +2993,21 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
         with _lock:
             _no_active_run_locked()
             _active_runs[run_id] = initial_state
-        _persist_run_state(run_id, initial_state, create=True)
+        try:
+            _persist_run_state(run_id, initial_state, create=True)
+        except Exception:
+            # Persistence failed: this run_id must not be left advertised as
+            # active forever (_ensure_no_active_run/_no_active_run_locked both
+            # read _active_runs), or every future /strategy-lab/run request
+            # would 409 for the rest of the process's life over a run that
+            # was never actually persisted or dispatched. Only remove the
+            # entry if it's still the one we just installed -- an identity
+            # check, not a bare pop, so a resume/restart that has since
+            # replaced it with a new state object is never torn down.
+            with _lock:
+                if _active_runs.get(run_id) is initial_state:
+                    _active_runs.pop(run_id, None)
+            raise
 
         # Dispatch the run as a durable Temporal workflow so it survives a
         # worker/process restart and is visible in the Temporal UI.
