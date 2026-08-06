@@ -6,17 +6,21 @@ bounded, pre-numbered review input suitable for ``CodeReviewInput`` with
 ``### path ###`` blocks) or ``ChangeSurface.blocks`` (path → body without
 headers).
 
-This module currently locks types, signatures, and empty/no-op postconditions.
-Expansion and assembly logic are owned by follow-on work; non-empty builder /
-expand inputs raise ``NotImplementedError`` until those land.
+This module locks types, signatures, and empty/no-op builder contracts.
+``expand_touched_ranges`` implements the Python AST expansion path; non-Python
+fallback and surface assembly are owned by follow-on work.
 
 Pure helpers: no I/O, no LLM clients, no package-level side effects.
 """
 
 from __future__ import annotations
 
+import ast
+import os
 from dataclasses import dataclass, field
 from typing import Collection, Mapping, Optional, Sequence
+
+from .function_boundaries import enclosing_construct
 
 __all__ = [
     "ChangeSurface",
@@ -194,6 +198,72 @@ def build_change_surface_from_pairs(
     )
 
 
+_PYTHON_EXTS = frozenset({".py", ".pyi"})
+
+
+def _path_is_python(path: str) -> bool:
+    """True when ``path``'s extension is a Python source/stub suffix."""
+    return os.path.splitext(path or "")[1].lower() in _PYTHON_EXTS
+
+
+def _content_parses_as_python(content: str) -> bool:
+    """True when ``content`` parses as a Python module.
+
+    Postconditions:
+        - Never raises; returns False on any parse failure.
+    """
+    try:
+        ast.parse(content)
+    except Exception:
+        return False
+    return True
+
+
+def _should_use_python_ast(content: str, path: str) -> bool:
+    """Decide whether the Python AST expansion path applies.
+
+    Postconditions:
+        - ``.py`` / ``.pyi`` paths always use the AST path (unparseable content
+          then yields an empty result rather than a non-Python fallback).
+        - Empty ``path`` uses the AST path only when ``content`` parses.
+        - Other extensions return False so callers keep ``NotImplementedError``
+          until the non-Python fallback lands.
+    """
+    if _path_is_python(path):
+        return True
+    if not path:
+        return _content_parses_as_python(content)
+    return False
+
+
+def _expand_touched_ranges_python(
+    content: str, touched_lines: Collection[int]
+) -> Sequence[LineRange]:
+    """Map touched lines to unique enclosing construct ranges via AST.
+
+    Preconditions:
+        - ``touched_lines`` is non-empty.
+
+    Postconditions:
+        - Returns sorted unique inclusive ``LineRange`` values for every touched
+          line that has an enclosing function/class (decorators included via
+          ``enclosing_construct`` / ``node_start_line``).
+        - Module-level lines and unparseable content contribute no ranges
+          (never expand to the whole file solely because a construct is missing).
+        - Never raises.
+    """
+    found: dict[tuple[int, int], LineRange] = {}
+    for line in sorted({int(n) for n in touched_lines}):
+        if line < 1:
+            continue
+        construct = enclosing_construct(content, line)
+        if construct is None:
+            continue
+        key = (construct.start_line, construct.end_line)
+        found[key] = LineRange(start_line=construct.start_line, end_line=construct.end_line)
+    return tuple(found[key] for key in sorted(found))
+
+
 def expand_touched_ranges(
     content: str,
     touched_lines: Collection[int],
@@ -211,15 +281,22 @@ def expand_touched_ranges(
 
     Postconditions:
         - Empty ``touched_lines`` → empty sequence ``()``.
-        - Otherwise raises ``NotImplementedError`` until expansion (#5389) is
-          implemented. Future non-stub behavior: return one or more inclusive
-          ``LineRange`` values for enclosing function/class constructs; when no
-          construct is found, return a capped context window around the touched
-          lines — never the whole file solely because a construct was missing.
-          Multi-hunk collapse across shared constructs is owned by later work.
+        - For Python paths (``.py`` / ``.pyi``) or empty ``path`` with
+          parseable Python content: returns unique inclusive ``LineRange``
+          values for enclosing function/class constructs (decorators included
+          consistently with ``function_boundaries`` / ``code_boundaries``).
+          Module-level or unparseable lines are omitted — never the whole file
+          solely because a construct was missing. Multi-hunk collapse across
+          shared constructs beyond range dedupe is owned by later work.
+        - Non-Python paths with non-empty ``touched_lines`` raise
+          ``NotImplementedError`` until the heuristic / capped-context fallback
+          is implemented.
     """
     if not touched_lines:
         return ()
+    if _should_use_python_ast(content, path):
+        return _expand_touched_ranges_python(content, touched_lines)
     raise NotImplementedError(
-        "expand_touched_ranges is not implemented yet (change-surface expansion)"
+        "expand_touched_ranges non-Python / capped-context fallback is not "
+        "implemented yet (change-surface expansion)"
     )

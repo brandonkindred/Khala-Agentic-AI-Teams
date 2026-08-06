@@ -120,6 +120,6 @@ def test_expand_touched_ranges_empty() -> None:
     assert expand_touched_ranges("def f():\n    pass\n", set()) == ()
 
 
-def test_expand_touched_ranges_nonempty_raises_not_implemented() -> None:
+def test_expand_touched_ranges_non_python_raises_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
-        expand_touched_ranges("def f():\n    pass\n", {1}, path="f.py")
+        expand_touched_ranges("function f() {\n  return 1;\n}\n", {2}, path="f.ts")
