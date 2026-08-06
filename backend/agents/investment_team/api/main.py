@@ -5350,7 +5350,14 @@ def _recover_orphaned_paper_trading_sessions() -> None:
                         session.session_id,
                     )
     except Exception:
-        logger.debug("Paper-trade recovery: could not enumerate sessions", exc_info=True)
+        # ``exception`` (ERROR level + traceback), not ``debug`` — this is the
+        # catch-all around the whole enumerate/parse/mutate/write pass, so it
+        # also covers non-recoverable infrastructure failures (e.g. the
+        # persisted-session store itself being unreachable/misconfigured),
+        # not just a single malformed record. Debug logs are typically
+        # disabled in production, which would leave orphaned sessions
+        # unrecovered with no operator-visible signal.
+        logger.exception("Paper-trade recovery: could not enumerate sessions")
         return
 
     if recovered:
