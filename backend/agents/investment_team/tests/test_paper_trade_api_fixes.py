@@ -249,6 +249,31 @@ def test_recovery_logs_and_skips_unparseable_session(
         _paper_trading_sessions.pop("pt-good", None)
 
 
+def test_recovery_logs_enumeration_failure_at_error_level(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failure enumerating the persisted-session store itself (e.g. the
+    store being unreachable/misconfigured) is a non-recoverable
+    infrastructure failure, not a single malformed record — the outer
+    catch-all around the whole enumerate/parse/mutate/write pass must log it
+    at ERROR level (with a traceback), not debug, which is typically
+    disabled in production and would leave orphaned sessions unrecovered
+    with no operator-visible signal."""
+
+    def _boom():
+        raise RuntimeError("job service unavailable")
+
+    monkeypatch.setattr(_paper_trading_sessions, "values", _boom)
+
+    with caplog.at_level(logging.DEBUG, logger="investment_team.api.main"):
+        _recover_orphaned_paper_trading_sessions()  # must not raise
+
+    matches = [r for r in caplog.records if "could not enumerate sessions" in r.getMessage()]
+    assert len(matches) == 1
+    assert matches[0].levelno == logging.ERROR
+    assert matches[0].exc_info is not None
+
+
 def test_recovery_holds_lock_for_entire_pass_against_concurrent_writer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
