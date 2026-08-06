@@ -58,6 +58,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     RosterValidationResult,
     SendMessageRequest,
     SendTestChatMessageRequest,
+    SetConversationProcessRequest,
     SetTeamModeRequest,
     StartPipelineRunRequest,
     SubmitPipelineInputRequest,
@@ -892,19 +893,22 @@ def send_message(conversation_id: str, req: SendMessageRequest):
 
 
 @app.put("/conversations/{conversation_id}/process")
-def set_conversation_process(conversation_id: str, body: dict):
-    """Link a process to the active conversation so chat stays in sync with the visual editor."""
+def set_conversation_process(conversation_id: str, req: SetConversationProcessRequest):
+    """Link a process to the active conversation so chat stays in sync with the visual editor.
+
+    Preconditions: ``req.process_id`` is non-empty (enforced by the request model;
+        a missing/blank value is a ``422`` before this handler runs).
+    Postconditions: ``200`` with the linked ``conversation_id``/``process_id`` pair;
+        ``404`` if the conversation or the process is unknown (link unchanged).
+    """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    process_id = body.get("process_id")
-    if not process_id:
-        raise HTTPException(status_code=400, detail="process_id is required")
-    process = _store.get_process(process_id)
+    process = _store.get_process(req.process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
-    _store.set_conversation_process(conversation_id, process_id)
-    return {"conversation_id": conversation_id, "process_id": process_id}
+    _store.set_conversation_process(conversation_id, req.process_id)
+    return {"conversation_id": conversation_id, "process_id": req.process_id}
 
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
