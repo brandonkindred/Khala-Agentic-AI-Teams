@@ -850,6 +850,40 @@ def test_paper_trading_results_orders_terminal_before_active_sessions(api_client
     ]
 
 
+def test_paper_trading_results_orders_by_real_time_not_lexicographic_string(
+    api_client,
+) -> None:
+    """A ``completed_at`` with a non-UTC timezone offset must sort by its
+    actual chronological instant, not by comparing the raw ISO-8601 strings
+    lexicographically — the two can disagree when the date/time digits don't
+    happen to move in the same direction as the UTC-normalized instant."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingVerdict
+
+    # 2024-01-01T23:00:00+00:00 == 2024-01-01T23:00:00 UTC — the later instant.
+    api_main._paper_trading_sessions["actually-newer"] = _paper_trading_session(
+        "actually-newer",
+        PaperTradingVerdict.READY_FOR_LIVE,
+        completed_at="2024-01-01T23:00:00+00:00",
+    )
+    # 2024-01-02T00:30:00+02:00 == 2024-01-01T22:30:00 UTC — the earlier
+    # instant, but its string sorts *after* the one above lexicographically
+    # because the date digit "02" outranks "01" in plain string comparison.
+    api_main._paper_trading_sessions["actually-older"] = _paper_trading_session(
+        "actually-older",
+        PaperTradingVerdict.NOT_PERFORMANT,
+        completed_at="2024-01-02T00:30:00+02:00",
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == [
+        "actually-newer",
+        "actually-older",
+    ]
+
+
 def test_paper_trading_results_skips_unparseable_session(api_client) -> None:
     """A single corrupt in-memory session record must not 500 the bulk
     endpoint — it should be logged and excluded, while parseable sessions
