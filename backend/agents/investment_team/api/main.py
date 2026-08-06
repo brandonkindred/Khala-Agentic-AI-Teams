@@ -148,6 +148,7 @@ from job_service_client import (
 )
 from shared.app import create_team_app
 from shared.concurrency import parallel_map
+from shared.env_config import env_float
 from shared.sse import sse_job_stream_async, sse_line
 
 logging.basicConfig(level=logging.INFO)
@@ -4724,10 +4725,32 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
         _paper_trading_sessions[session_id] = session
 
 
-# Default fees used when the request omits explicit overrides. Sits at module
-# scope so tests can exercise the resolution logic directly.
+# Fallback values for the env vars below — also what a caller sees if the
+# operator hasn't set either var.
 _DEFAULT_TX_COST_BPS = 5.0
 _DEFAULT_SLIPPAGE_BPS = 2.0
+
+
+def _default_tx_cost_bps() -> float:
+    """Operator-tunable fallback ``transaction_cost_bps`` (basis points) used
+    when a paper-trading request omits an explicit override.
+
+    Read from ``INVESTMENT_DEFAULT_TX_COST_BPS`` (falls back to
+    ``_DEFAULT_TX_COST_BPS``) on every call rather than once at import time,
+    so operators can retune this business parameter without a redeploy.
+    """
+    return env_float("INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0)
+
+
+def _default_slippage_bps() -> float:
+    """Operator-tunable fallback ``slippage_bps`` (basis points) used when a
+    paper-trading request omits an explicit override.
+
+    Read from ``INVESTMENT_DEFAULT_SLIPPAGE_BPS`` (falls back to
+    ``_DEFAULT_SLIPPAGE_BPS``) on every call rather than once at import time,
+    so operators can retune this business parameter without a redeploy.
+    """
+    return env_float("INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0)
 
 
 def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
@@ -4740,9 +4763,9 @@ def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, fl
     tx = (
         request.transaction_cost_bps
         if request.transaction_cost_bps is not None
-        else _DEFAULT_TX_COST_BPS
+        else _default_tx_cost_bps()
     )
-    slip = request.slippage_bps if request.slippage_bps is not None else _DEFAULT_SLIPPAGE_BPS
+    slip = request.slippage_bps if request.slippage_bps is not None else _default_slippage_bps()
     return tx, slip
 
 
