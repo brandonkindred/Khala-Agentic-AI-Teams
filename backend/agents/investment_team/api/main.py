@@ -115,6 +115,9 @@ from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
 )
 from investment_team.strategy_lab.run_state import (
+    async_lock as _async_lock,
+)
+from investment_team.strategy_lab.run_state import (
     get_lab_run_job_client as _get_lab_run_job_client,
 )
 from investment_team.strategy_lab.run_state import (
@@ -3938,8 +3941,9 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     Starlette's threadpool (``run_in_threadpool``) rather than run directly on
     this coroutine — otherwise they'd stall the asyncio event loop, and with
     it every other in-flight request on this worker, for the fetch+retry
-    window. The streaming generator itself remains async so it doesn't block
-    Uvicorn worker threads once connected.
+    window. In-memory ``_active_runs`` lookups use ``_async_lock`` (not the
+    threading ``_lock``) for the same reason. The streaming generator itself
+    remains async so it doesn't block Uvicorn worker threads once connected.
     """
     # Deliberately local (not module-level): tests substitute a fake
     # subscribe/unsubscribe by monkeypatching them directly on the
@@ -3954,7 +3958,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     # and its siblings).
     from investment_team.api.job_event_bus import subscribe, unsubscribe
 
-    with _lock:
+    async with _async_lock:
         state = _active_runs.get(run_id)
     if state:
         # Reconcile before the terminal check so an externally-completed run
@@ -3964,7 +3968,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         # reads _active_runs.get(run_id, {}) fresh -- picks up these same
         # values automatically.
         await run_in_threadpool(_reconcile_run_progress, run_id)
-        with _lock:
+        async with _async_lock:
             state = _active_runs.get(run_id, state)
     else:
         state = await run_in_threadpool(_load_run_from_job_service, run_id)
@@ -3982,9 +3986,9 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
-    def _snapshot_event() -> Optional[dict]:
+    async def _snapshot_event() -> Optional[dict]:
         # Skip the snapshot when there's no current in-memory state to send.
-        with _lock:
+        async with _async_lock:
             current = _active_runs.get(run_id, {})
         if not current:
             return None
