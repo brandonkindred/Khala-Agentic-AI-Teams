@@ -1526,6 +1526,12 @@ class DummyLLMClient(LLMClient):
         return hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
 
     def get_max_context_tokens(self) -> int:
+        """Return the fixed maximum context token limit for the dummy client.
+
+        Preconditions: none.
+        Postconditions: returns the constant context-window limit (16384) used by this
+            dummy implementation; the value is not derived from any loaded model config.
+        """
         return 16384
 
     def complete(
