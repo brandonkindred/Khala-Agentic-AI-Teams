@@ -1739,6 +1739,45 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
     assert body["error"] == "boom"
 
 
+def test_get_strategy_lab_run_status_degrades_malformed_current_cycle_to_none(api_client) -> None:
+    """A ``current_cycle`` dict that fails ``StrategyLabCycleProgress``
+    validation (e.g. missing the required ``cycle_index`` field) must not
+    500 -- it degrades to ``None`` instead of propagating a
+    ``ValidationError``.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-bad-cycle"] = {
+        "run_id": "run-bad-cycle",
+        "status": "completed",  # terminal: _reconcile_run_progress no-ops
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 3,
+        "current_cycle": {"phase": "design"},  # missing required cycle_index
+    }
+
+    resp = api_client.get("/strategy-lab/runs/run-bad-cycle/status")
+    assert resp.status_code == 200
+    assert resp.json()["current_cycle"] is None
+
+
+def test_get_strategy_lab_run_status_degrades_non_dict_current_cycle_to_none(api_client) -> None:
+    """A ``current_cycle`` that isn't even a dict (e.g. a stray value from
+    unvalidated job-service data) must also degrade to ``None``, not raise."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-str-cycle"] = {
+        "run_id": "run-str-cycle",
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 3,
+        "current_cycle": "not-a-dict",
+    }
+
+    resp = api_client.get("/strategy-lab/runs/run-str-cycle/status")
+    assert resp.status_code == 200
+    assert resp.json()["current_cycle"] is None
+
+
 def test_get_strategy_lab_run_status_reconciles_progress_while_non_terminal(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
