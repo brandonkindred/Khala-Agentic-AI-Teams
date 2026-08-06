@@ -563,6 +563,26 @@ def test_create_memo_returns_memo(api_client) -> None:
     assert "bear case" in body["memo"]["dissenting_views"]
 
 
+def test_create_memo_502_when_advisory_result_missing_memo(api_client, monkeypatch) -> None:
+    """A committee_memo payload without ``memo`` must return 502, not an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"unexpected": True}
+    )
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": [],
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "Memo generation result is missing"
+
+
 # ---------------------------------------------------------------------------
 # Strategy Lab read-only routes
 # ---------------------------------------------------------------------------
