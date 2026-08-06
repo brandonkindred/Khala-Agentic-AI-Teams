@@ -1284,28 +1284,21 @@ def test_delete_paper_sessions_list_jobs_http_error_raises_503(
 def test_delete_paper_sessions_list_jobs_runtime_error_raises_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unconfigured JOB_SERVICE_URL (RuntimeError from JobServiceClient) must
-    also surface as 503 so delete_strategy_lab_record can leave state intact."""
+    """Unconfigured JOB_SERVICE_URL (RuntimeError from JobServiceClient.__init__)
+    must also surface as 503 so delete_strategy_lab_record can leave state intact."""
     import job_service_client as jsc_mod
 
-    class _UnconfiguredClient(_FakeJobClient):
-        def list_jobs(self, *, statuses=None):
-            raise RuntimeError("JOB_SERVICE_URL is not configured")
+    def _unconfigured_factory(team=None):
+        raise RuntimeError("JOB_SERVICE_URL is not configured")
 
-        def delete_job(self, job_id: str) -> bool:
-            raise AssertionError("delete_job must not run when list_jobs fails")
-
-    monkeypatch.setattr(
-        jsc_mod,
-        "JobServiceClient",
-        lambda team=None: _UnconfiguredClient(team=team or "x"),
-    )
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _unconfigured_factory)
 
     from investment_team.api.main import _delete_paper_sessions_for_lab_record
 
     with pytest.raises(HTTPException) as ei:
         _delete_paper_sessions_for_lab_record("lab-1")
     assert ei.value.status_code == 503
+    assert "temporarily unavailable" in str(ei.value.detail).lower()
 
 
 def test_purge_strategy_lab_job_storage_many_jobs_concurrent(

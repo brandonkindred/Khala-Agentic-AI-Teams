@@ -4102,8 +4102,8 @@ def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
     """
     from job_service_client import JobServiceClient
 
-    client = JobServiceClient(team="investment_paper_trading_sessions")
     try:
+        client = JobServiceClient(team="investment_paper_trading_sessions")
         jobs = client.list_jobs() or []
     except (httpx.HTTPError, RuntimeError):
         # Narrow environmental failures only — same pair sibling list endpoints
@@ -4240,12 +4240,13 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
     Postconditions:
         - Paper-trading session cleanup (``_delete_paper_sessions_for_lab_record``,
           a job-service network call) runs *before* the lab record is removed
-          from memory. If it raises or times out, the lab record and its linked
-          strategy/backtest are left intact and the exception propagates
-          (surfacing as a 500) instead of being silently swallowed — a retry
-          then re-attempts the same cleanup rather than 404ing against an
-          already-deleted record while paper sessions sit orphaned in the job
-          service.
+          from memory. If listing or other environmental failures occur (e.g.
+          unconfigured ``JOB_SERVICE_URL``, job-service transport errors), the
+          lab record and its linked strategy/backtest are left intact and the
+          failure surfaces as **503** instead of being silently swallowed — a
+          retry then re-attempts the same cleanup rather than 404ing against
+          an already-deleted record while paper sessions sit orphaned in the
+          job service. Other unexpected exceptions may still surface as 500.
         - ``_strategy_lab_records[lab_record_id]`` is removed only if it is
           still present by the time the in-memory-mutation step runs — a
           concurrent delete of the same ``lab_record_id`` may have already
