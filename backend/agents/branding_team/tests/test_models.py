@@ -31,7 +31,7 @@ from branding_team.models import (
     ChannelGuidelineOutput,
     CoreValueOutput,
     CoreValuesOutput,
-    DifferentiationPillar,
+    DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
     ElevatorPitchOutput,
     MessagingFrameworkOutput,
@@ -184,7 +184,11 @@ def test_audience_segment_output_rejects_blank_content() -> None:
 
 def test_differentiation_pillars_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "2-4 differentiation pillars"."""
-    pillar = DifferentiationPillar(pillar="Execution speed")
+    pillar = DifferentiationPillarOutput(
+        pillar="Execution speed",
+        proof_points=["Ship weekly release cadence"],
+        competitive_context="Competitors ship quarterly.",
+    )
     with pytest.raises(ValidationError):
         DifferentiationPillarsOutput(differentiation_pillars=[pillar])  # below min of 2
     with pytest.raises(ValidationError):
@@ -192,6 +196,27 @@ def test_differentiation_pillars_output_enforces_stated_cardinality() -> None:
 
     output = DifferentiationPillarsOutput(differentiation_pillars=[pillar] * 2)
     assert len(output.differentiation_pillars) == 2
+
+
+def test_differentiation_pillar_output_rejects_blank_content() -> None:
+    """A blank pillar, competitive context, or proof point must fail validation."""
+    valid_kwargs = dict(
+        pillar="Execution speed",
+        proof_points=["Ship weekly release cadence"],
+        competitive_context="Competitors ship quarterly.",
+    )
+
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "pillar": ""})
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "competitive_context": ""})
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "proof_points": [""]})
+    with pytest.raises(ValidationError):
+        DifferentiationPillarOutput(**{**valid_kwargs, "proof_points": []})
+
+    output = DifferentiationPillarOutput(**valid_kwargs)
+    assert output.pillar == "Execution speed"
 
 
 def test_brand_story_output_rejects_missing_and_enforces_cardinality() -> None:

@@ -223,6 +223,24 @@ class DifferentiationPillar(BaseModel):
     competitive_context: str = ""
 
 
+class DifferentiationPillarOutput(BaseModel):
+    """Agent-facing differentiation pillar; requires non-empty fields.
+
+    Field-for-field twin of ``DifferentiationPillar`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``)
+    — ``DifferentiationPillar`` itself must stay soft (only ``pillar``
+    required) since it also backs
+    ``StrategicCoreOutput.differentiation_pillars``'s merge target.
+    """
+
+    pillar: str = Field(min_length=1)
+    proof_points: List[NonEmptyStr] = Field(min_length=1)
+    competitive_context: str = Field(min_length=1)
+
+
 class BrandDiscoveryAudit(BaseModel):
     """Brand discovery and audit findings.
 
@@ -305,9 +323,12 @@ class DifferentiationPillarsOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
+    Uses ``DifferentiationPillarOutput`` (not the soft ``DifferentiationPillar``)
+    so each pillar's fields are individually required — a blank pillar must
+    fail validation instead of silently passing.
     """
 
-    differentiation_pillars: List[DifferentiationPillar] = Field(min_length=2, max_length=4)
+    differentiation_pillars: List[DifferentiationPillarOutput] = Field(min_length=2, max_length=4)
 
 
 class PositioningOutput(BaseModel):

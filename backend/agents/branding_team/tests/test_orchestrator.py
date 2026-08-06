@@ -40,7 +40,7 @@ from branding_team.models import (
     CoreValuesOutput,
     CreativeRefinementDecision,
     DesignSystemDefinition,
-    DifferentiationPillar,
+    DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
     ElevatorPitchOutput,
     GovernanceOutput,
@@ -890,8 +890,16 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
         "differentiation_mapper": _phase1_leaf_node(
             DifferentiationPillarsOutput(
                 differentiation_pillars=[
-                    DifferentiationPillar(pillar="Execution speed"),
-                    DifferentiationPillar(pillar="Hands-on partnership"),
+                    DifferentiationPillarOutput(
+                        pillar="Execution speed",
+                        proof_points=["Ship weekly release cadence"],
+                        competitive_context="Competitors ship quarterly.",
+                    ),
+                    DifferentiationPillarOutput(
+                        pillar="Hands-on partnership",
+                        proof_points=["Dedicated strategist per account"],
+                        competitive_context="Competitors use ticket-based support.",
+                    ),
                 ]
             )
         ),
