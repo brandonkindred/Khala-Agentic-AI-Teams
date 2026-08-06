@@ -2071,7 +2071,7 @@ class DummyLLMClient(LLMClient):
                 "ready_for_review": True,
             }
         # Blogging: plan-critic report (token lives in the user prompt tail)
-        elif "plancriticreport" in lowered or "return a single plancriticreport" in lowered:
+        elif "plancriticreport" in lowered:
             return {
                 "status": "PASS",
                 "approved": True,
