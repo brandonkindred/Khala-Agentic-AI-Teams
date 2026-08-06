@@ -22,6 +22,7 @@ from software_engineering_team.github_source import (
     issue_to_plan_input,
     pick_ready_issue,
 )
+from software_engineering_team.models import JobStatus
 from software_engineering_team.temporal.coding_team_start_workflow import (
     start_coding_team_workflow,
 )
@@ -119,19 +120,35 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
 
     base = request.base_branch or default_branch
     integration_branch = f"khala/issue-{issue.number}"
-    start_coding_team_workflow(
-        job_id,
-        request.repo_path,
-        plan.model_dump(),
-        github={
-            "owner": request.owner,
-            "repo": request.repo,
-            "issue_number": issue.number,
-            "issue_title": issue.title,
-            "remote": request.remote,
-            "base": base,
-            "integration_branch": integration_branch,
-            "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
-        },
-    )
+    try:
+        start_coding_team_workflow(
+            job_id,
+            request.repo_path,
+            plan.model_dump(),
+            github={
+                "owner": request.owner,
+                "repo": request.repo,
+                "issue_number": issue.number,
+                "issue_title": issue.title,
+                "remote": request.remote,
+                "base": base,
+                "integration_branch": integration_branch,
+                "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
+            },
+        )
+    except Exception as e:
+        # Dispatch failed (worker not ready, start timeout, bad config). Mark
+        # the freshly-created row failed so it is not orphaned in 'pending',
+        # and surface a retryable error instead of an opaque 500.
+        logger.exception("Coding team Temporal dispatch failed: %s", e)
+        _main.update_job(
+            job_id,
+            status=JobStatus.FAILED.value,
+            error=f"Temporal dispatch failed: {e}",
+            current_activity=None,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
+        ) from e
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)

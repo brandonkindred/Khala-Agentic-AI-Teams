@@ -1365,6 +1365,37 @@ class TestEndpointHappyPath:
         }
         assert "token" not in started["github"]
 
+    def test_run_from_github_marks_job_failed_and_503_when_temporal_dispatch_raises(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """When Temporal dispatch fails, the route must mark the job failed and return 503."""
+        import software_engineering_team.api.routes.github as gh_routes
+
+        def _raise(*a, **k):
+            raise RuntimeError("temporal down")
+
+        monkeypatch.setattr(gh_routes, "start_coding_team_workflow", _raise)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+
+        assert resp.status_code == 503
+        jobs = patched_app["jobs"].list_jobs()
+        assert len(jobs) == 1
+        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
+        assert job is not None
+        assert job["status"] == "failed"
+        assert "Temporal dispatch failed" in job["error"]
+
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
             issues=[_issue(11, title="Add feature")],
