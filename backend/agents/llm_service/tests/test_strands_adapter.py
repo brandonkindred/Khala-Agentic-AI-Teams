@@ -13,6 +13,7 @@ from llm_service.clients.dummy import DummyLLMClient
 from llm_service.interface import LLMClient
 from llm_service.strands_adapter import (
     LLMClientModel,
+    _flatten_system_prompt_content,
     _strands_messages_to_openai,
     _tool_specs_to_openai,
     get_strands_model,
@@ -168,6 +169,13 @@ def test_flatten_mixed_text_and_tool_result_splits_messages() -> None:
     assert out[1] == {"role": "user", "content": "please use the result"}
 
 
+def test_flatten_system_prompt_content_handles_absence_and_non_dict_blocks() -> None:
+    assert _flatten_system_prompt_content(None) == ""
+    assert _flatten_system_prompt_content([]) == ""
+    assert _flatten_system_prompt_content([{"text": "a"}, {"text": "b"}]) == "ab"
+    assert _flatten_system_prompt_content(["already-a-string"]) == "already-a-string"
+
+
 def test_flatten_skips_unknown_blocks() -> None:
     messages = [
         {
@@ -265,6 +273,45 @@ def test_stream_emits_text_events_for_plain_response() -> None:
     assert call["messages"][1] == {"role": "user", "content": "review this"}
     assert call["temperature"] == 0.1
     assert call["think"] is True
+
+
+def test_stream_merges_system_prompt_content_blocks() -> None:
+    """``system_prompt_content`` (Strands' structured system prompt) must not be
+    silently dropped — its flattened text reaches the emitted system message
+    even when no plain ``system_prompt`` string is given."""
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt_content=[{"text": "Follow the house style."}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {"role": "system", "content": "Follow the house style."}
+
+
+def test_stream_combines_system_prompt_and_system_prompt_content() -> None:
+    """Both ``system_prompt`` and ``system_prompt_content`` may be supplied
+    together — both must reach the wire, merged into one system message."""
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="You are a QA expert.",
+            system_prompt_content=[{"text": "Follow the house style."}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": "You are a QA expert.\n\nFollow the house style.",
+    }
 
 
 def test_stream_propagates_team_through_to_thread() -> None:
@@ -556,6 +603,13 @@ def test_llm_client_model_rejects_invalid_response_format() -> None:
     """Invalid ``response_format`` values fail fast at construction time."""
     with pytest.raises(ValueError, match="response_format"):
         LLMClientModel(_RecordingClient({}), response_format="xml")
+
+
+def test_llm_client_model_rejects_none_client() -> None:
+    """A ``None`` client must fail fast at construction with a clear error
+    instead of surfacing as a confusing ``AttributeError`` on first use."""
+    with pytest.raises(ValueError, match="client is required"):
+        LLMClientModel(client=None)
 
 
 def test_get_strands_model_forwards_response_format() -> None:

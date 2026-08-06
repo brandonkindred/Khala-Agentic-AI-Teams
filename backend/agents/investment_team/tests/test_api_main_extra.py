@@ -387,6 +387,19 @@ def test_build_strategy_from_ideation_defaults_when_missing() -> None:
     assert sid.startswith("strat-lab-")
 
 
+def test_build_strategy_from_ideation_defaults_invalid_timeframe() -> None:
+    """An LLM-returned timeframe outside StrategySpec's allowed literal set
+    (e.g. a typo'd unit, or an empty string) must not raise a pydantic
+    ValidationError -- it degrades to the same "1d" default as an omitted
+    field, exactly like the missing-field case."""
+    from investment_team.api.main import _build_strategy_from_ideation
+
+    for bad_timeframe in ("1x", "", "daily", "1D"):
+        data: Dict[str, Any] = {"timeframe": bad_timeframe}
+        strategy, _ = _build_strategy_from_ideation(data)
+        assert strategy.timeframe == "1d"
+
+
 def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
     from investment_team.api.main import _build_strategy_from_ideation
 

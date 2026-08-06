@@ -247,6 +247,37 @@ def test_run_strategy_lab_starts_run_when_idle(api_client) -> None:
     assert body["run_id"] in api_main._active_runs
 
 
+def test_run_strategy_lab_locked_recheck_catches_race_past_early_check(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The early, unlocked ``_ensure_no_active_run()`` call is only a
+    fast-fail optimization -- it must not be the ONLY guard. Bypass it (as a
+    stand-in for a concurrent request that raced past it before another run's
+    ``_active_runs`` write landed) and confirm the second, ``_lock``-guarded
+    recheck at the actual write still rejects with 409 and leaves no partial
+    entry behind.
+
+    Regression test for the run_id-vs-run_id TOCTOU: two concurrent
+    run/resume/restart calls for DIFFERENT run_ids could previously both pass
+    the early check before either wrote "running", since the per-run_id
+    transition lock only serializes same-run_id transitions.
+    """
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_ensure_no_active_run", lambda: None)
+    api_main._active_runs["already-running"] = {"run_id": "already-running", "status": "running"}
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+
+    assert resp.status_code == 409
+    assert "already in progress" in resp.json()["detail"]
+    # No new run_id was left half-registered by the aborted write.
+    assert set(api_main._active_runs.keys()) == {"already-running"}
+
+
 # ---------------------------------------------------------------------------
 # resume_strategy_lab_run + restart_strategy_lab_run
 # ---------------------------------------------------------------------------
@@ -388,6 +419,33 @@ def test_restart_strategy_lab_run_409_when_other_active(lab_job_client, api_clie
     assert resp.status_code == 409
 
 
+def test_restart_strategy_lab_run_locked_recheck_catches_race_past_early_check(
+    lab_job_client, monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Same TOCTOU regression as run_strategy_lab's equivalent test, for
+    restart: bypass the early, unlocked ``_ensure_no_active_run()`` call (a
+    stand-in for a concurrent request that raced past it before another
+    run's ``_active_runs`` write landed) and confirm the second, ``_lock``-
+    guarded recheck immediately before this endpoint's own write still
+    rejects with 409 -- leaving the target run's pre-restart state
+    untouched, not overwritten with an optimistic "running" reset."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_ensure_no_active_run", lambda: None)
+    original = {
+        "run_id": "run-f2",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    api_main._active_runs["run-f2"] = dict(original)
+    api_main._active_runs["other"] = {"run_id": "other", "status": "running"}
+
+    resp = api_client.post("/strategy-lab/runs/run-f2/restart")
+
+    assert resp.status_code == 409
+    assert api_main._active_runs["run-f2"] == original
+
+
 def test_restart_strategy_lab_run_happy_path(lab_job_client, api_client) -> None:
     """A run in the extended restartable set (``completed_with_errors``) restarts from scratch."""
     from investment_team.api import main as api_main
@@ -439,6 +497,88 @@ def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
 
     resp = api_client.post("/strategy-lab/runs/run-rollback/restart")
     assert resp.status_code == 409
+
+
+def test_restart_strategy_lab_run_503_when_worker_client_not_ready(
+    lab_job_client, api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A RuntimeError from terminate_and_await_workflow_sync (the worker
+    client never became ready -- documented by that function's own
+    docstring) maps to 503, not an unhandled 500."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-worker-not-ready"] = {
+        "run_id": "run-worker-not-ready",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+
+    def _boom(*a, **k):
+        raise RuntimeError("worker client never became ready")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
+
+    resp = api_client.post("/strategy-lab/runs/run-worker-not-ready/restart")
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+
+
+def test_restart_strategy_lab_run_503_on_rpc_error(
+    lab_job_client, api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine temporalio RPCError (a real Temporal-side RPC failure, not
+    the NOT_FOUND case terminate_and_await_workflow_sync already treats as
+    a no-op internally) also maps to 503."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-rpc-error"] = {
+        "run_id": "run-rpc-error",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+
+    def _boom(*a, **k):
+        raise RPCError("temporal server unreachable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
+
+    resp = api_client.post("/strategy-lab/runs/run-rpc-error/restart")
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+
+
+def test_restart_strategy_lab_run_propagates_unexpected_termination_error(
+    lab_job_client, api_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exception from terminate_and_await_workflow_sync that is NOT one of
+    the documented Temporal-side failure modes (RuntimeError/RPCError/
+    TimeoutError) -- e.g. a programming error -- must NOT be swallowed into a
+    misleading 503. It propagates instead, matching the pattern used
+    elsewhere in this file for narrowed except clauses. TestClient re-raises
+    unhandled server exceptions by default, so the POST call itself raises.
+    """
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-unexpected-boom"] = {
+        "run_id": "run-unexpected-boom",
+        "status": "completed",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+
+    def _boom(*a, **k):
+        raise TypeError("not a Temporal-side failure at all")
+
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
+
+    with pytest.raises(TypeError, match="not a Temporal-side failure"):
+        api_client.post("/strategy-lab/runs/run-unexpected-boom/restart")
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +1057,33 @@ def test_list_strategy_lab_runs_merged_entry_null_data_does_not_500(
     assert any(r["run_id"] == "run-null-data" for r in resp.json()["runs"])
 
 
+def test_list_strategy_lab_runs_skips_active_run_entry_missing_run_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A malformed/partially-constructed ``_active_runs`` entry that lacks
+    the ``"run_id"`` key must not 500 the whole listing -- it's skipped, and
+    every other (well-formed) entry still appears in the response."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-ok"] = {
+        "run_id": "run-ok",
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    # Missing "run_id" entirely -- simulates a malformed/partially-built entry.
+    api_main._active_runs["malformed-key"] = {
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.get("/strategy-lab/runs")
+
+    assert resp.status_code == 200
+    run_ids = {r["run_id"] for r in resp.json()["runs"]}
+    assert run_ids == {"run-ok"}
+
+
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -1182,6 +1349,41 @@ def test_list_strategy_lab_jobs_tolerates_malformed_current_cycle(
     assert entry["label"] == "Strategy batch (1/4)"
 
 
+def test_list_strategy_lab_jobs_tolerates_non_dict_persisted_data(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted-only job (no in-memory counterpart) whose "data" field is
+    itself not a mapping -- a string, in this case -- must not 500 the
+    endpoint. ``job.get("data", job)`` falls back to the job dict itself only
+    when "data" is absent; when "data" is present but malformed (e.g. a
+    corrupted/foreign record), the resolved value must still degrade to
+    sensible defaults instead of raising AttributeError from data.get(...).
+    """
+    from investment_team.api import main as api_main
+
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "persisted-only-malformed",
+                "status": "completed",
+                "data": "not-a-dict",
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    matches = [j for j in body["jobs"] if j["job_id"] == "persisted-only-malformed"]
+    assert len(matches) == 1
+    entry = matches[0]
+    assert entry["progress"] == 0
+    assert entry["label"] == "Strategy batch (0/1)"
+    assert entry["status"] == "completed"
+
+
 def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -1221,6 +1423,62 @@ def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
     by_id = {j["job_id"]: j for j in body["jobs"]}
     assert by_id["mem-zero"]["progress"] == 0
     assert by_id["persisted-zero"]["progress"] == 0
+
+
+def test_list_strategy_lab_jobs_falls_back_on_job_service_connection_error(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ``httpx`` transport failure from the job-service client is caught
+    and the endpoint still returns 200, falling back to the in-memory-only
+    list -- the expected-failure path the narrowed ``except`` must preserve.
+    """
+    import httpx
+
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["mem-only"] = {
+        "run_id": "mem-only",
+        "status": "running",
+        "total_cycles": 4,
+        "completed_cycles": 1,
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+
+    class _Unreachable:
+        def list_jobs(self, *a, **k):
+            raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Unreachable())
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    ids = {j["job_id"] for j in resp.json()["jobs"]}
+    assert "mem-only" in ids
+
+
+def test_list_strategy_lab_jobs_propagates_unexpected_merge_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A programming error in the persisted-merge block (e.g. a ``TypeError``,
+    as opposed to an expected job-service/connection failure) is NOT
+    swallowed by the narrowed ``except`` -- it propagates instead of being
+    silently absorbed into a quiet 200 fallback.
+
+    Regression test for the bug this fix addresses: the previous bare
+    ``except Exception`` around this block hid programming errors in the
+    merge logic, making them invisible.
+    """
+    from investment_team.api import main as api_main
+
+    class _Broken:
+        def list_jobs(self, *a, **k):
+            raise TypeError("boom: not a job-service failure")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+
+    with pytest.raises(TypeError, match="boom"):
+        api_main.list_strategy_lab_jobs()
 
 
 def test_list_strategy_lab_jobs_survives_concurrent_cleanup(

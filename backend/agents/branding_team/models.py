@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
 
+# Individual list/dict items, not just container length, must be non-empty —
+# a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
+# strings, undermining every "requires non-empty content" docstring below.
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+
 # ---------------------------------------------------------------------------
 # Shared models
 # ---------------------------------------------------------------------------
@@ -209,11 +214,11 @@ class BrandDiscoveryAuditOutput(BaseModel):
 
     current_brand_perception: str = Field(min_length=1)
     market_position: str = Field(min_length=1)
-    strengths: List[str] = Field(min_length=1)
-    weaknesses: List[str] = Field(min_length=1)
-    opportunities: List[str] = Field(min_length=1)
-    threats: List[str] = Field(min_length=1)
-    stakeholder_insights: List[str] = Field(min_length=1)
+    strengths: List[NonEmptyStr] = Field(min_length=1)
+    weaknesses: List[NonEmptyStr] = Field(min_length=1)
+    opportunities: List[NonEmptyStr] = Field(min_length=1)
+    threats: List[NonEmptyStr] = Field(min_length=1)
+    stakeholder_insights: List[NonEmptyStr] = Field(min_length=1)
 
 
 class PurposeVisionOutput(BaseModel):
@@ -298,12 +303,46 @@ class BrandArchetype(BaseModel):
     personality_traits: List[str] = Field(default_factory=list)
 
 
+class BrandArchetypeOutput(BaseModel):
+    """Agent-facing brand archetype; requires non-empty fields.
+
+    Field-for-field twin of ``BrandArchetype`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
+    ``MessagingPillarOutput``, ``ElevatorPitchOutput``) — ``BrandArchetype``
+    itself must stay soft (only ``archetype`` required) since it also backs
+    ``NarrativeMessagingOutput.brand_archetypes``'s merge target.
+    """
+
+    archetype: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    personality_traits: List[NonEmptyStr] = Field(min_length=1)
+
+
 class MessagingPillar(BaseModel):
     """A messaging pillar with proof points."""
 
     pillar: str
     key_message: str = ""
     proof_points: List[str] = Field(default_factory=list)
+
+
+class MessagingPillarOutput(BaseModel):
+    """Agent-facing messaging pillar; requires non-empty fields.
+
+    Field-for-field twin of ``MessagingPillar`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) —
+    ``MessagingPillar`` itself must stay soft (only ``pillar`` required) since
+    it also backs ``NarrativeMessagingOutput.messaging_framework``'s merge
+    target.
+    """
+
+    pillar: str = Field(min_length=1)
+    key_message: str = Field(min_length=1)
+    proof_points: List[NonEmptyStr] = Field(min_length=1)
 
 
 class AudienceMessageMap(BaseModel):
@@ -315,11 +354,42 @@ class AudienceMessageMap(BaseModel):
     tone_adjustments: str = ""
 
 
+class AudienceMessageMapOutput(BaseModel):
+    """Agent-facing audience message map; requires non-empty fields.
+
+    Field-for-field twin of ``AudienceMessageMap`` with required content,
+    matching this file's other Phase 2/3 strict-twin pairs —
+    ``AudienceMessageMap`` itself must stay soft (only ``audience_segment``
+    required) since it also backs
+    ``NarrativeMessagingOutput.audience_message_maps``'s merge target.
+    """
+
+    audience_segment: str = Field(min_length=1)
+    primary_message: str = Field(min_length=1)
+    supporting_messages: List[NonEmptyStr] = Field(min_length=1)
+    tone_adjustments: str = Field(min_length=1)
+
+
 class ElevatorPitch(BaseModel):
     """Tiered elevator pitch."""
 
     tier: str = ""  # e.g., "5-second", "30-second", "2-minute"
     pitch: str = ""
+
+
+class ElevatorPitchOutput(BaseModel):
+    """Agent-facing elevator pitch; requires non-empty fields.
+
+    Field-for-field twin of ``ElevatorPitch`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) —
+    ``ElevatorPitch`` itself must stay soft (all-default) since it also backs
+    ``NarrativeMessagingOutput.elevator_pitches``'s merge target.
+    """
+
+    tier: str = Field(min_length=1)
+    pitch: str = Field(min_length=1)
 
 
 class PersonaProfile(BaseModel):
@@ -335,6 +405,27 @@ class PersonaProfile(BaseModel):
     jobs_to_be_done: List[str] = Field(default_factory=list)
 
 
+class PersonaProfileOutput(BaseModel):
+    """Agent-facing persona profile; requires non-empty fields.
+
+    Field-for-field twin of ``PersonaProfile`` with required content,
+    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
+    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
+    ``BrandArchitectureRuleOutput``) — ``PersonaProfile`` itself must stay soft
+    (all-default except ``name``) since it also backs
+    ``NarrativeMessagingOutput.persona_profiles``'s merge target.
+    """
+
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    demographics: str = Field(min_length=1)
+    psychographics: str = Field(min_length=1)
+    goals: List[NonEmptyStr] = Field(min_length=1)
+    frustrations: List[NonEmptyStr] = Field(min_length=1)
+    media_habits: List[NonEmptyStr] = Field(min_length=1)
+    jobs_to_be_done: List[NonEmptyStr] = Field(min_length=1)
+
+
 class BrandStoryOutput(BaseModel):
     """Agent-facing brand story schema.
 
@@ -345,7 +436,7 @@ class BrandStoryOutput(BaseModel):
 
     brand_story: str = Field(min_length=1)
     hero_narrative: str = Field(min_length=1)
-    boilerplate_variants: List[str] = Field(min_length=3, max_length=3)
+    boilerplate_variants: List[NonEmptyStr] = Field(min_length=3, max_length=3)
 
 
 class BrandArchetypesOutput(BrandStoryOutput):
@@ -355,30 +446,49 @@ class BrandArchetypesOutput(BrandStoryOutput):
     ``structured_output`` already exposes the brand story to TaglineWriter
     (Strands Graph node inputs only include direct dependency results, and
     multi-in edges use OR-ready semantics so cumulative fan-in is unsafe).
+    Uses ``BrandArchetypeOutput`` (not the soft ``BrandArchetype``) so each
+    archetype's fields are individually required — a blank archetype must
+    fail validation instead of silently passing.
     """
 
-    brand_archetypes: List[BrandArchetype] = Field(min_length=1, max_length=2)
+    brand_archetypes: List[BrandArchetypeOutput] = Field(min_length=1, max_length=2)
 
 
 class TaglineOutput(BrandArchetypesOutput):
-    """Prior narrative carry-forward plus tagline / elevator pitches."""
+    """Prior narrative carry-forward plus tagline / elevator pitches.
+
+    Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each
+    pitch's fields are individually required — three blank-tier/blank-pitch
+    entries must fail validation instead of silently passing.
+    """
 
     tagline: str = Field(min_length=1)
     tagline_rationale: str = Field(min_length=1)
-    elevator_pitches: List[ElevatorPitch] = Field(min_length=3, max_length=3)
+    elevator_pitches: List[ElevatorPitchOutput] = Field(min_length=3, max_length=3)
 
 
 class MessagingFrameworkOutput(TaglineOutput):
-    """Prior narrative carry-forward plus messaging framework / audience maps."""
+    """Prior narrative carry-forward plus messaging framework / audience maps.
 
-    messaging_framework: List[MessagingPillar] = Field(min_length=3, max_length=4)
-    audience_message_maps: List[AudienceMessageMap] = Field(min_length=1)
+    Uses ``MessagingPillarOutput``/``AudienceMessageMapOutput`` (not the soft
+    ``MessagingPillar``/``AudienceMessageMap``) so each nested item's fields
+    are individually required — a blank pillar or audience segment must fail
+    validation instead of silently producing empty output.
+    """
+
+    messaging_framework: List[MessagingPillarOutput] = Field(min_length=3, max_length=4)
+    audience_message_maps: List[AudienceMessageMapOutput] = Field(min_length=1)
 
 
 class PersonaProfilesOutput(MessagingFrameworkOutput):
-    """Prior narrative carry-forward plus persona profiles."""
+    """Prior narrative carry-forward plus persona profiles.
 
-    persona_profiles: List[PersonaProfile] = Field(min_length=2, max_length=3)
+    Uses ``PersonaProfileOutput`` (not the soft ``PersonaProfile``) so each
+    persona's fields are individually required — a blank-name persona must
+    fail validation instead of silently producing empty output.
+    """
+
+    persona_profiles: List[PersonaProfileOutput] = Field(min_length=2, max_length=3)
 
 
 class WritingGuidelinesBody(BaseModel):
@@ -390,10 +500,10 @@ class WritingGuidelinesBody(BaseModel):
     Cardinalities encode the prompt's stated "3-4" for each list.
     """
 
-    voice_principles: List[str] = Field(min_length=3, max_length=4)
-    style_dos: List[str] = Field(min_length=3, max_length=4)
-    style_donts: List[str] = Field(min_length=3, max_length=4)
-    editorial_quality_bar: List[str] = Field(min_length=3, max_length=4)
+    voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    style_dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    style_donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    editorial_quality_bar: List[NonEmptyStr] = Field(min_length=3, max_length=4)
 
 
 class WritingGuidelinesOutput(PersonaProfilesOutput):
@@ -522,9 +632,9 @@ class ChannelGuidelineOutput(BaseModel):
 
     channel: str = Field(min_length=1)
     strategy: str = Field(min_length=1)
-    dos: List[str] = Field(min_length=3, max_length=4)
-    donts: List[str] = Field(min_length=3, max_length=4)
-    content_types: List[str] = Field(min_length=3, max_length=5)
+    dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    content_types: List[NonEmptyStr] = Field(min_length=3, max_length=5)
     frequency_guidance: str = Field(min_length=1)
 
 
@@ -612,8 +722,8 @@ class BrandArchitectureOutput(BaseModel):
     """
 
     brand_architecture: List[BrandArchitectureRuleOutput] = Field(min_length=1)
-    naming_conventions: List[str] = Field(min_length=3, max_length=5)
-    terminology_glossary: Dict[str, str] = Field(min_length=5, max_length=10)
+    naming_conventions: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=5, max_length=10)
 
 
 class BrandInActionOutput(BaseModel):
@@ -670,12 +780,6 @@ class GovernanceOutput(BaseModel):
     brand_guidelines: List[str] = Field(default_factory=list)
     # Knowledge-base backlog (from asset_wiki_planner)
     wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
-
-
-# Individual list/dict items, not just container length, must be non-empty —
-# a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
-# strings, undermining every "requires non-empty content" docstring below.
-NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 
 class ApprovalWorkflowOutput(BaseModel):
