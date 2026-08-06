@@ -122,8 +122,6 @@ def test_temporal_package_init_does_not_call_os_getenv() -> None:
 
     _purge("investment_team.temporal")
     with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
-        importlib.import_module("investment_team.temporal.workflows")
-        spy.reset_mock()
         importlib.import_module("investment_team.temporal")
         assert spy.call_count == 0, (
             f"investment_team.temporal.__init__ called os.getenv {spy.call_count} "
