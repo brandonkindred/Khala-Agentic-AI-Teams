@@ -101,22 +101,35 @@ class TeamFormStore:
         return _row_to_record(row)
 
     @timed_query(store=_STORE, op="update_record")
-    def update_record(self, record_id: str, data: Dict[str, Any]) -> bool:
+    def update_record(self, form_key: str, record_id: str, data: Dict[str, Any]) -> bool:
+        """Update a record, scoped to both this team and the given form.
+
+        Postconditions: the record is updated and ``True`` is returned only when
+        ``record_id`` resolves to a row for this team AND ``form_key`` — a record_id
+        that belongs to a different form under the same team is a no-op.
+        """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE agentic_form_data SET data_json = %s, updated_at = %s "
-                "WHERE team_id = %s AND record_id = %s",
-                (Json(data), now, self._team_id, record_id),
+                "WHERE team_id = %s AND record_id = %s AND form_key = %s",
+                (Json(data), now, self._team_id, record_id, form_key),
             )
             return cur.rowcount > 0
 
     @timed_query(store=_STORE, op="delete_record")
-    def delete_record(self, record_id: str) -> bool:
+    def delete_record(self, form_key: str, record_id: str) -> bool:
+        """Delete a record, scoped to both this team and the given form.
+
+        Postconditions: the record is deleted and ``True`` is returned only when
+        ``record_id`` resolves to a row for this team AND ``form_key`` — a record_id
+        that belongs to a different form under the same team is a no-op.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM agentic_form_data WHERE team_id = %s AND record_id = %s",
-                (self._team_id, record_id),
+                "DELETE FROM agentic_form_data WHERE team_id = %s AND record_id = %s "
+                "AND form_key = %s",
+                (self._team_id, record_id, form_key),
             )
             return cur.rowcount > 0
 
