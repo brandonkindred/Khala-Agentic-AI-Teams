@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Optional
+from urllib.parse import quote
 
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -1080,13 +1081,27 @@ def list_team_assets(team_id: str):
 
 @app.get("/teams/{team_id}/assets/{name}")
 def download_team_asset(team_id: str, name: str):
-    """Download a specific asset file."""
+    """Download a specific asset file.
+
+    Preconditions: none beyond ``team_id``/``name`` being valid path segments.
+    Postconditions: ``200`` streaming the file's bytes with an RFC 5987-encoded
+        ``Content-Disposition`` header (safe for names containing quotes or
+        non-ASCII characters, which would otherwise malform a raw ``filename=``
+        header); ``404`` if ``name`` sanitizes to an invalid asset name, the
+        resolved path escapes ``assets_dir`` (e.g. a symlink inside the
+        directory pointing elsewhere on the host), or no such file exists.
+    """
     infra = _get_infra_or_404(team_id)
     safe_name = _safe_asset_name(name)
-    path = infra.assets_dir / safe_name
-    if not path.is_file():
+    assets_root = infra.assets_dir.resolve()
+    path = (infra.assets_dir / safe_name).resolve()
+    if not path.is_relative_to(assets_root) or not path.is_file():
         raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(str(path), filename=safe_name)
+    encoded_name = quote(safe_name)
+    return FileResponse(
+        str(path),
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
 
 
 @app.post("/teams/{team_id}/assets", response_model=AssetInfo)
