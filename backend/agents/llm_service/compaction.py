@@ -24,11 +24,12 @@ Usage::
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
-import threading
-from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, List, Tuple
+
+from shared.cache import get_shared_cache
 
 if TYPE_CHECKING:
     from .interface import LLMClient
@@ -36,19 +37,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Process-global compaction memo cache
+# Shared compaction memo cache
 # ---------------------------------------------------------------------------
 # The same spec/architecture/existing-codebase text is handed to ``compact_text``
 # on every task and every review->fix->re-review cycle of a run, so the identical
 # (expensive, deterministic) LLM compaction is otherwise recomputed constantly.
 # A bounded LRU keyed on (model, budget, description, content-hash) turns those
-# repeated, identical compactions into a single call per distinct input. Guarded by a
-# lock because callers (e.g. the code review coordinator's map phase) may compact
-# from worker threads. ``0`` disables the cache (pure passthrough).
+# repeated, identical compactions into a single call per distinct input. Backed by
+# ``shared.cache`` (Redis when configured). ``0`` disables the cache (pure
+# passthrough).
 DEFAULT_COMPACTION_CACHE_SIZE = 256  # LLM_COMPACTION_CACHE_SIZE, floor 0
+_COMPACTION_CACHE_NAMESPACE = "llm:compact:v1"
 
-_COMPACTION_CACHE: "OrderedDict[str, str]" = OrderedDict()
-_COMPACTION_CACHE_LOCK = threading.Lock()
 
 
 def _compaction_cache_size() -> int:
@@ -73,12 +73,16 @@ def clear_compaction_cache() -> None:
     """Drop every memoized compaction result.
 
     Postconditions:
-        - The process-global cache is empty; the next ``compact_text`` call for
-          any input is a guaranteed miss. Intended for tests (the cache persists
-          across calls by design) and callers that must force a cold compaction.
+        - A best-effort attempt is made to empty the shared compaction cache
+          namespace. Under normal operation the namespace is empty after this call,
+          but because the shared cache is fail-open, a backend failure may leave
+          entries behind (and never raises into the caller). Intended for tests
+          and callers that prefer a cold compaction when clearing succeeds.
     """
-    with _COMPACTION_CACHE_LOCK:
-        _COMPACTION_CACHE.clear()
+    try:
+        get_shared_cache(_COMPACTION_CACHE_NAMESPACE).clear()
+    except Exception:
+        logger.warning("Failed to clear compaction cache", exc_info=True)
 
 
 def _model_fingerprint(llm: "LLMClient") -> str:
@@ -120,8 +124,14 @@ def _compaction_cache_key(
           return. ``content_description`` is part of the key because it is
           interpolated into the compaction prompt (``_compact_single``), so the
           same text under a different label can produce a different summary.
+        - Components are JSON-array serialized so embedded delimiters (including
+          NUL) in ``content_description`` / ``text`` cannot create collisions.
     """
-    payload = f"{_model_fingerprint(llm)}\x00{max_chars}\x00{content_description}\x00{text}"
+    payload = json.dumps(
+        [_model_fingerprint(llm), max_chars, content_description, text],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -233,15 +243,21 @@ def compact_text(
 
     Notes
     -----
-    Results are memoized in a bounded, process-global LRU keyed on
+    Results are memoized in a bounded shared LRU keyed on
     ``(model, max_chars, content_description, content-hash)`` (see
     ``LLM_COMPACTION_CACHE_SIZE``), so a
     repeated call with the same inputs reuses the earlier compaction instead of
-    re-invoking the LLM. Compaction is deterministic given those inputs, so a
-    cache hit is byte-identical to what a fresh call would return. Only genuine
-    full compactions are cached — every fallback path (LLM failure, empty result,
-    or a chunked run with any degraded chunk) is retried on the next call rather
-    than frozen.
+    re-invoking the LLM. Concurrent callers for the same key share one compute
+    via ``shared.cache.single_flight`` (Redis NX lock + waiter poll when Redis
+    is configured; in-process lock otherwise). Capacity is the SharedCache
+    ``max_entries`` argument (read from ``LLM_COMPACTION_CACHE_SIZE`` each call
+    so env changes apply without restart). Value TTL / Redis ``maxmemory`` LRU
+    come from ``REDIS_CACHE_TTL_S`` and the Redis service config — not a
+    separate compaction TTL. Compaction is deterministic given those inputs,
+    so a cache hit is byte-identical to what a fresh call would return. Only
+    genuine full compactions are cached — every fallback path (LLM failure,
+    empty result, or a chunked run with any degraded chunk) is retried on the
+    next call rather than frozen.
     """
     if not text or len(text) <= max_chars:
         return text or ""
@@ -253,21 +269,27 @@ def compact_text(
         return _compact_uncached(text, max_chars, llm, content_description)[0]
 
     key = _compaction_cache_key(text, max_chars, content_description, llm)
-    with _COMPACTION_CACHE_LOCK:
-        hit = _COMPACTION_CACHE.get(key)
-        if hit is not None:
-            _COMPACTION_CACHE.move_to_end(key)
-    if hit is not None:
-        return hit
+    cache = get_shared_cache(_COMPACTION_CACHE_NAMESPACE)
 
-    result, cacheable = _compact_uncached(text, max_chars, llm, content_description)
-    if cacheable:
-        with _COMPACTION_CACHE_LOCK:
-            _COMPACTION_CACHE[key] = result
-            _COMPACTION_CACHE.move_to_end(key)
-            while len(_COMPACTION_CACHE) > capacity:
-                _COMPACTION_CACHE.popitem(last=False)
-    return result
+    def _compute() -> Tuple[bytes, bool]:
+        result, cacheable = _compact_uncached(text, max_chars, llm, content_description)
+        return result.encode("utf-8"), cacheable
+
+    # SharedCache.single_flight takes compute → (payload_bytes, cacheable) and
+    # returns only the payload bytes (durable-stores when cacheable is True).
+    raw = cache.single_flight(key, _compute, max_entries=capacity)
+    try:
+        if isinstance(raw, str):
+            return raw
+        return raw.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError):
+        logger.warning(
+            "corrupt compaction cache entry for %s; evicting and recomputing",
+            key,
+            exc_info=True,
+        )
+        cache.delete(key)
+        return _compact_uncached(text, max_chars, llm, content_description)[0]
 
 
 def _compact_uncached(
@@ -318,9 +340,13 @@ def _compact_uncached(
             return text, False
 
         # Text is too large for one call — chunk, compact each, concatenate.
+        # Per-chunk targets sum to at most ``max_chars`` (plus join separators),
+        # so a floored minimum cannot blow the overall budget.
         chunks = _split_into_chunks(text, chunk_chars)
         num_chunks = len(chunks)
-        per_chunk_target = max(1000, max_chars // num_chunks)
+        sep_overhead = 2 * max(0, num_chunks - 1)  # "\n\n" between parts
+        budget = max(1, max_chars - sep_overhead)
+        per_chunk_target = max(1, budget // num_chunks)
         logger.info(
             "Chunked compaction for %s: %d chunks, %d chars per chunk target",
             content_description,
@@ -360,6 +386,19 @@ def _compact_uncached(
                 return text, False
 
         result = "\n\n".join(compacted_parts)
+        if len(result) > max_chars:
+            # Models can overshoot the per-chunk target; tighten once against
+            # the overall budget before accepting the join.
+            try:
+                tightened = _compact_single(result, max_chars, llm, content_description)
+                if tightened:
+                    result = tightened
+            except Exception:
+                logger.warning(
+                    "Re-compaction of joined chunks failed for %s; keeping join",
+                    content_description,
+                    exc_info=True,
+                )
         logger.info(
             "Chunked compaction result for %s: %d chars from %d chunks (target %d)",
             content_description,

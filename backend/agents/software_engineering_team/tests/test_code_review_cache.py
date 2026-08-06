@@ -15,8 +15,10 @@ the cache skips; they are the only calls carrying the coordinator's
 ``**Code to review:**`` marker, so ``map_calls`` counts exactly those and ignores
 the reduce-phase synthesis pass (which fires whenever a run has >1 sub-review).
 
-The process-global cache is cleared around every test by the autouse
-``_reset_code_review_chunk_cache`` fixture in ``conftest.py``.
+The shared chunk-outcome cache (``shared.cache`` — Redis when configured,
+otherwise an in-process store) is cleared around every test by the autouse
+``_reset_code_review_chunk_cache`` fixture in ``conftest.py``, which resets
+factory state so tests do not observe cross-test cache hits.
 
 Text-field truncation/length-limit behavior is out of scope here; it is
 covered by the ``build_findings_digest`` tests in ``test_code_review_synthesis.py``.
@@ -25,7 +27,6 @@ covered by the ``build_findings_digest`` tests in ``test_code_review_synthesis.p
 from __future__ import annotations
 
 import threading
-from concurrent.futures import Future
 from typing import Any, Dict, List
 
 import pytest
@@ -36,6 +37,7 @@ from code_review_agent.coordinator import run_coordinator
 from code_review_agent.models import (
     ChunkReviewOutput,
     CodeReviewInput,
+    CodeReviewOutput,
     CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
@@ -101,7 +103,7 @@ class _SwitchingClient(DummyLLMClient):
 
 
 class _FailOnMarkerClient(DummyLLMClient):
-    """Raises a content failure on chunks containing ``fail_marker`` while ``fail``.
+    """Raises a semantic exhaustion error on chunks containing ``fail_marker`` while ``fail``.
 
     ``fail`` starts True and can be flipped to heal the client; the same instance
     is reused across runs so the model fingerprint (and thus the cache key for a
@@ -285,7 +287,9 @@ def test_degraded_outcome_is_not_cached() -> None:
     # Default graceful degradation: the clean sibling drives an approved verdict,
     # chunk b is recorded as a non-blocking not-reviewed range (never posted).
     assert degraded.approved is True
-    assert not any("could not be reviewed" in i.description for i in degraded.issues)
+    assert not any(
+        mapping.NOT_REVIEWED_FINDING_MARKER in i.description for i in degraded.issues
+    )
     assert degraded.not_reviewed_ranges  # b's range is recorded for observability
 
     # Heal the client and re-run identical input: chunk a is a cache hit (no new
@@ -601,23 +605,10 @@ def test_sibling_body_only_edit_keeps_dependent_cached() -> None:
 # Single-flight de-duplication of concurrent identical chunks
 # ---------------------------------------------------------------------------
 #
-# The waiter/leader branches are covered deterministically without real thread
-# races: pre-seeding a resolved ``Future`` in the in-flight registry exercises the
-# waiter path (``future.result()``), and a reviewer that raises drives the leader
-# failure path. The leader create-resolve-release path is covered by every solo
-# ``run_coordinator`` test above. Mutual exclusion of two real leaders is
-# guaranteed by the cache lock, so it needs no timing-dependent test.
-
-
-class _NeverRuns:
-    """Reviewer stand-in that must never be invoked — the waiter path must not review."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def run(self, chunk_input: Any) -> Any:
-        self.calls += 1
-        raise AssertionError("reviewer.run must not be called on the waiter path")
+# Leader/waiter coordination is exercised with real threads against the shared
+# cache backend (Memory by default): the leader holds the review open until the
+# waiter has joined, proving only one LLM call runs and both callers share the
+# outcome (or the same exception).
 
 
 class _RaisingReviewer:
@@ -638,12 +629,10 @@ def _single_chunk() -> ReviewChunk:
     )
 
 
-def _simple_outcome() -> mapping._ChunkOutcome:
-    return mapping._ChunkOutcome(approved_flags=[True], summaries=["ok"])
-
-
 def test_leader_review_failure_releases_slot_and_reraises() -> None:
     """A leader whose review fails re-raises, caches nothing, and frees the slot."""
+    from shared.cache import get_shared_cache
+
     reviewer = _RaisingReviewer(LLMRateLimitError("rate limited"))
     chunk = _single_chunk()
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
@@ -655,57 +644,140 @@ def test_leader_review_failure_releases_slot_and_reraises() -> None:
         mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
 
     assert reviewer.calls == 1
-    assert mapping._CHUNK_INFLIGHT == {}  # slot released on the failure path
-    assert key not in mapping._CHUNK_OUTCOME_CACHE  # failure is never cached
+    assert get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE).get(key) is None
+    with pytest.raises(CodeReviewUnavailableError):
+        mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+    assert reviewer.calls == 2
 
 
 def test_waiter_reuses_resolved_inflight_result() -> None:
-    """A waiter reads a resolved in-flight future's outcome without reviewing."""
+    """Concurrent callers of the same key share one review via single-flight."""
+    from code_review_agent.models import ChunkReviewOutput
+
     chunk = _single_chunk()
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
-    key = mapping._chunk_cache_key(chunk, context_fp, "")
-    published = _simple_outcome()
-    fut: Future = Future()
-    fut.set_result(published)
-    mapping._CHUNK_INFLIGHT[key] = fut  # simulate a leader already in flight
+    started = threading.Event()
+    release = threading.Event()
+    results: List[mapping._ChunkOutcome] = []
+    errors: List[BaseException] = []
 
-    reviewer = _NeverRuns()
-    got = mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+    class _SlowReviewer:
+        def __init__(self) -> None:
+            self.calls = 0
+            self._lock = threading.Lock()
 
-    assert reviewer.calls == 0  # the waiter never fires its own review
-    assert got.approved_flags == published.approved_flags
-    assert got is not published  # each caller owns an independent clone
+        def run(self, chunk_input: Any) -> Any:
+            with self._lock:
+                self.calls += 1
+            started.set()
+            assert release.wait(timeout=2), "leader was not released"
+            return ChunkReviewOutput(approved=True, issues=[], summary="ok")
+
+    reviewer = _SlowReviewer()
+
+    def leader() -> None:
+        try:
+            results.append(
+                mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+            )
+        except BaseException as exc:  # noqa: BLE001 - collect for assertion
+            errors.append(exc)
+
+    def waiter() -> None:
+        assert started.wait(timeout=2), "leader never started"
+        try:
+            results.append(
+                mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+            )
+        except BaseException as exc:  # noqa: BLE001 - collect for assertion
+            errors.append(exc)
+
+    t_leader = threading.Thread(target=leader)
+    t_waiter = threading.Thread(target=waiter)
+    t_leader.start()
+    assert started.wait(timeout=2), "leader never entered review"
+    t_waiter.start()
+    release.set()
+    t_leader.join(timeout=5)
+    t_waiter.join(timeout=5)
+
+    assert not errors
+    assert reviewer.calls == 1
+    assert len(results) == 2
+    assert results[0].approved_flags == [True]
+    assert results[1].approved_flags == [True]
+    assert results[0] is not results[1]
 
 
 def test_waiter_reraises_resolved_inflight_exception() -> None:
-    """A waiter re-raises the leader's stored exception without reviewing."""
+    """Concurrent waiters re-raise the leader's exception without re-reviewing."""
     chunk = _single_chunk()
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
-    key = mapping._chunk_cache_key(chunk, context_fp, "")
-    fut: Future = Future()
-    fut.set_exception(CodeReviewUnavailableError("leader failed"))
-    mapping._CHUNK_INFLIGHT[key] = fut
+    started = threading.Event()
+    release = threading.Event()
+    errors: List[BaseException] = []
 
-    reviewer = _NeverRuns()
-    with pytest.raises(CodeReviewUnavailableError):
-        mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
-    assert reviewer.calls == 0
+    class _SlowFailingReviewer:
+        def __init__(self) -> None:
+            self.calls = 0
+            self._lock = threading.Lock()
+
+        def run(self, chunk_input: Any) -> Any:
+            with self._lock:
+                self.calls += 1
+            started.set()
+            assert release.wait(timeout=2), "leader was not released"
+            raise LLMRateLimitError("rate limited")
+
+    reviewer = _SlowFailingReviewer()
+
+    def leader() -> None:
+        try:
+            mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+        except BaseException as exc:  # noqa: BLE001 - collect for assertion
+            errors.append(exc)
+
+    def waiter() -> None:
+        assert started.wait(timeout=2), "leader never started"
+        try:
+            mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+        except BaseException as exc:  # noqa: BLE001 - collect for assertion
+            errors.append(exc)
+
+    t_leader = threading.Thread(target=leader)
+    t_waiter = threading.Thread(target=waiter)
+    t_leader.start()
+    assert started.wait(timeout=2), "leader never entered review"
+    t_waiter.start()
+    release.set()
+    t_leader.join(timeout=5)
+    t_waiter.join(timeout=5)
+
+    assert reviewer.calls == 1
+    assert len(errors) == 2
+    assert all(isinstance(e, CodeReviewUnavailableError) for e in errors)
+
+
+def _simple_outcome() -> mapping._ChunkOutcome:
+    return mapping._ChunkOutcome(approved_flags=[True], summaries=["ok"])
 
 
 def test_clear_chunk_outcome_cache_empties_registries() -> None:
-    """A clear empties both the outcome cache and the in-flight registry."""
+    """A clear empties the shared chunk-outcome namespace."""
+    from shared.cache import get_shared_cache
+
     chunk = _single_chunk()
     context_fp = "fp"
     key = mapping._chunk_cache_key(chunk, context_fp, "")
-    mapping._CHUNK_OUTCOME_CACHE[key] = _simple_outcome()
-    mapping._CHUNK_INFLIGHT[key] = Future()
+    cache = get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE)
+    cache.set(key, mapping._chunk_outcome_to_bytes(_simple_outcome()), max_entries=8)
+    assert cache.get(key) is not None
 
     mapping.clear_chunk_outcome_cache()
 
-    assert mapping._CHUNK_OUTCOME_CACHE == {}
-    assert mapping._CHUNK_INFLIGHT == {}
+    assert cache.get(key) is None
 
 
 class _BlockingReviewer:
@@ -741,10 +813,13 @@ def test_clear_mid_flight_does_not_prevent_leader_from_caching() -> None:
     caching logic itself — e.g. a generation check meant to suppress a stale
     post-clear write — would be caught by this test.
     """
+    from shared.cache import get_shared_cache
+
     chunk = _single_chunk()
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
     key = mapping._chunk_cache_key(chunk, context_fp, "")
+    cache = get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE)
 
     entered = threading.Event()
     release = threading.Event()
@@ -760,21 +835,53 @@ def test_clear_mid_flight_does_not_prevent_leader_from_caching() -> None:
         # The leader registers its in-flight slot before calling reviewer.run,
         # so this confirms the clear below races a genuinely in-flight review.
         assert entered.wait(timeout=5), "leader never reached its blocking review call"
-        assert key in mapping._CHUNK_INFLIGHT
+        assert cache.get(key) is None  # still computing; nothing durable yet
 
         mapping.clear_chunk_outcome_cache()
-        assert key not in mapping._CHUNK_OUTCOME_CACHE
-        assert key not in mapping._CHUNK_INFLIGHT
-
-        # Let the (unaware) leader finish; it should still cache its outcome.
-        release.set()
+        assert cache.get(key) is None
     finally:
+        # Always unblock so a failed assertion cannot leave the worker hung.
+        release.set()
         leader_thread.join(timeout=5)
         assert not leader_thread.is_alive(), "leader thread did not finish"
 
     assert reviewer.calls == 1
-    assert key in mapping._CHUNK_OUTCOME_CACHE  # the "guaranteed miss" did not hold
+    assert cache.get(key) is not None  # the "guaranteed miss" did not hold
     assert outcomes[0].approved_flags == [True]
+
+
+def test_corrupt_chunk_cache_entry_is_evicted_and_recomputed() -> None:
+    """A corrupt durable entry is deleted; the chunk is recomputed and re-cached."""
+    from shared.cache import get_shared_cache
+
+    chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+    cache = get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE)
+    cache.set(key, b"not-valid-chunk-outcome-json", max_entries=8)
+
+    class _ApproveOnce:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, chunk_input: Any) -> ChunkReviewOutput:
+            self.calls += 1
+            return ChunkReviewOutput(approved=True, issues=[], summary="rebuilt")
+
+    approving = _ApproveOnce()
+    outcome = mapping._cached_review_chunk(approving, chunk, base_input, context_fp)
+    assert approving.calls == 1
+    assert outcome.approved_flags == [True]
+    assert outcome.summaries == ["rebuilt"]
+    raw = cache.get(key)
+    assert raw is not None
+    assert raw != b"not-valid-chunk-outcome-json"
+    # Valid round-trip; a subsequent call is a hit (no extra review).
+    assert mapping._chunk_outcome_from_bytes(raw).summaries == ["rebuilt"]
+    again = mapping._cached_review_chunk(approving, chunk, base_input, context_fp)
+    assert approving.calls == 1
+    assert again.summaries == ["rebuilt"]
 
 
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -943,6 +1050,54 @@ def test_rejected_submission_is_not_short_circuited(monkeypatch: pytest.MonkeyPa
     second = run_coordinator(client, data)
     assert spy["n"] == 1  # reviewed again (no submission short-circuit)
     assert second.approved is False
+
+
+def test_non_approved_cached_submission_treated_as_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-approved entry under the submission key is never served as a hit."""
+    from shared.cache import get_shared_cache
+
+    client = _CountingClient(_APPROVED)
+    data = _one_file_input()
+    key = "poisoned-submission-key"
+    reject = CodeReviewOutput.model_validate(_REJECTED)
+    get_shared_cache(coord._SUBMISSION_CACHE_NAMESPACE).set(
+        key, reject.model_dump_json().encode("utf-8"), max_entries=8
+    )
+    monkeypatch.setattr(coord, "_submission_fingerprint", lambda *_a, **_k: key)
+
+    spy = _chunking_spy(monkeypatch)
+    out = run_coordinator(client, data)
+    assert spy["n"] == 1  # reviewed for real (poisoned entry treated as miss)
+    assert out.approved is True
+
+
+def test_cached_submission_with_unreviewed_ranges_treated_as_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approved-but-partial entries must not short-circuit a full re-review."""
+    from shared.cache import get_shared_cache
+
+    client = _CountingClient(_APPROVED)
+    data = _one_file_input()
+    key = "partial-submission-key"
+    partial = CodeReviewOutput(
+        approved=True,
+        issues=[],
+        summary="OK but incomplete",
+        not_reviewed_ranges=["src/a.py:1-10"],
+    )
+    get_shared_cache(coord._SUBMISSION_CACHE_NAMESPACE).set(
+        key, partial.model_dump_json().encode("utf-8"), max_entries=8
+    )
+    monkeypatch.setattr(coord, "_submission_fingerprint", lambda *_a, **_k: key)
+
+    spy = _chunking_spy(monkeypatch)
+    out = run_coordinator(client, data)
+    assert spy["n"] == 1
+    assert out.approved is True
+    assert out.not_reviewed_ranges == []
 
 
 def test_short_circuit_returns_independent_clone() -> None:

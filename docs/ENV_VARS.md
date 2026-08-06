@@ -179,13 +179,15 @@ this interval. Floored at `0.1`s internally to avoid busy-looping; garbage/missi
 the default. `mark_exhausted` (the write on an actual 429) is unaffected and stays synchronous.
 
 ### LLM_COMPACTION_CACHE_SIZE
-Capacity of the process-global memoization cache for `compact_text` (`llm_service/compaction.py`),
-default **256**. `compact_text` compacts oversized text (spec, architecture overview, existing
-codebase, etc.) with an LLM; the result is deterministic given `(model, budget, content)`, so it is
-cached in a bounded LRU keyed on that triple and reused on repeated identical calls — most notably
-the code review agent's review→fix→re-review loop, which hands the same shared context to every task
-and every cycle. Only genuine full compactions are cached; every fallback path (LLM failure, empty
-result, or a chunked run with any degraded chunk) is retried rather than frozen. Set to `0` to
+Capacity of the `compact_text` memoization store (`llm_service/compaction.py`),
+default **256**. Backed by `shared.cache`: Redis when `REDIS_URL`/`REDIS_HOST` is
+set (value TTL via `REDIS_CACHE_TTL_S`; this size still caps how many keys the
+Redis LRU ZSET retains per namespace), otherwise an in-process bounded LRU of this
+capacity. `compact_text` results are keyed on the `(model, budget, content_description, content)`
+tuple and reused on identical calls — most notably the code review agent's
+review→fix→re-review loop. Only genuine full compactions are cached; every fallback
+path (LLM failure, empty result, or a chunked run with any degraded chunk) is
+retried rather than frozen. Set to `0` to
 disable the cache (pure passthrough); a value below 0 is floored to 0, and unparseable values fall
 back to the default.
 
@@ -729,14 +731,14 @@ calls are also `reviewer.run()` calls, so this knob's enforcement contract
 covers them too, but the two dispatch modes differ in *how* it is enforced:
 
 - **Thread-mode fallback** (in-process `run_coordinator`): a single
-  `threading.Semaphore`, sized to `_map_parallelism()` (`min(CODE_REVIEW_MAP_PARALLELISM,
+  `threading.Semaphore`, sized to `chunking._map_parallelism()` (`min(CODE_REVIEW_MAP_PARALLELISM,
   LLM_MAX_CONCURRENCY)`, floored at 1) and created once per review run, is
   threaded through the whole map phase — `_map_chunks` → `_cached_review_chunk`
   → `_review_chunk_with_recovery` — and acquired around every actual
   `reviewer.run()` call: the top-level chunk review, any same-input retry, the
   thinking-off retry, and both bisection halves. Unlike the outer map-phase fan-out
   width, this size is **not** further clamped to `chunk_count`: a review with a
-  single top-level chunk that bisects can still issue up to `_map_parallelism()`
+  single top-level chunk that bisects can still issue up to that same budget of
   concurrent `reviewer.run()` calls (e.g. both halves at once), not artificially
   limited to 1. This makes `CODE_REVIEW_MAP_PARALLELISM` a true **run-wide**
   ceiling: the total number of concurrent chunk-review LLM calls for one run —
@@ -910,6 +912,38 @@ and rejects the merged review (so unreviewed code cannot pass the gate as
 approved). Either way, the **total-failure** guard is unchanged: when *no* chunk
 could be reviewed at all the run still raises `CodeReviewUnavailableError`.
 
+### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
+Max entries in the shared map-phase chunk-outcome cache (`shared.cache`; owned by
+`mapping._cached_review_chunk`). Applies to both backends: the in-process LRU and
+the Redis ZSET trim on write. Redis keys also expire via `REDIS_CACHE_TTL_S`, and
+compose Redis is further bounded by `maxmemory`/`allkeys-lru`. Hits are shared
+across workers when `REDIS_URL`/`REDIS_HOST` is configured; otherwise each process
+keeps an in-process store. Backend failures fail open to a miss/recompute.
+The review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
+but a fix only mutates the files that had issues — so most chunks are byte-identical
+to the previous cycle. The cache reuses the prior map-phase result for any chunk
+whose exact LLM input (rendered `### path ###` content + segment notes) and context
+fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
+review model) are unchanged, so only the chunks the fix actually touched go back
+through the LLM. The same knob also gates **single-flight de-duplication**: within
+one submission the map phase reviews chunks in parallel, so two byte-identical
+chunks could otherwise miss the cache at the same moment and each fire the LLM
+before either result is stored. Instead the first worker reviews while the rest
+block and reuse its outcome, so concurrent duplicates trigger a single review.
+Default `512`, floor `0` (`0` disables the cache **and** the single-flight
+de-duplication entirely — every chunk is reviewed from scratch). Only
+fully-reviewed chunk outcomes are cached;
+degraded "not reviewed" outcomes are never stored, so a transient failure is
+retried for real next cycle. The cache covers the **map phase only** — the
+false-positive verification pass always re-runs against the current whole
+submission, so no coverage or fail-safe guarantee is weakened, and a changed
+profile, task context, or model invalidates the key. Each chunk reviewer is also
+given the *sibling surface* (the top-level symbols the other changed files
+define/export), which is folded into the chunk's cache key: a sibling's
+surface change (a renamed/removed export) re-runs the dependent chunk so the
+reviewer can flag the now-broken cross-file reference, while a body-only sibling
+edit leaves the surface — and the cached chunk — unchanged.
+
 ### PR_REVIEW_POST_OUTAGE_NOTICE
 Default-on toggle for the `/review-pr` flow. When an automated PR review cannot
 complete (the review engine is unavailable, a chunk's review could not be
@@ -973,33 +1007,6 @@ enhancement (skipping a redundant "file a new issue?" offer) — this trades rec
 (a match among issues past the cap won't be found) for bounded, predictable review
 latency. Parses defensively: a missing, blank, unparsable, or non-positive value
 falls back to the default rather than raising or disabling the cap.
-
-### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
-Max entries in the coordinator's process-global map-phase outcome cache. The
-review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
-but a fix only mutates the files that had issues — so most chunks are byte-identical
-to the previous cycle. The cache reuses the prior map-phase result for any chunk
-whose exact LLM input (rendered `### path ###` content + segment notes) and context
-fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
-review model) are unchanged, so only the chunks the fix actually touched go back
-through the LLM. The same knob also gates **single-flight de-duplication**: within
-one submission the map phase reviews chunks in parallel, so two byte-identical
-chunks could otherwise miss the cache at the same moment and each fire the LLM
-before either result is stored. Instead the first worker reviews while the rest
-block and reuse its outcome, so concurrent duplicates trigger a single review.
-Default `512`, floor `0` (`0` disables the cache **and** the single-flight
-de-duplication entirely — every chunk is reviewed from scratch). Only
-fully-reviewed chunk outcomes are cached;
-degraded "not reviewed" outcomes are never stored, so a transient failure is
-retried for real next cycle. The cache covers the **map phase only** — the
-false-positive verification pass always re-runs against the current whole
-submission, so no coverage or fail-safe guarantee is weakened, and a changed
-profile, task context, or model invalidates the key. Each chunk reviewer is also
-given the *sibling surface* (the top-level symbols the other changed files
-define/export), which is folded into the chunk's cache key: a sibling's
-surface change (a renamed/removed export) re-runs the dependent chunk so the
-reviewer can flag the now-broken cross-file reference, while a body-only sibling
-edit leaves the surface — and the cached chunk — unchanged.
 
 ### CODE_REVIEW_FALSE_POSITIVE_FILTER
 Default-on toggle for the false-positive verification pass. After the map-reduce
@@ -1410,6 +1417,49 @@ driver + worker). An unset value is also how the unit-test suite runs against a 
 a live database. When enabled, the graph ingests agent memories as temporal episodes partitioned per
 agent (`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
 rule-proposal grounding.
+
+### REDIS_URL / REDIS_HOST / REDIS_PORT / REDIS_PASSWORD / REDIS_DB
+Redis endpoint for `shared.cache` — the shared backend behind the code-review chunk-outcome cache,
+submission short-circuit cache, and `compact_text` memoization. When `REDIS_URL` (or `REDIS_HOST`) is
+set, those caches persist across worker processes and restarts; when unset, each process keeps an
+in-memory LRU (today's single-process behavior). Compose defaults `REDIS_URL` to `redis://:${REDIS_PASSWORD}@redis:6379/0` when unset
+(nested substitution; password defaults to `please-change-me`, same local placeholder as
+Neo4j). Set `REDIS_URL=`
+(empty) in the compose env file to fall back to in-process memory. `REDIS_URL` wins over
+host/port/password. `REDIS_HOST` must be a bare hostname or bare IPv6 literal (no embedded
+port — use `REDIS_PORT`; no zone-ID / scoped addresses — use `REDIS_URL` for those). Compose
+passes `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` through (password defaults to
+`please-change-me` to match compose Redis `--requirepass`; host/port/db have no defaults so
+an empty `REDIS_URL` cannot silently re-enable Redis via a default host). Backend unavailability fails open to a cache miss (recompute),
+never a review failure. When Redis is unreachable (or the `redis` wheel is missing),
+`shared.cache` logs a warning that includes the exception class and falls back to the
+in-process LRU / a local recompute — reviews continue without raising. Operators can
+distinguish an outage from a genuine cold cache by those warning lines (and by Redis
+client/healthcheck failures); there is no separate metric today. Optional
+`REDIS_SOCKET_CONNECT_TIMEOUT_S` (default `1.0`) tunes redis-py's connect timeout.
+
+**Local compose vs production auth.** The in-repo `docker-compose.yml` Redis service enables
+`requirepass` from `REDIS_PASSWORD` (default `please-change-me`) so siblings on the `stack`
+network cannot silently poison the shared cache without credentials. Host publish is IPv4
+loopback only (`127.0.0.1:6379`) — from the host use `127.0.0.1:6379`, not `localhost` / `::1`.
+Override `REDIS_PASSWORD` (the nested default `REDIS_URL` picks it up when `REDIS_URL` is unset).
+Production deployments must use a strong secret, ACL/`requirepass`, and keep Redis off public
+interfaces. Compose Redis is intentionally ephemeral (no volume) — a restart is a cold cache;
+durable state lives elsewhere.
+
+### REDIS_CACHE_TTL_S / REDIS_LOCK_TTL_S / REDIS_WAITER_POLL_S / REDIS_WAITER_TIMEOUT_S / REDIS_RESULT_TTL_S
+Redis backend tuning for `shared.cache`: value-key TTL (default `86400` s), single-flight lock TTL
+(default `3600` s — sized for long code-review computes so the lock is unlikely to expire mid-flight),
+waiter poll interval (default `0.05` s), waiter timeout before recomputing (defaults to the
+*effective* `REDIS_LOCK_TTL_S` when unset, so waiters wait at least as long as a customized lock TTL), and
+short-lived single-flight result/error-marker TTL (`REDIS_RESULT_TTL_S`, defaults to the effective
+lock TTL when unset; the Redis backend still hard-caps markers at 60 s so abandoned publishes cannot
+linger past leadership). All parse defensively with floors: TTL / lock / waiter-timeout / result-TTL
+floored at `1` s; poll-interval floored at `0.01` s.
+
+### REDIS_KEY_PREFIX
+Optional prefix for all `shared.cache` Redis keys (default `khala`). Blank falls back to the
+default. Must not contain `:` — the backend appends `:{namespace}:` itself.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change

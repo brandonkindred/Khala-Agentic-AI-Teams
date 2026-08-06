@@ -343,3 +343,11 @@ def test_cache_key_is_stable_and_input_sensitive() -> None:
     assert k1 != _compaction_cache_key("other", 100, "spec", client)
     assert k1 != _compaction_cache_key("text", 200, "spec", client)
     assert k1 != _compaction_cache_key("text", 100, "architecture", client)
+
+
+def test_cache_key_resists_null_byte_collision() -> None:
+    """Embedded NULs in description/text must not create colliding keys."""
+    client = _CountingClient(model_id="m")
+    a = _compaction_cache_key("baz", 100, "foo\x00bar", client)
+    b = _compaction_cache_key("bar\x00baz", 100, "foo", client)
+    assert a != b
