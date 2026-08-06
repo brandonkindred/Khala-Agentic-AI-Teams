@@ -2575,6 +2575,17 @@ def _dispatch_strategy_lab_run(
           ``HTTPException(503)``.
     """
     try:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+    except ImportError:  # pragma: no cover - temporalio always installed
+        # Import outside the dispatch try/except below (not inside its
+        # `except Exception`) so a hypothetical ImportError here can't mask
+        # the dispatch failure that block is meant to translate into a 503.
+        # `()` as an isinstance target always resolves False, so the
+        # WorkflowAlreadyStartedError branch below simply never matches --
+        # every dispatch failure then falls through to the generic 503 path.
+        WorkflowAlreadyStartedError = ()  # type: ignore[assignment]
+
+    try:
         _require_temporal()
         from investment_team.strategy_lab.temporal.start_workflow import (
             start_strategy_lab_batch_workflow,
@@ -2582,8 +2593,6 @@ def _dispatch_strategy_lab_run(
 
         start_strategy_lab_batch_workflow(run_id, request)
     except Exception as exc:
-        from temporalio.exceptions import WorkflowAlreadyStartedError
-
         if isinstance(exc, WorkflowAlreadyStartedError):
             if allow_already_started:
                 # The durable workflow for this run_id is already running
