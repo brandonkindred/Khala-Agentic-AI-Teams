@@ -88,3 +88,14 @@ def test_rejects_when_no_token_available(monkeypatch: pytest.MonkeyPatch, api: A
     monkeypatch.setattr(api, "get_job", lambda job_id, cache_dir=None: {})
     with pytest.raises(ValueError, match="token"):
         _helper()({"job_id": "job-1"})
+
+
+def test_activity_required_field_tuples_exclude_token() -> None:
+    from software_engineering_team.temporal import coding_team_github_activities as mod
+
+    assert "token" not in mod._REQUIRED_FIELDS
+    assert "job_id" in mod._REQUIRED_FIELDS
+    assert "token" not in mod._PUBLISH_REQUIRED_FIELDS
+    assert "job_id" in mod._PUBLISH_REQUIRED_FIELDS
+    assert "token" not in mod._FAILURE_NOTICE_REQUIRED_FIELDS
+    assert "job_id" in mod._FAILURE_NOTICE_REQUIRED_FIELDS
