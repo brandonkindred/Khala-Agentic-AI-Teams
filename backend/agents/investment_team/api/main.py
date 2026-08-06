@@ -4596,7 +4596,8 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             "Only strategies with executable code can be paper traded.",
         )
 
-    # 2 — Create initial "running" session and persist immediately
+    # 2 — Create the initial session (OPENING for the live path, RUNNING for
+    # the legacy recent-OHLCV path) and persist immediately
     session_id = f"pt-{uuid.uuid4().hex[:8]}"
     now = datetime.now(tz=timezone.utc).isoformat()
     use_live = _live_paper_enabled()
