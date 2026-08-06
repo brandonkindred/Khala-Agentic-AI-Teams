@@ -373,6 +373,89 @@ def test_run_paper_trading_background_crashes_into_failed(
     assert "Paper trading crashed" in (updated.error or "")
 
 
+def test_run_paper_trading_background_unparseable_record_does_not_escape_crash_handler(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The except block's own ``PaperTradingSession.parse_persisted(raw)`` call
+    can itself raise (e.g. a corrupt persisted record) — that secondary
+    exception must not escape the worker in place of the original crash,
+    contradicting the documented ``Raises: None`` contract. The record is
+    left as-is (logged, not updated) rather than propagating."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=BacktestResult(
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        ),
+        trades=[],
+    )
+    # A raw dict missing required fields -> PaperTradingSession.parse_persisted
+    # raises a pydantic ValidationError when the except block tries to re-parse
+    # it (unlike the earlier tests, which seed an already-valid PaperTradingSession
+    # instance that parse_persisted short-circuits on via isinstance()).
+    api_main._paper_trading_sessions["pt-crash-corrupt"] = {"session_id": "pt-crash-corrupt"}
+
+    import investment_team.market_data_service as mds
+
+    class _Broken:
+        def resolve_strategy_symbols(self, s):
+            raise RuntimeError("boom in resolve")
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _Broken())
+
+    # Must not raise.
+    api_main._run_paper_trading_background(
+        "pt-crash-corrupt",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    # Left as-is: the corrupt record could not be re-parsed, so it was logged
+    # rather than overwritten with a FAILED status.
+    assert api_main._paper_trading_sessions.get("pt-crash-corrupt") == {
+        "session_id": "pt-crash-corrupt"
+    }
+
+
 def test_run_paper_trading_background_import_failure_marks_failed(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

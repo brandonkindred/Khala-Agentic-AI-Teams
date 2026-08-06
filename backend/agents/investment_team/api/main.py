@@ -4278,6 +4278,10 @@ def _run_paper_trading_background(
     Raises:
         - None. All failures, including import errors for the two lazily-imported
           dependencies, are caught and logged; the session is marked FAILED instead.
+          This includes a failure to re-parse the persisted session record while
+          handling a crash: that secondary failure is itself caught and logged,
+          so an unparseable record is left as-is (logged, not updated) rather
+          than letting the parse error escape in place of the original crash.
     """
     try:
         from investment_team.market_data_service import MarketDataService
@@ -4351,15 +4355,30 @@ def _run_paper_trading_background(
         )
     except Exception as exc:
         logger.exception("Paper trade %s: background worker crashed", session_id)
-        with _lock:
-            raw = _paper_trading_sessions.get(session_id)
-            if raw is not None:
-                session = PaperTradingSession.parse_persisted(raw)
-                session.status = PaperTradingStatus.FAILED
-                session.error = f"Paper trading crashed: {exc}"
-                session.divergence_analysis = f"Paper trading crashed: {exc}"
-                session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                _paper_trading_sessions[session_id] = session
+        # Nested try/except: parse_persisted() below can itself raise (e.g. a
+        # corrupt persisted record) — that secondary exception is not caught by
+        # this handler's own `except Exception as exc` clause (Python doesn't
+        # let an except block catch its own body's exceptions), so left
+        # unguarded it would escape the worker, contradicting this function's
+        # documented "Raises: None" contract. Catch and log it here instead;
+        # the record is left unparseable/unupdated rather than crashing the
+        # worker over a failure to report a failure.
+        try:
+            with _lock:
+                raw = _paper_trading_sessions.get(session_id)
+                if raw is not None:
+                    session = PaperTradingSession.parse_persisted(raw)
+                    session.status = PaperTradingStatus.FAILED
+                    session.error = f"Paper trading crashed: {exc}"
+                    session.divergence_analysis = f"Paper trading crashed: {exc}"
+                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                    _paper_trading_sessions[session_id] = session
+        except Exception:
+            logger.exception(
+                "Paper trade %s: failed to persist FAILED status for the crashed "
+                "session (record may be unparseable, or the store rejected the write)",
+                session_id,
+            )
 
 
 @app.post("/strategy-lab/paper-trade", response_model=PaperTradingResponse)
