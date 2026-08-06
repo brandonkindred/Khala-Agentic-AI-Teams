@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, pytest, Pydantic, `DummyLLMClient` in `llm_service`, branding Phase 2 `*Output` models.
 
-**Worktree:** `/Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema` on branch `fix/4516-dummy-explicit-schema`.
+**Worktree:** the feature worktree (`.worktrees/` checkout for the current feature branch).
 
 **Spec:** `docs/superpowers/specs/2026-08-06-dummy-phase2-explicit-schema-routing-design.md`
 
@@ -75,7 +75,7 @@ def test_phase2_system_prompt_without_model_does_not_route_by_text_anchors() -> 
 Run:
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema/backend
+cd $WORKTREE/backend
 /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
   agents/llm_service/tests/test_dummy_client.py::test_phase2_system_prompt_without_model_does_not_route_by_text_anchors -v
 ```
@@ -85,7 +85,7 @@ Expected: FAIL — assertion on `"messaging_framework" not in j` fails because t
 - [ ] **Step 3: Commit the failing test**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema
+cd $WORKTREE
 git add backend/agents/llm_service/tests/test_dummy_client.py
 git commit -m "$(cat <<'EOF'
 Add failing regression for Phase 2 text-anchor routing.
@@ -157,7 +157,7 @@ Example replacement for the Phase 2 portion of that comment block:
 - [ ] **Step 4: Run the regression test — expect PASS**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema/backend
+cd $WORKTREE/backend
 /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
   agents/llm_service/tests/test_dummy_client.py::test_phase2_system_prompt_without_model_does_not_route_by_text_anchors \
   agents/llm_service/tests/test_dummy_client.py::test_structured_output_model_routes_by_class_despite_misleading_prompt -v
@@ -177,7 +177,7 @@ Expected: FAIL (no `structured_output_model` → no Phase 2 keys). This failure 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema
+cd $WORKTREE
 git add backend/agents/llm_service/clients/dummy.py
 git commit -m "$(cat <<'EOF'
 Remove Phase 2 dummy stub text-anchor fallback.
@@ -342,7 +342,7 @@ def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelin
 - [ ] **Step 4: Run Phase 2–related dummy client tests**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema/backend
+cd $WORKTREE/backend
 /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
   agents/llm_service/tests/test_dummy_client.py -q
 ```
@@ -352,7 +352,7 @@ Expected: all PASS (63+ tests; count may rise by 1 from Task 1).
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema
+cd $WORKTREE
 git add backend/agents/llm_service/tests/test_dummy_client.py
 git commit -m "$(cat <<'EOF'
 Retarget Phase 2 dummy client tests to explicit models.
@@ -396,7 +396,7 @@ Passing Phase 1 models is safe: unrecognized names fall through to existing Phas
 - [ ] **Step 2: Run the alignment suite**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema/backend
+cd $WORKTREE/backend
 /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
   agents/branding_team/tests/test_dummy_stub_alignment.py -v
 ```
@@ -406,7 +406,7 @@ Expected: all parametrized cases PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema
+cd $WORKTREE
 git add backend/agents/branding_team/tests/test_dummy_stub_alignment.py
 git commit -m "$(cat <<'EOF'
 Pass structured_output_model in branding stub alignment tests.
@@ -430,7 +430,7 @@ EOF
 - [ ] **Step 1: Grep for deleted symbol**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema
+cd $WORKTREE
 rg '_branding_phase2_text_routed_stub' backend/
 ```
 
@@ -439,7 +439,7 @@ Expected: no matches.
 - [ ] **Step 2: Run full related suites + ruff on touched files**
 
 ```bash
-cd /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/.worktrees/issue-4516-dummy-explicit-schema/backend
+cd $WORKTREE/backend
 /Users/brandonkindred/Documents/GitHub/Khala-Agentic-AI-Teams/backend/.venv/bin/python -m pytest \
   agents/llm_service/tests/test_dummy_client.py \
   agents/branding_team/tests/test_dummy_stub_alignment.py \

@@ -1133,25 +1133,20 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
     """Deterministic Branding Phase 2 "Narrative & Messaging" payload for a known
     ``structured_output`` model class name.
 
-    This is the routing counterpart to the ``system_lowered`` text anchors the
-    six Phase 2 ``elif`` branches in ``complete_json`` use: those branches
-    delegate to the exact same functions below via a hardcoded class name, so
-    there is one payload per class regardless of which path reaches it. Takes
-    a name string rather than the class object itself because two of this
-    dispatcher's three callers (``chat()``'s and ``stream()``'s tool-call
-    detection) only ever see the Strands tool's ``name`` — which Strands sets
-    to ``model.__name__`` — never the Python class; ``complete_json`` derives
-    the same string from its own ``structured_output_model`` class parameter
-    so all three callers share one dispatch table. The recognized names are
-    also listed in ``_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES``, for callers that
-    need the name set without the payload.
+    Dispatches Phase 2 Narrative & Messaging stubs by Pydantic model class name
+    string. Callers are ``complete_json`` (via ``structured_output_model.__name__``)
+    and ``chat``/``stream`` (via the Strands StructuredOutputTool name, which Strands
+    sets to ``model.__name__``). Returns the stub dict for the six known Phase 2
+    class names listed in ``_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES``; returns
+    ``None`` for unrecognized names so callers continue their non–Phase-2 routing
+    (e.g. Phase 1/3/4/5 text anchors or generic fallbacks).
 
     Preconditions:
         ``model_name`` is a string, typically a ``type.__name__``.
     Postconditions:
         Returns the fresh stub dict that the named model class should
         validate against, or ``None`` for any unrecognized name so callers
-        can fall back to prompt-text matching.
+        continue non–Phase-2 routing paths.
     """
     if model_name == "BrandStoryOutput":
         return _branding_phase2_narrative_base()
