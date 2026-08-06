@@ -714,6 +714,13 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
 
 @app.get("/teams/{team_id}/processes", response_model=list[ProcessDefinition])
 def list_processes(team_id: str):
+    """List all processes defined for a team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the team's processes as a list of
+        ``ProcessDefinition`` (empty if none have been created yet); ``404``
+        if the team is not found.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -722,6 +729,16 @@ def list_processes(team_id: str):
 
 @app.get("/processes/{process_id}", response_model=ProcessDefinition)
 def get_process(process_id: str):
+    """Retrieve a single process definition by id.
+
+    Note: unlike the team-scoped routes, this one is looked up globally by
+    ``process_id`` alone (no ``team_id`` in the path) — the visual editor and
+    conversation flows address a process directly once they know its id.
+
+    Preconditions: ``process_id`` is a non-empty string.
+    Postconditions: ``200`` with the ``ProcessDefinition``; ``404`` if no
+        process with that id exists.
+    """
     process = _store.get_process(process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -730,7 +747,15 @@ def get_process(process_id: str):
 
 @app.post("/teams/{team_id}/processes", response_model=ProcessDefinition, status_code=201)
 def create_process(team_id: str):
-    """Create a new blank process for the team."""
+    """Create a new blank process for the team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``201`` with a fresh ``ProcessDefinition`` (a new UUID
+        ``process_id``, name "New Process", no steps, ``status=DRAFT``)
+        persisted under the team; ``404`` if the team is not found (no process
+        created). Side effect: inserts a new process row via
+        ``_store.save_process``.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -749,7 +774,19 @@ def create_process(team_id: str):
 
 @app.put("/processes/{process_id}", response_model=ProcessDefinition)
 def update_process(process_id: str, process: ProcessDefinition):
-    """Update a process definition (visual editor saves)."""
+    """Update a process definition (visual editor saves).
+
+    Preconditions: ``process_id`` is a non-empty string identifying an
+        existing process; ``process.process_id`` must equal ``process_id``.
+    Postconditions: ``200`` with the saved ``ProcessDefinition`` (the full
+        body replaces the stored definition — this is a whole-document save,
+        not a partial patch); ``404`` if the process (or its owning team) is
+        not found; ``400`` if ``process.process_id`` doesn't match the URL
+        (process unchanged in both error cases). Side effect: calls
+        ``_after_process_saved``, which schedules background provisioning of
+        per-step agent environments (``schedule_provision_step_agents``) for
+        the updated process — this runs even for a no-op-looking save.
+    """
     existing = _store.get_process(process_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -769,7 +806,21 @@ def update_process(process_id: str, process: ProcessDefinition):
     response_model=RecommendAgentsResponse,
 )
 def recommend_agents_for_step(process_id: str, step_id: str):
-    """Recommend agents for a specific process step based on its description."""
+    """Recommend roster agents for a specific process step based on its description.
+
+    Scoring is a simple token-overlap heuristic, not semantic matching:
+    lowercased words (length > 2) from the step's ``name``/``description`` are
+    intersected against each roster agent's combined
+    skills/capabilities/tools/expertise; the overlap *count* is the
+    ``match_score``. Agents with zero overlap are omitted entirely, and the
+    remaining ones are sorted by descending score and capped to the top 10.
+
+    Preconditions: ``process_id`` and ``step_id`` are non-empty strings.
+    Postconditions: ``200`` with a ``RecommendAgentsResponse`` (``recommended_agents``
+        is empty when the process's team has no matching agents, or is
+        unresolvable); ``404`` if the process is unknown, or the process has
+        no step with ``step_id``.
+    """
     process = _store.get_process(process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
