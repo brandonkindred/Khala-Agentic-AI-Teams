@@ -1516,6 +1516,26 @@ def test_run_paper_trading_rejects_when_no_strategy_code(api_client, monkeypatch
     assert "no generated strategy code" in resp.json()["detail"]
 
 
+def test_run_paper_trading_500_on_corrupt_lab_record(api_client) -> None:
+    """A persisted record that exists but fails StrategyLabRecord.parse_persisted
+    (schema drift, missing required fields, ...) must return a controlled 500
+    with a sanitized detail, not an unhandled 500 with a raw pydantic
+    traceback leaking internal validation details to the client."""
+    from investment_team.api import main as api_main
+
+    # Missing required fields (strategy/backtest/is_winning/...) -- a raw
+    # dict that fails StrategyLabRecord's model_validate.
+    api_main._strategy_lab_records["lab-corrupt"] = {"lab_record_id": "lab-corrupt"}
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-corrupt"},
+    )
+    assert resp.status_code == 500
+    assert "lab-corrupt" in resp.json()["detail"]
+    assert "corrupted" in resp.json()["detail"]
+
+
 def test_run_paper_trading_kicks_off_background_worker(
     api_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
