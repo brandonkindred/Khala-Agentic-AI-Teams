@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -86,6 +87,7 @@ from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
 from agent_team_studio.agentic_team_provisioning.testing.store import get_test_store
 from shared.app import create_team_app
+from shared.env_config import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -1021,6 +1023,19 @@ def submit_team_answers(team_id: str, job_id: str, req: SubmitTeamAnswersRequest
 # Assets (File System)
 # ---------------------------------------------------------------------------
 
+_DEFAULT_MAX_ASSET_BYTES = 10 * 1024 * 1024  # 10 MiB
+_ASSET_UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB, read granularity while enforcing the limit
+
+
+def _max_asset_upload_bytes() -> int:
+    """Configured per-asset upload ceiling (``AGENTIC_TEAM_MAX_ASSET_BYTES``).
+
+    Postconditions: returns a positive int — the parsed env var when set and
+    valid, else ``_DEFAULT_MAX_ASSET_BYTES`` (per ``shared.env_config.env_int``:
+    garbage or unset falls back to the default, never raises).
+    """
+    return env_int("AGENTIC_TEAM_MAX_ASSET_BYTES", _DEFAULT_MAX_ASSET_BYTES, floor=1)
+
 
 def _safe_asset_name(name: str) -> str:
     """Sanitize asset name to prevent path traversal."""
@@ -1064,13 +1079,40 @@ def download_team_asset(team_id: str, name: str):
 
 @app.post("/teams/{team_id}/assets", response_model=AssetInfo)
 async def upload_team_asset(team_id: str, file: UploadFile):
-    """Upload a file to the team's asset directory."""
+    """Upload a file to the team's asset directory.
+
+    Preconditions: none beyond a valid multipart upload.
+    Postconditions: ``200`` with the stored asset's metadata; ``400`` if the
+        filename sanitizes to nothing usable; ``409`` if an asset with the same
+        sanitized name already exists (uploads never silently overwrite one
+        another); ``413`` if the upload exceeds
+        ``AGENTIC_TEAM_MAX_ASSET_BYTES`` (default 10 MiB) — enforced by reading
+        in bounded chunks, so an oversized upload is rejected without ever
+        buffering the full payload into memory. The filesystem write and stat
+        run off the event loop (``asyncio.to_thread``) so a large upload can't
+        stall concurrent requests.
+    """
     infra = _get_infra_or_404(team_id)
     safe_name = _safe_asset_name(file.filename or "upload")
     dest = infra.assets_dir / safe_name
-    content = await file.read()
-    dest.write_bytes(content)
-    stat = dest.stat()
+    if dest.exists():
+        raise HTTPException(status_code=409, detail=f"Asset already exists: {safe_name}")
+
+    max_bytes = _max_asset_upload_bytes()
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_ASSET_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="Asset exceeds maximum upload size")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+
+    await asyncio.to_thread(dest.write_bytes, content)
+    stat = await asyncio.to_thread(dest.stat)
     return AssetInfo(
         name=safe_name,
         size_bytes=stat.st_size,
