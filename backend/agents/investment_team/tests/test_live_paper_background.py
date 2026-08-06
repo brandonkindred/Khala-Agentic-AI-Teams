@@ -259,6 +259,101 @@ def test_live_paper_background_raises_when_no_symbols(
     assert session.status == PaperTradingStatus.FAILED
 
 
+def test_live_paper_background_does_not_clobber_already_terminal_session_on_success(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """If the session was already declared FAILED (e.g. by
+    ``run_paper_trading``'s dispatch-failure path, ``_fail_paper_trading_session``)
+    while this worker was an orphaned Temporal workflow still running
+    server-side, the worker's own late-arriving success write must not
+    clobber that FAILED status."""
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy = _winning_strategy()
+    failed_session = PaperTradingSession(
+        session_id="pt-orphan-success",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="live",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-06-01T00:00:00Z",
+        completed_at="2024-06-01T00:05:00Z",
+        error="Failed to start the paper-trading workflow (Temporal unavailable).",
+    )
+    api_state._paper_trading_sessions["pt-orphan-success"] = failed_session
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(
+        monkeypatch,
+        _FakeRunResult(
+            trades=[],
+            fill_count=5,
+            provider_id="binance",
+            terminated_reason="min_fills_reached",
+            error=None,
+        ),
+    )
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+    _run_live_paper_trading_background("pt-orphan-success", "lab-w", strategy, req)
+
+    session = api_state._paper_trading_sessions.get("pt-orphan-success")
+    assert session.status == PaperTradingStatus.FAILED
+    assert session.error == "Failed to start the paper-trading workflow (Temporal unavailable)."
+    assert session.completed_at == "2024-06-01T00:05:00Z"
+    # The orphaned run's data must not have been persisted onto the session.
+    assert session.fill_count == 0
+
+
+def test_live_paper_background_does_not_clobber_already_terminal_session_on_crash(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """Same guard on the crash-handler's terminal write."""
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy = _winning_strategy()
+    failed_session = PaperTradingSession(
+        session_id="pt-orphan-crash",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="live",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-06-01T00:00:00Z",
+        completed_at="2024-06-01T00:05:00Z",
+        error="Failed to start the paper-trading workflow (Temporal unavailable).",
+    )
+    api_state._paper_trading_sessions["pt-orphan-crash"] = failed_session
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(monkeypatch, RuntimeError("provider exploded"))
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+    _run_live_paper_trading_background("pt-orphan-crash", "lab-w", strategy, req)
+
+    session = api_state._paper_trading_sessions.get("pt-orphan-crash")
+    assert session.status == PaperTradingStatus.FAILED
+    assert session.error == "Failed to start the paper-trading workflow (Temporal unavailable)."
+    assert session.completed_at == "2024-06-01T00:05:00Z"
+
+
 def test_live_paper_background_bt_config_start_end_date_match(
     monkeypatch: pytest.MonkeyPatch, api_state
 ) -> None:
