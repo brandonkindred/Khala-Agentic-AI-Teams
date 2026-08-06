@@ -2108,7 +2108,7 @@ def _strategy_lab_signal_expert_enabled() -> bool:
 
 def _compute_signal_brief_snapshot(
     benchmark_symbol: str,
-) -> tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]:
+) -> tuple[Optional[SignalIntelligenceBriefV1], Dict[str, Any]]:
     """Build a per-batch signal brief over all currently-persisted prior records.
 
     Used by the Temporal ``compute_signal_brief_activity``. Called at the start
@@ -2117,7 +2117,8 @@ def _compute_signal_brief_snapshot(
     Preconditions:
         ``benchmark_symbol`` is the run's benchmark ticker.
     Postconditions:
-        Returns ``(brief, storage)``. Fail-open: on disabled expert /
+        Returns ``(brief, storage)``. ``storage`` is always a ``dict`` --
+        never ``None`` -- even on failure. Fail-open: on disabled expert /
         provider-initialization failure / market-fetch failure / expert
         (including its own initialization) failure / provider-cleanup
         failure, it returns ``(None, {"skipped": True, ...})`` (or a
