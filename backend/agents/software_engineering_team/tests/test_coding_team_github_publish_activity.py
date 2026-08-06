@@ -133,6 +133,16 @@ def _install(
     constructs its ``GitHubClient`` only after being called, so callers use
     this to fetch whichever fake client that call produced.
     """
+    from cryptography.fernet import Fernet
+
+    from software_engineering_team import token_crypto
+
+    if "github_token_encrypted" not in job_fields:
+        monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        ct = token_crypto.encrypt_token("tok-123")
+        assert ct is not None
+        job_fields = {**job_fields, "github_token_encrypted": ct}
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     store = _FakeJobStore(job_id, **job_fields)
     client_holder: list[_FakeGitHubClient] = []
 
@@ -169,7 +179,6 @@ BASE_REQUEST = {
     "repo": "widgets",
     "repo_path": "/repo",
     "issue_number": 9,
-    "token": "tok-123",
 }
 
 MERGED_WORK_FIELDS = {
@@ -188,18 +197,23 @@ def _activity():
 
 
 @pytest.mark.parametrize(
-    "request_overrides,expected_fields",
+    "request_overrides,expected_fields,seed_job",
     [
-        ({"job_id": None}, ["job_id"]),
-        ({"owner": None, "repo": None}, ["owner", "repo"]),
-        ({"token": None}, ["token"]),
+        ({"job_id": None}, ["job_id"], False),
+        ({"owner": None, "repo": None}, ["owner", "repo"], True),
     ],
 )
 def test_publish_activity_missing_base_field_raises_value_error(
-    request_overrides: dict[str, Any], expected_fields: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    api: Any,
+    request_overrides: dict[str, Any],
+    expected_fields: list[str],
+    seed_job: bool,
 ) -> None:
-    """A missing/falsy base-required field raises before any GitHub/job-store call,
+    """A missing/falsy base-required field raises before any GitHub side effect,
     naming only the missing field(s) -- never the payload (which may carry a token)."""
+    if seed_job:
+        _install(monkeypatch, api, "job-1")
     request = {**BASE_REQUEST, **MERGED_WORK_FIELDS, **request_overrides}
 
     with pytest.raises(ValueError, match="missing") as exc_info:
@@ -210,6 +224,27 @@ def test_publish_activity_missing_base_field_raises_value_error(
         assert field in msg
     assert repr(request) not in msg
     assert "tok-123" not in msg
+
+
+def test_publish_activity_rejects_plaintext_token_arg(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> None:
+    _install(monkeypatch, api, "job-1")
+    secret = "ghp_leaked"
+    request = {**BASE_REQUEST, **MERGED_WORK_FIELDS, "token": secret}
+    with pytest.raises(ValueError, match="token") as exc_info:
+        _activity()(request)
+    assert secret not in str(exc_info.value)
+
+
+def test_publish_activity_unresolvable_token_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch, api: Any
+) -> None:
+    _install(monkeypatch, api, "job-1", github_token_encrypted="")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="token"):
+        _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
 
 def test_publish_activity_merged_work_missing_branch_fields_raises_value_error(
@@ -242,6 +277,7 @@ def test_publish_activity_merged_work_creates_new_draft_pr(
     out = _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
     client = get_client()
+    assert client.token == "tok-123"
     assert len(client.created_prs) == 1
     pr = client.created_prs[0]
     assert pr["base"] == "main"
@@ -282,6 +318,7 @@ def test_publish_activity_merged_work_reuses_existing_draft_pr(
     out = _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
     client = get_client_holder[-1]
+    assert client.token == "tok-123"
     assert client.created_prs == []
     assert len(client.updated_prs) == 1
     assert client.updated_prs[0]["number"] == 55
@@ -308,6 +345,7 @@ def test_publish_activity_partial_failure_annotates_pr_and_marks_completed_with_
     out = _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
     client = get_client()
+    assert client.token == "tok-123"
     pr = client.created_prs[0]
     assert pr["body"].startswith("Refs #9")
     assert "t2" in pr["body"]
@@ -339,6 +377,7 @@ def test_publish_activity_update_pr_failure_is_nonfatal_and_still_completes(
     out = _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
     assert len(holder) == 1
+    assert holder[-1].token == "tok-123"
     assert store.jobs["job-1"]["status"] == "completed"
     assert out["status"] == "completed"
 
@@ -394,6 +433,7 @@ def test_publish_activity_fast_forward_failure_records_failure_and_stops(
     _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
     client = get_client()
+    assert client.token == "tok-123"
     assert pushed == []
     assert client.created_prs == []
     assert store.jobs["job-1"]["status"] == "failed"
@@ -415,6 +455,7 @@ def test_publish_activity_push_failure_records_failure_and_stops(
     _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
     client = get_client()
+    assert client.token == "tok-123"
     assert client.created_prs == []
     assert store.jobs["job-1"]["status"] == "failed"
     assert "git push failed" in store.jobs["job-1"]["error"]
@@ -438,6 +479,7 @@ def test_publish_activity_create_pr_github_api_error_records_failure(
     _activity()({**BASE_REQUEST, **MERGED_WORK_FIELDS})
 
     assert len(holder) == 1
+    assert holder[-1].token == "tok-123"
     assert store.jobs["job-1"]["status"] == "failed"
     assert "create_pull_request" in store.jobs["job-1"]["error"]
 
@@ -460,6 +502,7 @@ def test_publish_activity_already_complete_posts_close_recommendation_and_marks_
     out = _activity()({**BASE_REQUEST})  # no MERGED_WORK_FIELDS needed
 
     client = get_client()
+    assert client.token == "tok-123"
     assert client.created_prs == []
     assert client.updated_prs == []
     assert len(client.comments) == 1
@@ -488,7 +531,23 @@ def test_publish_activity_missing_job_returns_unknown_status(
     """A job the job store has never heard of throughout the whole call (edge case,
     not expected in practice) still returns a well-formed dict rather than raising
     or returning None."""
-    monkeypatch.setattr(api, "get_job", lambda job_id, cache_dir=None: None)
+    from cryptography.fernet import Fernet
+
+    from software_engineering_team import token_crypto
+
+    monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    ct = token_crypto.encrypt_token("tok-123")
+    assert ct is not None
+    calls = 0
+
+    def _get_job(job_id: str, cache_dir: Any = None) -> Optional[dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"job_id": job_id, "github_token_encrypted": ct}
+        return None
+
+    monkeypatch.setattr(api, "get_job", _get_job)
     monkeypatch.setattr(
         api, "update_job", lambda job_id, cache_dir=None, heartbeat=True, **fields: None
     )
