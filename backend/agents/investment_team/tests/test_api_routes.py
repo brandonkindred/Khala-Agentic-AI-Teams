@@ -708,7 +708,14 @@ def test_paper_trading_results_empty(api_client) -> None:
     assert body["count"] == 0
 
 
-def _paper_trading_session(session_id: str, verdict):
+def _paper_trading_session(
+    session_id: str,
+    verdict,
+    *,
+    status=None,
+    started_at: str = "2024-01-01T00:00:00Z",
+    completed_at: str = "2024-01-01T01:00:00Z",
+):
     from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
 
     strat = StrategySpec(
@@ -723,12 +730,12 @@ def _paper_trading_session(session_id: str, verdict):
         session_id=session_id,
         lab_record_id=f"lab-{session_id}",
         strategy=strat,
-        status=PaperTradingStatus.COMPLETED,
+        status=status or PaperTradingStatus.COMPLETED,
         initial_capital=100_000.0,
         current_capital=100_000.0,
         verdict=verdict,
-        started_at="2024-01-01T00:00:00Z",
-        completed_at="2024-01-01T01:00:00Z",
+        started_at=started_at,
+        completed_at=completed_at,
     )
 
 
@@ -791,6 +798,48 @@ def test_paper_trading_results_rejects_unknown_verdict(api_client) -> None:
     """An unrecognized ``verdict`` must 422, not silently match nothing."""
     resp = api_client.get("/strategy-lab/paper-trade/results?verdict=bogus")
     assert resp.status_code == 422
+
+
+def test_paper_trading_results_orders_terminal_before_active_sessions(api_client) -> None:
+    """Terminal (completed/failed) sessions sort first by ``completed_at``
+    descending; active sessions sort after, by ``started_at`` descending.
+
+    A single ``completed_at or started_at`` sort key would let an in-flight
+    session's ``started_at`` outrank a genuinely more-recent completed
+    session's ``completed_at`` — the two timestamps aren't the same kind of
+    "recency". Here the active session's ``started_at`` (2024-01-03) is later
+    than either completed session's ``completed_at``, so a naive single-key
+    sort would put it first; the bucketed policy must still rank it last.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, PaperTradingVerdict
+
+    api_main._paper_trading_sessions["older-completed"] = _paper_trading_session(
+        "older-completed",
+        PaperTradingVerdict.READY_FOR_LIVE,
+        completed_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["newer-completed"] = _paper_trading_session(
+        "newer-completed",
+        PaperTradingVerdict.NOT_PERFORMANT,
+        completed_at="2024-01-02T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["still-active"] = _paper_trading_session(
+        "still-active",
+        None,
+        status=PaperTradingStatus.LIVE,
+        started_at="2024-01-03T00:00:00Z",
+        completed_at="",
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == [
+        "newer-completed",
+        "older-completed",
+        "still-active",
+    ]
 
 
 def test_paper_trading_results_skips_unparseable_session(api_client) -> None:

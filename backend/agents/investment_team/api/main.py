@@ -4949,13 +4949,14 @@ def get_paper_trading_results(
     verdict: Optional[PaperTradingVerdict] = None,
 ) -> PaperTradingResultsResponse:
     """
-    Return all paper trading sessions, sorted newest-first.
-    Filter by verdict with ?verdict=ready_for_live or ?verdict=not_performant;
-    an unrecognized value is rejected with a 422 rather than silently matching
-    nothing. The response's ``count``, ``ready_for_live_count``, and
-    ``not_performant_count`` are derived from the returned ``items`` by
-    ``PaperTradingResultsResponse`` itself, so they always match the
-    (possibly filtered) list.
+    Return all paper trading sessions, sorted newest-first: terminal
+    (completed/failed) sessions first, newest-completed to oldest, followed by
+    every still-active session, newest-started to oldest. Filter by verdict
+    with ?verdict=ready_for_live or ?verdict=not_performant; an unrecognized
+    value is rejected with a 422 rather than silently matching nothing. The
+    response's ``count``, ``ready_for_live_count``, and ``not_performant_count``
+    are derived from the returned ``items`` by ``PaperTradingResultsResponse``
+    itself, so they always match the (possibly filtered) list.
 
     Postconditions:
         A session record that fails ``PaperTradingSession.parse_persisted`` is
@@ -4963,6 +4964,15 @@ def get_paper_trading_results(
         recovery pass in ``_recover_orphaned_paper_trading_sessions`` and the
         single-session lookup in ``get_paper_trading_session``. One corrupt
         in-memory record must not 500 this bulk endpoint for every caller.
+
+        Ordering: sorting by ``completed_at or started_at`` in one pass would
+        let an in-flight session's ``started_at`` (no ``completed_at`` yet)
+        outrank a genuinely more-recent completed session's ``completed_at`` —
+        the two timestamps aren't comparable "recency" in the same sense.
+        Terminal sessions (status not in ``_ACTIVE_PT_STATES``) are grouped
+        first and sorted by ``completed_at`` descending; active sessions are
+        grouped after and sorted by ``started_at`` descending. Each group's
+        own sort is independent of the other's timestamps.
     """
     with _lock:
         raw = list(_paper_trading_sessions.values())
@@ -4976,7 +4986,11 @@ def get_paper_trading_results(
                 "Paper-trade results: skipping unparseable session record",
                 exc_info=True,
             )
-    items.sort(key=lambda s: s.completed_at or s.started_at, reverse=True)
+    terminal_items = [s for s in items if s.status not in _ACTIVE_PT_STATES]
+    active_items = [s for s in items if s.status in _ACTIVE_PT_STATES]
+    terminal_items.sort(key=lambda s: s.completed_at, reverse=True)
+    active_items.sort(key=lambda s: s.started_at, reverse=True)
+    items = terminal_items + active_items
 
     if verdict is not None:
         items = [s for s in items if s.verdict == verdict]
