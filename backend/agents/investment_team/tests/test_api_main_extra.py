@@ -1915,3 +1915,44 @@ def test_normalize_persisted_job_defaults_status_from_fallback() -> None:
     result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
 
     assert result["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_run_progress: None "data" tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_run_progress_tolerates_none_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A persisted record with ``"data": None`` (present but null, distinct
+    from the key being absent) must not raise ``TypeError`` -- regression
+    test for the same defect class as ``normalize_persisted_job`` (issue
+    #4325) but in ``_reconcile_run_progress``'s own, separate fallback.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-none-data"
+    monkeypatch.setattr(
+        api_main,
+        "_active_runs",
+        {
+            run_id: {
+                "run_id": run_id,
+                "status": "running",
+                "total_cycles": 4,
+                "completed_cycles": 1,
+            }
+        },
+    )
+
+    class _Stub:
+        def get_job(self, jid: str):
+            return {"job_id": run_id, "status": "running", "data": None}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+
+    api_main._reconcile_run_progress(run_id)
+
+    # No crash, and the in-memory entry's existing progress is left intact
+    # since the fallback ("data" -> the persisted record itself) contains
+    # none of _STRATEGY_LAB_PROGRESS_FIELDS.
+    assert api_main._active_runs[run_id]["completed_cycles"] == 1

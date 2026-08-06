@@ -2336,10 +2336,12 @@ def _reconcile_run_progress(run_id: str) -> None:
         - Otherwise calls ``client.get_job(run_id)`` at most once. When a
           persisted record is returned, every key in
           ``_STRATEGY_LAB_PROGRESS_FIELDS`` present in the record's data (via
-          the ``job.get("data", job)`` fallback used elsewhere in this file)
-          is copied onto ``_active_runs[run_id]``; a key absent from the
-          persisted record is left untouched (a sparse/early persisted record
-          can never erase a more-complete in-memory value). ``status``/
+          the ``job.get("data", job)`` fallback used elsewhere in this file,
+          with an explicit ``"data": None`` treated the same as a missing
+          ``"data"`` key) is copied onto ``_active_runs[run_id]``; a key
+          absent from the persisted record is left untouched (a sparse/early
+          persisted record can never erase a more-complete in-memory value).
+          ``status``/
           ``error`` are copied onto ``_active_runs[run_id]`` only when the
           persisted status is itself in ``STRATEGY_LAB_TERMINAL_STATUSES``
           (unchanged from prior behavior).
@@ -2373,6 +2375,13 @@ def _reconcile_run_progress(run_id: str) -> None:
     if not persisted:
         return
     data = persisted.get("data", persisted)
+    if data is None:
+        # "data" can be explicitly present but None (distinct from being
+        # absent, which the .get default above already handles) -- treat
+        # both the same instead of letting a bare None reach the `field in
+        # data` loop below and raise TypeError, violating this function's
+        # "Raises: None" contract.
+        data = persisted
     with _lock:
         current = _active_runs.get(run_id)
         if current is None or current.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
