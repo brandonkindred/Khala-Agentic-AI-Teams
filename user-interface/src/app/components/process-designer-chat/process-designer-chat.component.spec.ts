@@ -10,12 +10,20 @@ import { AddAgentFromRegistryDialogComponent } from './add-agent-from-registry-d
 import { ConfirmDialogComponent } from '../../shared/confirm-dialog/confirm-dialog.component';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import type {
+  AgenticConversationMessage,
   AgenticTeam,
   AgenticTeamAgent,
   ProcessDefinition,
   ProcessStep,
   RosterValidationResult,
 } from '../../models';
+
+interface ConversationStateResponse {
+  conversation_id: string;
+  messages: AgenticConversationMessage[];
+  current_process: ProcessDefinition | null;
+  suggested_questions: string[];
+}
 
 const team = (overrides: Partial<AgenticTeam> = {}): AgenticTeam => ({
   team_id: 't-1',
@@ -155,6 +163,45 @@ describe('ProcessDesignerChatComponent', () => {
     });
     expect(api.createConversation.mock.calls.length).toBe(initialCreateCalls + 1);
     expect(api.createConversation).toHaveBeenLastCalledWith('t-2');
+  });
+
+  // ── startConversation: sequence-token guard against out-of-order responses ──
+
+  it('drops a stale createConversation response: an older call completing last cannot clobber the newer state', () => {
+    const r1 = new Subject<ConversationStateResponse>();
+    const r2 = new Subject<ConversationStateResponse>();
+    api.createConversation.mockReturnValueOnce(r1.asObservable()).mockReturnValueOnce(r2.asObservable());
+
+    component.newConversation(); // A -> subscribes r1
+    component.newConversation(); // B -> subscribes r2 (now the latest)
+
+    // B resolves first, then the stale A completes last.
+    r2.next({ conversation_id: 'c-b', messages: [], current_process: null, suggested_questions: ['B?'] });
+    r2.complete();
+    r1.next({ conversation_id: 'c-a-stale', messages: [], current_process: null, suggested_questions: ['A (stale)?'] });
+    r1.complete();
+
+    // Only B's state survives; the late stale A is ignored.
+    expect((component as unknown as { conversationId: string | null }).conversationId).toBe('c-b');
+    expect(component.suggestedQuestions()).toEqual(['B?']);
+  });
+
+  it('drops a stale createConversation error: an older failure completing last cannot clobber the newer state', () => {
+    const r1 = new Subject<ConversationStateResponse>();
+    const r2 = new Subject<ConversationStateResponse>();
+    api.createConversation.mockReturnValueOnce(r1.asObservable()).mockReturnValueOnce(r2.asObservable());
+
+    component.newConversation(); // A -> subscribes r1
+    component.newConversation(); // B -> subscribes r2 (now the latest)
+
+    // B resolves successfully first, then the stale A errors last.
+    r2.next({ conversation_id: 'c-b', messages: [], current_process: null, suggested_questions: [] });
+    r2.complete();
+    r1.error({ error: { detail: 'stale failure' } });
+
+    // The stale error must not surface, since it belongs to a superseded call.
+    expect(component.error()).toBeNull();
+    expect((component as unknown as { conversationId: string | null }).conversationId).toBe('c-b');
   });
 
   it('emits rosterChanged with the validation result on a successful refresh', () => {
@@ -414,6 +461,32 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.editingAgent()).toBe('Writer');
   });
 
+  // ── createNewProcess: create + link to the active conversation ─────────────
+
+  it('createNewProcess creates the process and links it to the active conversation', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    component.createNewProcess();
+
+    expect(component.currentProcess()?.process_id).toBe('p-new');
+    expect(component.saving()).toBe(false);
+    expect(api.setConversationProcess).toHaveBeenCalledWith('c-1', 'p-new');
+    expect(component.error()).toBeNull();
+  });
+
+  it('createNewProcess surfaces an error when linking the process to the conversation fails', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    api.setConversationProcess.mockReturnValueOnce(
+      throwError(() => ({ error: { detail: 'link failed' } })),
+    );
+
+    component.createNewProcess();
+
+    // The link failure is surfaced, but the already-created process is kept —
+    // it was not rolled back, matching the unchanged happy-path create step.
+    expect(component.error()).toBe('link failed');
+    expect(component.currentProcess()?.process_id).toBe('p-new');
+  });
+
   // ── Process CRUD: roll back optimistic mutations on save failure ───────────
 
   it('addStep rolls back the new step when updateProcess fails', () => {
@@ -435,6 +508,23 @@ describe('ProcessDesignerChatComponent', () => {
 
     expect(component.currentProcess()?.steps.length).toBe(2);
     expect(component.error()).toBeNull();
+  });
+
+  it('does not leak the step counter across component instances', () => {
+    // Regression guard: the step counter used to be module-scope (`let _stepCounter`),
+    // shared by every component instance. It must now be a per-instance field.
+    const original = process({ steps: [step({ step_id: 's-1' })] });
+    component.currentProcess.set(original);
+    component.addStep('action');
+    component.addStep('action');
+    expect((component as unknown as { _stepCounter: number })._stepCounter).toBe(2);
+
+    const fixture2 = TestBed.createComponent(ProcessDesignerChatComponent);
+    const component2 = fixture2.componentInstance;
+    component2.team = team();
+    fixture2.detectChanges();
+
+    expect((component2 as unknown as { _stepCounter: number })._stepCounter).toBe(0);
   });
 
   it('onStepUpdated rolls back the edit when updateProcess fails', () => {

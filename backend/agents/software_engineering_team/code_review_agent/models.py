@@ -326,6 +326,13 @@ class ChunkReviewInput(BaseModel):
         description="Acceptance criteria the code must meet",
     )
     spec_excerpt: str = Field(default="", description="Spec excerpt (capped ~8K)")
+    spec_compliance_single_pass: bool = Field(
+        default=False,
+        description="When True, a dedicated single-pass spec/acceptance-criteria compliance check "
+        "(synthesize_spec_compliance) runs once post-dedupe instead of including "
+        "acceptance_criteria/spec_excerpt in this chunk's prompt. Computed once per run from "
+        "CODE_REVIEW_SPEC_COMPLIANCE_PASS, never re-read per chunk.",
+    )
     architecture_overview: str = Field(default="", description="Architecture overview (capped ~2K)")
     existing_codebase_excerpt: Optional[str] = Field(
         default=None,
@@ -845,12 +852,15 @@ class CodeReviewInput(BaseModel):
         default=False,
         description="When True, the coordinator skips BOTH tail passes entirely (the "
         "false-positive filter and the merged architecture/side-effect pass) and returns "
-        "the per-chunk findings as-is, with no additional LLM calls after the map phase. "
-        "Default False keeps both passes on for every existing caller. Intended for a "
-        "lightweight fallback caller that wants speed over full tail-pass rigor; implies "
-        "skip_false_positive_filter's effect (setting both is redundant, not conflicting). "
-        "Only honored by the in-process coordinator today — the Temporal workflow path "
-        "does not yet thread it through.",
+        "the per-chunk findings as-is, with no additional LLM calls from those two passes "
+        "after the map phase. Default False keeps both passes on for every existing caller. "
+        "Intended for a lightweight fallback caller that wants speed over full tail-pass "
+        "rigor; implies skip_false_positive_filter's effect (setting both is redundant, not "
+        "conflicting). Does NOT affect the separate, independently-gated post-dedupe "
+        "spec-compliance synthesis pass: when CODE_REVIEW_SPEC_COMPLIANCE_PASS is enabled "
+        "for the CODE_REVIEW profile, that single synthesize_spec_compliance call still runs "
+        "even if skip_tail_passes is set. Only honored by the in-process coordinator today — "
+        "the Temporal workflow path does not yet thread it through.",
     )
     repo_root: Optional[str] = Field(
         default=None,

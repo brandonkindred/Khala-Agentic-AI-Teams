@@ -696,15 +696,23 @@ def test_strategy_lab_results_filter_by_winning(
     assert body["losing_count"] == 1
     assert body["count"] == 2
 
-    # Filter winning=true → just the winner.
+    # Filter winning=true → just the winner. Regression coverage: counts must
+    # be derived from the same filtered list as `items`/`count`, not the
+    # unfiltered global set -- winning_count + losing_count == count always.
     resp_w = api_client.get("/strategy-lab/results?winning=true")
     body_w = resp_w.json()
     assert [r["lab_record_id"] for r in body_w["items"]] == ["w"]
+    assert body_w["count"] == 1
+    assert body_w["winning_count"] == 1
+    assert body_w["losing_count"] == 0
 
-    # Filter winning=false → just the loser.
+    # Filter winning=false → just the loser, with matching counts.
     resp_l = api_client.get("/strategy-lab/results?winning=false")
     body_l = resp_l.json()
     assert [r["lab_record_id"] for r in body_l["items"]] == ["l"]
+    assert body_l["count"] == 1
+    assert body_l["winning_count"] == 0
+    assert body_l["losing_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +758,14 @@ def test_paper_trading_results_empty(api_client) -> None:
     assert body["count"] == 0
 
 
-def _paper_trading_session(session_id: str, verdict):
+def _paper_trading_session(
+    session_id: str,
+    verdict,
+    *,
+    status=None,
+    started_at: str = "2024-01-01T00:00:00Z",
+    completed_at: str = "2024-01-01T01:00:00Z",
+):
     from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
 
     strat = StrategySpec(
@@ -765,12 +780,12 @@ def _paper_trading_session(session_id: str, verdict):
         session_id=session_id,
         lab_record_id=f"lab-{session_id}",
         strategy=strat,
-        status=PaperTradingStatus.COMPLETED,
+        status=status or PaperTradingStatus.COMPLETED,
         initial_capital=100_000.0,
         current_capital=100_000.0,
         verdict=verdict,
-        started_at="2024-01-01T00:00:00Z",
-        completed_at="2024-01-01T01:00:00Z",
+        started_at=started_at,
+        completed_at=completed_at,
     )
 
 
@@ -835,9 +850,123 @@ def test_paper_trading_results_rejects_unknown_verdict(api_client) -> None:
     assert resp.status_code == 422
 
 
+def test_paper_trading_results_orders_terminal_before_active_sessions(api_client) -> None:
+    """Terminal (completed/failed) sessions sort first by ``completed_at``
+    descending; active sessions sort after, by ``started_at`` descending.
+
+    A single ``completed_at or started_at`` sort key would let an in-flight
+    session's ``started_at`` outrank a genuinely more-recent completed
+    session's ``completed_at`` — the two timestamps aren't the same kind of
+    "recency". Here the active session's ``started_at`` (2024-01-03) is later
+    than either completed session's ``completed_at``, so a naive single-key
+    sort would put it first; the bucketed policy must still rank it last.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, PaperTradingVerdict
+
+    api_main._paper_trading_sessions["older-completed"] = _paper_trading_session(
+        "older-completed",
+        PaperTradingVerdict.READY_FOR_LIVE,
+        completed_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["newer-completed"] = _paper_trading_session(
+        "newer-completed",
+        PaperTradingVerdict.NOT_PERFORMANT,
+        completed_at="2024-01-02T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["still-active"] = _paper_trading_session(
+        "still-active",
+        None,
+        status=PaperTradingStatus.LIVE,
+        started_at="2024-01-03T00:00:00Z",
+        completed_at="",
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == [
+        "newer-completed",
+        "older-completed",
+        "still-active",
+    ]
+
+
+def test_paper_trading_results_orders_by_real_time_not_lexicographic_string(
+    api_client,
+) -> None:
+    """A ``completed_at`` with a non-UTC timezone offset must sort by its
+    actual chronological instant, not by comparing the raw ISO-8601 strings
+    lexicographically — the two can disagree when the date/time digits don't
+    happen to move in the same direction as the UTC-normalized instant."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingVerdict
+
+    # 2024-01-01T23:00:00+00:00 == 2024-01-01T23:00:00 UTC — the later instant.
+    api_main._paper_trading_sessions["actually-newer"] = _paper_trading_session(
+        "actually-newer",
+        PaperTradingVerdict.READY_FOR_LIVE,
+        completed_at="2024-01-01T23:00:00+00:00",
+    )
+    # 2024-01-02T00:30:00+02:00 == 2024-01-01T22:30:00 UTC — the earlier
+    # instant, but its string sorts *after* the one above lexicographically
+    # because the date digit "02" outranks "01" in plain string comparison.
+    api_main._paper_trading_sessions["actually-older"] = _paper_trading_session(
+        "actually-older",
+        PaperTradingVerdict.NOT_PERFORMANT,
+        completed_at="2024-01-02T00:30:00+02:00",
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == [
+        "actually-newer",
+        "actually-older",
+    ]
+
+
+def test_paper_trading_results_skips_unparseable_session(api_client) -> None:
+    """A single corrupt in-memory session record must not 500 the bulk
+    endpoint — it should be logged and excluded, while parseable sessions
+    are still returned (matching the recovery-pass and single-session
+    lookup behavior).
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingVerdict
+
+    api_main._paper_trading_sessions["good"] = _paper_trading_session(
+        "good", PaperTradingVerdict.READY_FOR_LIVE
+    )
+    # Missing required fields (e.g. strategy, status) -> parse_persisted raises.
+    api_main._paper_trading_sessions["corrupt"] = {"session_id": "corrupt"}
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == ["good"]
+    assert body["count"] == 1
+
+
 def test_paper_trading_session_get_404(api_client) -> None:
     resp = api_client.get("/strategy-lab/paper-trade/pt-missing")
     assert resp.status_code == 404
+
+
+def test_paper_trading_session_get_corrupted_record_returns_500(api_client) -> None:
+    """A corrupted persisted record must surface as a controlled 500 with a
+    generic client-facing detail, not leak the raw parse/validation
+    exception as an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    # Missing required fields (e.g. strategy, status) -> parse_persisted raises.
+    api_main._paper_trading_sessions["pt-corrupt"] = {"session_id": "pt-corrupt"}
+
+    resp = api_client.get("/strategy-lab/paper-trade/pt-corrupt")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == (
+        "Paper trading session 'pt-corrupt' is corrupted and cannot be loaded."
+    )
 
 
 def test_stop_live_paper_trading_disabled_returns_404(api_client) -> None:
@@ -1017,34 +1146,24 @@ def test_cancel_backtest_job_success_and_failure(
 
 
 def test_delete_backtest_job_404_when_missing(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+    """Covers both a genuinely nonexistent job and a concurrent-delete race:
+    since there is no separate existence check to race, either case maps to
+    404 from ``_bt_delete_job``'s own return value, never a misleading 500."""
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: None)
+    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
 
 
 def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
     monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: True)
     resp = api_client.delete("/backtests/jobs/j1")
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
-
-
-def test_delete_backtest_job_500_when_delete_fails_after_existing(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
-    """Job confirmed to exist, but the delete itself fails: 500, not 404."""
-    from investment_team.api import main as api_main
-
-    monkeypatch.setattr(api_main, "_bt_get_job", lambda jid: {"status": "running"})
-    monkeypatch.setattr(api_main, "_bt_delete_job", lambda jid: False)
-    resp = api_client.delete("/backtests/jobs/j1")
-    assert resp.status_code == 500
-    assert "Failed to delete" in resp.json()["detail"]
 
 
 def test_list_backtests_empty(api_client) -> None:
@@ -1147,7 +1266,7 @@ def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, m
     sid = start.json()["session_id"]
 
     # Bypass the "missing required fields" 400 branch so we reach the guard under test.
-    monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
     monkeypatch.setattr(
         api_main, "_execute_advisory", lambda op, payload, *, key: {"user_id": "u1"}
     )

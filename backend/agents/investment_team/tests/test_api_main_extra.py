@@ -38,6 +38,24 @@ from typing import Any, Dict, List
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_job_client_cache():
+    """Isolate _PersistentDict.__init__'s get_job_service_client delegation.
+
+    _PersistentDict.__init__ now resolves its client through the process-wide
+    ``job_service_client`` cache (one client per team, for the life of the
+    process) rather than constructing a fresh JobServiceClient per instance.
+    Clearing the cache before and after each test keeps every
+    ``_PersistentDict(...)`` construction in this file deterministic,
+    regardless of team-string reuse or test execution order.
+    """
+    import job_service_client as jsc
+
+    jsc._clear_job_client_cache_for_testing()
+    yield
+    jsc._clear_job_client_cache_for_testing()
+
+
 def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
     """The Strategy Lab concurrency clamp bounds a request's max_parallel to the
     env-configured ceiling and logs only when it actually lowers the value."""
@@ -168,29 +186,27 @@ def test_strategy_lab_run_response_derives_count_from_records() -> None:
     assert empty.count == 0
 
 
-def test_strategy_lab_results_response_derives_counts_from_all_records() -> None:
-    """winning_count/losing_count are derived from all_records (the full,
-    unfiltered set) even when items only holds a filtered subset — this is
-    what keeps the UI's tab-chip counts stable across the ?winning= filter."""
+def test_strategy_lab_results_response_derives_counts_from_items() -> None:
+    """count/winning_count/losing_count are all derived from items, so a
+    mismatched constructor value can never survive construction — and a
+    filtered items list (e.g. ?winning=true) correctly reports losing_count
+    == 0 rather than an unfiltered global count."""
     from investment_team.api.main import StrategyLabResultsResponse
 
     winner = _make_strategy_lab_record("lab-w", is_winning=True)
     loser = _make_strategy_lab_record("lab-l", is_winning=False)
 
-    # Filtered view: items narrowed to winners only, but winning/losing counts
-    # still reflect the full all_records set.
     resp = StrategyLabResultsResponse(
-        items=[winner], all_records=[winner, loser], count=999, winning_count=0, losing_count=0
+        items=[winner, loser], count=999, winning_count=0, losing_count=0
     )
-    assert resp.count == 1
+    assert resp.count == 2
     assert resp.winning_count == 1
     assert resp.losing_count == 1
 
-    # Direct construction without all_records falls back to deriving from items.
-    fallback = StrategyLabResultsResponse(items=[winner, loser])
-    assert fallback.count == 2
-    assert fallback.winning_count == 1
-    assert fallback.losing_count == 1
+    filtered = StrategyLabResultsResponse(items=[winner])
+    assert filtered.count == 1
+    assert filtered.winning_count == 1
+    assert filtered.losing_count == 0
 
 
 class _InMemoryDict:
@@ -451,6 +467,99 @@ def test_resolve_fee_overrides_defaults_when_none() -> None:
     assert slip == 2.0  # _DEFAULT_SLIPPAGE_BPS
 
 
+def test_resolve_fee_overrides_defaults_are_operator_tunable_via_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback defaults are business parameters operators may need to
+    retune without a redeploy — read from env vars, not hardcoded."""
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    monkeypatch.setenv("INVESTMENT_DEFAULT_TX_COST_BPS", "12.5")
+    monkeypatch.setenv("INVESTMENT_DEFAULT_SLIPPAGE_BPS", "7.5")
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=None,
+        slippage_bps=None,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 12.5
+    assert slip == 7.5
+
+
+def test_resolve_fee_overrides_defaults_fall_back_on_invalid_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A garbage env value falls back to the documented default rather than
+    raising or silently propagating an unparseable value."""
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    monkeypatch.setenv("INVESTMENT_DEFAULT_TX_COST_BPS", "not-a-number")
+    monkeypatch.setenv("INVESTMENT_DEFAULT_SLIPPAGE_BPS", "-5")
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=None,
+        slippage_bps=None,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 5.0  # unparseable -> falls back to the documented default
+    assert slip == 0.0  # -5 is out of [0, 1000] -> clamped to the floor
+
+
+# ---------------------------------------------------------------------------
+# _parse_iso_timestamp_for_sort
+# ---------------------------------------------------------------------------
+
+
+def test_parse_iso_timestamp_for_sort_empty_string_sorts_last() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("") == datetime.min.replace(tzinfo=timezone.utc)
+
+
+def test_parse_iso_timestamp_for_sort_unparseable_falls_back_like_empty() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("not-a-timestamp") == datetime.min.replace(
+        tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_accepts_z_suffix() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("2024-01-01T12:00:00Z") == datetime(
+        2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_naive_string_assumed_utc() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("2024-01-01T12:00:00") == datetime(
+        2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_respects_non_utc_offset() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    # 2024-01-02T00:30:00+02:00 is 2024-01-01T22:30:00 UTC.
+    parsed = _parse_iso_timestamp_for_sort("2024-01-02T00:30:00+02:00")
+    assert parsed == datetime(2024, 1, 1, 22, 30, 0, tzinfo=timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # _normalize_strategy_lab_asset_class + _build_strategy_from_ideation
 # ---------------------------------------------------------------------------
@@ -490,6 +599,19 @@ def test_build_strategy_from_ideation_defaults_when_missing() -> None:
     assert sid.startswith("strat-lab-")
 
 
+def test_build_strategy_from_ideation_defaults_invalid_timeframe() -> None:
+    """An LLM-returned timeframe outside StrategySpec's allowed literal set
+    (e.g. a typo'd unit, or an empty string) must not raise a pydantic
+    ValidationError -- it degrades to the same "1d" default as an omitted
+    field, exactly like the missing-field case."""
+    from investment_team.api.main import _build_strategy_from_ideation
+
+    for bad_timeframe in ("1x", "", "daily", "1D"):
+        data: Dict[str, Any] = {"timeframe": bad_timeframe}
+        strategy, _ = _build_strategy_from_ideation(data)
+        assert strategy.timeframe == "1d"
+
+
 def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
     from investment_team.api.main import _build_strategy_from_ideation
 
@@ -505,6 +627,34 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
     assert len(strategy.exit_rules) == 1
 
 
+def test_build_strategy_from_ideation_recovers_single_dict_rule() -> None:
+    """A single dict emitted in place of a one-element list must be
+    recovered, not silently discarded. ``strategy_data.get("entry_rules") or
+    []`` previously evaluated a truthy dict to itself, and iterating a dict
+    yields its string keys (none of which are dicts) -- filtering those out
+    left an empty rule set with no warning, a silent data-loss path for
+    otherwise-recoverable LLM output.
+    """
+    from investment_team.api.main import _build_strategy_from_ideation
+    from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate
+
+    entry_rule = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
+    ).model_dump()
+    data = {
+        "asset_class": "stocks",
+        "timeframe": "1d",
+        "entry_rules": entry_rule,  # a bare dict, not wrapped in a list
+        "exit_rules": {"kind": "stop_loss", "pct": 0.1},  # likewise
+    }
+    strategy, _ = _build_strategy_from_ideation(data)
+    assert len(strategy.entry_rules) == 1
+    assert strategy.entry_rules[0].side == "long"
+    assert len(strategy.exit_rules) == 1
+    assert strategy.exit_rules[0].pct == 0.1
+
+
 def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
     from investment_team.api.main import _build_strategy_from_ideation
 
@@ -512,6 +662,44 @@ def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
         _build_strategy_from_ideation(None)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         _build_strategy_from_ideation(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# _persist_strategy_lab_record
+# ---------------------------------------------------------------------------
+
+
+def test_persist_strategy_lab_record_rejects_missing_strategy() -> None:
+    """A record with strategy=None (bypassing Pydantic's own field validation
+    via model_construct, as a stray in-process mutation elsewhere might) must
+    raise ValueError before acquiring the lock -- not an AttributeError from
+    inside the locked write."""
+    from investment_team.api.main import _persist_strategy_lab_record
+    from investment_team.models import BacktestRecord, StrategyLabRecord
+
+    record = StrategyLabRecord.model_construct(
+        lab_record_id="lab-missing-strategy",
+        strategy=None,
+        backtest=BacktestRecord.model_construct(backtest_id="bt-1"),
+    )
+
+    with pytest.raises(ValueError, match="record.strategy must be populated"):
+        _persist_strategy_lab_record(record)
+
+
+def test_persist_strategy_lab_record_rejects_missing_backtest() -> None:
+    """Same contract check for a missing backtest."""
+    from investment_team.api.main import _persist_strategy_lab_record
+    from investment_team.models import StrategyLabRecord, StrategySpec
+
+    record = StrategyLabRecord.model_construct(
+        lab_record_id="lab-missing-backtest",
+        strategy=StrategySpec.model_construct(strategy_id="strat-1"),
+        backtest=None,
+    )
+
+    with pytest.raises(ValueError, match="record.backtest must be populated"):
+        _persist_strategy_lab_record(record)
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +830,102 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
 
 
+def test_persistent_dict_pop_rejects_extra_positional_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pop() must reject a second default argument with TypeError, matching
+    dict.pop's contract, instead of silently returning the first one."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("pop_arity_test")
+
+    with pytest.raises(TypeError):
+        pd.pop("missing", "a", "b")
+
+
+def test_persistent_dict_pop_accepts_explicit_none_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit default=None must be distinguishable from "no default
+    passed" -- pop() should return None, not raise KeyError."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("pop_none_default_test")
+
+    assert pd.pop("missing", None) is None
+
+
+class _HasNonCallableModelDumpAttr:
+    """A lookalike object exposing a non-Pydantic, non-callable ``model_dump``
+    attribute -- the old ``hasattr(value, "model_dump")`` check would try to
+    call this and raise ``TypeError``; ``isinstance(value, BaseModel)`` must
+    not."""
+
+    model_dump = "not a method"
+
+
+def test_persistent_dict_setitem_treats_non_basemodel_model_dump_attr_as_plain_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("model_dump_lookalike_test")
+    client: _FakeJobClient = pd._client  # type: ignore[assignment]
+
+    obj = _HasNonCallableModelDumpAttr()
+    pd["k"] = obj  # must not raise TypeError trying to call the attribute
+
+    assert client._jobs["k"]["data"] == {"value": obj}
+
+
+def test_persistent_dict_init_delegates_to_get_job_service_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """__init__ must resolve its client via the shared get_job_service_client
+    factory rather than constructing a JobServiceClient directly."""
+    import job_service_client as jsc_mod
+    from investment_team.api.main import _PersistentDict
+
+    calls: List[str] = []
+    sentinel_client = _FakeJobClient(team="spy")
+
+    def _spy_get_job_service_client(team: str):
+        calls.append(team)
+        return sentinel_client
+
+    monkeypatch.setattr(jsc_mod, "get_job_service_client", _spy_get_job_service_client)
+
+    pd = _PersistentDict("spy_test")
+
+    assert calls == ["investment_spy_test"]
+    assert pd._client is sentinel_client
+
+
+def test_persistent_dict_init_shares_cached_client_across_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two _PersistentDict instances for the same entity_type must share one
+    process-wide cached JobServiceClient instead of each opening their own."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd_a = _PersistentDict("shared_test")
+    pd_b = _PersistentDict("shared_test")
+
+    assert pd_a._client is pd_b._client
+
+
 class _LostDeleteRaceClient:
     """Stub JobServiceClient simulating a lost pop() race: get_job still
     finds the job (read before the race is settled), but delete_job reports
@@ -753,6 +1037,33 @@ def test_persistent_dict_values_return_annotation() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Lazy agent singleton factories (_get_advisor_agent / _get_policy_guardian /
+# _get_orchestrator / _get_committee_agent)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "factory_name",
+    ["_get_advisor_agent", "_get_policy_guardian", "_get_orchestrator", "_get_committee_agent"],
+)
+def test_agent_factory_returns_cached_singleton_until_cleared(factory_name: str) -> None:
+    """Each lazy factory must return the same cached instance across repeated
+    calls, and a genuinely new instance after cache_clear() -- proving it's a
+    real lazy/rebuildable singleton, not a disguised eager one."""
+    from investment_team.api import main as api_main
+
+    factory = getattr(api_main, factory_name)
+
+    first = factory()
+    second = factory()
+    assert first is second
+
+    factory.cache_clear()
+    third = factory()
+    assert third is not first
+
+
+# ---------------------------------------------------------------------------
 # _run_backtest_background — direct invocation with stubbed dependencies
 # ---------------------------------------------------------------------------
 
@@ -810,11 +1121,9 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
     assert state.get("backtest_id", "").startswith("bt-")
 
 
-def test_run_backtest_background_handles_http_exception(
+def test_run_backtest_background_handles_backtest_execution_error(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
-    from fastapi import HTTPException
-
     from investment_team.api import main as api_main
     from investment_team.models import BacktestConfig, StrategySpec
 
@@ -822,10 +1131,10 @@ def test_run_backtest_background_handles_http_exception(
     monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
     monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
 
-    def _raises_http(strategy, config):
-        raise HTTPException(status_code=422, detail="bad strategy")
+    def _raises_backtest_error(strategy, config):
+        raise api_main.BacktestExecutionError(status_code=422, detail="bad strategy")
 
-    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_http)
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_backtest_error)
 
     strategy = StrategySpec(
         strategy_id="s",
@@ -903,6 +1212,62 @@ def test_run_backtest_background_early_cancellation(
     api_main._run_backtest_background("job-4", strategy, config, "tester", None)
     # No update calls — early return.
     assert state == {}
+
+
+def test_run_backtest_background_retry_reuses_backtest_id(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A second run for the same job_id (e.g. a Temporal activity retry after a
+    worker crash left the job RUNNING) must overwrite the same backtest record
+    instead of minting a duplicate — the defect reported for retries."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    first_backtest_id = state["backtest_id"]
+
+    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    second_backtest_id = state["backtest_id"]
+
+    assert first_backtest_id == second_backtest_id
+    # The second run overwrote the same record rather than adding a duplicate.
+    assert len(api_main._backtests.values()) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1297,6 +1662,81 @@ def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backte
     assert api_main._strategy_lab_records.get("lab-Y") is None
 
 
+def test_delete_strategy_lab_record_preserves_record_when_paper_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """If paper-session cleanup fails, the lab record/strategy/backtest must NOT
+    be deleted -- a retry should re-attempt cleanup, not 404 against an
+    already-deleted record while paper sessions sit orphaned in the job service."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Z",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Z",
+        strategy_id="strat-lab-Z",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Z",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Z"] = record
+    api_main._strategies["strat-lab-Z"] = strat
+    api_main._backtests["bt-lab-Z"] = bt
+
+    def _broken_cleanup(lab_id: str) -> int:
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", _broken_cleanup)
+
+    with pytest.raises(RuntimeError, match="job service unreachable"):
+        api_main.delete_strategy_lab_record("lab-Z")
+
+    # Nothing was deleted: the record stays retryable instead of becoming an
+    # orphan-producing 404.
+    assert api_main._strategy_lab_records.get("lab-Z") is not None
+    assert api_main._strategies.get("strat-lab-Z") is not None
+    assert api_main._backtests.get("bt-lab-Z") is not None
+
+
 # ---------------------------------------------------------------------------
 # _recover_orphaned_paper_trading_sessions startup hook
 # ---------------------------------------------------------------------------
@@ -1573,6 +2013,26 @@ def test_run_paper_trading_rejects_when_no_strategy_code(api_client, monkeypatch
     assert "no generated strategy code" in resp.json()["detail"]
 
 
+def test_run_paper_trading_500_on_corrupt_lab_record(api_client) -> None:
+    """A persisted record that exists but fails StrategyLabRecord.parse_persisted
+    (schema drift, missing required fields, ...) must return a controlled 500
+    with a sanitized detail, not an unhandled 500 with a raw pydantic
+    traceback leaking internal validation details to the client."""
+    from investment_team.api import main as api_main
+
+    # Missing required fields (strategy/backtest/is_winning/...) -- a raw
+    # dict that fails StrategyLabRecord's model_validate.
+    api_main._strategy_lab_records["lab-corrupt"] = {"lab_record_id": "lab-corrupt"}
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-corrupt"},
+    )
+    assert resp.status_code == 500
+    assert "lab-corrupt" in resp.json()["detail"]
+    assert "corrupted" in resp.json()["detail"]
+
+
 def test_run_paper_trading_kicks_off_background_worker(
     api_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1653,8 +2113,14 @@ def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.Mo
     assert calls == ["server shutdown"]
 
 
-def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A raising failure-sweep must NOT abort shutdown teardown."""
+def test_shutdown_hook_swallows_job_store_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising failure-sweep must NOT abort shutdown teardown, and the
+    swallowed failure must be logged at WARNING (not DEBUG) so it's visible
+    at standard operational log levels."""
+    import logging
+
     from investment_team.api import main as api_main
 
     def _boom(reason: str) -> None:
@@ -1665,7 +2131,37 @@ def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch)
         "investment_team.api.job_event_bus.shutdown", lambda: None, raising=False
     )
 
-    api_main._run_investment_service_shutdown()  # must not raise
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        api_main._run_investment_service_shutdown()  # must not raise
+
+    assert any(
+        r.levelno == logging.WARNING and "backtest job failure sweep skipped" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_shutdown_hook_logs_event_bus_teardown_failure_at_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising event-bus reaper teardown must also be swallowed and logged
+    at WARNING, not DEBUG."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    def _boom() -> None:
+        raise RuntimeError("event bus unavailable")
+
+    monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", _boom, raising=False)
+    monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", lambda reason: None)
+
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        api_main._run_investment_service_shutdown()  # must not raise
+
+    assert any(
+        r.levelno == logging.WARNING and "event-bus reaper shutdown skipped" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1821,3 +2317,63 @@ def test_normalize_persisted_job_defaults_status_from_fallback() -> None:
     result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
 
     assert result["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_run_progress: None "data" tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_run_progress_tolerates_none_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A persisted record with ``"data": None`` (present but null, distinct
+    from the key being absent) must not raise ``TypeError`` -- regression
+    test for the same defect class as ``normalize_persisted_job`` (issue
+    #4325) but in ``_reconcile_run_progress``'s own, separate fallback.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-none-data"
+    monkeypatch.setattr(
+        api_main,
+        "_active_runs",
+        {
+            run_id: {
+                "run_id": run_id,
+                "status": "running",
+                "total_cycles": 4,
+                "completed_cycles": 1,
+            }
+        },
+    )
+
+    class _Stub:
+        def get_job(self, jid: str):
+            return {"job_id": run_id, "status": "running", "data": None}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+
+    api_main._reconcile_run_progress(run_id)
+
+    # No crash, and the in-memory entry's existing progress is left intact
+    # since the fallback ("data" -> the persisted record itself) contains
+    # none of _STRATEGY_LAB_PROGRESS_FIELDS.
+    assert api_main._active_runs[run_id]["completed_cycles"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _run_state_to_response: missing run_id tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_run_state_to_response_tolerates_missing_run_id() -> None:
+    """A state dict without a ``run_id`` key must not raise ``KeyError`` --
+    every other field in this function already degrades to a default, and
+    ``run_id`` (guaranteed by construction today, but not schema-validated)
+    should be defended the same way instead of assuming the invariant can
+    never be violated."""
+    from investment_team.api.main import _run_state_to_response
+
+    resp = _run_state_to_response({"status": "running"})
+
+    assert resp.run_id == ""
+    assert resp.status == "running"
