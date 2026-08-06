@@ -211,6 +211,47 @@ def test_startup_backstop_swallows_worker_error(monkeypatch) -> None:
     api_main._startup()  # must not raise
 
 
+def test_startup_calls_paper_trading_recovery(monkeypatch) -> None:
+    """``_startup()`` must itself invoke orphaned-session recovery — it is no
+    longer reachable via ``@app.on_event("startup")``, which a custom
+    ``lifespan=`` (set by ``create_team_app``) makes FastAPI never invoke."""
+    from investment_team.api import main as api_main
+    from investment_team.temporal import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "start_investment_temporal_worker_thread", lambda: False)
+    called = []
+    monkeypatch.setattr(
+        api_main, "_recover_orphaned_paper_trading_sessions", lambda: called.append(True)
+    )
+
+    api_main._startup()
+
+    assert called == [True]
+
+
+def test_app_lifespan_startup_invokes_paper_trading_recovery(monkeypatch) -> None:
+    """End-to-end regression for the on_event/lifespan bug: driving the app's
+    actual lifespan (not calling ``_startup()`` directly) must reach the
+    paper-trading recovery pass. Before the fix this hook was registered via
+    the now-dead ``@app.on_event("startup")`` decorator and never ran under
+    ``create_team_app``'s custom ``lifespan=``."""
+    from fastapi.testclient import TestClient
+
+    from investment_team.api import main as api_main
+    from investment_team.temporal import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "start_investment_temporal_worker_thread", lambda: False)
+    called = []
+    monkeypatch.setattr(
+        api_main, "_recover_orphaned_paper_trading_sessions", lambda: called.append(True)
+    )
+
+    with TestClient(api_main.app):
+        pass
+
+    assert called == [True], "app lifespan startup did not invoke paper-trading recovery"
+
+
 # ---------------------------------------------------------------------------
 # 2. Activity wiring
 # ---------------------------------------------------------------------------
