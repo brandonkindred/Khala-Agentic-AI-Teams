@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import ast
 
-import pytest
-
 from investment_team.strategy_lab.ast_utils.names import call_name, func_name, name_or_attr
 
 
