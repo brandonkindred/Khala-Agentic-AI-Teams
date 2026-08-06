@@ -852,13 +852,9 @@ def _resolve_assign_evaluator(
 
 
 def _func_name(func: ast.expr) -> Optional[str]:
-    if isinstance(func, ast.Name):
-        return func.id.lower()
-    if isinstance(
-        func, ast.Attribute
-    ):  # pragma: no cover — ``self.indicator(...)``-style call name extraction rare in generated strategies
-        return func.attr.lower()
-    return None
+    from investment_team.strategy_lab.ast_utils.names import func_name as _shared_func_name
+
+    return _shared_func_name(func)
 
 
 def _positional_series_input(

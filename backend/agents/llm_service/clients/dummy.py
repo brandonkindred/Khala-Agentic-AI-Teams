@@ -1133,25 +1133,20 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
     """Deterministic Branding Phase 2 "Narrative & Messaging" payload for a known
     ``structured_output`` model class name.
 
-    This is the routing counterpart to the ``system_lowered`` text anchors the
-    six Phase 2 ``elif`` branches in ``complete_json`` use: those branches
-    delegate to the exact same functions below via a hardcoded class name, so
-    there is one payload per class regardless of which path reaches it. Takes
-    a name string rather than the class object itself because two of this
-    dispatcher's three callers (``chat()``'s and ``stream()``'s tool-call
-    detection) only ever see the Strands tool's ``name`` — which Strands sets
-    to ``model.__name__`` — never the Python class; ``complete_json`` derives
-    the same string from its own ``structured_output_model`` class parameter
-    so all three callers share one dispatch table. The recognized names are
-    also listed in ``_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES``, for callers that
-    need the name set without the payload.
+    Dispatches Phase 2 Narrative & Messaging stubs by Pydantic model class name
+    string. Callers are ``complete_json`` (via ``structured_output_model.__name__``)
+    and ``chat``/``stream`` (via the Strands StructuredOutputTool name, which Strands
+    sets to ``model.__name__``). Returns the stub dict for the six known Phase 2
+    class names listed in ``_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES``; returns
+    ``None`` for unrecognized names so callers continue their non–Phase-2 routing
+    (e.g. Phase 1/3/4/5 text anchors or generic fallbacks).
 
     Preconditions:
         ``model_name`` is a string, typically a ``type.__name__``.
     Postconditions:
         Returns the fresh stub dict that the named model class should
         validate against, or ``None`` for any unrecognized name so callers
-        can fall back to prompt-text matching.
+        continue non–Phase-2 routing paths.
     """
     if model_name == "BrandStoryOutput":
         return _branding_phase2_narrative_base()
@@ -1194,51 +1189,6 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         or "structured_output" in description_lowered
         or name in _PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES
     )
-
-
-def _branding_phase2_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
-    """Text-anchor fallback for the Phase 2 "Narrative & Messaging" cluster.
-
-    Used by ``complete_json`` when the caller didn't supply a recognized
-    ``structured_output_model`` (see ``_branding_phase2_structured_output_stub``).
-    Kept as its own helper — like ``_branding_structured_stub`` for Phase 3/4 —
-    so that call site's branching stays flat and under the mccabe complexity
-    ceiling.
-
-    Preconditions:
-        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
-    Postconditions:
-        Returns the first matching Phase 2 payload, or ``None`` when no
-        anchor combination matches. Cumulative carry-forward stubs: each
-        specialist repeats upstream fields so a linear Graph predecessor
-        exposes the full prior narrative — anchors are ordered least- to
-        most-specific; earlier branches carry negative guards so a later
-        specialist's prompt (which also contains earlier fields) does not
-        get caught by an earlier branch.
-    """
-    if (
-        "brand_story" in system_lowered
-        and "boilerplate_variants" in system_lowered
-        and (
-            "tagline_rationale" not in system_lowered
-            and "personality_traits" not in system_lowered
-            and "messaging_framework" not in system_lowered
-            and "jobs_to_be_done" not in system_lowered
-            and "writing_guidelines" not in system_lowered
-        )
-    ):
-        return _branding_phase2_narrative_base()
-    if "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered:
-        return _branding_phase2_narrative_with_archetype()
-    if "tagline_rationale" in system_lowered and "elevator_pitches" in system_lowered:
-        return _branding_phase2_narrative_with_tagline()
-    if "messaging_framework" in system_lowered and "audience_message_maps" in system_lowered:
-        return _branding_phase2_narrative_with_messaging()
-    if "jobs_to_be_done" in system_lowered and "media_habits" in system_lowered:
-        return _branding_phase2_narrative_with_personas()
-    if "writing_guidelines" in system_lowered and "editorial_quality_bar" in system_lowered:
-        return _branding_phase2_narrative_with_writing_guidelines()
-    return None
 
 
 class DummyLLMClient(LLMClient):
@@ -1568,12 +1518,14 @@ class DummyLLMClient(LLMClient):
     ) -> Dict[str, Any]:
         """Return a JSON-shaped stub for the given prompt.
 
-        Routes the Branding Phase 2 "Narrative & Messaging" cluster
-        deterministically by ``structured_output_model``'s class name when
-        provided (see ``_branding_phase2_structured_output_stub``); otherwise
-        — and for every other prompt shape this dummy stubs — pattern-matches
-        against ``prompt`` (and, for a few teams, ``system_prompt``) for
-        anchor tokens and returns the matching canned dict.
+        Routes the Branding Phase 2 "Narrative & Messaging" cluster only when
+        ``structured_output_model`` is provided (see
+        ``_branding_phase2_structured_output_stub``); Phase 2 prompts without
+        that parameter do not match system-prompt text anchors here — use
+        ``chat``/``stream`` Strands tool-name dispatch instead. For every other
+        prompt shape this dummy stubs, pattern-matches against ``prompt`` (and,
+        for a few teams, ``system_prompt``) for anchor tokens and returns the
+        matching canned dict.
 
         Preconditions:
             - ``prompt`` is a string (may be empty).
@@ -1602,18 +1554,16 @@ class DummyLLMClient(LLMClient):
         # other teams' prompts that happened to mention those words in persona
         # text.
         #
-        # Branding Phase 1 / Phase 3 branches are the exception: they anchor
-        # on ``system_prompt`` (via ``system_lowered`` later in this method)
-        # because every agent in those phases receives the same serialized
-        # mission/phase context as its user message, so only each agent's own
-        # system_prompt (its required output field names) can distinguish
-        # which one is asking. Those anchors are multi-token combinations
-        # unique to one agent's prompt. Phase 2 used the same system_prompt
-        # anchoring historically, but is now routed deterministically by the
-        # structured_output_model's class name below when a caller supplies
-        # it — see the fast path immediately after this comment block; the
-        # system_prompt anchors in ``_branding_phase2_text_routed_stub``
-        # remain only as a fallback for callers that don't.
+        # Branding Phase 1 / Phase 3 / Phase 4 / Phase 5 branches are the
+        # exception: they anchor on ``system_prompt`` (via ``system_lowered``
+        # later in this method) because every agent in those phases receives
+        # the same serialized mission/phase context as its user message, so
+        # only each agent's own system_prompt (its required output field names)
+        # can distinguish which one is asking. Those anchors are multi-token
+        # combinations unique to one agent's prompt. Phase 2 is routed only by
+        # ``structured_output_model``'s class name (fast path below) or by
+        # Strands StructuredOutputTool name in ``chat``/``stream`` — there is
+        # no system-prompt substring fallback for Phase 2.
         lowered = prompt.lower()
         # Shared across instances so sequential coding stubs can mint distinct
         # module/component names when the task hint alone is not enough.
@@ -1632,11 +1582,10 @@ class DummyLLMClient(LLMClient):
         # _branding_phase2_structured_output_stub directly with just the tool's
         # name string (the only identifier Strands' event loop ever gives them,
         # per that helper's own docstring), bypassing this parameter entirely.
-        # Route by class *name* instead of the text-anchor scan below —
-        # sidesteps the exact fragility this scan is prone to (a prompt reword
-        # or an incidentally-mentioned field name silently returning the wrong
-        # shape). Only a known subset of classes are wired up; anything else
-        # falls through unchanged.
+        # Route by class *name* — sidesteps fragility from prompt rewording or
+        # incidentally-mentioned field names silently returning the wrong shape.
+        # Only a known subset of classes are wired up; anything else falls
+        # through unchanged.
         if structured_output_model is not None:
             assert isinstance(structured_output_model, type), (
                 f"structured_output_model must be a Pydantic model class, "
@@ -2241,13 +2190,6 @@ class DummyLLMClient(LLMClient):
                 ),
                 "brand_promise": "Every customer touchpoint will feel cohesive and intentional (dummy).",
             }
-        # Branding team — Phase 2 "Narrative & Messaging" Graph agents (built
-        # with structured_output=, see agents.py). Text-anchor fallback lives
-        # in _branding_phase2_text_routed_stub so this call site's branching
-        # stays flat and under the mccabe complexity ceiling (mirrors
-        # _branding_structured_stub for Phase 3/4/5 just below).
-        elif (phase2_stub := _branding_phase2_text_routed_stub(system_lowered)) is not None:
-            return phase2_stub
         # Branding Phase 3 / Phase 4 / Phase 5 stubs live in ``_branding_structured_stub``
         # so ``complete_json`` stays under the mccabe complexity ceiling. Only
         # ``None`` means "unmatched" — an intentional empty dict must not

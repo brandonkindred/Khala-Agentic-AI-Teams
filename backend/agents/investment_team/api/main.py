@@ -1516,8 +1516,9 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         check, unlike ``promotion_decision``). Raises ``HTTPException(503)``
         when Temporal is disabled/unavailable; on any other workflow
         failure, raises the ``HTTPException`` that
-        ``_translate_advisory_failure`` maps it to. On success, returns the
-        generated ``InvestmentCommitteeMemo``.
+        ``_translate_advisory_failure`` maps it to. Raises
+        ``HTTPException(502)`` when the advisory result lacks a ``memo``
+        payload. On success, returns the generated ``InvestmentCommitteeMemo``.
     """
     result = _execute_advisory(
         "committee_memo",
@@ -1529,7 +1530,11 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(result["memo"]))
+    memo_data = result.get("memo")
+    if not memo_data:
+        logger.error("committee_memo activity returned no memo: %r", result)
+        raise HTTPException(status_code=502, detail="Memo generation result is missing")
+    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(memo_data))
 
 
 # ---------------------------------------------------------------------------
@@ -1852,7 +1857,9 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
 # The timeframe values StrategySpec.timeframe (a strict Literal) accepts.
 # Derived from the field itself so this can never drift out of sync with
 # models.py.
-_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(get_args(StrategySpec.model_fields["timeframe"].annotation))
+_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(
+    get_args(StrategySpec.model_fields["timeframe"].annotation)
+)
 
 
 def _coerce_strategy_lab_timeframe(raw: object) -> str:
@@ -2598,7 +2605,11 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
                     _active_runs.pop(run_id, None)
                 cleanup_job(run_id)
             except Exception:
-                logger.warning("Failed to clean up strategy-lab run %s after failure timeout", run_id, exc_info=True)
+                logger.warning(
+                    "Failed to clean up strategy-lab run %s after failure timeout",
+                    run_id,
+                    exc_info=True,
+                )
 
         timer = threading.Timer(900.0, _cleanup)
         timer.daemon = True
@@ -3258,7 +3269,9 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     # since it acquires `_lock` internally (it is not reentrant).
     with _lock:
         running_ids = [
-            rid for rid, r in _active_runs.items() if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
+            rid
+            for rid, r in _active_runs.items()
+            if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
         ]
     for rid in running_ids:
         _reconcile_run_progress(rid)
@@ -3355,9 +3368,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             # genuinely malformed payload the isinstance guard above didn't
             # anticipate) must not discard every other persisted/in-memory
             # job already collected -- log distinctly and move on.
-            logger.warning(
-                "Skipping malformed persisted strategy lab job %s", jid, exc_info=True
-            )
+            logger.warning("Skipping malformed persisted strategy lab job %s", jid, exc_info=True)
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]
@@ -3860,7 +3871,9 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         for job in persisted_list:
             rid = job.get("job_id") or job.get("run_id", "")
             if rid and rid not in in_memory:
-                in_memory[rid] = _normalize_persisted_job(job, fallback_status="running", run_id=rid)
+                in_memory[rid] = _normalize_persisted_job(
+                    job, fallback_status="running", run_id=rid
+                )
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         in_memory = _in_memory_runs_by_id()
@@ -4085,12 +4098,33 @@ def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
         - Returns the number of those jobs for which ``delete_job`` returned a
           truthy value. The count equals the number of jobs successfully deleted
           and is independent of the order in which the concurrent deletes finish.
+
+    Raises:
+        - ``HTTPException`` 503: ``list_jobs`` failed with ``httpx.HTTPError``
+          (transport/HTTP) or ``RuntimeError`` (e.g. unconfigured
+          ``JOB_SERVICE_URL``). Callers must leave lab state intact so a retry
+          can re-attempt cleanup.
     """
     from job_service_client import JobServiceClient
 
-    client = JobServiceClient(team="investment_paper_trading_sessions")
+    try:
+        client = JobServiceClient(team="investment_paper_trading_sessions")
+        jobs = client.list_jobs() or []
+    except (httpx.HTTPError, RuntimeError):
+        # Narrow environmental failures only — same pair sibling list endpoints
+        # use. Soft-failing here would orphan paper sessions after the lab
+        # record is deleted; fail closed with 503 instead.
+        logger.warning(
+            "list_jobs failed for paper trading sessions; cleanup unavailable",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Paper-trading session cleanup is temporarily unavailable; retry later.",
+        ) from None
+
     matching_ids: list[str] = []
-    for job in client.list_jobs() or []:
+    for job in jobs:
         jid = job.get("job_id")
         if not jid:
             continue
@@ -4211,12 +4245,13 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
     Postconditions:
         - Paper-trading session cleanup (``_delete_paper_sessions_for_lab_record``,
           a job-service network call) runs *before* the lab record is removed
-          from memory. If it raises or times out, the lab record and its linked
-          strategy/backtest are left intact and the exception propagates
-          (surfacing as a 500) instead of being silently swallowed — a retry
-          then re-attempts the same cleanup rather than 404ing against an
-          already-deleted record while paper sessions sit orphaned in the job
-          service.
+          from memory. If listing or other environmental failures occur (e.g.
+          unconfigured ``JOB_SERVICE_URL``, job-service transport errors), the
+          lab record and its linked strategy/backtest are left intact and the
+          failure surfaces as **503** instead of being silently swallowed — a
+          retry then re-attempts the same cleanup rather than 404ing against
+          an already-deleted record while paper sessions sit orphaned in the
+          job service. Other unexpected exceptions may still surface as 500.
         - ``_strategy_lab_records[lab_record_id]`` is removed only if it is
           still present by the time the in-memory-mutation step runs — a
           concurrent delete of the same ``lab_record_id`` may have already
@@ -4983,7 +5018,9 @@ def _default_tx_cost_bps() -> float:
     ``_DEFAULT_TX_COST_BPS``) on every call rather than once at import time,
     so operators can retune this business parameter without a redeploy.
     """
-    return env_float("INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0)
+    return env_float(
+        "INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0
+    )
 
 
 def _default_slippage_bps() -> float:
@@ -4994,7 +5031,9 @@ def _default_slippage_bps() -> float:
     ``_DEFAULT_SLIPPAGE_BPS``) on every call rather than once at import time,
     so operators can retune this business parameter without a redeploy.
     """
-    return env_float("INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0)
+    return env_float(
+        "INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0
+    )
 
 
 def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
@@ -5696,11 +5735,11 @@ def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
     Preconditions:
         - `session_id` must identify a previously started advisor session.
-        
+
     Postconditions:
         - Returns the session if found.
         - Otherwise, returns `found=False` with `session=None`.
-        
+
     Raises:
         - None (intentionally avoids standard 404 errors for missing sessions).
     """
