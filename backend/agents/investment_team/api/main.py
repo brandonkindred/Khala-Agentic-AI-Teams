@@ -5049,7 +5049,14 @@ def get_paper_trading_results(
 
 @app.get("/strategy-lab/paper-trade/{session_id}", response_model=PaperTradingResponse)
 def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
-    """Return a specific paper trading session by ID."""
+    """Return a specific paper trading session by ID.
+
+    Postconditions:
+        A session record that fails ``PaperTradingSession.parse_persisted`` is
+        logged and reported as a 500, not left to leak the raw parse/
+        validation exception as an unhandled 500 with no useful client-facing
+        detail.
+    """
     with _lock:
         raw = _paper_trading_sessions.get(session_id)
 
@@ -5058,7 +5065,25 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
             status_code=404, detail=f"Paper trading session '{session_id}' not found."
         )
 
-    session = PaperTradingSession.parse_persisted(raw)
+    try:
+        session = PaperTradingSession.parse_persisted(raw)
+    except Exception as exc:
+        # The record exists but is internally corrupt (schema drift, a
+        # missing required field, malformed JSON, ...) -- a server-side data
+        # integrity problem, not a client input error, so this is a 500
+        # rather than a 4xx. Log the full exception (which may include raw
+        # persisted field values) server-side only; the client-facing detail
+        # stays generic so it can't leak internal schema/validation details.
+        logger.error(
+            "Paper trading session %s failed to parse: %s",
+            session_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Paper trading session '{session_id}' is corrupted and cannot be loaded.",
+        ) from exc
     return PaperTradingResponse(session=session)
 
 
