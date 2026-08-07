@@ -227,6 +227,10 @@ jobs:
             agent_provisioning:
               - 'backend/agents/agent_team_studio/agent_provisioning_team/**'
               - 'backend/agents/agent_registry/**'
+            # Agent Studio authoring + drafts persistence (in-memory unit suite;
+            # live-Postgres store tests skip without POSTGRES_HOST).
+            agent_studio:
+              - 'backend/agents/agent_team_studio/agent_studio/**'
             sales:
               - 'backend/agents/sales_team/**'
             # user_agent_founder's drift tripwire imports the real
@@ -317,6 +321,7 @@ jobs:
               - '!backend/agents/agent_registry/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
+              - '!backend/agents/agent_team_studio/agent_studio/**'
               - '!backend/agents/agent_team_studio/user_agent_founder/**'
               - '!backend/agents/agent_team_studio/agentic_team_provisioning/**'
               # shared_backend paths (already trigger fan-out separately)
@@ -355,6 +360,7 @@ jobs:
           F_INVESTMENT: ${{ steps.filter.outputs.investment }}
           F_SOCIAL_MARKETING: ${{ steps.filter.outputs.social_marketing }}
           F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
+          F_AGENT_STUDIO: ${{ steps.filter.outputs.agent_studio }}
           F_SALES: ${{ steps.filter.outputs.sales }}
           F_AGENT_REPO_TOOLS: ${{ steps.filter.outputs.agent_repo_tools }}
           F_USER_AGENT_FOUNDER: ${{ steps.filter.outputs.user_agent_founder }}
@@ -399,6 +405,14 @@ jobs:
                   "tests": "agent_team_studio/agent_provisioning_team/tests/",
                   "source": "agent_team_studio.agent_provisioning_team",
                   "extra_requirements": "agent_team_studio/agent_provisioning_team/requirements.txt",
+              },
+              "agent_studio": {
+                  "name": "Agent Studio",
+                  "tests": "agent_team_studio/agent_studio/tests/",
+                  "source": "agent_team_studio.agent_studio",
+                  # Omit live-Postgres store modules from the unit cov gate
+                  # (those suites skip without POSTGRES_HOST).
+                  "cov_config": "agent_team_studio/agent_studio/pyproject.toml",
               },
               # unified_api lives at backend/unified_api/ (a sibling of backend/agents/,
               # this job's working directory), so its test/source paths are given
