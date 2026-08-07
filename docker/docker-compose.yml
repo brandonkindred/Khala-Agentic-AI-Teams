@@ -179,14 +179,26 @@ services:
     # cache, which shared.cache treats as misses (recompute).
     # requirepass lives in a generated conf file so the redis-server argv does
     # not include the password (process listings). Healthcheck still uses
-    # REDISCLI_AUTH from the service env.
+    # REDISCLI_AUTH from the service env. Password bytes are escaped for a
+    # redis.conf double-quoted string (\, ", newline, CR, tab) so exotic
+    # secrets cannot split the requirepass line.
     command:
       - /bin/sh
       - -c
       - |
         set -eu
         conf=/tmp/khala-redis.conf
-        esc=$$(printf '%s' "$$REDIS_PASSWORD" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        # Encode for redis.conf double-quoted strings (Redis recognizes \n/\r/\t).
+        esc=$$(printf '%s' "$$REDIS_PASSWORD" | awk -v ORS= '
+        NR > 1 { printf "\\n" }
+        {
+          s = $$0
+          gsub(/\\/, "\\\\", s)
+          gsub(/"/, "\\\"", s)
+          gsub(/\t/, "\\t", s)
+          gsub(/\r/, "\\r", s)
+          printf "%s", s
+        }')
         cat > "$$conf" <<EOF
         bind 0.0.0.0
         requirepass "$$esc"
@@ -195,7 +207,8 @@ services:
         save ""
         appendonly no
         EOF
-        exec redis-server "$$conf"    # Host publish is IPv4 loopback only (127.0.0.1:6379). There is no IPv6
+        exec redis-server "$$conf"
+    # Host publish is IPv4 loopback only (127.0.0.1:6379). There is no IPv6
     # host publish — on IPv6-preferring systems use ``127.0.0.1:6379``, not
     # bare ``localhost`` (which may resolve to ``::1`` and fail to connect).
     # Containers still reach Redis via the stack network (redis:6379 /
