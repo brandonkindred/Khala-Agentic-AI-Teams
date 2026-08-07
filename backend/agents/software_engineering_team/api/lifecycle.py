@@ -1,12 +1,16 @@
 """ASGI startup/shutdown hooks for the SE team app.
 
 Passed to ``create_team_app`` by ``main``. Startup fails fast when Temporal is
-disabled, unreachable, or either Temporal worker fails to start; telemetry and
-CodeEngineProvider install remain log-and-continue so a non-Temporal failure
-never leaks the Postgres pool.
+disabled, unreachable, either Temporal worker fails to start, or the worker
+thread never becomes ready; telemetry and CodeEngineProvider install remain
+log-and-continue so a non-Temporal failure never leaks the Postgres pool.
 """
 
+from __future__ import annotations
+
+import asyncio
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +40,73 @@ async def _assert_temporal_ready() -> None:
         )
 
 
+async def _wait_for_shared_temporal_client() -> None:
+    """Block until a team worker has populated the shared Temporal client + loop.
+
+    ``start_team_worker`` returns True as soon as the daemon thread is spawned;
+    connect + ``Worker.run`` happen asynchronously. Polling via
+    ``await_client`` turns that race into a hard startup failure when the
+    worker never becomes ready.
+
+    Preconditions:
+        - A Temporal worker thread has already been started for this process.
+
+    Postconditions:
+        - Returns once ``await_client`` observes a live shared client + loop.
+        - Propagates ``RuntimeError`` from ``await_client`` on timeout.
+    """
+    from shared.temporal import await_client
+
+    # ``await_client`` sleeps while polling — keep it off the ASGI event loop.
+    await asyncio.to_thread(await_client)
+
+
+async def _wait_for_team_worker_thread(team: str) -> None:
+    """Require ``team``'s worker thread to stay alive through connect settle.
+
+    Shared ``await_client`` only proves *some* worker populated the shared
+    client slots (typically SE). Coding_team runs on its own thread/queue; if
+    its connect fails, the daemon exits while SE's client may still look ready.
+
+    Preconditions:
+        - ``team`` was passed to ``start_team_worker`` (thread registered).
+
+    Postconditions:
+        - Returns once the team's thread is alive and remains alive after a
+          short settle, or raises ``RuntimeError`` if it exits / never appears
+          within ``CLIENT_READY_TIMEOUT_S``.
+    """
+    from shared.temporal import worker as temporal_worker
+    from shared.temporal.runner import CLIENT_READY_POLL_S, CLIENT_READY_TIMEOUT_S
+
+    deadline = time.monotonic() + CLIENT_READY_TIMEOUT_S
+    seen_alive = False
+    while time.monotonic() < deadline:
+        thread = temporal_worker._worker_threads.get(team)
+        if thread is not None and thread.is_alive():
+            seen_alive = True
+            # Brief settle so a connect that fails immediately can exit the
+            # thread before we declare success.
+            await asyncio.sleep(CLIENT_READY_POLL_S)
+            thread = temporal_worker._worker_threads.get(team)
+            if thread is not None and thread.is_alive():
+                return
+            break
+        await asyncio.sleep(CLIENT_READY_POLL_S)
+    status = "exited after start" if seen_alive else "never became ready"
+    raise RuntimeError(
+        f"{team} Temporal worker thread {status}; refusing to serve without a worker"
+    )
+
+
 async def _se_startup() -> None:
     """Register SE telemetry observers and start SE's + coding_team's Temporal workers.
 
     Runs after the factory has registered the SE Postgres schema. Fails fast
-    when Temporal is disabled, unreachable, or either Temporal worker fails to
-    start (see ``_assert_temporal_ready``). Telemetry and CodeEngineProvider
-    install are log-and-continue so a single non-Temporal failure never leaks
-    the Postgres pool the factory may have opened.
+    when Temporal is disabled, unreachable, either Temporal worker fails to
+    start, or a worker thread never becomes ready. Telemetry and
+    CodeEngineProvider install are log-and-continue so a single non-Temporal
+    failure never leaks the Postgres pool the factory may have opened.
 
     Also installs the SE-backed ``CodeEngineProvider`` and starts coding_team's
     own Temporal worker (on its own task queue) — this is the in-process
@@ -65,6 +128,8 @@ async def _se_startup() -> None:
         raise RuntimeError(
             "SE Temporal worker failed to start; refusing to serve without a worker"
         )
+    await _wait_for_shared_temporal_client()
+    await _wait_for_team_worker_thread("software_engineering")
     try:
         from software_engineering_team.coding_engine_provider import SECodeEngineProvider
         from software_engineering_team.engine_provider import set_engine_provider
@@ -80,6 +145,7 @@ async def _se_startup() -> None:
         raise RuntimeError(
             "coding_team Temporal worker failed to start; refusing to serve without a worker"
         )
+    await _wait_for_team_worker_thread("coding_team")
 
 
 def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown hook
