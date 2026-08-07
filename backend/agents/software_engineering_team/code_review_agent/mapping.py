@@ -111,8 +111,16 @@ logger = logging.getLogger(__name__)
 # content+context+model hash. Backed by ``shared.cache`` (Redis when configured,
 # else in-process memory). ``0`` disables it (pure passthrough).
 DEFAULT_CHUNK_OUTCOME_CACHE_SIZE = 512  # CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE, floor 0
+# Base stem; ``_chunk_cache_namespace()`` appends ``KHALA_CACHE_BUILD_ID`` /
+# ``KHALA_BUILD_ID`` when set so a deploy is a cold cache under Redis.
 _CHUNK_CACHE_NAMESPACE = "cr:chunk:v2"
 
+
+def _chunk_cache_namespace() -> str:
+    """Shared-cache namespace for map-phase chunk outcomes (includes build id)."""
+    from shared.cache import with_cache_build_id  # noqa: PLC0415
+
+    return with_cache_build_id(_CHUNK_CACHE_NAMESPACE)
 
 
 def _chunk_outcome_cache_size() -> int:
@@ -135,7 +143,7 @@ def clear_chunk_outcome_cache() -> None:
           Intended for tests (the cache persists across ``run_coordinator``
           calls by design) and for callers that must force a cold review.
     """
-    get_shared_cache(_CHUNK_CACHE_NAMESPACE).clear()
+    get_shared_cache(_chunk_cache_namespace()).clear()
 
 
 def _chunk_outcome_to_bytes(outcome: "_ChunkOutcome") -> bytes:
@@ -1102,7 +1110,7 @@ def _cached_review_chunk(
         )
 
     key = _chunk_cache_key(chunk, context_fp, sibling_surface)
-    cache = get_shared_cache(_CHUNK_CACHE_NAMESPACE)
+    cache = get_shared_cache(_chunk_cache_namespace())
 
     def _compute() -> Tuple[bytes, bool]:
         outcome = _review_chunk_with_recovery(

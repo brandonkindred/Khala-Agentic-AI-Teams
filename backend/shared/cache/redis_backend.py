@@ -585,6 +585,13 @@ class RedisBackend:
                 self.set(key, payload, max_entries=max_entries)
             return payload
 
+        # Another leader may have finished and released in the window between
+        # our initial miss and this acquire — re-check before recomputing.
+        hit_after_lock = self.get(key)
+        if hit_after_lock is not None:
+            self._release_lock(lock_key, lock_token)
+            return hit_after_lock
+
         try:
             try:
                 payload, cacheable = compute()

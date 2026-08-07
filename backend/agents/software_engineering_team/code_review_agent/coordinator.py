@@ -208,7 +208,15 @@ __all__ = [
 # Backed by ``shared.cache``. ``0`` disables it (every run is a guaranteed miss).
 # Coarser and independent of the per-chunk cache in ``mapping``.
 DEFAULT_SUBMISSION_CACHE_SIZE = 256  # CODE_REVIEW_SUBMISSION_CACHE_SIZE, floor 0
+# Base stem; ``_submission_cache_namespace()`` appends build id when configured.
 _SUBMISSION_CACHE_NAMESPACE = "cr:sub:v1"
+
+
+def _submission_cache_namespace() -> str:
+    """Shared-cache namespace for submission short-circuit (includes build id)."""
+    from shared.cache import with_cache_build_id  # noqa: PLC0415
+
+    return with_cache_build_id(_SUBMISSION_CACHE_NAMESPACE)
 
 
 # Named so ``run_coordinator`` (the sole reader) and this module's docstrings/tests
@@ -257,7 +265,7 @@ def clear_submission_outcome_cache() -> None:
           review, so a distributed miss is not absolutely guaranteed. Intended
           for tests and for callers that must force a cold review.
     """
-    get_shared_cache(_SUBMISSION_CACHE_NAMESPACE).clear()
+    get_shared_cache(_submission_cache_namespace()).clear()
 
 
 def _block_on_unreviewed() -> bool:
@@ -746,7 +754,7 @@ def run_coordinator(
         submission_key = _submission_fingerprint(
             input_data, model_fingerprint, spec_compliance_single_pass
         )
-        cache = get_shared_cache(_SUBMISSION_CACHE_NAMESPACE)
+        cache = get_shared_cache(_submission_cache_namespace())
         # shared.cache is fail-open, but keep an explicit local guard so a
         # misbehaving backend / unexpected raise never aborts the review.
         try:
@@ -1051,7 +1059,7 @@ def run_coordinator(
     if submission_key is not None and result.approved and len(not_reviewed_ranges) == 0:
         payload = result.model_dump_json().encode("utf-8")
         try:
-            get_shared_cache(_SUBMISSION_CACHE_NAMESPACE).set(
+            get_shared_cache(_submission_cache_namespace()).set(
                 submission_key,
                 payload,
                 max_entries=submission_capacity,

@@ -169,9 +169,11 @@ def get_shared_cache(namespace: str) -> SharedCache:
                     # Misconfigured prefix/TTL must not abort reviews on first
                     # get_shared_cache call (fail open like a missing redis client).
                     logger.error(
-                        "shared.cache: RedisBackend init failed for namespace %r (%s); using memory backend",
+                        "shared.cache: RedisBackend init failed for namespace %r (%s); "
+                        "using memory backend",
                         namespace,
                         exc,
+                        exc_info=True,
                     )
                     backend = MemoryBackend()
             else:

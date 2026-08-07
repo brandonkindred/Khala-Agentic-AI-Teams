@@ -810,6 +810,36 @@ def test_redis_single_flight_hit_short_circuits_compute():
     assert calls["n"] == 0
 
 
+def test_redis_single_flight_rechecks_durable_after_lock_acquire():
+    """Winning the lock after another leader finished must not recompute.
+
+    Simulates the race where the initial ``get`` misses, then a peer publishes
+    a durable value and releases before this worker's NX acquire succeeds.
+    """
+    client = FakeRedis()
+    cache = RedisBackend(client, "ns")
+    calls = {"n": 0}
+    original_eval = client.eval
+
+    def eval_seed_on_acquire(script: str, numkeys: int, *keys_and_args):
+        result = original_eval(script, numkeys, *keys_and_args)
+        if result == 1 and "nx" in script.lower():
+            cache.set("k", b"peer-published", max_entries=8)
+        return result
+
+    client.eval = eval_seed_on_acquire  # type: ignore[method-assign]
+
+    def compute() -> Tuple[bytes, bool]:
+        calls["n"] += 1
+        return b"fresh", True
+
+    out = cache.single_flight("k", compute, max_entries=8)
+    assert out == b"peer-published"
+    assert calls["n"] == 0
+    # Lock must be released when short-circuiting after acquire.
+    assert client.exists(cache._lock_key("k")) == 0
+
+
 def test_redis_leader_compute_exception_releases_lock():
     """Leader exceptions release the NX lock so later callers are not stuck."""
     client = FakeRedis()

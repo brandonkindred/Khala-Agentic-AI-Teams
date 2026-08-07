@@ -1,21 +1,18 @@
 #!/bin/sh
 # Escape stdin for a redis.conf double-quoted ``requirepass`` value.
 #
-# Compatible with BusyBox (redis:*-alpine) and GNU userland. Escapes
-# backslash, double-quote, tab, and CR; joins physical newlines as ``\n``.
+# Compatible with BusyBox (redis:*-alpine) and GNU userland. Encodes every
+# input byte as a redis.conf ``\xHH`` escape so the value round-trips under
+# Redis's config parser — including backslash, quote, tab, CR, embedded
+# newlines, and a trailing newline.
 #
 # Preconditions:
 #   - Password bytes are read from stdin (may be empty).
 # Postconditions:
 #   - Writes the escaped form to stdout with no trailing newline added.
-#   - Backslash is doubled so Redis does not treat ``\a`` / ``\n`` / ``\xHH``
-#     as escapes when parsing the conf double-quoted string.
+#   - Empty stdin yields empty stdout.
 #
-# BusyBox awk ``gsub(/\\/, ...)`` is a no-op for backslash — do not use awk to
-# escape ``\``. Use sed for ``\`` / ``"`` / tab / CR; awk only joins lines.
+# Do not use BusyBox awk ``gsub`` to escape backslashes — it is a no-op for
+# ``\`` on Alpine. Hex encoding avoids that class of bugs entirely.
 set -eu
-sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' -e 's/\r/\\r/g' | awk '
-BEGIN { ORS = "" }
-NR > 1 { printf "\\n" }
-{ printf "%s", $0 }
-'
+od -An -tx1 -v | tr -d ' \n' | sed 's/../\\x&/g'

@@ -29,7 +29,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any, List, Tuple
 
-from shared.cache import get_shared_cache
+from shared.cache import get_shared_cache, with_cache_build_id
 
 if TYPE_CHECKING:
     from .interface import LLMClient
@@ -47,8 +47,13 @@ logger = logging.getLogger(__name__)
 # ``shared.cache`` (Redis when configured). ``0`` disables the cache (pure
 # passthrough).
 DEFAULT_COMPACTION_CACHE_SIZE = 256  # LLM_COMPACTION_CACHE_SIZE, floor 0
+# Base stem; ``_compaction_cache_namespace()`` appends build id when configured.
 _COMPACTION_CACHE_NAMESPACE = "llm:compact:v1"
 
+
+def _compaction_cache_namespace() -> str:
+    """Shared-cache namespace for compaction memos (includes build id)."""
+    return with_cache_build_id(_COMPACTION_CACHE_NAMESPACE)
 
 
 def _compaction_cache_size() -> int:
@@ -80,7 +85,7 @@ def clear_compaction_cache() -> None:
           and callers that prefer a cold compaction when clearing succeeds.
     """
     try:
-        get_shared_cache(_COMPACTION_CACHE_NAMESPACE).clear()
+        get_shared_cache(_compaction_cache_namespace()).clear()
     except Exception:
         logger.warning("Failed to clear compaction cache", exc_info=True)
 
@@ -270,7 +275,7 @@ def compact_text(
         return _compact_uncached(text, max_chars, llm, content_description)[0]
 
     key = _compaction_cache_key(text, max_chars, content_description, llm)
-    cache = get_shared_cache(_COMPACTION_CACHE_NAMESPACE)
+    cache = get_shared_cache(_compaction_cache_namespace())
 
     def _compute() -> Tuple[bytes, bool]:
         result, cacheable = _compact_uncached(text, max_chars, llm, content_description)
