@@ -6,7 +6,10 @@ import pytest
 from fastapi import APIRouter
 from fastapi.routing import APIRoute
 
-from agent_team_studio.agentic_team_provisioning.models import CreateConversationRequest, CreateTeamRequest
+from agent_team_studio.agentic_team_provisioning.models import (
+    CreateConversationRequest,
+    CreateTeamRequest,
+)
 
 # Representative extracted paths — enough to catch a dropped include_router while
 # hub aliases (_teams_router / _conversations_router) remain assigned.
