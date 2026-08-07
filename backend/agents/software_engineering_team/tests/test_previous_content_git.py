@@ -197,6 +197,15 @@ def test_flag_like_revision_is_all_misses(tmp_path: Path) -> None:
     assert result.misses == frozenset({"a.py"})
 
 
+def test_revision_with_colon_is_all_misses(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "a.py", "x\n")
+    # Colon would make ``rev:path`` object syntax ambiguous.
+    result = read_previous_content_from_git(str(repo), "HEAD:odd", ["a.py"])
+    assert result.contents == {}
+    assert result.misses == frozenset({"a.py"})
+
+
 def test_path_list_beyond_spawn_cap_overflow_is_miss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
