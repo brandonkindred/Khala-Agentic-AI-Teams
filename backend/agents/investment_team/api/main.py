@@ -1161,7 +1161,7 @@ def _run_backtest_background(
     config: BacktestConfig,
     submitted_by: str,
     notes: List[str],
-) -> None:
+) -> str:
     """Background worker: run a real-data backtest and persist the completed record.
 
     Long-running (market data + sandbox execution), so this runs off the request
@@ -1183,22 +1183,24 @@ def _run_backtest_background(
           deterministically from ``job_id``. A second invocation for the same
           ``job_id`` (e.g. a Temporal activity retry that lands after a worker
           crash left the job at RUNNING) therefore overwrites the same record
-          instead of orphaning a duplicate.
+          instead of orphaning a duplicate. Returns ``_BT_JOB_STATUS_COMPLETED``.
         - On ``BacktestExecutionError`` or other exceptions: job status becomes
-          FAILED with an error string, unless a cancel check already returned
+          FAILED with an error string, unless a cancel check already returned.
+          Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
-          without writing COMPLETED or FAILED so the cancelled status visible at
-          that check is preserved. Updates use unconditional ``_bt_update_job``,
-          so a cancel that lands between a check and the next update can still be
-          overwritten with RUNNING, COMPLETED, or FAILED.
+          ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
+          cancelled status visible at that check is preserved. Updates use
+          unconditional ``_bt_update_job``, so a cancel that lands between a
+          check and the next update can still be overwritten with RUNNING,
+          COMPLETED, or FAILED.
     """
     try:
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         # Deterministic (not random) so a retry of the same job_id — e.g. a
         # Temporal activity retry after a worker crash left the job RUNNING —
         # overwrites the same record instead of minting a duplicate.
@@ -1224,15 +1226,18 @@ def _run_backtest_background(
             result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
             backtest_id=backtest_id,
         )
+        return _BT_JOB_STATUS_COMPLETED
     except BacktestExecutionError as exc:
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc.detail))
+        return _BT_JOB_STATUS_FAILED
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        return _BT_JOB_STATUS_FAILED
 
 
 @app.post("/backtests", response_model=BacktestJobSubmission)
