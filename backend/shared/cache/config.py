@@ -34,6 +34,10 @@ Env vars:
     REDIS_SOCKET_CONNECT_TIMEOUT_S
                            redis-py ``socket_connect_timeout`` seconds
                            (default ``1.0``).
+    REDIS_SOCKET_TIMEOUT_S redis-py ``socket_timeout`` seconds for command
+                           I/O after connect (default ``1.0``). Finite so a
+                           stalled Redis cannot hang reviews forever; outages
+                           fail open to miss/recompute.
     REDIS_KEY_PREFIX       Optional prefix for all Redis keys (default
                            ``khala``). A blank value falls back to the default
                            prefix. Must not contain ``:`` (the backend appends
@@ -58,6 +62,7 @@ _DEFAULT_KEY_PREFIX = "khala"
 _DEFAULT_LOCK_TTL_S = 3600
 _DEFAULT_WAITER_POLL_S = 0.05
 _DEFAULT_SOCKET_CONNECT_TIMEOUT_S = 1.0
+_DEFAULT_SOCKET_TIMEOUT_S = 1.0
 _PORT_IN_HOST_ERROR = (
     "REDIS_HOST must not include a port; set REDIS_PORT separately "
     "or use REDIS_URL (got {host!r})"
@@ -208,5 +213,21 @@ def redis_socket_connect_timeout_s() -> float:
     return parse_float(
         "REDIS_SOCKET_CONNECT_TIMEOUT_S",
         _DEFAULT_SOCKET_CONNECT_TIMEOUT_S,
+        minimum=0.1,
+    )
+
+
+def redis_socket_timeout_s() -> float:
+    """redis-py per-command socket timeout (seconds). Floor 0.1.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns a finite timeout so stalled Redis command I/O cannot block
+          callers indefinitely; RedisBackend then fail-opens on ``TimeoutError``.
+    """
+    return parse_float(
+        "REDIS_SOCKET_TIMEOUT_S",
+        _DEFAULT_SOCKET_TIMEOUT_S,
         minimum=0.1,
     )

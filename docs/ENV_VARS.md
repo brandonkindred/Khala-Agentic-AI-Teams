@@ -1437,7 +1437,10 @@ never a review failure. When Redis is unreachable (or the `redis` wheel is missi
 in-process LRU / a local recompute — reviews continue without raising. Operators can
 distinguish an outage from a genuine cold cache by those warning lines (and by Redis
 client/healthcheck failures); there is no separate metric today. Optional
-`REDIS_SOCKET_CONNECT_TIMEOUT_S` (default `1.0`) tunes redis-py's connect timeout.
+`REDIS_SOCKET_CONNECT_TIMEOUT_S` (default `1.0`) and `REDIS_SOCKET_TIMEOUT_S`
+(default `1.0`) tune redis-py's connect and per-command socket timeouts. Command
+timeout must stay finite so a Redis that accepts TCP but stalls on GET/SET/EVAL
+fails open to miss/recompute instead of hanging the review thread forever.
 
 **Local compose vs production auth.** The in-repo `docker-compose.yml` Redis service enables
 `requirepass` from `REDIS_PASSWORD` (default `please-change-me`). Redis credentials are injected

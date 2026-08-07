@@ -78,6 +78,8 @@ x-se-redis-env: &se-redis-env
   REDIS_LOCK_TTL_S: ${REDIS_LOCK_TTL_S:-3600}
   REDIS_WAITER_TIMEOUT_S: ${REDIS_WAITER_TIMEOUT_S:-}
   REDIS_RESULT_TTL_S: ${REDIS_RESULT_TTL_S:-}
+  REDIS_SOCKET_CONNECT_TIMEOUT_S: ${REDIS_SOCKET_CONNECT_TIMEOUT_S:-1.0}
+  REDIS_SOCKET_TIMEOUT_S: ${REDIS_SOCKET_TIMEOUT_S:-1.0}
 
 # Opt-in OTLP → Tempo. Merge only into services you are actively debugging.
 x-team-otel-export: &team-otel-export

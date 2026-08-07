@@ -151,6 +151,54 @@ def test_redis_socket_connect_timeout_env(monkeypatch):
     assert cache_config.redis_socket_connect_timeout_s() == 2.5
 
 
+def test_redis_socket_timeout_env(monkeypatch):
+    """Command socket_timeout is independently configurable (fail-open on hung I/O)."""
+    monkeypatch.delenv("REDIS_SOCKET_TIMEOUT_S", raising=False)
+    assert cache_config.redis_socket_timeout_s() == 1.0
+    monkeypatch.setenv("REDIS_SOCKET_TIMEOUT_S", "3.5")
+    assert cache_config.redis_socket_timeout_s() == 3.5
+
+
+def test_build_redis_client_passes_socket_timeouts(monkeypatch):
+    """Client construction must set both connect and command socket timeouts.
+
+    Without ``socket_timeout``, a Redis that accepts TCP but stalls on GET/SET
+    blocks the calling thread forever and breaks fail-open.
+    """
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("REDIS_SOCKET_CONNECT_TIMEOUT_S", "2.0")
+    monkeypatch.setenv("REDIS_SOCKET_TIMEOUT_S", "4.0")
+    captured: dict = {}
+
+    class _FakeRedisMod:
+        class Redis:
+            @staticmethod
+            def from_url(url, **kwargs):
+                captured.update(kwargs)
+                return FakeRedis()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "redis", _FakeRedisMod)
+    client = factory_mod._build_redis_client()
+    assert client is not None
+    assert captured["socket_connect_timeout"] == 2.0
+    assert captured["socket_timeout"] == 4.0
+
+
+def test_redis_fail_open_on_timeout_error():
+    """Hung command I/O (TimeoutError) must miss/fail-open, never raise."""
+    client = FakeRedis()
+    cache = RedisBackend(client, "ns")
+    cache.set("k", b"v", max_entries=8)
+
+    def _timeout_get(_key: str):
+        raise TimeoutError("redis command timed out")
+
+    client.get = _timeout_get  # type: ignore[method-assign]
+    assert cache.get("k") is None
+
+
 # ---------------------------------------------------------------------------
 # MemoryBackend
 # ---------------------------------------------------------------------------

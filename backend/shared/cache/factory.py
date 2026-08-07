@@ -78,6 +78,8 @@ def _build_redis_client() -> Any | None:
           is set. Does **not** ping at construction time — RedisBackend fail-opens
           per operation so a compose cold-start race does not permanently stick
           the process to the memory backend. ImportError returns ``None``.
+        - Sets finite ``socket_connect_timeout`` and ``socket_timeout`` so a
+          stalled Redis cannot hang callers; RedisBackend then fail-opens.
         - Construction/config errors log at ``error`` (with redacted URL) and
           return ``None`` so callers still fail open to memory.
     """
@@ -99,6 +101,7 @@ def _build_redis_client() -> Any | None:
             url,
             decode_responses=False,
             socket_connect_timeout=config.redis_socket_connect_timeout_s(),
+            socket_timeout=config.redis_socket_timeout_s(),
         )
     except Exception:
         logger.error(
