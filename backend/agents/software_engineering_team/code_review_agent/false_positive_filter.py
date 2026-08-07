@@ -553,6 +553,68 @@ class CodebaseIndex:
         body = "\n".join(f"{i}| {lines[i - 1]}" for i in range(start, end_eff + 1))
         return f"{header}\n{body}"
 
+    def read_function(self, path: str, line: int) -> str:
+        """Return the enclosing Python construct body for ``line``, or an error.
+
+        Preconditions:
+            - Callers should pass a 1-based ``line``. Invalid bounds and
+              unresolved lookups are reported as ``Error: ...`` strings rather
+              than raised.
+
+        Postconditions:
+            - Returns ``Error: ...`` for bad ``line``, unreadable paths,
+              non-``.py``/``.pyi`` paths, or when no enclosing function/class
+              brackets ``line`` — never raises on those cases.
+            - On success, returns a header
+              ``{path} {kind} {name} lines {start}–{end} ({n} lines):``
+              followed by ``N| content`` body lines for the inclusive construct
+              span (decorators included). Path resolution matches ``read_file``.
+            - Does not apply ``_READ_LINES_MAX_SPAN``.
+        """
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            return f"Error: line must be a positive integer, got {line!r}."
+
+        content, error = self._read(path)
+        if content is None:
+            return error if error is not None else f"Error: file not found: {path}."
+
+        display = self.resolve_path(path) or path
+        if display == self.EXISTING_CODEBASE_PATH:
+            display = path
+        _, ext = os.path.splitext(display)
+        if ext.lower() not in (".py", ".pyi"):
+            return (
+                f"Error: read_function by line requires a Python file (.py/.pyi); "
+                f"got {display}."
+            )
+
+        stripped, physical, mapper = strip_numbered_prefixes(content, line)
+        construct = enclosing_construct(
+            stripped, physical, annotated_hunks=mapper is not None
+        )
+        if construct is None:
+            return (
+                f"Error: no enclosing function/class for line {line} of {display}."
+            )
+
+        display_start = (
+            mapper(construct.start_line) if mapper is not None else construct.start_line
+        )
+        display_end = (
+            mapper(construct.end_line) if mapper is not None else construct.end_line
+        )
+        body_lines = stripped.splitlines()
+        n = construct.end_line - construct.start_line + 1
+        header = (
+            f"{display} {construct.kind} {construct.name} "
+            f"lines {display_start}–{display_end} ({n} lines):"
+        )
+        body = "\n".join(
+            f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
+            for i in range(construct.start_line, construct.end_line + 1)
+        )
+        return f"{header}\n{body}"
+
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
     ) -> List[Tuple[str, int, str]]:
