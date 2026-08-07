@@ -298,7 +298,28 @@ describe('PendingQuestionsComponent', () => {
     // The coding-team backend contract is single-select: no multi-select field.
     const body = codingTeamApiSpy.submitAnswers.mock.calls[0][1];
     expect('selected_option_ids' in body.answers[0]).toBe(false);
+    expect(body.resume_token).toBeUndefined();
     expect(emitted).toEqual(mockStatus);
+  });
+
+  it('echoes resume_token on coding-team submit for Temporal-native pauses', () => {
+    component.submitEndpoint = 'coding-team';
+    component.resumeToken = 'job-1:tok-abc';
+    component.questions = [{ ...mockQuestion, required: false } as any];
+    component.initializeAnswers();
+    component.getAnswer('q1')!.selectedOptionIds.add('a1');
+    component.answers = new Map(component.answers);
+
+    codingTeamApiSpy.submitAnswers.mockReturnValue(
+      of({ job_id: 'job-1', status: 'waiting_for_user', waiting_for_answers: true }),
+    );
+
+    component.submitAnswers();
+
+    expect(codingTeamApiSpy.submitAnswers).toHaveBeenCalledWith('job-1', {
+      answers: [{ question_id: 'q1', selected_option_id: 'a1', other_text: null }],
+      resume_token: 'job-1:tok-abc',
+    });
   });
 
   it('coding-team submit error path sets error', () => {

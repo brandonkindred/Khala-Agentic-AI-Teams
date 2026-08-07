@@ -517,6 +517,7 @@
               <app-pending-questions
                 [jobId]="selectedRunId!"
                 [questions]="jobStatus.pending_questions!"
+                [resumeToken]="jobStatus.resume_token ?? null"
                 submitEndpoint="coding-team"
                 (answersSubmitted)="onAnswersSubmitted($event)"
               />
