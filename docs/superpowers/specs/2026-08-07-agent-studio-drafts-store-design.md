@@ -98,7 +98,7 @@ predicate includes `user_id`.
 - Wrong-user access is indistinguishable from not-found (`None` / `False`).
 - Preconditions (raise `ValueError`): non-empty `user_id`; non-empty `name` when
   provided / on rename; `payload` is a `dict` when provided.
-- Routes (#5701) map `None`/`False` → 404 and `ValueError` → 400.
+- Follow-on HTTP routes map `None`/`False` → 404 and `ValueError` → 400.
 
 ## Files
 
