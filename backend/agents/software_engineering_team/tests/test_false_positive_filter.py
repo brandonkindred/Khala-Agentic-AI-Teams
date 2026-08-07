@@ -594,6 +594,72 @@ def test_find_references_rejects_nonpositive_max(bad_max: int) -> None:
         CodebaseIndex(files={"a.py": "x"}).find_references("x", max_matches=bad_max)
 
 
+def test_find_references_includes_repo_reader_hits() -> None:
+    """When a reader is present, out-of-submission matches appear as path:line."""
+    idx = CodebaseIndex(
+        files={"changed.py": "x = 1\n"},
+        repo_reader=_FakeReader({"other/caller.py": "from changed import x\nx()\n"}),
+    )
+    result = idx.find_references("changed")
+    assert "other/caller.py:1" in result.splitlines()
+    assert "No references" not in result
+
+
+def test_find_references_merges_submission_then_repo_under_cap() -> None:
+    """Submission hits come first; total length respects max_matches."""
+    idx = CodebaseIndex(
+        files={"a.py": "needle\n"},
+        repo_reader=_FakeReader(
+            {
+                "r1.py": "needle\n",
+                "r2.py": "needle\n",
+                "r3.py": "needle\n",
+            }
+        ),
+    )
+    lines = idx.find_references("needle", max_matches=3).splitlines()
+    assert lines[0] == "a.py:1"
+    assert len(lines) == 3
+    assert all(":" in line and "needle" not in line for line in lines)
+
+
+def test_find_references_skips_submission_paths_in_repo_half() -> None:
+    """A reader path that is also a submission key is not double-counted from repo."""
+    idx = CodebaseIndex(
+        files={"shared.py": "needle\n"},
+        repo_reader=_FakeReader(
+            {
+                "shared.py": "needle\nneedle\n",  # would add extra lines if not skipped
+                "only_repo.py": "needle\n",
+            }
+        ),
+    )
+    lines = idx.find_references("needle", max_matches=10).splitlines()
+    assert lines.count("shared.py:1") == 1
+    assert "shared.py:2" not in lines
+    assert "only_repo.py:1" in lines
+
+
+def test_search_repo_references_respects_max_files_scanned() -> None:
+    """File-scan cap limits how many non-submission reader files are opened."""
+    from software_engineering_team.code_review_agent.false_positive_filter import (
+        _search_repo_references,
+    )
+
+    reader_files = {f"f{i}.py": "needle\n" for i in range(5)}
+    idx = CodebaseIndex(files={"sub.py": "other\n"}, repo_reader=_FakeReader(reader_files))
+    hits = _search_repo_references(idx, "needle", max_matches=10, max_files_scanned=2)
+    assert len(hits) == 2
+    assert {path for path, _, _ in hits} <= set(reader_files)
+
+
+def test_find_references_no_reader_unchanged() -> None:
+    """Without a reader, behavior stays submission-only."""
+    idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
+    assert idx.find_references("foo") == "a.py:1"
+    assert idx.find_references("zzz") == "No references for 'zzz'."
+
+
 # --------------------------------------------------------------------------- tools
 
 
