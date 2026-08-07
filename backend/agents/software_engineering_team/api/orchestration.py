@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.env_config import env_bool
 from shared.git.git_utils import DEVELOPMENT_BRANCH
+from shared.temporal.runner import signal_workflow_sync
 from software_engineering_team import hitl
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
@@ -33,6 +34,7 @@ from software_engineering_team.job_store import (
     RESUME_CLAIM_TTL_S,
 )
 from software_engineering_team.models import CodingTeamPlanInput, JobStatus
+from software_engineering_team.temporal.coding_team_constants import WORKFLOW_ID_PREFIX
 from software_engineering_team.token_crypto import decrypt_token
 
 logger = logging.getLogger(__name__)
@@ -423,26 +425,34 @@ def _claim_and_spawn_resume(
 
 
 def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
-    """Best-effort restart of a dead orchestrator after answers arrived.
+    """Best-effort resume of a paused job after answers arrived (or a deferred recheck).
 
-    The thread registry is process-local, so "not alive here" does not mean "not alive anywhere":
-    a paused wait loop in another worker process heartbeats the job record every poll, and a fresh
-    heartbeat means that loop will consume the just-stored answers itself — spawning a second
-    orchestrator would double-drive the job and its checkout. GitHub-issue jobs resume through the
-    full hook path so publication (PR, issue comments) is preserved.
+    Two paths, told apart by whether ``data`` carries a ``resume_token`` (set only by a
+    ``pause_strategy="return"`` pause):
+
+    - **Temporal-native pause** (``resume_token`` present): signal the running
+      ``CodingTeamWorkflow`` with ``submit_answers``, carrying ``resume_token`` and
+      already-stored ``submitted_answers`` (or ``[]``). No heartbeat deferral, plan
+      recovery, GitHub-token resolution, or claim+spawn. Signal delivery failures are
+      logged and become ``False`` so this function's never-raises contract holds.
+    - **Thread-mode / GitHub-hook pause** (``resume_token`` absent): unchanged — defer to
+      a fresh answer-wait heartbeat (with recheck), or claim and spawn the orchestrator
+      (hook path for GitHub-issue jobs).
 
     Preconditions:
         - ``data`` is the job record for ``job_id`` and the caller observed the run thread
-          as not alive in this process.
+          as not alive in this process (thread-mode callers); Temporal callers may invoke
+          this with a waiting Temporal-native job as a safety net / recheck.
     Postconditions:
-        - Returns True when the run is resuming (a live wait loop heartbeated recently — with a
-          deferred recheck scheduled in case that loop died right after its last beat — a thread
-          was spawned here, or another caller holds the start claim); False when the job is
-          terminal, the record lacks a usable ``repo_path``/``plan_input``, a GitHub-issue job
-          has no token to resume its publish flow, or the thread could not be started.
-          Never raises for any documented ``ResumeSpawnResult`` outcome; raises ``RuntimeError``
-          only if ``_claim_and_spawn_resume`` ever returns an outcome this function doesn't
-          recognize (an exhaustiveness guard against future silent drift, not a normal path).
+        - Returns True when the run is resuming (Temporal signal accepted; a live wait loop
+          heartbeated recently — with a deferred recheck scheduled; a thread was spawned
+          here; or another caller holds the start claim).
+        - Returns False when the job is terminal, not paused, a Temporal signal failed, the
+          record lacks a usable ``repo_path``/``plan_input``, a GitHub-issue job has no
+          token, or the thread could not be started.
+        - Never raises for Temporal signal failures or any documented ``ResumeSpawnResult``
+          outcome; raises ``RuntimeError`` only if ``_claim_and_spawn_resume`` returns an
+          unrecognized outcome (exhaustiveness guard).
     """
     if hitl.is_terminal(data):
         logger.warning("Auto-resume for job %s skipped: job is terminal.", job_id)
@@ -457,6 +467,25 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
             data.get("status"),
         )
         return False
+    resume_token = data.get("resume_token")
+    if resume_token:
+        try:
+            signal_workflow_sync(
+                f"{WORKFLOW_ID_PREFIX}{job_id}",
+                "submit_answers",
+                {
+                    "resume_token": resume_token,
+                    "answers": data.get("submitted_answers") or [],
+                },
+            )
+        except Exception:
+            logger.error(
+                "Auto-resume for job %s skipped: Temporal submit_answers signal failed.",
+                job_id,
+                exc_info=True,
+            )
+            return False
+        return True
     if _main._answer_wait_heartbeat_fresh(data):
         _main._schedule_resume_recheck(job_id)
         return True

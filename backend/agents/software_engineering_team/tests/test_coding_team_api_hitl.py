@@ -901,6 +901,62 @@ def test_auto_resume_refuses_non_paused_job():
     assert api._try_auto_resume("j1", _job(status="pending", waiting_for_answers=False)) is False
 
 
+def test_auto_resume_temporal_native_signals_workflow(monkeypatch):
+    """A Temporal-native pause (resume_token) must wake CodingTeamWorkflow via
+    submit_answers instead of claim+spawn."""
+    from software_engineering_team.api import orchestration as orch
+
+    answers = [{"question_id": "q1", "selected_option_id": "strict"}]
+    job = _job(
+        resume_token="j1:tok-1",
+        submitted_answers=answers,
+        status="waiting_for_user",
+    )
+
+    signaled: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        orch,
+        "signal_workflow_sync",
+        lambda workflow_id, signal, payload: signaled.update(
+            workflow_id=workflow_id, signal=signal, payload=payload
+        ),
+    )
+
+    def _must_not_spawn(*_a, **_k):  # pragma: no cover - Temporal path only
+        raise AssertionError("claim/spawn path must not run for Temporal-native auto-resume")
+
+    monkeypatch.setattr(orch, "_claim_and_spawn_resume", _must_not_spawn)
+    monkeypatch.setattr(api, "_answer_wait_heartbeat_fresh", lambda data: False)
+    monkeypatch.setattr(api, "_recover_resume_plan", _must_not_spawn)
+    monkeypatch.setattr(api, "_resolve_github_job_token", _must_not_spawn)
+
+    assert api._try_auto_resume("j1", job) is True
+    assert signaled["workflow_id"] == "coding_team-j1"
+    assert signaled["signal"] == "submit_answers"
+    assert signaled["payload"] == {"resume_token": "j1:tok-1", "answers": answers}
+
+
+def test_auto_resume_temporal_signal_failure_returns_false(monkeypatch):
+    """signal_workflow_sync failures must degrade to False (never raise) so /answers
+    and the recheck timer can fall back to the manual-resume hint."""
+    from software_engineering_team.api import orchestration as orch
+
+    job = _job(resume_token="j1:tok-2", status="waiting_for_user")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("temporal client unavailable")
+
+    monkeypatch.setattr(orch, "signal_workflow_sync", _boom)
+
+    def _must_not_spawn(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not fall through to claim/spawn after a signal failure")
+
+    monkeypatch.setattr(orch, "_claim_and_spawn_resume", _must_not_spawn)
+    monkeypatch.setattr(api, "_answer_wait_heartbeat_fresh", lambda data: False)
+
+    assert api._try_auto_resume("j1", job) is False
+
+
 def test_auto_resume_coerces_non_dict_plan_input(monkeypatch):
     """A non-dict plan_input must be coerced to {} (not raise off .get()) so auto-resume can still
     use the job's own top-level repo_path field."""
