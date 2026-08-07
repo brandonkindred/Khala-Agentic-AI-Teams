@@ -111,16 +111,6 @@ def test_build_from_pairs_empty_new_with_old_still_empty() -> None:
     assert surface.is_empty
 
 
-def test_build_from_pairs_nonempty_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        build_change_surface_from_pairs({"a.py": "new"})
-
-
-def test_build_from_pairs_nonempty_with_old_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        build_change_surface_from_pairs({"a.py": "new"}, old_contents={"a.py": "old"})
-
-
 def test_expand_touched_ranges_empty() -> None:
     assert expand_touched_ranges("def f():\n    pass\n", []) == ()
     assert expand_touched_ranges("def f():\n    pass\n", set()) == ()

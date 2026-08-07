@@ -372,25 +372,27 @@ def build_change_surface_from_pairs(
 
     Preconditions:
         - ``new_contents`` maps path → new-file content. May be empty.
-        - ``old_contents``, when omitted/`None`, means no base for every path
-          (new-file semantics in follow-on assembly). When provided, missing
-          keys are treated as absent old content for that path.
+        - ``old_contents``, when omitted/`None`, means empty old for every
+          path. When provided, missing keys are treated as empty old for
+          that path (same as ``unified_diffs_from_pairs``).
 
     Postconditions:
         - ``new_contents == {}`` → empty ``ChangeSurface`` regardless of
           ``old_contents``.
-        - Otherwise raises ``NotImplementedError`` until pair assembly (#5391)
-          is implemented. Future non-stub behavior: derive unified diffs
-          (difflib or equivalent), then the same pre-numbered expanded surface
-          as the patch path; identical old/new yields an empty/no-op for that
-          path; new files (no old) are included.
+        - Otherwise equivalent to
+          ``build_change_surface_from_patches(
+              unified_diffs_from_pairs(new_contents, old_contents),
+              new_contents=new_contents,
+          )``: identical old/new → blank patch → path omitted; all-identical
+          / no assemblable bodies → empty surface; new and modified files
+          with assemblable bodies match the patch-path surface for those
+          diffs.
+        - Never raises for well-typed string mappings.
     """
     if not new_contents:
         return _empty_surface()
-    raise NotImplementedError(
-        "build_change_surface_from_pairs assembly is not implemented yet "
-        "(change-surface old/new path)"
-    )
+    patches = unified_diffs_from_pairs(new_contents, old_contents)
+    return build_change_surface_from_patches(patches, new_contents=new_contents)
 
 
 _PYTHON_EXTS = frozenset({".py", ".pyi"})
