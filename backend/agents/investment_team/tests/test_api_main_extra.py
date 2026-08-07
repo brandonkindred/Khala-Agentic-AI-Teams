@@ -1357,8 +1357,11 @@ def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
     None (unknown, still in flight) rather than a misleadingly-confirmed 0."""
     import job_service_client as jsc_mod
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(api_main, "_PURGE_TIMEOUT_S", 0.2)
+    # Timeout lives (and is read) on orchestrator_api; patching api.main's
+    # re-export alias would not shrink the deadline the purge helper uses.
+    monkeypatch.setattr(orchestrator_api, "_PURGE_TIMEOUT_S", 0.2)
 
     release = threading.Event()
 
@@ -1884,6 +1887,7 @@ def test_persist_run_state_propagates_job_service_error(
     persist activity's retry policy) need to detect a durable-write failure
     instead of continuing as if it succeeded (issue #4150)."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     class _Broken:
         def create_job(self, *a, **k):
@@ -1892,7 +1896,7 @@ def test_persist_run_state_propagates_job_service_error(
         def update_job(self, *a, **k):
             raise RuntimeError("backend down")
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
     with pytest.raises(RuntimeError, match="backend down"):
         api_main._persist_run_state("run-z", {"status": "running"}, create=True)
     with pytest.raises(RuntimeError, match="backend down"):
@@ -1908,10 +1912,11 @@ def test_persist_run_state_status_less_update_does_not_clobber_status(
     status to "running" unconditionally, clobbering a cancelled/failed/
     completed status a concurrent path had already persisted (issue #4185)."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     client = _FakeJobClient()
     client.create_job("run-cancelled", status="cancelled", completed_cycles=2)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: client)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: client)
 
     # A progress-only delta, no "status" key -- must not touch status at all.
     api_main._persist_run_state("run-cancelled", {"completed_cycles": 3}, create=False)
@@ -2350,33 +2355,32 @@ def test_reconcile_run_progress_tolerates_none_data(monkeypatch: pytest.MonkeyPa
     #4325) but in ``_reconcile_run_progress``'s own, separate fallback.
     """
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     run_id = "run-none-data"
-    monkeypatch.setattr(
-        api_main,
-        "_active_runs",
-        {
-            run_id: {
-                "run_id": run_id,
-                "status": "running",
-                "total_cycles": 4,
-                "completed_cycles": 1,
-            }
-        },
-    )
+    shared_runs = {
+        run_id: {
+            "run_id": run_id,
+            "status": "running",
+            "total_cycles": 4,
+            "completed_cycles": 1,
+        }
+    }
+    monkeypatch.setattr(run_state, "active_runs", shared_runs)
+    monkeypatch.setattr(api_main, "_active_runs", shared_runs)
 
     class _Stub:
         def get_job(self, jid: str):
             return {"job_id": run_id, "status": "running", "data": None}
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Stub())
 
     api_main._reconcile_run_progress(run_id)
 
     # No crash, and the in-memory entry's existing progress is left intact
     # since the fallback ("data" -> the persisted record itself) contains
     # none of _STRATEGY_LAB_PROGRESS_FIELDS.
-    assert api_main._active_runs[run_id]["completed_cycles"] == 1
+    assert run_state.active_runs[run_id]["completed_cycles"] == 1
 
 
 # ---------------------------------------------------------------------------
