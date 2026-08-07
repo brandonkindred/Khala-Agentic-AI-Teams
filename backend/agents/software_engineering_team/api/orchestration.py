@@ -8,7 +8,7 @@ split; models are imported directly.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from shared.env_config import env_bool
 from shared.git.git_utils import DEVELOPMENT_BRANCH
