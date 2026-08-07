@@ -218,12 +218,12 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
     """Build this pass's tools: the shared submission tools plus repo-wide search.
 
     Postconditions:
-        - Returns the four shared tools from ``false_positive_filter._build_tools``
-          (``read_file``, ``list_files``, ``search_codebase``,
-          ``find_function_at_line``) plus a new ``search_repository`` tool bound
-          to ``index`` -- the only tool in this set whose entire purpose is
-          reaching beyond the submission's own files to find a changed
-          function's out-of-diff callers.
+        - Returns the six shared tools from ``false_positive_filter._build_tools``
+          (``read_file``, ``read_lines``, ``read_function``, ``list_files``,
+          ``search_codebase``, ``find_function_at_line``) plus a new
+          ``search_repository`` tool bound to ``index`` -- the only tool in this
+          set whose entire purpose is reaching beyond the submission's own files
+          to find a changed function's out-of-diff callers.
     """
 
     @tool

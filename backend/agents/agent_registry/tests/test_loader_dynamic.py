@@ -95,10 +95,10 @@ def test_static_id_resolution_never_touches_the_store(fake_store: _FakeStore) ->
 
 def test_get_resolves_dynamic_id_from_store(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
-    saved = _manifest("agent_studio.mine-abc")
+    saved = _manifest("agent_team_studio.agent_studio.mine-abc")
     fake_store.upsert(saved)
-    got = reg.get("agent_studio.mine-abc")
-    assert got is not None and got.id == "agent_studio.mine-abc"
+    got = reg.get("agent_team_studio.agent_studio.mine-abc")
+    assert got is not None and got.id == "agent_team_studio.agent_studio.mine-abc"
 
 
 def test_get_reads_your_writes_local_copy_on_store_miss(fake_store: _FakeStore) -> None:
@@ -107,10 +107,13 @@ def test_get_reads_your_writes_local_copy_on_store_miss(fake_store: _FakeStore) 
     # the local copy is the fallback for exactly this case.
     reg = AgentRegistry([], {})
     fake_store.raise_on = {"upsert"}  # write-through fails → id marked unconfirmed
-    m = _manifest("agent_studio.local-only-1")
+    m = _manifest("agent_team_studio.agent_studio.local-only-1")
     reg.register(m)
-    assert "agent_studio.local-only-1" in reg._unconfirmed
-    assert reg.get("agent_studio.local-only-1").id == "agent_studio.local-only-1"
+    assert "agent_team_studio.agent_studio.local-only-1" in reg._unconfirmed
+    assert (
+        reg.get("agent_team_studio.agent_studio.local-only-1").id
+        == "agent_team_studio.agent_studio.local-only-1"
+    )
 
 
 def test_get_does_not_resurrect_confirmed_id_deleted_on_another_worker(
@@ -120,36 +123,38 @@ def test_get_does_not_resurrect_confirmed_id_deleted_on_another_worker(
     # then another worker deletes the row from Postgres. A store miss for a *confirmed*
     # id must return None — not the stale local copy — so cross-worker deletes are seen.
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.shared-1")
+    m = _manifest("agent_team_studio.agent_studio.shared-1")
     reg.register(m)  # upsert succeeds → confirmed, still in local _by_id
-    assert "agent_studio.shared-1" not in reg._unconfirmed
-    assert reg.get("agent_studio.shared-1") is not None  # resolves via the store row
+    assert "agent_team_studio.agent_studio.shared-1" not in reg._unconfirmed
+    assert (
+        reg.get("agent_team_studio.agent_studio.shared-1") is not None
+    )  # resolves via the store row
     # Simulate another worker's unregister(): the Postgres row is gone.
-    fake_store.rows.pop("agent_studio.shared-1")
-    assert reg.get("agent_studio.shared-1") is None  # not resurrected from _by_id
+    fake_store.rows.pop("agent_team_studio.agent_studio.shared-1")
+    assert reg.get("agent_team_studio.agent_studio.shared-1") is None  # not resurrected from _by_id
     # And it's dropped from the catalog listing too (consistent with get()).
-    assert "agent_studio.shared-1" not in {mm.id for mm in reg.all()}
+    assert "agent_team_studio.agent_studio.shared-1" not in {mm.id for mm in reg.all()}
 
 
 def test_get_unknown_dynamic_id_returns_none(fake_store: _FakeStore) -> None:
     # No static, store, or local entry → None.
     reg = AgentRegistry([], {})
-    assert reg.get("agent_studio.nowhere-1") is None
+    assert reg.get("agent_team_studio.agent_studio.nowhere-1") is None
 
 
 def test_get_degrades_to_local_on_store_error(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.local-1")
+    m = _manifest("agent_team_studio.agent_studio.local-1")
     reg._by_id[m.id] = m
     fake_store.raise_on = {"get"}
-    assert reg.get("agent_studio.local-1") is m
+    assert reg.get("agent_team_studio.agent_studio.local-1") is m
 
 
 def test_register_writes_through_for_dynamic_ids(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.new-1")
+    m = _manifest("agent_team_studio.agent_studio.new-1")
     reg.register(m)
-    assert "agent_studio.new-1" in fake_store.rows
+    assert "agent_team_studio.agent_studio.new-1" in fake_store.rows
 
 
 def test_register_never_persists_static_ids(fake_store: _FakeStore) -> None:
@@ -164,38 +169,41 @@ def test_register_swallows_store_error(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
     fake_store.raise_on = {"upsert"}
     # Default path is best-effort: local install survives a store upsert failure.
-    reg.register(_manifest("agent_studio.err-1"))
-    assert reg._by_id["agent_studio.err-1"].id == "agent_studio.err-1"
+    reg.register(_manifest("agent_team_studio.agent_studio.err-1"))
+    assert (
+        reg._by_id["agent_team_studio.agent_studio.err-1"].id
+        == "agent_team_studio.agent_studio.err-1"
+    )
 
 
 def test_register_require_persist_raises_and_rolls_back_local(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
     fake_store.raise_on = {"upsert"}
-    m = _manifest("agent_studio.strict-1")
+    m = _manifest("agent_team_studio.agent_studio.strict-1")
     with pytest.raises(RuntimeError, match="boom:upsert"):
         reg.register(m, require_persist=True)
-    assert "agent_studio.strict-1" not in reg._by_id
-    assert "agent_studio.strict-1" not in reg._unconfirmed
-    assert "agent_studio.strict-1" not in fake_store.rows
+    assert "agent_team_studio.agent_studio.strict-1" not in reg._by_id
+    assert "agent_team_studio.agent_studio.strict-1" not in reg._unconfirmed
+    assert "agent_team_studio.agent_studio.strict-1" not in fake_store.rows
 
 
 def test_register_require_persist_restores_prior_on_upsert_failure(
     fake_store: _FakeStore,
 ) -> None:
     reg = AgentRegistry([], {})
-    prior = _manifest("agent_studio.strict-overwrite", name="Prior")
+    prior = _manifest("agent_team_studio.agent_studio.strict-overwrite", name="Prior")
     reg.register(prior)
-    assert "agent_studio.strict-overwrite" in fake_store.rows
+    assert "agent_team_studio.agent_studio.strict-overwrite" in fake_store.rows
 
     fake_store.raise_on = {"upsert"}
     with pytest.raises(RuntimeError, match="boom:upsert"):
         reg.register(
-            _manifest("agent_studio.strict-overwrite", name="New"),
+            _manifest("agent_team_studio.agent_studio.strict-overwrite", name="New"),
             require_persist=True,
         )
     # Prior local entry restored; store still has the last successful upsert.
-    assert reg._by_id["agent_studio.strict-overwrite"].name == "Prior"
-    assert fake_store.rows["agent_studio.strict-overwrite"].name == "Prior"
+    assert reg._by_id["agent_team_studio.agent_studio.strict-overwrite"].name == "Prior"
+    assert fake_store.rows["agent_team_studio.agent_studio.strict-overwrite"].name == "Prior"
 
 
 def test_register_require_persist_succeeds_when_store_inactive(
@@ -204,10 +212,10 @@ def test_register_require_persist_succeeds_when_store_inactive(
     # No dynamic store → local-only is authoritative; require_persist is a no-op.
     fake_store.active = False
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.strict-local")
+    m = _manifest("agent_team_studio.agent_studio.strict-local")
     reg.register(m, require_persist=True)
-    assert reg.get("agent_studio.strict-local") is m
-    assert "agent_studio.strict-local" in reg._unconfirmed
+    assert reg.get("agent_team_studio.agent_studio.strict-local") is m
+    assert "agent_team_studio.agent_studio.strict-local" in reg._unconfirmed
 
 
 def test_register_require_persist_rollback_preserves_concurrent_install(
@@ -216,8 +224,8 @@ def test_register_require_persist_rollback_preserves_concurrent_install(
 ) -> None:
     """A failed require_persist must not clobber a concurrent re-register of the same id."""
     reg = AgentRegistry([], {})
-    failing = _manifest("agent_studio.race-1", name="Failing")
-    concurrent = _manifest("agent_studio.race-1", name="Concurrent")
+    failing = _manifest("agent_team_studio.agent_studio.race-1", name="Failing")
+    concurrent = _manifest("agent_team_studio.agent_studio.race-1", name="Concurrent")
 
     def _upsert_then_race(manifest):
         # Simulate another thread installing a newer entry while our store call runs
@@ -232,8 +240,8 @@ def test_register_require_persist_rollback_preserves_concurrent_install(
     with pytest.raises(RuntimeError, match="boom:upsert"):
         reg.register(failing, require_persist=True)
 
-    assert reg._by_id["agent_studio.race-1"] is concurrent
-    assert reg._by_id["agent_studio.race-1"].name == "Concurrent"
+    assert reg._by_id["agent_team_studio.agent_studio.race-1"] is concurrent
+    assert reg._by_id["agent_team_studio.agent_studio.race-1"].name == "Concurrent"
 
 
 def test_replace_dynamic_manifests_rejects_overlap(fake_store: _FakeStore) -> None:
@@ -286,7 +294,9 @@ def test_replace_manifests_rejects_empty_id_and_overlap() -> None:
     with pytest.raises(ValueError, match="non-empty id"):
         replace_manifests([_manifest("")], [])
     with pytest.raises(ValueError, match="disjoint"):
-        replace_manifests([_manifest("agent_studio.x")], ["agent_studio.x"])
+        replace_manifests(
+            [_manifest("agent_team_studio.agent_studio.x")], ["agent_team_studio.agent_studio.x"]
+        )
 
 
 def test_upsert_rejects_empty_id() -> None:
@@ -325,7 +335,7 @@ def test_replace_manifests_shared_conn_avoids_nested_pool(
         def cursor(self, *args, **kwargs):
             return _Cur()
 
-    ds.replace_manifests([_manifest("agent_studio.shared-1")], [], conn=_Conn())
+    ds.replace_manifests([_manifest("agent_team_studio.agent_studio.shared-1")], [], conn=_Conn())
     # DDL + upsert ran on the shared conn; _ensure_schema was never entered.
     assert any("CREATE TABLE" in s or "agent_registry_dynamic" in s for s in executed)
     assert any("INSERT INTO" in s for s in executed)
@@ -354,7 +364,9 @@ def test_replace_manifests_shared_conn_propagates_execute_failure(
             return _Cur()
 
     with pytest.raises(RuntimeError, match="shared conn execute boom"):
-        ds.replace_manifests([_manifest("agent_studio.shared-fail")], [], conn=_Conn())
+        ds.replace_manifests(
+            [_manifest("agent_team_studio.agent_studio.shared-fail")], [], conn=_Conn()
+        )
     # A rolled-back outer txn must be able to retry schema on the same process.
     assert ds._schema_ensured is True  # unchanged from our pre-set True
 
@@ -387,7 +399,9 @@ def test_replace_manifests_shared_conn_propagates_schema_failure(
             return _Cur()
 
     with pytest.raises(RuntimeError, match="shared conn ddl boom"):
-        ds.replace_manifests([_manifest("agent_studio.shared-ddl")], [], conn=_Conn())
+        ds.replace_manifests(
+            [_manifest("agent_team_studio.agent_studio.shared-ddl")], [], conn=_Conn()
+        )
     assert ds._schema_ensured is False
 
 
@@ -404,10 +418,10 @@ def test_manifests_with_id_prefix_require_store_propagates(
 
 def test_unregister_deletes_from_store(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.del-1")
+    m = _manifest("agent_team_studio.agent_studio.del-1")
     reg.register(m)
-    assert reg.unregister("agent_studio.del-1") is True
-    assert "agent_studio.del-1" not in fake_store.rows
+    assert reg.unregister("agent_team_studio.agent_studio.del-1") is True
+    assert "agent_team_studio.agent_studio.del-1" not in fake_store.rows
 
 
 def test_unregister_refuses_a_static_id(fake_store: _FakeStore) -> None:
@@ -422,13 +436,13 @@ def test_unregister_refuses_a_static_id(fake_store: _FakeStore) -> None:
 def test_all_merges_static_over_dynamic(fake_store: _FakeStore) -> None:
     disk = _manifest("blogging.planner", team="blogging", name="Disk")
     reg = AgentRegistry([disk], {})
-    fake_store.upsert(_manifest("agent_studio.saved-1"))
+    fake_store.upsert(_manifest("agent_team_studio.agent_studio.saved-1"))
     # A dynamic row colliding with a static id must not shadow the disk manifest.
     fake_store.rows["blogging.planner"] = _manifest(
         "blogging.planner", team="blogging", name="Shadow"
     )
     by_id = {m.id: m for m in reg.all()}
-    assert set(by_id) == {"blogging.planner", "agent_studio.saved-1"}
+    assert set(by_id) == {"blogging.planner", "agent_team_studio.agent_studio.saved-1"}
     assert by_id["blogging.planner"].name == "Disk"  # static wins
 
 
@@ -445,9 +459,9 @@ def test_all_includes_dynamic_entry_whose_write_through_failed(fake_store: _Fake
     # the store never received it (read-your-writes parity with get()).
     reg = AgentRegistry([], {})
     fake_store.raise_on = {"upsert"}
-    reg.register(_manifest("agent_studio.write-through-failed-1"))
+    reg.register(_manifest("agent_team_studio.agent_studio.write-through-failed-1"))
     ids = {m.id for m in reg.all()}
-    assert "agent_studio.write-through-failed-1" in ids
+    assert "agent_team_studio.agent_studio.write-through-failed-1" in ids
 
 
 def test_manifests_with_id_prefix_includes_dynamic_entry_whose_write_through_failed(
@@ -464,8 +478,8 @@ def test_manifests_with_id_prefix_includes_dynamic_entry_whose_write_through_fai
 
 def test_search_and_teams_see_dynamic_entries(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
-    fake_store.upsert(_manifest("agent_studio.searchme-1", name="Searchable"))
-    assert any(s.id == "agent_studio.searchme-1" for s in reg.search())
+    fake_store.upsert(_manifest("agent_team_studio.agent_studio.searchme-1", name="Searchable"))
+    assert any(s.id == "agent_team_studio.agent_studio.searchme-1" for s in reg.search())
     assert any(g.team == "agent_studio" and g.agent_count == 1 for g in reg.teams())
 
 
@@ -499,39 +513,39 @@ def test_manifests_with_id_prefix_degrades_on_store_error(fake_store: _FakeStore
 
 def test_unregister_swallows_store_error(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.del-err")
+    m = _manifest("agent_team_studio.agent_studio.del-err")
     reg._by_id[m.id] = m  # local only
     fake_store.raise_on = {"delete"}
     # Must not raise even though the store delete blows up; local removal still happens.
-    assert reg.unregister("agent_studio.del-err") is True
-    assert "agent_studio.del-err" not in reg._by_id
+    assert reg.unregister("agent_team_studio.agent_studio.del-err") is True
+    assert "agent_team_studio.agent_studio.del-err" not in reg._by_id
 
 
 def test_get_does_not_resurrect_after_unregister_delete_fails(fake_store: _FakeStore) -> None:
     # A failed best-effort Postgres delete must not let get() resurrect the stale
     # row on the worker that just unregistered it (tombstone window).
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.resurrect-1")
+    m = _manifest("agent_team_studio.agent_studio.resurrect-1")
     reg.register(m)
-    assert "agent_studio.resurrect-1" in fake_store.rows  # upsert succeeded
+    assert "agent_team_studio.agent_studio.resurrect-1" in fake_store.rows  # upsert succeeded
     fake_store.raise_on = {"delete"}
-    assert reg.unregister("agent_studio.resurrect-1") is True
+    assert reg.unregister("agent_team_studio.agent_studio.resurrect-1") is True
     # The store row is still there (delete failed) but get() must not return it.
-    assert "agent_studio.resurrect-1" in fake_store.rows
-    assert reg.get("agent_studio.resurrect-1") is None
+    assert "agent_team_studio.agent_studio.resurrect-1" in fake_store.rows
+    assert reg.get("agent_team_studio.agent_studio.resurrect-1") is None
 
 
 def test_register_after_failed_unregister_clears_the_tombstone(fake_store: _FakeStore) -> None:
     # Re-registering the same id supersedes an earlier failed-delete tombstone.
     reg = AgentRegistry([], {})
-    reg.register(_manifest("agent_studio.re-reg-1"))
+    reg.register(_manifest("agent_team_studio.agent_studio.re-reg-1"))
     fake_store.raise_on = {"delete"}
-    reg.unregister("agent_studio.re-reg-1")
-    assert reg.get("agent_studio.re-reg-1") is None  # tombstoned
+    reg.unregister("agent_team_studio.agent_studio.re-reg-1")
+    assert reg.get("agent_team_studio.agent_studio.re-reg-1") is None  # tombstoned
     fake_store.raise_on = set()
-    fresh = _manifest("agent_studio.re-reg-1", name="Fresh")
+    fresh = _manifest("agent_team_studio.agent_studio.re-reg-1", name="Fresh")
     reg.register(fresh)
-    assert reg.get("agent_studio.re-reg-1") is fresh
+    assert reg.get("agent_team_studio.agent_studio.re-reg-1") is fresh
 
 
 def test_all_excludes_tombstoned_id_even_though_store_row_still_there(
@@ -542,13 +556,25 @@ def test_all_excludes_tombstoned_id_even_though_store_row_still_there(
     # store row (failed delete) or this worker's own stale local copy would
     # otherwise resurface it.
     reg = AgentRegistry([], {})
-    reg.register(_manifest("agent_studio.tombstoned-listing-1"))
+    reg.register(_manifest("agent_team_studio.agent_studio.tombstoned-listing-1"))
     fake_store.raise_on = {"delete"}
-    reg.unregister("agent_studio.tombstoned-listing-1")
-    assert "agent_studio.tombstoned-listing-1" in fake_store.rows  # delete failed
-    assert reg.get("agent_studio.tombstoned-listing-1") is None  # tombstoned
+    reg.unregister("agent_team_studio.agent_studio.tombstoned-listing-1")
+    assert "agent_team_studio.agent_studio.tombstoned-listing-1" in fake_store.rows  # delete failed
+    assert reg.get("agent_team_studio.agent_studio.tombstoned-listing-1") is None  # tombstoned
     ids = {m.id for m in reg.all()}
-    assert "agent_studio.tombstoned-listing-1" not in ids
+    assert "agent_team_studio.agent_studio.tombstoned-listing-1" not in ids
+
+
+def test_all_excludes_tombstoned_id_when_store_all_fails(fake_store: _FakeStore) -> None:
+    # Same guarantee as the happy path above, but when store.all() itself raises
+    # (e.g. Postgres outage) and _merged_manifests falls back to the local-only
+    # view — that fallback must apply _drop_tombstoned too.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("agent_team_studio.agent_studio.tombstoned-outage-1"))
+    reg.unregister("agent_team_studio.agent_studio.tombstoned-outage-1")
+    fake_store.raise_on = {"all"}
+    ids = {m.id for m in reg.all()}
+    assert "agent_team_studio.agent_studio.tombstoned-outage-1" not in ids
 
 
 def test_manifests_with_id_prefix_excludes_tombstoned_id(fake_store: _FakeStore) -> None:
@@ -560,6 +586,19 @@ def test_manifests_with_id_prefix_excludes_tombstoned_id(fake_store: _FakeStore)
     assert "agentic.team-z.tombstoned-1" not in ids
 
 
+def test_manifests_with_id_prefix_excludes_tombstoned_id_when_store_scan_fails(
+    fake_store: _FakeStore,
+) -> None:
+    # Same guarantee as the happy path above, but when the store's prefix scan
+    # itself raises and the method falls back to the local-only view.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("agentic.team-z.tombstoned-2", team="agentic_team_provisioning"))
+    reg.unregister("agentic.team-z.tombstoned-2")
+    fake_store.raise_on = {"manifests_with_prefix"}
+    ids = {m.id for m in reg.manifests_with_id_prefix("agentic.team-z.")}
+    assert "agentic.team-z.tombstoned-2" not in ids
+
+
 def test_tombstones_are_bounded_and_evict_oldest(
     fake_store: _FakeStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -567,28 +606,31 @@ def test_tombstones_are_bounded_and_evict_oldest(
     monkeypatch.setattr(AgentRegistry, "_TOMBSTONE_MAX_ENTRIES", 2)
     fake_store.raise_on = {"delete"}
     for i in range(3):
-        reg.register(_manifest(f"agent_studio.bound-{i}"))
-        reg.unregister(f"agent_studio.bound-{i}")
+        reg.register(_manifest(f"agent_team_studio.agent_studio.bound-{i}"))
+        reg.unregister(f"agent_team_studio.agent_studio.bound-{i}")
     # Cap held at 2; the oldest (bound-0) was evicted, so its tombstone no longer
     # masks a (hypothetical) fresh store row for that id.
     assert len(reg._tombstones) == 2
-    assert "agent_studio.bound-0" not in reg._tombstones
-    assert "agent_studio.bound-1" in reg._tombstones
-    assert "agent_studio.bound-2" in reg._tombstones
+    assert "agent_team_studio.agent_studio.bound-0" not in reg._tombstones
+    assert "agent_team_studio.agent_studio.bound-1" in reg._tombstones
+    assert "agent_team_studio.agent_studio.bound-2" in reg._tombstones
 
 
 def test_pg_off_behaves_exactly_as_before(fake_store: _FakeStore) -> None:
     fake_store.active = False  # POSTGRES_HOST unset / in sandbox
     disk = _manifest("blogging.planner", team="blogging")
     reg = AgentRegistry([disk], {})
-    reg.register(_manifest("agent_studio.local-only"))
-    assert reg.get("agent_studio.local-only") is not None  # local dict only
+    reg.register(_manifest("agent_team_studio.agent_studio.local-only"))
+    assert reg.get("agent_team_studio.agent_studio.local-only") is not None  # local dict only
     assert fake_store.rows == {}  # nothing persisted
-    assert {m.id for m in reg.all()} == {"blogging.planner", "agent_studio.local-only"}
+    assert {m.id for m in reg.all()} == {
+        "blogging.planner",
+        "agent_team_studio.agent_studio.local-only",
+    }
 
 
 def test_inline_schema_summary_flag(fake_store: _FakeStore) -> None:
-    m = _manifest("agent_studio.inline-1")
+    m = _manifest("agent_team_studio.agent_studio.inline-1")
     m.inputs = IOSchema(inline_schema={"type": "object"})
     reg = AgentRegistry([m], {})
     summary = reg.search(team="agent_studio")[0]
@@ -600,7 +642,7 @@ def test_inline_schema_empty_dict_still_counts_as_present(fake_store: _FakeStore
     # has_input_schema must key off presence (matching GET /schema/input's
     # `is not None` check), not truthiness — an empty-but-present inline_schema is
     # still "has a schema" on both sides, so the catalog and the schema endpoint agree.
-    m = _manifest("agent_studio.inline-empty-1")
+    m = _manifest("agent_team_studio.agent_studio.inline-empty-1")
     m.inputs = IOSchema(inline_schema={})
     reg = AgentRegistry([m], {})
     summary = reg.search(team="agent_studio")[0]

@@ -13,6 +13,7 @@ from llm_service.clients.dummy import DummyLLMClient
 from llm_service.interface import LLMClient
 from llm_service.strands_adapter import (
     LLMClientModel,
+    _flatten_system_prompt_content,
     _strands_messages_to_openai,
     _tool_specs_to_openai,
     get_strands_model,
@@ -44,6 +45,7 @@ class _RecordingClient(LLMClient):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: bool = False,
+        structured_output_model: Optional[type] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         self.complete_json_calls.append(
@@ -53,6 +55,7 @@ class _RecordingClient(LLMClient):
                 "system_prompt": system_prompt,
                 "tools": tools,
                 "think": think,
+                "structured_output_model": structured_output_model,
             }
         )
         return self.response
@@ -89,7 +92,7 @@ def _drain(gen) -> List[Dict[str, Any]]:
             out.append(event)
         return out
 
-    return asyncio.get_event_loop().run_until_complete(_run()) if False else asyncio.run(_run())
+    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +167,13 @@ def test_flatten_mixed_text_and_tool_result_splits_messages() -> None:
     # Tool result flushed first (as its own message), then the remaining text.
     assert out[0] == {"role": "tool", "tool_call_id": "t9", "content": "42"}
     assert out[1] == {"role": "user", "content": "please use the result"}
+
+
+def test_flatten_system_prompt_content_handles_absence_and_non_dict_blocks() -> None:
+    assert _flatten_system_prompt_content(None) == ""
+    assert _flatten_system_prompt_content([]) == ""
+    assert _flatten_system_prompt_content([{"text": "a"}, {"text": "b"}]) == "ab"
+    assert _flatten_system_prompt_content(["already-a-string"]) == "already-a-string"
 
 
 def test_flatten_skips_unknown_blocks() -> None:
@@ -263,6 +273,45 @@ def test_stream_emits_text_events_for_plain_response() -> None:
     assert call["messages"][1] == {"role": "user", "content": "review this"}
     assert call["temperature"] == 0.1
     assert call["think"] is True
+
+
+def test_stream_merges_system_prompt_content_blocks() -> None:
+    """``system_prompt_content`` (Strands' structured system prompt) must not be
+    silently dropped — its flattened text reaches the emitted system message
+    even when no plain ``system_prompt`` string is given."""
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt_content=[{"text": "Follow the house style."}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {"role": "system", "content": "Follow the house style."}
+
+
+def test_stream_combines_system_prompt_and_system_prompt_content() -> None:
+    """Both ``system_prompt`` and ``system_prompt_content`` may be supplied
+    together — both must reach the wire, merged into one system message."""
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="You are a QA expert.",
+            system_prompt_content=[{"text": "Follow the house style."}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": "You are a QA expert.\n\nFollow the house style.",
+    }
 
 
 def test_stream_propagates_team_through_to_thread() -> None:
@@ -556,6 +605,13 @@ def test_llm_client_model_rejects_invalid_response_format() -> None:
         LLMClientModel(_RecordingClient({}), response_format="xml")
 
 
+def test_llm_client_model_rejects_none_client() -> None:
+    """A ``None`` client must fail fast at construction with a clear error
+    instead of surfacing as a confusing ``AttributeError`` on first use."""
+    with pytest.raises(ValueError, match="client is required"):
+        LLMClientModel(client=None)
+
+
 def test_get_strands_model_forwards_response_format() -> None:
     client = _RecordingClient({"ok": True})
     model = get_strands_model(client=client, response_format="text")
@@ -747,6 +803,9 @@ def test_structured_output_validates_into_pydantic_model() -> None:
     assert client.complete_json_calls[0]["system_prompt"] == "You are a code reviewer."
     assert client.complete_json_calls[0]["temperature"] == 0.2
     assert client.complete_json_calls[0]["think"] is True
+    # The output_model class itself is forwarded so a class-identity-routing
+    # client (e.g. the dummy stub) doesn't have to infer it from prompt text.
+    assert client.complete_json_calls[0]["structured_output_model"] is _Review
 
 
 def test_structured_output_raises_on_invalid_response() -> None:

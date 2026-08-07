@@ -27,11 +27,13 @@ reaper does not evict an actively-connected consumer, and ``unsubscribe`` in a
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from typing import (
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Collection,
     Dict,
@@ -39,6 +41,7 @@ from typing import (
     List,
     Optional,
     Tuple,
+    Union,
 )
 
 __all__ = [
@@ -66,8 +69,10 @@ _DEFAULT_DEADLINE_SECONDS = 4 * 3600  # 4-hour max connection
 _DEFAULT_POLL_INTERVAL = 1.0
 
 # A snapshot supplier returns the initial event payload, or ``None`` to skip it
-# (e.g. when the team has no current state to send).
-SnapshotFn = Callable[[], Optional[Dict[str, Any]]]
+# (e.g. when the team has no current state to send). The async stream also
+# accepts an awaitable supplier so callers can take async locks without
+# blocking the event loop.
+SnapshotFn = Callable[[], Union[Optional[Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]]]
 SubscribeFn = Callable[[str], Any]
 UnsubscribeFn = Callable[[str, Any], None]
 
@@ -206,10 +211,21 @@ async def sse_job_stream_async(
     Same contract as :func:`sse_job_stream_sync`, but never blocks the event
     loop: it ``await``\\s a poll sleep between drains instead of blocking on the
     subscription's notify event.
+
+    Preconditions:
+        - Same as :func:`sse_job_stream_sync`, except ``snapshot()`` may return
+          either a payload/``None`` or an awaitable of the same — awaitables
+          are awaited here so async callers can hold ``asyncio.Lock`` while
+          building the snapshot without blocking the loop.
+
+    Postconditions:
+        - Same framing/lifetime contract as :func:`sse_job_stream_sync`.
     """
     sub = subscribe(job_id)
     try:
         snap = snapshot()
+        if inspect.isawaitable(snap):
+            snap = await snap
         if snap is not None:
             yield sse_line(snap)
 

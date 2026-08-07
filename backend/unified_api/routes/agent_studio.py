@@ -8,10 +8,10 @@ Thin HTTP surface over the Agent Studio Temporal workflows:
     POST /api/agent-studio/agents                              — save + register a finished definition
 
 Agent Studio is **Temporal-only**: every handler dispatches its operation as a
-durable workflow → activity via :mod:`agent_studio.temporal.dispatch` and blocks for
+durable workflow → activity via :mod:`agent_team_studio.agent_studio.temporal.dispatch` and blocks for
 the result. There is no non-Temporal fallback — the activity does the real work by
-delegating to the process-wide :class:`~agent_studio.service.AgentStudioService`
-singleton (:func:`agent_studio.runtime.get_studio_service`). The worker runs
+delegating to the process-wide :class:`~agent_team_studio.agent_studio.service.AgentStudioService`
+singleton (:func:`agent_team_studio.agent_studio.runtime.get_studio_service`). The worker runs
 in-process (started from the unified-API lifespan), so those activity threads share
 that singleton's conversation store with these handlers.
 
@@ -35,7 +35,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from agent_studio.models import (
+from agent_team_studio.agent_studio.models import (
     AgentDefinition,
     ConversationStateResponse,
     SaveAgentRequest,
@@ -43,7 +43,7 @@ from agent_studio.models import (
     SendMessageRequest,
     StartConversationRequest,
 )
-from agent_studio.temporal import dispatch
+from agent_team_studio.agent_studio.temporal import dispatch
 
 logger = logging.getLogger(__name__)
 

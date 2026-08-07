@@ -215,7 +215,7 @@ async def _start_sandbox_reaper_with_retry() -> None:
     isn't ready *yet* rather than block for up to 10s before this loop's own
     delay even applies.
     """
-    from agent_provisioning_team.temporal.sandbox_dispatch import start_sandbox_reaper_workflow
+    from agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch import start_sandbox_reaper_workflow
 
     delay = 2.0
     while True:
@@ -255,10 +255,10 @@ async def _start_sandbox_reaper_task() -> asyncio.Task:
           back to the in-process ``run_idle_reaper()`` asyncio task
           (thread mode).
     """
-    from agent_provisioning_team.temporal.sandbox_dispatch import sandbox_temporal_enabled
+    from agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch import sandbox_temporal_enabled
 
     if sandbox_temporal_enabled():
-        from agent_provisioning_team.temporal.worker import (
+        from agent_team_studio.agent_provisioning_team.temporal.worker import (
             start_agent_provisioning_sandbox_temporal_worker_thread,
         )
 
@@ -266,7 +266,7 @@ async def _start_sandbox_reaper_task() -> asyncio.Task:
         logger.info("Starting Agent Console sandbox idle reaper (Temporal workflow)")
         return asyncio.create_task(_start_sandbox_reaper_with_retry())
 
-    from agent_provisioning_team.sandbox import run_idle_reaper
+    from agent_team_studio.agent_provisioning_team.sandbox import run_idle_reaper
 
     logger.info("Started Agent Console sandbox idle reaper (in-process)")
     return asyncio.create_task(run_idle_reaper())
@@ -601,7 +601,7 @@ def _start_agent_studio_temporal_worker() -> None:
     if not TEAM_CONFIGS["agent_studio"].enabled:
         return
     try:
-        from agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
+        from agent_team_studio.agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
 
         started = start_agent_studio_temporal_worker_thread()
     except Exception:
@@ -671,7 +671,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     # to run unconditionally regardless of config.
     if TEAM_CONFIGS["agent_studio"].enabled:
         try:
-            from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
+            from agent_team_studio.agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
             from shared.postgres import register_team_schemas
 
             register_team_schemas(AGENT_STUDIO_SCHEMA)
@@ -771,16 +771,22 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     except Exception:
         logger.warning("Agent Console run pruner failed to start", exc_info=True)
 
-    # 6. Start the Agent Cognition knowledge-graph sync worker. It self-disables
-    #    (returns without looping) when NEO4J_BOLT_URL / POSTGRES_HOST are unset.
-    graph_sync_task: asyncio.Task | None = None
-    try:
-        from agent_cognition.graph.sync_worker import run_graph_sync
+    # 6. Start the Agent Cognition knowledge-graph sync worker, gated on
+    #    NEO4J_BOLT_URL so the module (and the graphiti_core import chain it
+    #    eventually reaches) is never pulled into sys.modules when the
+    #    knowledge-graph layer is unused. Once started, the worker also
+    #    self-disables (returns without looping) when POSTGRES_HOST is unset.
+    from shared.neo4j import is_neo4j_enabled
 
-        graph_sync_task = asyncio.create_task(run_graph_sync())
-        logger.info("Started Agent Cognition graph sync worker")
-    except Exception:
-        logger.warning("Agent Cognition graph sync worker failed to start", exc_info=True)
+    graph_sync_task: asyncio.Task | None = None
+    if is_neo4j_enabled():
+        try:
+            from agent_cognition.graph.sync_worker import run_graph_sync
+
+            graph_sync_task = asyncio.create_task(run_graph_sync())
+            logger.info("Started Agent Cognition graph sync worker")
+        except Exception:
+            logger.warning("Agent Cognition graph sync worker failed to start", exc_info=True)
 
     # 7. Start the Agent Cognition scheduler (rollups → reflection → pruning). It
     #    self-disables when POSTGRES_HOST is unset and never activates a rule.

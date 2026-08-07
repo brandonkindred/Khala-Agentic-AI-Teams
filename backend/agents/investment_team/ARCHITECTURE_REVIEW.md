@@ -1,8 +1,36 @@
 # Strategy Lab Team -- Architecture Review
 
 **Date**: 2026-04-06
+**Update Date**: 2026-08-07
 **Reviewers**: Principal Solutions Architect (Security & Distributed Systems), Senior Agentic AI Engineer (Output Quality & Prompt Engineering)
 **Scope**: Strategy Lab agents, orchestration, API layer, market data service, prompt quality, output quality gates
+
+> ⚠️ **HISTORICAL DOCUMENT - ARCHIVED** ⚠️
+> 
+> *This document is preserved for historical context. The systemic weaknesses identified below have largely been resolved in the current architecture (Temporal workflows, Strands SDK adoption, Compiled DSLs, Quality Gates).*
+> 
+> *Do not use this document as a current backlog. Findings marked as "Still Open" below have been migrated to the active issue tracker.*
+
+## 2026-08 Resolution Matrix
+
+| ID | Finding | Status | Current Implementation / Gap |
+|---|---|---|---|
+| **CRITICAL-1** | LLM-Per-Bar Simulation Cost | **Resolved** | Compiled DSL executor replaced LLM-per-bar evaluation. |
+| **CRITICAL-2** | No Strands SDK Adoption | **Resolved** | `strands.Agent` is adopted natively throughout the system. |
+| **CRITICAL-3** | Prompt Injection Defenses | **Still Open** | `signal_intelligence_agent.py` still relies on a trivial regex defense. |
+| **HIGH-4** | Advisor Uses Regex, Not LLM | **Still Open** | Requires migration to local LLM for PII compliance. |
+| **HIGH-5** | Workflow Logic in API Layer | **Resolved** | Dispatch replaced by Temporal `StrategyLabBatchWorkflow`. |
+| **HIGH-6** | Distributed State Is Fragile | **Resolved** | Handled by durable Temporal workflow state. |
+| **MEDIUM-7** | Market Data Caching | **Still Open** | Needs TTL cache and integrity checks. |
+| **MEDIUM-8** | Generic Exception Handling | **Still Open** | Needs migration to specific `LLMError` hierarchy. |
+| **MEDIUM-9** | SSE Reliability | **Still Open** | Needs `Last-Event-ID` and backpressure support. |
+| **HIGH-10** | Missing Decision Framework | **Still Open** | Investment Priority Framework not yet injected into prompts. |
+| **HIGH-11** | Bar Evaluation Hallucination | **Resolved** | Addressed via CRITICAL-1's compiled DSL. |
+| **HIGH-12** | Lacks Decomposed Reasoning | **Still Open** | Ideation prompt requires reasoning chain restructuring. |
+| **MEDIUM-13**| Arbitrary Temperatures | **Still Open** | Requires consolidation to documented analytical/creative tiers. |
+| **MEDIUM-14**| Missing Tool Specifications | **Still Open** | Agent tools require robust docstrings and failover modes. |
+| **CRITICAL-15**| No Output Quality Gates | **Resolved** | `quality_gates/` module is now extensive. |
+| **HIGH-16** | No Convergence Detection | **Still Open** | Needs `StrategyFeedbackTracker` for batch loop metrics. |
 
 ---
 

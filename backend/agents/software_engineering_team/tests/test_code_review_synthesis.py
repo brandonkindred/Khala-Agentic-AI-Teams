@@ -1,11 +1,15 @@
 """Tests for the reduce-phase findings synthesis (Stage 2).
 
-``synthesis.py`` owns the narrative only: a single findings-only LLM pass that
-merges per-chunk summaries/notes. These tests cover the digest builder (ordering
-and completeness, no code), the synthesis call's success path and its ``None``
-fallback on every failure mode, and the coordinator integration — synthesis is
-used for multi-chunk reviews, skipped for single-chunk ones, never mutates the
-verdict or issues, and falls back to concatenation when it returns ``None``.
+``synthesis.py`` owns the reduce-phase narrative synthesis: a findings-only LLM
+pass that merges per-chunk summaries/notes (``synthesize_review_findings``),
+and a separate spec-compliance LLM pass that checks the merged findings
+against the full spec/acceptance-criteria text once
+(``synthesize_spec_compliance``). These tests cover the digest builder
+(ordering and completeness, no code), both synthesis calls' success paths and
+their ``None``/fallback behavior on every failure mode, and the coordinator
+integration — ``synthesize_review_findings`` is used for multi-chunk reviews,
+skipped for single-chunk ones, never mutates the verdict or issues, and falls
+back to concatenation when it returns ``None``.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from code_review_agent.synthesis import (
     SynthesisResult,
     build_findings_digest,
     synthesize_review_findings,
+    synthesize_spec_compliance,
 )
 
 from llm_service.clients.dummy import DummyLLMClient
@@ -281,6 +286,92 @@ def test_synthesize_returns_none_on_exception() -> None:
 
 
 # ---------------------------------------------------------------------------
+# synthesize_spec_compliance — single dedicated pass, paired with
+# synthesize_review_findings; not yet wired into the coordinator (see its
+# own docstring), so these tests exercise it standalone.
+# ---------------------------------------------------------------------------
+
+
+def test_spec_compliance_success_returns_notes_string() -> None:
+    client = _PayloadClient({"spec_compliance_notes": "AC2 is not implemented"})
+    result = synthesize_spec_compliance(
+        client,
+        input_data=_input(acceptance_criteria=["AC1", "AC2"]),
+        issues=[_issue("high", "missing endpoint")],
+    )
+    assert result == "AC2 is not implemented"
+
+
+def test_spec_compliance_allows_empty_notes() -> None:
+    """An empty ``spec_compliance_notes`` is a valid, successful result — it
+    means no gaps were found, matching CodeReviewOutput's own contract."""
+    client = _PayloadClient({"spec_compliance_notes": ""})
+    result = synthesize_spec_compliance(client, input_data=_input(), issues=[])
+    assert result == ""
+
+
+def test_spec_compliance_forwards_full_spec_and_criteria_into_prompt() -> None:
+    """The full spec/acceptance-criteria text reaches the model verbatim —
+    this pass runs once, so it need not compact or truncate that text the way
+    a per-chunk prompt would."""
+    client = _RecordingClient({"spec_compliance_notes": ""})
+    long_spec = "SPEC " * 2_000
+    synthesize_spec_compliance(
+        client,
+        input_data=_input(spec_content=long_spec, acceptance_criteria=["Must support X"]),
+        issues=[],
+    )
+    assert len(client.prompts) == 1
+    assert long_spec in client.prompts[0]
+    assert "Must support X" in client.prompts[0]
+
+
+def test_spec_compliance_forwards_merged_issues_into_prompt() -> None:
+    client = _RecordingClient({"spec_compliance_notes": ""})
+    synthesize_spec_compliance(
+        client,
+        input_data=_input(),
+        issues=[_issue("critical", "SQL injection risk", file_path="app/db.py")],
+    )
+    assert len(client.prompts) == 1
+    assert "SQL injection risk" in client.prompts[0]
+    assert "app/db.py" in client.prompts[0]
+
+
+def test_spec_compliance_returns_none_on_missing_key() -> None:
+    client = _PayloadClient({"unrelated_key": "value"})
+    assert synthesize_spec_compliance(client, input_data=_input(), issues=[]) is None
+
+
+def test_spec_compliance_returns_none_on_malformed_json() -> None:
+    client = _PayloadClient("<<< not valid json >>>")
+    assert synthesize_spec_compliance(client, input_data=_input(), issues=[]) is None
+
+
+def test_spec_compliance_returns_none_on_non_object_json() -> None:
+    client = _PayloadClient('"a bare json string"')
+    assert synthesize_spec_compliance(client, input_data=_input(), issues=[]) is None
+
+
+def test_spec_compliance_returns_none_on_exception() -> None:
+    assert (
+        synthesize_spec_compliance(
+            _RaisingClient(), input_data=_input(), issues=[_issue("critical", "c")]
+        )
+        is None
+    )
+
+
+def test_spec_compliance_never_mutates_issues() -> None:
+    issues = [_issue("high", "h")]
+    original = list(issues)
+    synthesize_spec_compliance(
+        _PayloadClient({"spec_compliance_notes": "gap found"}), input_data=_input(), issues=issues
+    )
+    assert issues == original
+
+
+# ---------------------------------------------------------------------------
 # coordinator integration — multi-chunk synthesis, single-chunk no-call,
 # verdict/issues untouched, concatenation fallback
 # ---------------------------------------------------------------------------
@@ -298,6 +389,9 @@ class _NoNotesClient(DummyLLMClient):
     """Per-chunk summaries, but the synthesis pass yields an empty summary → None."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        """Route each chunk-review call to fixed per-chunk output; the synthesis
+        pass call (identified by falling through both chunk markers) returns an
+        empty summary so the coordinator falls back to concatenation."""
         if "### a.py ###" in prompt:
             return {
                 "approved": True,
@@ -320,6 +414,9 @@ class _SynthOkClient(DummyLLMClient):
     """One chunk flags a critical issue; the synthesis pass returns clean prose."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        """Route each chunk-review call to fixed per-chunk output (one chunk
+        flags a critical issue, the other is clean); the synthesis pass call
+        returns a fixed, recognizable summary/notes pair."""
         if "### a.py ###" in prompt:
             return {
                 "approved": False,
@@ -349,15 +446,25 @@ class _SynthOkClient(DummyLLMClient):
 
 
 def test_coordinator_falls_back_to_concatenation_when_synthesis_unavailable() -> None:
+    """When the narrative synthesis pass returns an empty summary, the
+    coordinator must fall back to concatenating per-chunk summaries and
+    spec_compliance_notes without changing the deterministic verdict or issue
+    list."""
     result = run_coordinator(
         _NoNotesClient(),
         CodeReviewInput(files=_two_chunk_files(), task_description="t", language="python"),
     )
     assert "alpha summary" in result.summary
     assert "beta summary" in result.summary
+    # Per-chunk spec_compliance_notes are both "" here, so the concatenation
+    # fallback must also be "" -- not the synthesis pass's (unused) "ignored".
+    assert result.spec_compliance_notes == ""
 
 
 def test_coordinator_uses_synthesis_without_mutating_verdict_or_issues() -> None:
+    """When the synthesis pass succeeds, its summary/notes replace the
+    per-chunk narrative, but the deterministic verdict and issue list --
+    already decided before synthesis runs -- are never touched."""
     result = run_coordinator(
         _SynthOkClient(),
         CodeReviewInput(files=_two_chunk_files(), task_description="t", language="python"),
@@ -372,6 +479,9 @@ def test_coordinator_uses_synthesis_without_mutating_verdict_or_issues() -> None
 
 
 def test_single_chunk_makes_no_synthesis_call(monkeypatch) -> None:
+    """A submission that reviews as exactly one chunk has nothing to merge, so
+    the coordinator must skip the synthesis LLM call entirely and pass that
+    chunk's own summary/notes through verbatim."""
     calls: list[int] = []
     real = coordinator_mod.synthesize_review_findings
 
@@ -397,6 +507,8 @@ def test_single_chunk_makes_no_synthesis_call(monkeypatch) -> None:
 
 
 def test_multi_chunk_invokes_synthesis_exactly_once(monkeypatch) -> None:
+    """A submission that reviews as multiple chunks must invoke the synthesis
+    pass exactly once per run, not once per chunk."""
     calls: list[int] = []
     real = coordinator_mod.synthesize_review_findings
 

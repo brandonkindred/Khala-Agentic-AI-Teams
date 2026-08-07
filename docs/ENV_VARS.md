@@ -157,7 +157,7 @@ Ollama Cloud 429 bodies are classified into `session` / `weekly` / `rate` from p
 
 | Kind | Env | Default | Notes |
 |---|---|---|---|
-| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `18000` (5h) | Fixed from error time; **ignores** `Retry-After` |
+| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `3900` (65m) | Fixed from error time; **ignores** `Retry-After` |
 | `weekly` | `LLM_FAILOVER_WEEKLY_WINDOW_S` | `86400` (24h) | Fixed from error time; **ignores** `Retry-After` (Cloud weekly bodies omit a reset timestamp) |
 | `rate` | `LLM_FAILOVER_RATE_WINDOW_S` | `300` (5m) | Used only when the 429 carries no `Retry-After`; otherwise `Retry-After` wins |
 
@@ -570,7 +570,7 @@ blocking all provisioning/deprovisioning traffic on a visibility-RPC hiccup.
 ## Agentic Team Provisioning
 
 WAIT-state reliability for Agent Studio pipeline test runs
-(`agentic_team_provisioning/runtime/pipeline_runner.py`). All three parse
+(`agent_team_studio/agentic_team_provisioning/runtime/pipeline_runner.py`). All three parse
 defensively (garbage → default) and are read once when the `PipelineRunner`
 singleton is constructed.
 
@@ -692,15 +692,19 @@ single budget, not two. Default `16`, floor `1` (`1` runs both phases' calls
 sequentially). Results merge in deterministic order regardless of completion
 order.
 
-The value actually used is `min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY,
-chunk_count)` (see `LLM_MAX_CONCURRENCY` above) -- an adaptive fan-out width
-rather than a flat one: small reviews (few chunks) never request more workers
-than they have chunks, and raising this ceiling for large reviews can never
-push the map phase past the process-wide `LLM_MAX_CONCURRENCY` gate, no matter
-what else is concurrently in flight. With both vars at their defaults (`16`
-and `4`), the effective width is unchanged from the previous fixed-`4`
-behavior; raise `LLM_MAX_CONCURRENCY` (and this var, if a higher value is
-desired) together to let large-PR reviews fan out wider.
+The map phase's outer fan-out width is `min(_map_parallelism(), chunk_count)`,
+i.e. `min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY, chunk_count)` (see
+`LLM_MAX_CONCURRENCY` above) -- an adaptive fan-out width rather than a flat
+one: small reviews (few chunks) never request more workers than they have
+chunks, and raising this ceiling for large reviews can never push the map
+phase past the process-wide `LLM_MAX_CONCURRENCY` gate, no matter what else is
+concurrently in flight. With both vars at their defaults (`16` and `4`), the
+effective width is unchanged from the previous fixed-`4` behavior; raise
+`LLM_MAX_CONCURRENCY` (and this var, if a higher value is desired) together to
+let large-PR reviews fan out wider. This outer, chunk-count-clamped width is
+distinct from the run-wide `reviewer.run()` semaphore ceiling described below,
+which uses `_map_parallelism()` directly and is intentionally **not** clamped
+to `chunk_count`.
 
 The map-phase fan-out governed by this knob **applies only to the in-process
 thread-mode fallback** (`coordinator.run_coordinator`, via `mapping.py`'s
@@ -780,6 +784,25 @@ logged — rather than blocking the rest of the phase indefinitely. Unlike
 calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
 dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
+
+### CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP
+Int (default `40`, floor `1`). Cap on how many findings the false-positive
+verification phase inlines into a single per-file LLM call
+(`_build_group_prompt`/`_verify_group`). A cited file whose genuine findings
+exceed this cap is split into multiple same-sized batches — each its own
+verification call, fanned out the same way calls for additional files are
+(subject to `CODE_REVIEW_MAP_PARALLELISM` and
+`CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`, above) — instead of growing one
+prompt/agent turn without bound as a single file's finding count grows.
+Verdicts from every batch are merged back onto the *original* finding list
+via the batch's own slice of original indices, so which batch (and which
+within-batch index) confirmed a false positive does not change which finding
+gets dropped. Lowering this cap increases the number of verification LLM
+calls (and therefore cost/latency) for files with many findings; raising it
+trades that against a larger prompt per call. This is a cap on how many
+*findings* share one verification call — separate from any cap on how much
+*file content* a single tool read can return (out of scope here; tracked in
+a separate sub-issue).
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
@@ -1109,6 +1132,61 @@ Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
 
+### CODE_REVIEW_SPEC_COMPLIANCE_PASS
+Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
+for moving spec/acceptance-criteria compliance checking out of every chunk's
+prompt and into one dedicated post-merge pass. Design decision recorded in
+`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`
+(see that ADR's Amendment section for how the implementation below deviates
+from its original Decision).
+
+When unset or any value other than `true`/`1`/`yes`/`on`, behavior is
+unchanged from today: `acceptance_criteria` and `spec_excerpt` are rendered
+into every chunk's review prompt, and per-chunk `spec_compliance_notes` are
+synthesized into the final narrative exactly as they are now. When enabled
+**and** the review profile is `CODE_REVIEW`, the per-chunk prompt omits the
+acceptance-criteria/spec-excerpt blocks (architecture overview and
+sibling-surface context are unaffected — out of scope for this toggle), and
+`synthesize_spec_compliance` (`code_review_agent/synthesis.py`) runs once,
+after the final issue list is deduped, over the full spec/acceptance-criteria
+text plus the deduped findings list — **no source code is inlined into this
+pass**, unlike the sibling architecture/side-effect tail pass. It runs in the
+reduce phase (alongside `synthesize_review_findings`), not inside the
+concurrent tail-pass set with the false-positive filter/architecture pass,
+since it needs the final, post-dedupe issue list. Its note feeds into the
+existing narrative synthesis step in place of the per-chunk notes. Any setup
+or LLM failure is fail-safe: it is logged and yields an empty compliance
+note, never blocking or changing the rest of the review.
+
+**Measured token/cost delta.** Measured directly against the production
+prompt-construction code (`ChunkReviewAgent.run` for the per-chunk prompts,
+`synthesis._build_spec_compliance_framing`/`build_findings_digest` for the
+single dedicated pass) on a representative fixture: a ~15,880-character spec
+excerpt, 6 acceptance criteria, and an 8-issue post-dedupe finding list —
+close to ADR-010's own "~14K chars, 15 chunks" illustrative example. Prompt
+character counts (a ~4-chars/token rule of thumb converts these to an
+approximate token figure; the *relative* delta between modes is what
+matters, not the exact tokenizer):
+
+| Chunks | Per-chunk mode (chars) | Single-pass mode (chars) | Delta |
+|---|---|---|---|
+| 1  | 18,143  | 19,279 | single-pass sends **6.3% more** |
+| 2  | 36,286  | 20,968 | single-pass sends 42.2% less |
+| 5  | 90,715  | 26,035 | single-pass sends 71.3% less |
+| 15 | 272,160 | 42,940 | single-pass sends 84.2% less |
+| 30 | 544,350 | 68,320 | single-pass sends 87.4% less |
+
+The dedicated single-pass prompt has a fixed overhead (~17,590 chars in this
+fixture, independent of chunk count) from carrying the full spec/AC text plus
+the findings digest in one call. Below that fixed cost, single-pass mode
+*loses* — this refines ADR-010's Risks section, which estimated savings as
+merely "close to zero" on 1-2 chunk submissions; measured, a single-chunk
+submission is a small net loss, and the crossover to a real win happens
+between 1 and 2 chunks. Every submission with 2+ chunks measured here shows a
+net reduction, growing toward the fixed-overhead floor as chunk count rises.
+This is descriptive data for a future decision on the default, not a
+recommendation to flip it (deliberately out of scope here).
+
 ---
 
 ## Shared Infrastructure and Storage
@@ -1271,6 +1349,15 @@ Default per-agent execution timeout (`asyncio.wait_for`) inside the sandbox; ove
 with `timeout_hit: true` (default `60`). Per-agent override via `invoke.timeout_seconds` in the
 manifest.
 
+### AGENT_REGISTRY_TOMBSTONE_TTL_S
+How long (seconds) a worker's own `unregister()` of a dynamic agent id masks that id from `get()`
+on the same worker, closing the window where a failed best-effort Postgres delete would otherwise
+resurrect the stale row (default `5.0`; clamped to `>= 0.0`).
+
+### AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES
+Max number of tombstoned ids `AgentRegistry` retains per worker; oldest entries are evicted first
+once the cap is exceeded (default `1000`; clamped to `>= 1`).
+
 ---
 
 ## Agent Cognition and Knowledge Graph
@@ -1310,15 +1397,19 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`).
-Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it), but processes
-that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this unset so
-they skip Graphiti client construction and the background graph sync worker (lifespan no-ops cleanly).
-Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set `NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that
-process into graph sync (extra memory/CPU for the driver + worker). An unset value is also how the
-unit-test suite runs against a faked Graphiti without a live database. When enabled, the graph
-ingests agent memories as temporal episodes partitioned per agent (`group_id = agent_id`) and serves
-recency-ranked related knowledge back for request context and rule-proposal grounding.
+`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`),
+and it is opt-in at zero cost when unset: `unified_api.main`'s lifespan checks `is_neo4j_enabled()`
+before even importing `agent_cognition.graph.sync_worker`, and `shared.neo4j.client.get_graphiti()`
+defers its `graphiti_core` imports to first real use — so leaving `NEO4J_BOLT_URL` unset keeps the
+`graphiti_core` dependency (and its Neo4j driver) out of `sys.modules` entirely, with no import-time
+or memory cost. Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it),
+but processes that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this
+unset for exactly that reason. Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set
+`NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that process into graph sync (extra memory/CPU for the
+driver + worker). An unset value is also how the unit-test suite runs against a faked Graphiti without
+a live database. When enabled, the graph ingests agent memories as temporal episodes partitioned per
+agent (`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
+rule-proposal grounding.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change
@@ -1341,7 +1432,9 @@ agent since a watermark (`agent_cognition_graph_watermarks`). Events keyset on `
 are added as `event:<id>` episodes; summaries keyset on `(updated_at, id)` (the content-write time
 advanced by each accepted `upsert_summary`) and are added as `summary:<id>:<version>` episodes, so a
 recomputed summary — whose `version` advanced — is re-ingested as a fresh per-version episode rather
-than overwriting the prior one. The worker is a no-op when `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
+than overwriting the prior one. Unified-api's lifespan skips importing this worker's module at all when
+`NEO4J_BOLT_URL` is unset; once started (i.e. `NEO4J_BOLT_URL` is set), the worker itself is a further
+no-op when `POSTGRES_HOST` is unset.
 
 ### NEO4J_SLOW_OP_MS
 Slow-call log threshold (ms, default `1000`) for `shared.neo4j.timed_graph_op`.
@@ -1367,7 +1460,7 @@ retry conflict; once the lease expires the row is reclaimed in place (its `reque
 re-executed. Distinct from `AGENT_COGNITION_RUN_TTL_S`, which bounds *terminal* rows for replay.
 
 ### AGENT_COGNITION_WRITEBACK_MAX_BYTES
-Byte cap on the cognition `cognition_writeback` half of an invoke envelope
+Byte cap on the `cognition_writeback` half of an invoke envelope
 (`shared/agent_invoke/limits.py`, default `1048576` = 1 MiB). The user `output` field has its
 own bound (`AGENT_INVOKE_MAX_OUTPUT_BYTES`), so control/memory data never competes with user output;
 an over-cap writeback is truncated and flagged rather than dropping the response.

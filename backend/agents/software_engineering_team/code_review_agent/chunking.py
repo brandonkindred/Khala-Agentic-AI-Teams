@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
+from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import parse_env_int
 
 from .code_boundaries import preferred_break_lines
@@ -27,13 +28,6 @@ from .models import (
     derive_issue_title,
     is_no_op_suggestion,
 )
-
-# Pattern: a whole line of the form "### path/to/file ###". Anchored to line
-# boundaries with a single-line path so header-like fragments inside source
-# (markdown headings, "### x" comments, mid-line strings) can never match,
-# and a false header can never swallow lines of code the way an unanchored
-# DOTALL pattern could.
-_FILE_HEADER_PATTERN = re.compile(r"^###[ \t]+(\S[^\n]*?)[ \t]+###[ \t]*\n", re.MULTILINE)
 
 # First capture: the original line number embedded in a pre-numbered line.
 _PRENUMBERED_LINE_RE = re.compile(r"^\s*(\d+):")
@@ -97,42 +91,6 @@ def _map_parallelism() -> int:
 
     ceiling = parse_env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
     return max(1, min(ceiling, get_llm_max_concurrency()))
-
-
-def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:
-    """
-    Parse concatenated code into (path, content) blocks using ### path ### pattern.
-    Returns list of (file_path, content) tuples.
-
-    Only a complete line of the form ``### path ###`` counts as a header, so a
-    header can never span source lines. A source line that happens to match
-    that exact shape (e.g. inside a docstring) is still read as a header — an
-    inherent ambiguity of the legacy ``code=`` transport; callers whose content
-    may contain such lines must use ``CodeReviewInput.files`` instead, which
-    skips header parsing entirely.
-
-    Postconditions:
-        - Every non-blank character of ``code`` except recognized header lines
-          is covered by some block: content before the first header (or all of
-          it, when no header exists) becomes a ``('', content)`` block rather
-          than being dropped.
-    """
-    blocks: List[Tuple[str, str]] = []
-    matches = list(_FILE_HEADER_PATTERN.finditer(code))
-    if not matches:
-        if code.strip():
-            blocks.append(("", code.strip()))
-        return blocks
-    preamble = code[: matches[0].start()]
-    if preamble.strip():
-        blocks.append(("", preamble.strip()))
-    for i, m in enumerate(matches):
-        path = m.group(1).strip()
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(code)
-        content = code[start:end].rstrip()
-        blocks.append((path, content))
-    return blocks
 
 
 def _blocks_from_input(input_data: CodeReviewInput) -> Tuple[List[Tuple[str, str]], List[str]]:

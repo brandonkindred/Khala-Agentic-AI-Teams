@@ -122,8 +122,6 @@ def test_temporal_package_init_does_not_call_os_getenv() -> None:
 
     _purge("investment_team.temporal")
     with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
-        importlib.import_module("investment_team.temporal.workflows")
-        spy.reset_mock()
         importlib.import_module("investment_team.temporal")
         assert spy.call_count == 0, (
             f"investment_team.temporal.__init__ called os.getenv {spy.call_count} "
@@ -211,6 +209,47 @@ def test_startup_backstop_swallows_worker_error(monkeypatch) -> None:
     api_main._startup()  # must not raise
 
 
+def test_startup_calls_paper_trading_recovery(monkeypatch) -> None:
+    """``_startup()`` must itself invoke orphaned-session recovery — it is no
+    longer reachable via ``@app.on_event("startup")``, which a custom
+    ``lifespan=`` (set by ``create_team_app``) makes FastAPI never invoke."""
+    from investment_team.api import main as api_main
+    from investment_team.temporal import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "start_investment_temporal_worker_thread", lambda: False)
+    called = []
+    monkeypatch.setattr(
+        api_main, "_recover_orphaned_paper_trading_sessions", lambda: called.append(True)
+    )
+
+    api_main._startup()
+
+    assert called == [True]
+
+
+def test_app_lifespan_startup_invokes_paper_trading_recovery(monkeypatch) -> None:
+    """End-to-end regression for the on_event/lifespan bug: driving the app's
+    actual lifespan (not calling ``_startup()`` directly) must reach the
+    paper-trading recovery pass. Before the fix this hook was registered via
+    the now-dead ``@app.on_event("startup")`` decorator and never ran under
+    ``create_team_app``'s custom ``lifespan=``."""
+    from fastapi.testclient import TestClient
+
+    from investment_team.api import main as api_main
+    from investment_team.temporal import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "start_investment_temporal_worker_thread", lambda: False)
+    called = []
+    monkeypatch.setattr(
+        api_main, "_recover_orphaned_paper_trading_sessions", lambda: called.append(True)
+    )
+
+    with TestClient(api_main.app):
+        pass
+
+    assert called == [True], "app lifespan startup did not invoke paper-trading recovery"
+
+
 # ---------------------------------------------------------------------------
 # 2. Activity wiring
 # ---------------------------------------------------------------------------
@@ -229,11 +268,12 @@ def test_run_backtest_activity_reconstructs_models_and_runs_worker(monkeypatch) 
     monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
 
     calls = []
-    monkeypatch.setattr(
-        api_main,
-        "_run_backtest_background",
-        lambda *a: calls.append(a),
-    )
+
+    def _bg(*a):
+        calls.append(a)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
 
     result = run_backtest_activity(
         "job-1", {"strategy_id": "s"}, {"start_date": "2024-01-01"}, "agent-x", ["note"]
@@ -266,15 +306,38 @@ def test_run_backtest_activity_raises_when_job_failed(monkeypatch) -> None:
 
     monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
     monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
-    # Not completed at entry, failed after the worker runs.
-    statuses = iter([None, api_main._BT_JOB_STATUS_FAILED])
-    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: next(statuses))
-    monkeypatch.setattr(api_main, "_run_backtest_background", lambda *a: None)
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_FAILED,
+    )
 
     from temporalio.exceptions import ApplicationError
 
     with pytest.raises(ApplicationError, match="failed"):
         run_backtest_activity("job-x", {}, {}, "agent", [])
+
+
+def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
+    """A user-cancelled backtest must be reported as ``cancelled``, not the
+    default ``completed`` — outcome comes from the worker return value."""
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_CANCELLED,
+    )
+
+    result = run_backtest_activity("job-cancelled", {}, {}, "agent", [])
+
+    assert result == {"job_id": "job-cancelled", "status": "cancelled"}
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +350,26 @@ def api_client(monkeypatch):
     from fastapi.testclient import TestClient
 
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
+    from investment_team.strategy_lab import run_state as _run_state
 
-    monkeypatch.setattr(api_main, "_active_runs", {})
+    active_runs = {}
+    monkeypatch.setattr(api_main, "_active_runs", active_runs)
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    monkeypatch.setattr(_run_state, "active_runs", active_runs)
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: None)
+    # Dispatch-failure paths call ``_fail_strategy_lab_run``, which schedules a
+    # 900s daemon ``threading.Timer``. Stub it so 503 route tests do not leave
+    # real timers running for the suite process.
+    class _NoopTimer:
+        def __init__(self, delay, callback):
+            self.daemon = None
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _NoopTimer)
     return TestClient(api_main.app)
 
 
@@ -350,11 +430,13 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
     _active_runs entry forever — repeated requests during an outage would
     otherwise grow it unboundedly until a process restart.
     _fail_strategy_lab_run schedules a 900s delayed cleanup for this."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-cleanup-me"
-    monkeypatch.setattr(api_main, "_active_runs", {run_id: {"run_id": run_id, "status": "running"}})
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    active_runs = {run_id: {"run_id": run_id, "status": "running"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    persisted = []
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a))
 
     captured = {}
 
@@ -367,17 +449,59 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
         def start(self):
             captured["started"] = True
 
-    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _FakeTimer)
 
-    api_main._fail_strategy_lab_run(run_id, "boom")
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
 
-    assert api_main._active_runs[run_id]["status"] == "failed"
+    assert active_runs[run_id]["status"] == "failed"
+    assert persisted[0][0] == run_id
     assert captured["delay"] == 900.0
     assert captured["started"] is True
 
     # Firing the captured callback (simulating the timer elapsing) pops the entry.
     captured["callback"]()
-    assert run_id not in api_main._active_runs
+    assert run_id not in active_runs
+
+
+def test_fail_strategy_lab_run_persists_outside_the_lock(monkeypatch) -> None:
+    """_persist_run_state performs a synchronous job-service RPC and must not
+    run while _lock (the process-wide lock shared by run-status queries,
+    dispatch, and reconciliation) is held -- otherwise that I/O blocks every
+    other thread needing _lock for its duration.
+
+    Also confirms the persisted payload is a snapshot: mutating the live
+    _active_runs entry after _fail_strategy_lab_run returns must not affect
+    what was captured for persistence.
+    """
+    from investment_team.strategy_lab import orchestrator_api
+
+    run_id = "run-persist-unlocked"
+    state = {"run_id": run_id, "status": "running"}
+    active_runs = {run_id: state}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", lambda *a, **k: mock.Mock())
+
+    observed = {}
+
+    def _fake_persist(rid, persisted_state, **kwargs):
+        observed["run_id"] = rid
+        observed["state"] = dict(persisted_state)
+        observed["lock_held"] = orchestrator_api._lock.locked()
+
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _fake_persist)
+
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
+
+    assert observed["run_id"] == run_id
+    assert observed["lock_held"] is False
+    assert observed["state"]["status"] == "failed"
+    assert observed["state"]["error"] == "boom"
+
+    # The live entry is mutated in place (by design -- see the function's
+    # Postconditions), but the persisted snapshot was captured by value and
+    # must not change if the live entry is mutated afterward.
+    state["error"] = "mutated after the fact"
+    assert observed["state"]["error"] == "boom"
 
 
 def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
@@ -388,12 +512,13 @@ def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
     resumed run's live tracking entry or its event-bus subscribers —
     otherwise a second run could start concurrently with the still-executing
     resumed workflow."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-resumed-before-cleanup"
     active_runs = {run_id: {"run_id": run_id, "status": "running"}}
-    monkeypatch.setattr(api_main, "_active_runs", active_runs)
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    persisted = []
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a))
 
     captured = {}
 
@@ -403,12 +528,14 @@ def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
             self.daemon = None
 
         def start(self):
-            pass
+            captured["started"] = True
 
-    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _FakeTimer)
 
-    api_main._fail_strategy_lab_run(run_id, "boom")
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
     assert active_runs[run_id]["status"] == "failed"
+    assert persisted[0][0] == run_id
+    assert captured["started"] is True
 
     # Simulate a resume: a brand-new state object replaces the failed one
     # (mirrors resume_strategy_lab_run, which never mutates in place).
@@ -420,6 +547,49 @@ def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
 
     assert active_runs[run_id] is resumed_state
     assert active_runs[run_id]["status"] == "running"
+
+
+def test_fail_strategy_lab_run_cleanup_survives_cleanup_job_failure(monkeypatch) -> None:
+    """The delayed cleanup callback runs on threading.Timer's own daemon
+    thread, well after _fail_strategy_lab_run's own try/except has exited —
+    that outer handler can't catch anything the callback raises. If
+    cleanup_job() raises, the callback must log and swallow it rather than
+    let the exception escape unhandled on the timer thread."""
+    from investment_team.api import job_event_bus
+    from investment_team.strategy_lab import orchestrator_api
+
+    run_id = "run-cleanup-job-boom"
+    active_runs = {run_id: {"run_id": run_id, "status": "running"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    persisted = []
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a))
+
+    def _boom(_job_id):
+        raise RuntimeError("event bus is on fire")
+
+    monkeypatch.setattr(job_event_bus, "cleanup_job", _boom)
+
+    captured = {}
+
+    class _FakeTimer:
+        def __init__(self, delay, callback):
+            captured["callback"] = callback
+            self.daemon = None
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _FakeTimer)
+
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
+    assert persisted[0][0] == run_id
+    assert captured["started"] is True
+
+    # The callback must not raise despite cleanup_job() blowing up, and the
+    # _active_runs entry must still be popped (that happens before the
+    # cleanup_job() call).
+    captured["callback"]()
+    assert run_id not in active_runs
 
 
 def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -> None:
@@ -487,6 +657,24 @@ def test_dispatch_via_temporal_false_when_disabled(monkeypatch) -> None:
     assert called == []  # starter not invoked when Temporal is disabled
 
 
+def test_dispatch_via_temporal_downgrades_enablement_check_error_to_false(monkeypatch) -> None:
+    """``is_temporal_enabled()`` raising (not just the import failing) must
+    also be swallowed to False -- regression test for the gap where only
+    ``ImportError`` from the import statement was caught, leaving an
+    exception from the enablement check itself free to propagate and break
+    this function's documented "Never raises" contract."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    def _boom() -> bool:
+        raise RuntimeError("enablement check backend unavailable")
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", _boom)
+    called = []
+    assert api_main._dispatch_via_temporal(lambda: called.append(1)) is False
+    assert called == []  # starter not invoked when the enablement check itself fails
+
+
 def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_client) -> None:
     """A RuntimeError from the starter must not 500 or leave a stuck 'running'
     entry — Temporal-only dispatch rolls the run to 'failed' and 503s (no
@@ -510,6 +698,42 @@ def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_
     assert resp.status_code == 503
     (run_state,) = api_main._active_runs.values()
     assert run_state["status"] == "failed"
+
+
+def test_strategy_lab_dispatch_503_survives_workflow_already_started_error_import_failure(
+    monkeypatch, api_client
+) -> None:
+    """If importing ``WorkflowAlreadyStartedError`` itself fails (e.g. a
+    broken ``temporalio`` install), that ImportError must not mask the
+    dispatch failure it's meant to help classify -- the endpoint still 503s
+    instead of surfacing an unhandled ImportError.
+
+    Regression test for the bug where this import lived inside the dispatch
+    `except Exception` handler: an ImportError raised there would propagate
+    straight out of the except block, in place of the intended 503.
+    """
+    import sys
+
+    import shared.temporal
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    # Force `from temporalio.exceptions import WorkflowAlreadyStartedError` to
+    # raise ImportError, regardless of whether the real module is already
+    # cached -- the standard `sys.modules[name] = None` technique.
+    monkeypatch.setitem(sys.modules, "temporalio.exceptions", None)
+
+    def _boom(run_id, request):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _boom)
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 1, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+
+    assert resp.status_code == 503
 
 
 def test_strategy_lab_dispatch_treats_already_started_workflow_as_success(
@@ -660,10 +884,16 @@ def test_strategy_lab_restart_returns_503_when_termination_fails(monkeypatch, ap
 
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", _boom)
 
+    persist_calls = []
+    monkeypatch.setattr(
+        api_main, "_persist_run_state", lambda rid, state, **k: persist_calls.append(state)
+    )
+
     resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
 
     assert resp.status_code == 503
     assert api_main._active_runs == {}  # never written
+    assert persist_calls == []
 
 
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
@@ -701,6 +931,13 @@ def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
 
     assert resp.status_code == 200  # not a 500
     thread_ctor.assert_called_once()  # fell back to the thread path
+    thread_ctor.return_value.start.assert_called_once()
+    _, kwargs = thread_ctor.call_args
+    assert kwargs["target"] is api_main._run_backtest_background
+    args = kwargs["args"]
+    assert args[0] == resp.json()["job_id"]
+    assert args[1] is strat
+    assert args[3] == "agent-1"
 
 
 def test_rehydrate_active_run_offset_repopulates_from_job_store(monkeypatch) -> None:
@@ -727,6 +964,39 @@ def test_rehydrate_active_run_offset_defaults_to_zero(monkeypatch) -> None:
     monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
 
     assert run_state.rehydrate_active_run_offset("missing") == 0
+
+
+def test_rehydrate_active_run_offset_propagates_job_service_error(monkeypatch) -> None:
+    """A genuine job-service failure during resume must fail closed, not
+    silently resolve the offset to 0 as if the run never existed -- that
+    would replay every already-completed cycle."""
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+
+    def _broken(rid):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", _broken)
+
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.rehydrate_active_run_offset("run-broken")
+
+
+def test_get_resume_seed_counters_propagates_job_service_error(monkeypatch) -> None:
+    """Mirrors the offset case: a job-service failure must not be seeded as
+    zero/empty resume counters."""
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+
+    def _broken(rid):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", _broken)
+
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_resume_seed_counters("run-broken")
 
 
 def test_get_resume_seed_counters_defaults_for_unknown_run(monkeypatch) -> None:
