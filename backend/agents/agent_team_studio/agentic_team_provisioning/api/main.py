@@ -271,7 +271,11 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
             summaries[name] = role
         skills = a.get("skills") or []
         if isinstance(skills, list) and skills:
-            skill_tags[name] = [str(s) for s in skills if str(s).strip()]
+            cleaned = [str(s).strip() for s in skills if str(s).strip()]
+            # Only stamp when at least one non-blank skill remains; a whitespace-only
+            # list must omit the key so register_team_manifests preserves prior tags.
+            if cleaned:
+                skill_tags[name] = cleaned
         generated.append(
             AgenticTeamAgent(
                 agent_name=name,
@@ -1361,9 +1365,10 @@ def get_test_chat_session(team_id: str, session_id: str):
         (only generated when the session has no messages yet); ``404`` if the
         session doesn't exist or belongs to a different team. If starter-prompt
         generation raises a 404 because the session's agent isn't on the
-        roster, the prompts list is empty rather than failing the request; any
-        other failure (e.g. a registry outage) propagates instead of being
-        swallowed.
+        roster, or ``LookupError`` because the linked Manifest is missing
+        (orphan ``manifest_id``), the prompts list is empty rather than failing
+        the request; any other failure (e.g. a registry 500) propagates instead
+        of being swallowed.
     """
     session_row = _test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
@@ -1380,6 +1385,15 @@ def get_test_chat_session(team_id: str, session_id: str):
             persona = resolve_persona(agent_def.manifest_id)
             prompts = generate_starter_prompts(
                 agent_def.agent_name, persona.role, persona.skills, persona.expertise
+            )
+        except LookupError as exc:
+            # Orphan manifest_id: soft-fail like list enrichment — empty prompts,
+            # not a 500 on an otherwise-valid session GET.
+            logger.warning(
+                "Could not generate starter prompts for session %s (agent=%s): %s",
+                session_id,
+                session.agent_name,
+                exc,
             )
         except HTTPException as exc:
             # Only the genuine "agent not on roster" case falls back to an empty

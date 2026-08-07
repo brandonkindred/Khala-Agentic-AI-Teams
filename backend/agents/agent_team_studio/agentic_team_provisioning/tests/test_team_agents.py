@@ -145,6 +145,50 @@ def test_delete_team_agent_migrates_fat_returning(
     assert (team_id, "Writer") not in fake_pg["team_agents"]
 
 
+def test_list_team_agents_keeps_fat_row_when_manifest_persist_fails(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Store upsert failure during migrate must not strip fat skills from the row."""
+    store = AgenticTeamStore()
+    team = store.create_team(name="T-persist-fail", description="")
+    team_id = team.team_id
+    fat = {
+        "agent_name": "Writer",
+        "role": "Writes docs",
+        "skills": ["seo"],
+        "capabilities": [],
+        "tools": [],
+        "expertise": [],
+        "source": "generated",
+        "manifest_id": None,
+    }
+    now = datetime.now(tz=timezone.utc)
+    fake_pg["team_agents"][(team_id, "Writer")] = {
+        "team_id": team_id,
+        "agent_name": "Writer",
+        "data_json": fat,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    class _Reg:
+        def get(self, agent_id: str):
+            return None
+
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            assert require_persist is True
+            raise RuntimeError("boom:upsert")
+
+    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
+
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        store.list_team_agents(team_id)
+
+    stored = fake_pg["team_agents"][(team_id, "Writer")]["data_json"]
+    assert stored["skills"] == ["seo"]
+    assert stored.get("manifest_id") in (None, "")
+
+
 def test_save_and_load_team_agents(fake_pg: dict):
     store = AgenticTeamStore()
     team = store.create_team(name="T", description="")

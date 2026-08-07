@@ -539,6 +539,30 @@ def test_llm_save_maps_skills_to_manifest_tags(
     assert manifest.tags.count("seo") == 1
 
 
+def test_llm_save_whitespace_only_skills_preserve_prior_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Whitespace-only LLM skills must omit skill_tags so prior Manifest tags survive."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["seo"]}],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert "seo" in registry.get(mid).tags
+
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["", "  "]}],
+    )
+    assert "seo" in registry.get(mid).tags
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert "seo" in roster[0]["skills"]
+
+
 def test_register_team_manifests_skips_registry_agents(
     client: TestClient, registry: _FakeRegistry
 ) -> None:

@@ -192,6 +192,33 @@ def test_migrate_with_manifest_id_merges_fat_skills(monkeypatch: pytest.MonkeyPa
     assert updated.summary == "Writes docs"
 
 
+def test_migrate_persist_failure_raises_before_thin_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """require_persist failure must abort migrate so callers keep the fat row."""
+    team_id = "team-1"
+    raw = {
+        "agent_name": "Writer",
+        "role": "Writes docs",
+        "skills": ["seo"],
+        "source": "generated",
+        "manifest_id": None,
+    }
+
+    class _Reg:
+        def get(self, agent_id: str):
+            return None
+
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            assert require_persist is True
+            raise RuntimeError("boom:upsert")
+
+    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
+
+    with pytest.raises(RuntimeError, match="boom:upsert"):
+        migrate_roster_row(team_id, raw)
+
+
 def test_migrate_registry_without_manifest_id_raises() -> None:
     with pytest.raises(ValueError, match="manifest_id"):
         migrate_roster_row(

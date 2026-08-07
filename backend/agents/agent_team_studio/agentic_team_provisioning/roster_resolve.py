@@ -114,11 +114,13 @@ def _ensure_generated_manifest_from_fat(
 
     Preconditions:
         * ``team_id`` / ``agent_name`` / ``manifest_id`` are non-empty.
-        * ``registry`` supports ``get`` / ``register``.
+        * ``registry`` supports ``get`` / ``register`` (with ``require_persist``).
     Postconditions:
         * Ensures a Manifest at ``manifest_id``. Fat ``role`` → summary;
           fat ``skills`` → skill tags (merged with any existing non-marker tags).
         * Does not clear existing skill tags when fat ``skills`` is empty/absent.
+        * Registration uses ``require_persist=True`` so a dynamic-store upsert
+          failure raises and callers can leave the fat roster row unstripped.
     """
     fat_skills = _skill_tags_from_fat_raw(raw)
     role = raw.get("role")
@@ -131,7 +133,8 @@ def _ensure_generated_manifest_from_fat(
                 agent_name,
                 summary=role_summary,
                 skill_tags=fat_skills or None,
-            )
+            ),
+            require_persist=True,
         )
         return
 
@@ -148,7 +151,8 @@ def _ensure_generated_manifest_from_fat(
             agent_name,
             summary=summary,
             skill_tags=merged_skills,
-        )
+        ),
+        require_persist=True,
     )
 
 
@@ -168,7 +172,9 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
           ``manifest_id`` set.
         * For ``source == "generated"``, ensures a Manifest exists and copies
           legacy fat ``role`` / ``skills`` onto summary / tags when present
-          (merging skill tags with any already on the Manifest).
+          (merging skill tags with any already on the Manifest). Manifest
+          registration is fail-closed (``require_persist=True``) so a store
+          upsert failure aborts before callers strip the fat roster row.
     Raises:
         * ``ValueError`` when ``source == "registry"`` and ``manifest_id`` is missing.
     """
