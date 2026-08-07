@@ -51,8 +51,10 @@ from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .function_boundaries import (
+    EnclosingConstruct,
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
 )
@@ -597,23 +599,65 @@ class CodebaseIndex:
                 f"Error: no enclosing function/class for line {line} of {display}."
             )
 
-        display_start = (
-            mapper(construct.start_line) if mapper is not None else construct.start_line
+        return _format_construct_slice(
+            display, construct, stripped.splitlines(), mapper=mapper
         )
-        display_end = (
-            mapper(construct.end_line) if mapper is not None else construct.end_line
+
+    def read_function_by_name(self, path: str, name: str) -> str:
+        """Return the construct body for an exact name match, or an error.
+
+        Preconditions:
+            - ``name`` should be a non-empty string matching ``EnclosingConstruct.name``
+              exactly (bare or ``Class.method``).
+
+        Postconditions:
+            - Returns ``Error: ...`` for bad name, unreadable/non-Python paths,
+              zero matches, or multiple matches — never raises on those cases.
+            - On a unique match, returns the same success format as ``read_function``.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return f"Error: name must be a non-empty string, got {name!r}."
+        needle = name.strip()
+
+        content, error = self._read(path)
+        if content is None:
+            return error if error is not None else f"Error: file not found: {path}."
+
+        display = self.resolve_path(path) or path
+        if display == self.EXISTING_CODEBASE_PATH:
+            display = path
+        _, ext = os.path.splitext(display)
+        if ext.lower() not in (".py", ".pyi"):
+            return (
+                f"Error: read_function by name requires a Python file (.py/.pyi); "
+                f"got {display}."
+            )
+
+        stripped, _, mapper = strip_numbered_prefixes(content, 1)
+        # Pre-numbered hunk excerpts use annotated_hunks so a sibling
+        # unparseable continuation does not hide constructs in other hunks.
+        matches = [
+            c
+            for c in iter_constructs(stripped, annotated_hunks=mapper is not None)
+            if c.name == needle
+        ]
+        if not matches:
+            return f"Error: no function/class named {needle!r} in {display}."
+        if len(matches) > 1:
+
+            def _disp(n: int) -> int:
+                return mapper(n) if mapper is not None else n
+
+            detail = ", ".join(
+                f"{c.name} (lines {_disp(c.start_line)}–{_disp(c.end_line)})" for c in matches
+            )
+            return (
+                f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}. "
+                f"Call read_function with a line number from one of those ranges."
+            )
+        return _format_construct_slice(
+            display, matches[0], stripped.splitlines(), mapper=mapper
         )
-        body_lines = stripped.splitlines()
-        n = construct.end_line - construct.start_line + 1
-        header = (
-            f"{display} {construct.kind} {construct.name} "
-            f"lines {display_start}–{display_end} ({n} lines):"
-        )
-        body = "\n".join(
-            f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
-            for i in range(construct.start_line, construct.end_line + 1)
-        )
-        return f"{header}\n{body}"
 
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
@@ -650,6 +694,31 @@ class CodebaseIndex:
                         return results
         return results
 
+    def find_references(
+        self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT
+    ) -> str:
+        """Search in-memory sources for ``symbol`` and return capped path:line hits.
+
+        Thin wrapper over :meth:`search`: same corpus (submission files plus the
+        existing-codebase excerpt), case-insensitive substring match, and cap.
+        Does not consult the repo reader and does not attach excerpts.
+
+        Preconditions:
+            - ``max_matches`` > 0.
+
+        Postconditions:
+            - On hits, returns newline-joined ``path:line`` strings for the first
+              ``max_matches`` occurrences in path-then-line order (no line text).
+            - On no hits (including a blank/whitespace-only ``symbol``), returns
+              ``No references for {symbol!r}.``
+            - Never raises for missing symbols; raises ``ValueError`` when
+              ``max_matches`` is non-positive (delegated via ``search``).
+        """
+        hits = self.search(symbol, max_matches=max_matches)
+        if not hits:
+            return f"No references for {symbol!r}."
+        return "\n".join(f"{path}:{lineno}" for path, lineno, _text in hits)
+
 
 def _strip_numbered_prefixes(
     content: str, line_number: int
@@ -660,6 +729,37 @@ def _strip_numbered_prefixes(
     kept under this name for existing call sites/tests in this module.
     """
     return strip_numbered_prefixes(content, line_number)
+
+
+def _format_construct_slice(
+    display: str,
+    construct: EnclosingConstruct,
+    body_lines: List[str],
+    *,
+    mapper: Optional[Callable[[int], int]] = None,
+) -> str:
+    """Format one construct span as a header plus ``N| content`` body lines.
+
+    Preconditions:
+        - ``body_lines`` contains at least ``construct.end_line`` entries
+          (1-based indexing into ``body_lines``).
+
+    Postconditions:
+        - Returns the shared success format used by ``read_function`` and
+          ``read_function_by_name``.
+    """
+    display_start = mapper(construct.start_line) if mapper is not None else construct.start_line
+    display_end = mapper(construct.end_line) if mapper is not None else construct.end_line
+    n = construct.end_line - construct.start_line + 1
+    header = (
+        f"{display} {construct.kind} {construct.name} "
+        f"lines {display_start}–{display_end} ({n} lines):"
+    )
+    body = "\n".join(
+        f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
+        for i in range(construct.start_line, construct.end_line + 1)
+    )
+    return f"{header}\n{body}"
 
 
 def _find_python_function_at_line(
@@ -822,11 +922,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns five tools (``read_file``, ``read_lines``, ``list_files``,
-          ``search_codebase``, ``find_function_at_line``) that delegate to
-          ``index``; each returns a string and never raises, so a bad
-          model-supplied argument becomes a tool message rather than an error
-          that aborts the agent loop.
+        - Returns six tools (``read_file``, ``read_lines``, ``read_function``,
+          ``list_files``, ``search_codebase``, ``find_function_at_line``) that
+          delegate to ``index``; each returns a string and never raises, so a
+          bad model-supplied argument becomes a tool message rather than an
+          error that aborts the agent loop.
     """
 
     @tool
@@ -871,6 +971,45 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return (
                 f"Error: could not read_lines {path!r} [{start}:{end}]: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    @tool
+    def read_function(path: str, name_or_line) -> str:
+        """Read one function/method/class body by line number or exact name.
+
+        Pass a positive integer for line-based lookup, or a name such as
+        ``foo`` / ``Class.method`` for exact name lookup. A string of only
+        digits (e.g. ``"12"``) is treated as a line number, not a name —
+        prefer an int when you mean a line.
+
+        Args:
+            path: File path (same paths accepted by read_file).
+            name_or_line: 1-based line number (int or digit-only string) or
+                exact construct name (any other non-empty string).
+
+        Returns:
+            Header plus ``N| content`` lines, or an ``Error: ...`` message.
+        """
+        try:
+            if isinstance(name_or_line, bool):
+                return (
+                    f"Error: name_or_line must be a line number or name, "
+                    f"got {name_or_line!r}."
+                )
+            if isinstance(name_or_line, int):
+                return index.read_function(path, name_or_line)
+            if isinstance(name_or_line, str) and name_or_line.strip().isdigit():
+                return index.read_function(path, int(name_or_line.strip()))
+            if isinstance(name_or_line, str):
+                return index.read_function_by_name(path, name_or_line)
+            return (
+                f"Error: name_or_line must be a line number or name, "
+                f"got {name_or_line!r}."
+            )
+        except Exception as exc:
+            return (
+                f"Error: could not read_function {path!r} ({name_or_line!r}): "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -959,7 +1098,7 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, read_lines, list_files, search_codebase, find_function_at_line]
+    return [read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line]
 
 
 @dataclass

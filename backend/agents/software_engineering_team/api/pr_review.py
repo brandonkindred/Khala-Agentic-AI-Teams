@@ -237,16 +237,13 @@ class ReviewCode(NamedTuple):
 # the "is this file removed" check isn't a bare string literal at each call site.
 _FILE_STATUS_REMOVED = "removed"
 
-# Prefix of the scope-tagging focus note (whole-file or hunk mode), exposed so
-# callers/tests can detect the note (e.g. in task_requirements) without
-# duplicating its full wording.
+# Prefix of the scope-tagging focus note, exposed so callers/tests can detect
+# the note (e.g. in task_requirements) without duplicating its full wording.
 REVIEW_FOCUS_NOTE_PREFIX = "Review focus:"
 
-# Shared "tag pre-existing findings" instruction body, reused by both the
-# whole-file and hunk-mode focus notes below (only the framing sentence
-# ahead of it differs, since the two modes show the reviewer different
-# content). Kept as one instruction so the tagging contract can never drift
-# between the two modes.
+# Shared "tag pre-existing findings" instruction body, appended after the
+# diff-first framing and eight-criteria list. Kept as one constant so the
+# tagging contract cannot drift from call-site edits.
 _PRE_EXISTING_TAG_INSTRUCTIONS = (
     "For EVERY issue you report, add a boolean field named `pre_existing` to the issue "
     "object:\n"
@@ -260,57 +257,40 @@ _PRE_EXISTING_TAG_INSTRUCTIONS = (
     "true` when it is a real defect in code outside this PR's change."
 )
 
-
-def _whole_file_focus(body: str) -> str:
-    """Append a "tag pre-existing findings" instruction to ``body`` (whole-file mode).
-
-    Whole-file review shows the reviewer complete files (for context and existing-
-    code awareness), which also lets it see unchanged code. Rather than silently
-    dropping problems it notices in that unchanged code, the reviewer is told to
-    still report them but tag each issue with a ``pre_existing`` boolean, so the
-    review flow can route pre-existing findings to GitHub-issue proposals (offered
-    to a human) instead of posting them as comments on this PR.
-
-    Preconditions:
-        - ``body`` is a string (the PR body or "").
-
-    Postconditions:
-        - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
-          and instructs the reviewer to emit a ``pre_existing`` field per issue.
-    """
-    note = (
-        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
-        "file contents are provided for context, which also lets you see unchanged code.\n"
-        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
-    )
-    return f"{body}\n\n{note}" if body.strip() else note
+_DIFF_FIRST_FOCUS_NOTE = (
+    f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate what this pull request changes (and enclosing "
+    "constructs when shown). Treat surrounding or unchanged code as context, not the primary "
+    "target — this is a diff-first review.\n"
+    "Judge the change against these eight criteria:\n"
+    "1. Logical / syntactic correctness of the change\n"
+    "2. Contract changes on touched functions/classes (DbC, signatures, invariants)\n"
+    "3. Side effects on callers of those encapsulating constructs\n"
+    "4. Architectural standards\n"
+    "5. Language / library / framework best practices\n"
+    "6. New issues introduced by the change\n"
+    "7. Does the change actually implement/fix the ticket/spec?\n"
+    "8. Project style preferences\n"
+    f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
+)
 
 
-def _hunk_review_focus(body: str) -> str:
-    """Append the same "tag pre-existing findings" instruction to ``body`` (hunk mode).
+def _diff_first_focus(body: str) -> str:
+    """Append the shared diff-first focus note to ``body``.
 
-    Hunk-mode review shows the reviewer diff hunks — added lines plus some
-    surrounding unchanged context lines — rather than complete files. A context
-    line can still reveal a genuine, unrelated pre-existing bug, so this mode
-    asks for the same ``pre_existing`` tag whole-file mode does (previously this
-    mode carried no tagging instruction at all, so every hunk-mode finding
-    defaulted ``pre_existing=False`` and was posted regardless of relevance).
+    Every PR reviewer attempt (change surface, whole-file fallback, or hunk
+    ``code``) gets the same note so findings stay change-scoped, the eight
+    review criteria are explicit, and ``pre_existing`` tagging stays consistent.
 
     Preconditions:
         - ``body`` is a string (the PR body or "").
 
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
-          and instructs the reviewer to emit a ``pre_existing`` field per issue.
+          ``body`` is blank/whitespace). The note starts with
+          ``REVIEW_FOCUS_NOTE_PREFIX``, lists the eight criteria, and includes
+          ``_PRE_EXISTING_TAG_INSTRUCTIONS``.
     """
-    note = (
-        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. You are "
-        "shown diff hunks (added lines plus some surrounding unchanged context lines), not "
-        "complete files.\n"
-        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
-    )
+    note = _DIFF_FIRST_FOCUS_NOTE
     return f"{body}\n\n{note}" if body.strip() else note
 
 
@@ -811,11 +791,11 @@ def _run_reviewer(
 
     One reviewer call per non-empty source. A non-empty ``change_surface``
     drives the primary pre-numbered attempt (``pre_numbered=True``,
-    ``_hunk_review_focus``) and replaces a whole-file ``head_files`` attempt;
+    ``_diff_first_focus``) and replaces a whole-file ``head_files`` attempt;
     when the surface is empty or absent, a truthy ``head_files`` drives
-    whole-file review (``pre_numbered=False``, ``_whole_file_focus``). A
+    whole-file review (``pre_numbered=False``, ``_diff_first_focus``). A
     truthy ``code`` always drives an additional diff-hunk attempt
-    (``pre_numbered=True``, ``_hunk_review_focus``). The sources can never be
+    (``pre_numbered=True``, ``_diff_first_focus``). The sources can never be
     mixed into a single call (the underlying engine's ``files``/``code`` are
     mutually exclusive), which is why partial-fetch PRs may need two calls
     instead of one.
@@ -869,7 +849,7 @@ def _run_reviewer(
             dict(
                 code=surface.code,
                 pre_numbered=True,
-                task_requirements=_hunk_review_focus(pr.body or ""),
+                task_requirements=_diff_first_focus(pr.body or ""),
             )
         )
     elif head_files:
@@ -883,7 +863,7 @@ def _run_reviewer(
             dict(
                 files=head_files,
                 pre_numbered=False,
-                task_requirements=_whole_file_focus(pr.body or ""),
+                task_requirements=_diff_first_focus(pr.body or ""),
             )
         )
     if code:
@@ -897,7 +877,7 @@ def _run_reviewer(
             dict(
                 code=code,
                 pre_numbered=True,
-                task_requirements=_hunk_review_focus(pr.body or ""),
+                task_requirements=_diff_first_focus(pr.body or ""),
             )
         )
     assert attempts, (
@@ -1391,8 +1371,8 @@ def _partition_review_issues(
     # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
     # in unchanged code are NOT posted on this PR — they become GitHub-issue
     # proposals a human approves later on the Code Review page. A finding
-    # without the tag defaults to a PR finding (hunk-mode reviews now tag
-    # too, per _hunk_review_focus, but any caller that doesn't ask still
+    # without the tag defaults to a PR finding (reviews now tag via
+    # _diff_first_focus, but any caller that doesn't ask still
     # behaves exactly as before). The LLM's self-reported tag is not trusted
     # unconditionally: a finding whose file/line is verified to be a line
     # this PR actually ADDED (per is_within_diff against changed_by_path —
