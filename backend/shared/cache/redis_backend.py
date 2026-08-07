@@ -309,7 +309,11 @@ class RedisBackend:
         Postconditions:
             - On success, the durable value and LRU member are written via a
               pipeline, then oldest entries past ``max_entries`` are trimmed.
-            - Redis/client outages are logged and swallowed (fail-open).
+            - On Redis write failure (including OOM under ``noeviction``), best-
+              effort ``_trim`` runs for **this namespace only**, then the write
+              is retried once. Trim cannot reclaim memory held by other
+              namespaces or non-value keys; when reclaim is a no-op the second
+              write still fails open (logged, no raise).
             - Still raises on argument validation errors.
         """
         self._require_logical_key(key)
@@ -337,9 +341,9 @@ class RedisBackend:
 
         results = _pipeline_write()
         if results is None:
-            # OOM / transient write failure: reclaim via app-side ZSET trim, then
-            # retry once so a full ``noeviction`` Redis can recover without
-            # waiting for value TTLs to age out.
+            # OOM / transient write failure: reclaim via app-side ZSET trim for
+            # this namespace only, then retry once. Cross-namespace memory
+            # pressure is not cleared here — fail-open if the retry still fails.
             self._trim(max_entries)
             results = _pipeline_write()
             if results is None:
@@ -420,7 +424,9 @@ class RedisBackend:
         single ``zrange`` never pulls an unbounded key list. Continues while
         over capacity and each batch deletes at least one key; logs a warning
         if a round makes no progress. Does **not** delete ``__sf_lock`` /
-        ``__sf_result`` keys — those have their own TTLs.
+        ``__sf_result`` keys — those have their own TTLs. Only this namespace's
+        LRU is touched; other namespaces' memory is not reclaimed (OOM
+        trim-retry is best-effort within the caller's namespace).
         """
         try:
             lru = self._lru_key()
@@ -461,8 +467,7 @@ class RedisBackend:
                 oldest = self._client.zrange(lru, 0, batch_size - 1)
                 if not oldest:
                     logger.warning(
-                        "shared.cache redis trim made no progress for %s "
-                        "(zcard overflow=%s but zrange empty)",
+                        "shared.cache redis trim made no progress for %s (zcard overflow=%s but zrange empty)",
                         self._namespace,
                         overflow,
                     )
@@ -480,8 +485,7 @@ class RedisBackend:
                         to_zrem.append(k)
                 if not to_zrem and ghosts_removed == 0:
                     logger.warning(
-                        "shared.cache redis trim made no progress for %s "
-                        "(overflow=%s, batch=%s)",
+                        "shared.cache redis trim made no progress for %s (overflow=%s, batch=%s)",
                         self._namespace,
                         overflow,
                         keys,
@@ -516,6 +520,9 @@ class RedisBackend:
               outages fail open to a local compute. Leader ``compute``
               exceptions propagate to the leader and (when published) to waiters
               as reconstructed ``Exception`` subclasses.
+            - Lock-acquire failures (e.g. OOM) trigger a namespace-scoped
+              ``_trim`` then one retry before fail-open local compute — same
+              reclaim limits as ``set`` (other namespaces are not trimmed).
             - Still raises on argument validation errors.
         """
         self._require_logical_key(key)
@@ -531,7 +538,6 @@ class RedisBackend:
 
         lock_key = self._lock_key(key)
         result_key = self._result_key(key)
-        got_lock = False
         lock_token = uuid.uuid4().hex.encode("ascii")
 
         def _try_acquire() -> bool | None:
@@ -554,6 +560,8 @@ class RedisBackend:
         if acquired is None:
             # OOM / Redis down: trim values then retry once so ``noeviction``
             # pressure does not permanently disable cross-worker single-flight.
+            # Trim is namespace-scoped (this ZSET only); if Redis is globally full
+            # from other namespaces, reclaim may be a no-op and we fail open.
             self._trim(max_entries)
             acquired = _try_acquire()
             if acquired is None:
@@ -566,9 +574,8 @@ class RedisBackend:
                 if cacheable:
                     self.set(key, payload, max_entries=max_entries)
                 return payload
-        got_lock = acquired
 
-        if not got_lock:
+        if not acquired:
             waited = self._wait_for_result(key, result_key)
             if waited is not None:
                 return waited

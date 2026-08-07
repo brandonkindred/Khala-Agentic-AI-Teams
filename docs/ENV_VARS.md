@@ -1471,14 +1471,24 @@ full `noeviction` Redis recovers via natural expiry instead of wedging for a day
 lock TTL (default `3600` s — sized for long code-review computes so the lock is unlikely to
 expire mid-flight), waiter poll interval (default `0.05` s), waiter timeout before recomputing
 (default `300` s, **independent** of lock TTL so a crashed leader cannot stall waiters for up to
-an hour; raise explicitly when long computes must not duplicate), and short-lived single-flight
-result/error-marker TTL (`REDIS_RESULT_TTL_S`, defaults to the effective lock TTL when unset;
-the Redis backend still hard-caps markers at 60 s so abandoned publishes cannot linger past
-leadership). Successful `get` touches the LRU ZSET (write-on-read) so eviction order stays
-accurate under multi-worker load. Published error markers reconstruct allow-listed `Exception`
-subclasses with best-effort stringified `args` — match on type/message, not arg identity.
-All parse defensively with floors: TTL / lock / waiter-timeout / result-TTL floored at `1` s;
-poll-interval floored at `0.01` s.
+an hour), and short-lived single-flight result/error-marker TTL (`REDIS_RESULT_TTL_S`, defaults
+to the effective lock TTL when unset; the Redis backend still hard-caps markers at 60 s so
+abandoned publishes cannot linger past leadership).
+
+**Long reviews vs waiter timeout:** lock TTL can be an hour, but waiters bail at 300 s by default
+and recompute in parallel if the leader is still running. That is intentional crash-recovery
+trade-off. If code-review map/compute steps routinely exceed five minutes and you need
+cross-worker dedup for the whole flight, raise `REDIS_WAITER_TIMEOUT_S` (up to the lock TTL)
+or both knobs together — otherwise this PR's single-flight benefit is limited to shorter keys.
+
+Trim-then-retry after OOM only reclaims **this namespace's** LRU ZSET; memory held by other
+namespaces is not freed, and the write/lock then fail-opens.
+
+Successful `get` touches the LRU ZSET (write-on-read) so eviction order stays accurate under
+multi-worker load. Published error markers reconstruct allow-listed `Exception` subclasses with
+best-effort stringified `args` — match on type/message, not arg identity. All parse defensively
+with floors: TTL / lock / waiter-timeout / result-TTL floored at `1` s; poll-interval floored at
+`0.01` s.
 
 ### REDIS_KEY_PREFIX
 Optional prefix for all `shared.cache` Redis keys (default `khala`). Blank falls back to the

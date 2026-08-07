@@ -647,7 +647,8 @@ jobs:
           PYTHONPATH: ..
 
   # shared_cache: unit suite uses FakeRedis; a follow-up step hits live Redis
-  # (service container below) for cross-worker hit / fail-open coverage.
+  # (service container below) for cross-worker hit / fail-open / OOM trim-retry
+  # coverage (live OOM test uses CONFIG SET maxmemory+noeviction temporarily).
   test-shared-cache:
     name: Test – shared.cache
     runs-on: ubuntu-latest

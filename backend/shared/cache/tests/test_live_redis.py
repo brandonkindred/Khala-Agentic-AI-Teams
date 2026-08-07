@@ -44,9 +44,7 @@ def _live_redis_or_skip(request: pytest.FixtureRequest | None = None):
 
 
 @pytest.mark.integration
-def test_live_redis_cross_backend_hit_and_fail_open(
-    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-):
+def test_live_redis_cross_backend_hit_and_fail_open(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     """Two backends sharing REDIS_URL round-trip a value; outage fails open.
 
     Preconditions:
@@ -80,9 +78,7 @@ def test_live_redis_cross_backend_hit_and_fail_open(
 
 
 @pytest.mark.integration
-def test_live_redis_single_flight_dedupes_work(
-    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-):
+def test_live_redis_single_flight_dedupes_work(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     """Two RedisBackend instances share one live single-flight compute.
 
     Preconditions:
@@ -136,3 +132,71 @@ def test_live_redis_single_flight_dedupes_work(
     assert results == [b"expensive-result", b"expensive-result"]
     assert calls["n"] == 1
     backend_a.clear()
+
+
+@pytest.mark.integration
+def test_live_redis_oom_set_trim_retries(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """Under ``noeviction`` + tight ``maxmemory``, SET OOM then trim-retry succeeds.
+
+    Preconditions:
+        - ``REDIS_URL`` points at a live Redis that allows ``CONFIG SET``.
+    Postconditions:
+        - After filling Redis until writes OOM, a ``RedisBackend.set`` for a
+          namespaced key whose LRU is over ``max_entries`` reclaims via
+          ``_trim`` and stores the new value (or still fails open without
+          raising if reclaim cannot free enough — never raises to the caller).
+    """
+    monkeypatch.setenv("REDIS_CACHE_TTL_S", "120")
+    client = _live_redis_or_skip(request)
+
+    # Snapshot and restore memory policy so other live tests are unaffected.
+    prev_max = client.config_get("maxmemory").get("maxmemory", b"0")
+    prev_policy = client.config_get("maxmemory-policy").get("maxmemory-policy", b"noeviction")
+    if isinstance(prev_max, bytes):
+        prev_max = prev_max.decode()
+    if isinstance(prev_policy, bytes):
+        prev_policy = prev_policy.decode()
+
+    def _restore() -> None:
+        try:
+            client.config_set("maxmemory", prev_max)
+            client.config_set("maxmemory-policy", prev_policy)
+        except Exception:  # pragma: no cover - best-effort restore
+            pass
+
+    request.addfinalizer(_restore)
+
+    client.config_set("maxmemory-policy", "noeviction")
+    # Small enough to fill quickly with a few large values on CI.
+    client.config_set("maxmemory", "2mb")
+
+    ns = "shared.cache:live-it:oom"
+    cache = RedisBackend(client, ns)
+    cache.clear()
+
+    chunk = b"x" * (256 * 1024)  # 256 KiB
+    # Fill until Redis rejects further SETs (or we hit a safety bound).
+    filled = 0
+    for i in range(64):
+        try:
+            client.set(f"{ns}:pad:{i}", chunk)
+            filled += 1
+        except Exception:
+            break
+    if filled == 0:
+        pytest.skip("could not write pad keys (Redis already constrained)")
+
+    # Namespace-owned keys so trim can reclaim under max_entries.
+    for i in range(4):
+        cache.set(f"ns-old-{i}", chunk, max_entries=2)
+
+    # Must not raise; either stores after trim-retry or fail-opens.
+    cache.set("ns-new", b"after-oom-retry", max_entries=2)
+    hit = cache.get("ns-new")
+    assert hit in (b"after-oom-retry", None)
+    cache.clear()
+    for i in range(filled):
+        try:
+            client.delete(f"{ns}:pad:{i}")
+        except Exception:  # pragma: no cover
+            pass

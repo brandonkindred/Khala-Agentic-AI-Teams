@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import pytest
 
@@ -534,9 +534,37 @@ def test_redis_single_flight_disabled_passthrough():
 def test_redis_single_flight_lock_failure_computes_locally():
     client = FakeRedis()
     cache = RedisBackend(client, "ns")
-    client.fail_ops.add("set")
+    client.fail_ops.add("eval")
     out = cache.single_flight("k", lambda: (b"local", True), max_entries=8)
     assert out == b"local"
+
+
+def test_redis_single_flight_retries_lock_acquire_after_eval_failure():
+    """First EVAL OOM → trim → second EVAL succeeds as leader (not fail-open)."""
+    client = FakeRedis()
+    cache = RedisBackend(client, "ns")
+    cache.set("old", b"1", max_entries=1)
+    eval_calls = {"n": 0}
+    real_eval = client.eval
+
+    def flaky_eval(*args: Any, **kwargs: Any) -> int:
+        eval_calls["n"] += 1
+        if eval_calls["n"] == 1:
+            raise ConnectionError("OOM command not allowed when used memory")
+        return real_eval(*args, **kwargs)
+
+    client.eval = flaky_eval  # type: ignore[method-assign]
+    compute_calls = {"n": 0}
+
+    def compute() -> Tuple[bytes, bool]:
+        compute_calls["n"] += 1
+        return b"leader-after-retry", True
+
+    out = cache.single_flight("k", compute, max_entries=1)
+    assert out == b"leader-after-retry"
+    assert eval_calls["n"] >= 2
+    assert compute_calls["n"] == 1
+    assert cache.get("k") == b"leader-after-retry"
 
 
 def test_redis_single_flight_waiter_recomputes_when_lock_dropped_without_result(
