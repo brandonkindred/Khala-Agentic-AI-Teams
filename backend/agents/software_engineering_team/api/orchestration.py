@@ -54,16 +54,16 @@ def run_orchestrator_wired(
 ) -> Optional[Dict[str, Any]]:
     """Run the coding-team orchestrator for *job_id* with the standard job-store wiring.
 
-    Single source of the ``(update_job_fn, get_job_fn, cache_dir)`` wiring shared
-    by the POST /run background thread, the resume path, and the Temporal
-    activity, so it cannot drift between them. The github-source path wires a
-    custom ``update_job_fn`` (+ ``on_pause``) and deliberately does not use this.
+    Single source of the ``(update_job_fn, get_job_fn, cache_dir)`` wiring shared by
+    the Temporal pipeline activity (and any remaining direct callers), so it cannot
+    drift between them. The github-source path wires a custom ``update_job_fn``
+    (+ ``on_pause``) and deliberately does not use this.
 
     ``pause_strategy``/``acknowledged_resume_token`` are forwarded unchanged into
     ``run_coding_team_orchestrator`` — see that function's docstring for the full
-    contract. Thread-mode callers pass neither, so it keeps requesting ``"block"``
-    (today's behavior, unchanged) by default; only the Temporal activity path
-    (``run_pipeline_activity``) passes ``pause_strategy="return"``.
+    contract. Callers that omit both keep requesting ``"block"`` (legacy thread-mode
+    default); the Temporal activity path (``run_pipeline_activity``) passes
+    ``pause_strategy="return"``.
 
     Preconditions:
         - ``job_id`` names an existing job in the process job store; ``plan`` is a
