@@ -114,12 +114,15 @@ def test_main_exposes_test_agent_hub_aliases() -> None:
 
     Monkeypatch alone cannot prove this: ``setattr`` creates missing attributes.
     Preconditions: ``main`` finished module import.
-    Postconditions: both names are callable on ``main`` without prior setattr.
+    Postconditions: both names are callable on ``main`` without prior setattr;
+        ``_pipeline_runner`` is bound (thread dispatch target).
     """
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod
 
     assert callable(getattr(main_mod, "_build_test_agent", None))
     assert callable(getattr(main_mod, "_call_test_agent", None))
+    assert getattr(main_mod, "_pipeline_runner", None) is not None
+    assert callable(getattr(main_mod._pipeline_runner, "start_run", None))
 
 
 def test_teams_service_create_team_reads_store_from_main(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,17 +173,9 @@ def test_testing_service_reads_test_store_from_main(monkeypatch: pytest.MonkeyPa
         testing_svc.set_team_mode(team_id="t1", req=SetTeamModeRequest(mode=TeamMode.TESTING))
 
 
-def test_testing_service_send_message_uses_hub_build_test_agent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hub dereference: ``send_test_chat_message`` must call ``main._build_test_agent``.
-
-    Preconditions: session/roster fakes succeed so the agent-invocation path runs.
-    Postconditions: a boom from ``main._build_test_agent`` surfaces as HTTP 502
-        (wrapped by the service), proving the hub alias was dereferenced.
-    """
+def _chat_session_wiring_fakes(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """Shared session/roster fakes so send-message probes reach the agent hub aliases."""
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod
-    from agent_team_studio.agentic_team_provisioning.api.services import testing as testing_svc
     from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
 
     session_id = "sess-wiring"
@@ -207,6 +202,22 @@ def test_testing_service_send_message_uses_hub_build_test_agent(
         "_find_agent_in_roster",
         lambda tid, name: AgenticTeamAgent(agent_name=name, role="probe"),
     )
+    return team_id, session_id
+
+
+def test_testing_service_send_message_uses_hub_build_test_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hub dereference: ``send_test_chat_message`` must call ``main._build_test_agent``.
+
+    Preconditions: session/roster fakes succeed so the agent-invocation path runs.
+    Postconditions: a boom from ``main._build_test_agent`` surfaces as HTTP 502
+        (wrapped by the service), proving the hub alias was dereferenced.
+    """
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import testing as testing_svc
+
+    team_id, session_id = _chat_session_wiring_fakes(monkeypatch)
 
     def _boom(*_a, **_k):
         raise RuntimeError("hub-build-test-agent-hit")
@@ -218,3 +229,76 @@ def test_testing_service_send_message_uses_hub_build_test_agent(
             team_id, session_id, SendTestChatMessageRequest(content="hi")
         )
     assert exc_info.value.status_code == 502
+
+
+def test_testing_service_send_message_uses_hub_call_test_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hub dereference: ``send_test_chat_message`` must call ``main._call_test_agent``.
+
+    Preconditions: ``_build_test_agent`` succeeds so the call path runs.
+    Postconditions: a boom from ``main._call_test_agent`` surfaces as HTTP 502.
+    """
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import testing as testing_svc
+
+    team_id, session_id = _chat_session_wiring_fakes(monkeypatch)
+    monkeypatch.setattr(main_mod, "_build_test_agent", lambda *_a, **_k: object())
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("hub-call-test-agent-hit")
+
+    monkeypatch.setattr(main_mod, "_call_test_agent", _boom)
+
+    with pytest.raises(HTTPException) as exc_info:
+        testing_svc.send_test_chat_message(
+            team_id, session_id, SendTestChatMessageRequest(content="hi")
+        )
+    assert exc_info.value.status_code == 502
+
+
+def test_testing_service_dispatch_uses_hub_pipeline_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hub dereference: thread dispatch must call ``main._pipeline_runner.start_run``.
+
+    Preconditions: ``temporal_owned`` is False so the daemon-thread path is selected.
+    Postconditions: a boom from ``_pipeline_runner.start_run`` propagates, proving
+        ``_dispatch_pipeline_run`` dereferenced the hub runner (not a local import).
+    """
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import testing as testing_svc
+    from agent_team_studio.agentic_team_provisioning.models import (
+        AgenticTeamAgent,
+        ProcessDefinition,
+        ProcessStep,
+        ProcessStepAgent,
+        StepType,
+    )
+
+    class _BoomRunner:
+        def start_run(self, *_a, **_k):
+            raise RuntimeError("hub-pipeline-runner-hit")
+
+    monkeypatch.setattr(main_mod, "_pipeline_runner", _BoomRunner())
+
+    process = ProcessDefinition(
+        process_id="proc-wiring",
+        name="Wiring",
+        steps=[
+            ProcessStep(
+                step_id="s1",
+                name="Do",
+                step_type=StepType.ACTION,
+                agents=[ProcessStepAgent(agent_name="worker", role="doer")],
+            )
+        ],
+    )
+    with pytest.raises(RuntimeError, match="hub-pipeline-runner-hit"):
+        testing_svc._dispatch_pipeline_run(
+            "run-wiring",
+            [AgenticTeamAgent(agent_name="worker", role="doer")],
+            process,
+            None,
+            temporal_owned=False,
+        )
