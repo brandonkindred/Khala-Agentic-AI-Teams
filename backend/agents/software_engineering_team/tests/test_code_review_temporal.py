@@ -98,10 +98,13 @@ def test_disable_sentinels_resolve_to_none(monkeypatch: pytest.MonkeyPatch, sent
     assert cfg.resolve_code_review_temporal_address() is None
 
 
-def test_enabled_is_false_under_pytest_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The suite runs under pytest, so the guard keeps reviews in-process.
+def test_enabled_is_true_under_pytest_when_env_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pytest alone must not disable Temporal; with env cleared the default
+    # address resolves and the gate returns True.
     _clear_env(monkeypatch)
-    assert cfg.code_review_temporal_enabled() is False
+    assert cfg.code_review_temporal_enabled() is True
 
 
 def test_force_flag_enables_under_pytest(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -334,6 +334,46 @@ def test_create_proposal_404_when_no_ips(api_client) -> None:
     assert "No IPS found" in resp.json()["detail"]
 
 
+def test_create_proposal_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'proposal' surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
+    resp = api_client.post("/proposals/create", json=_proposal_body())
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_create_proposal_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    """A non-dict _execute_advisory return (not just a dict missing keys) must
+    also hit the isinstance guard and surface as a 502, not a 500/AttributeError."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post("/proposals/create", json=_proposal_body())
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_create_proposal_502_on_non_dict_proposal_value(api_client, monkeypatch) -> None:
+    """A 'proposal' value that isn't a dict (e.g. None) must not fall through to a
+    Pydantic ValidationError / 422 — it's still a malformed advisory result."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"proposal": None}
+    )
+    resp = api_client.post("/proposals/create", json=_proposal_body())
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 def test_get_proposal_not_found(api_client) -> None:
     resp = api_client.get("/proposals/nope")
     assert resp.status_code == 200
@@ -359,6 +399,56 @@ def test_validate_proposal_404_when_ips_missing(api_client) -> None:
         json={"user_id": "ghost"},
     )
     assert vresp.status_code == 404
+
+
+def test_validate_proposal_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'valid'/'violations' surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/proposals/create", json=_proposal_body())
+    pid = create.json()["proposal_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"valid": True})
+    resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_validate_proposal_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/proposals/create", json=_proposal_body())
+    pid = create.json()["proposal_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_validate_proposal_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """'valid'/'violations' present but wrong-typed must not fall through to a
+    Pydantic ValidationError / 422 — it's still a malformed advisory result."""
+    from investment_team.api import main as api_main
+
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/proposals/create", json=_proposal_body())
+    pid = create.json()["proposal_id"]
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"valid": "yes", "violations": "none"},
+    )
+    resp = api_client.post(f"/proposals/{pid}/validate", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +552,64 @@ def test_validate_strategy_custom_checks_with_failure(api_client) -> None:
     body = resp.json()
     assert body["passed"] is False
     assert "shoddy Sharpe" in body["failures"]
+
+
+def test_validate_strategy_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"passed": True})
+    resp = api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_validate_strategy_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    from investment_team.api import main as api_main
+
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_validate_strategy_502_on_wrong_typed_nested_values(api_client, monkeypatch) -> None:
+    """All required keys present but wrong-typed (validation/passed/failures)
+    must still raise a clean 502, not a Pydantic ValidationError as a 500."""
+    from investment_team.api import main as api_main
+
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "validation": "not-a-dict",
+            "passed": "true",
+            "failures": None,
+        },
+    )
+    resp = api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -576,8 +724,8 @@ def test_promotion_decision_updates_workflow_status_in_api_process(api_client) -
     assert any(item["payload_id"] == sid for item in queues["queues"]["escalation"])
 
 
-def _promotion_decide_setup(api_client) -> str:
-    """Create a profile, strategy, and validation report; return the strategy_id."""
+def _setup_promotion_ready_strategy(api_client) -> str:
+    """Create a profile + strategy + validation report so /promotions/decide can run."""
     api_client.post("/profiles", json=_profile_payload())
     create = api_client.post("/strategies", json=_strategy_body())
     sid = create.json()["strategy_id"]
@@ -588,59 +736,171 @@ def _promotion_decide_setup(api_client) -> str:
     return sid
 
 
-def test_promotion_decision_missing_decision_field_returns_500(api_client, monkeypatch) -> None:
-    """A result missing 'decision' triggers a clean 500, not an unhandled KeyError."""
+def _promotion_decision_body(sid: str) -> Dict[str, Any]:
+    return {
+        "strategy_id": sid,
+        "user_id": "u1",
+        "proposer_agent_id": "p1",
+        "approver_agent_id": "a1",
+    }
+
+
+def test_promotion_decision_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'decision' surfaces as a clean 502, not a KeyError."""
     from investment_team.api import main as api_main
 
-    sid = _promotion_decide_setup(api_client)
+    sid = _setup_promotion_ready_strategy(api_client)
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
-    resp = api_client.post(
-        "/promotions/decide",
-        json={
-            "strategy_id": sid,
-            "user_id": "u1",
-            "proposer_agent_id": "p1",
-            "approver_agent_id": "a1",
-        },
-    )
-    assert resp.status_code == 500
-    assert "decision" in resp.json()["detail"]
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
-def test_promotion_decision_invalid_decision_payload_returns_500(api_client, monkeypatch) -> None:
-    """A present but schema-invalid 'decision' is a server/integration fault → 500,
-    matching advisor routes' handling of malformed Temporal payloads."""
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_promotion_decision_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
     from investment_team.api import main as api_main
 
-    sid = _promotion_decide_setup(api_client)
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_non_dict_decision(api_client, monkeypatch) -> None:
+    """A 'decision' key present but not a dict must raise 502, not an
+    unhandled Pydantic ValidationError from PromotionDecision.model_validate."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
     monkeypatch.setattr(
-        api_main, "_execute_advisory", lambda op, payload, *, key: {"decision": {"not": "valid"}}
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"decision": "not-a-dict"}
     )
-    resp = api_client.post(
-        "/promotions/decide",
-        json={
-            "strategy_id": sid,
-            "user_id": "u1",
-            "proposer_agent_id": "p1",
-            "approver_agent_id": "a1",
-        },
-    )
-    assert resp.status_code == 500
-    assert "decision" in resp.json()["detail"].lower() or "invalid" in resp.json()["detail"].lower()
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
-def test_promotion_decision_unknown_escalation_queue_returns_500(api_client, monkeypatch) -> None:
-    """An escalation naming a queue outside the known set is rejected before any
-    _workflow_state mutation, instead of raising an unhandled KeyError."""
+def test_promotion_decision_502_on_non_string_escalation_queue(api_client, monkeypatch) -> None:
+    """An escalation_enqueued['queue'] that is an unhashable type (e.g. a
+    list) must raise 502, not a TypeError from the ``in`` membership test."""
     from investment_team.api import main as api_main
 
-    sid = _promotion_decide_setup(api_client)
-    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    sid = _setup_promotion_ready_strategy(api_client)
     monkeypatch.setattr(
         api_main,
         "_execute_advisory",
         lambda op, payload, *, key: {
-            "decision": decision,
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": ["not", "a", "string"],
+                "payload_id": sid,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_non_list_audit_log_appended(api_client, monkeypatch) -> None:
+    """An 'audit_log_appended' value that is present but not a list must
+    raise 502 rather than corrupt or crash on _workflow_state.audit_log.extend()."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "audit_log_appended": "not-a-list",
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+    status = api_client.get("/workflow/status").json()
+    assert status["audit_log"] == []
+
+
+def test_promotion_decision_502_on_malformed_escalation_payload(api_client, monkeypatch) -> None:
+    """An escalation_enqueued payload missing payload_id/priority surfaces as a 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {"queue": "escalation"},
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_empty_escalation_payload(api_client, monkeypatch) -> None:
+    """An empty (but present) escalation_enqueued dict is falsy in Python — the
+    guard must check ``is not None``, not truthiness, or it silently skips
+    validation instead of raising 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {},
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_unknown_escalation_queue(api_client, monkeypatch) -> None:
+    """An escalation_enqueued['queue'] not in _workflow_state.queues surfaces as a 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
             "escalation_enqueued": {
                 "queue": "not-a-real-queue",
                 "payload_id": sid,
@@ -648,114 +908,43 @@ def test_promotion_decision_unknown_escalation_queue_returns_500(api_client, mon
             },
         },
     )
-    resp = api_client.post(
-        "/promotions/decide",
-        json={
-            "strategy_id": sid,
-            "user_id": "u1",
-            "proposer_agent_id": "p1",
-            "approver_agent_id": "a1",
-        },
-    )
-    assert resp.status_code == 500
-    assert "queue" in resp.json()["detail"].lower()
-    assert api_main._workflow_state.audit_log == []
-    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert "not-a-real-queue" in resp.json()["detail"]
 
 
-def test_promotion_decision_escalation_missing_payload_id_does_not_mutate_audit_log(
+def test_promotion_decision_502_leaves_audit_log_untouched_on_bad_escalation(
     api_client, monkeypatch
 ) -> None:
-    """A known-queue escalation missing payload_id must 500 before any shared-state
-    mutation — not extend audit_log then raise KeyError inside the lock."""
+    """A malformed/unknown escalation must raise before audit_log is mutated —
+    otherwise a client that retries after the 502 sees duplicated entries from
+    the rejected attempt."""
     from investment_team.api import main as api_main
 
-    sid = _promotion_decide_setup(api_client)
-    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    sid = _setup_promotion_ready_strategy(api_client)
     monkeypatch.setattr(
         api_main,
         "_execute_advisory",
         lambda op, payload, *, key: {
-            "decision": decision,
-            "audit_log_appended": [f"promotion:{sid}:paper"],
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "audit_log_appended": [f"promotion:{sid}:reject"],
             "escalation_enqueued": {
-                "queue": "escalation",
+                "queue": "not-a-real-queue",
+                "payload_id": sid,
                 "priority": "high",
             },
         },
     )
-    resp = api_client.post(
-        "/promotions/decide",
-        json={
-            "strategy_id": sid,
-            "user_id": "u1",
-            "proposer_agent_id": "p1",
-            "approver_agent_id": "a1",
-        },
-    )
-    assert resp.status_code == 500
-    assert "escalation" in resp.json()["detail"].lower()
-    assert api_main._workflow_state.audit_log == []
-    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
 
-
-def test_promotion_decision_non_dict_escalation_does_not_mutate_audit_log(
-    api_client, monkeypatch
-) -> None:
-    """A truthy non-dict escalation_enqueued must 500 before mutating shared state."""
-    from investment_team.api import main as api_main
-
-    sid = _promotion_decide_setup(api_client)
-    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
-    monkeypatch.setattr(
-        api_main,
-        "_execute_advisory",
-        lambda op, payload, *, key: {
-            "decision": decision,
-            "audit_log_appended": [f"promotion:{sid}:paper"],
-            "escalation_enqueued": "not-a-dict",
-        },
-    )
-    resp = api_client.post(
-        "/promotions/decide",
-        json={
-            "strategy_id": sid,
-            "user_id": "u1",
-            "proposer_agent_id": "p1",
-            "approver_agent_id": "a1",
-        },
-    )
-    assert resp.status_code == 500
-    assert api_main._workflow_state.audit_log == []
-    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
-
-
-def test_promotion_decision_invalid_audit_log_entries_returns_500(api_client, monkeypatch) -> None:
-    """Non-string audit-log entries are rejected before extending _workflow_state,
-    instead of corrupting the audit log or raising an unhandled TypeError."""
-    from investment_team.api import main as api_main
-
-    sid = _promotion_decide_setup(api_client)
-    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
-    monkeypatch.setattr(
-        api_main,
-        "_execute_advisory",
-        lambda op, payload, *, key: {
-            "decision": decision,
-            "audit_log_appended": [{"not": "a string"}],
-        },
-    )
-    resp = api_client.post(
-        "/promotions/decide",
-        json={
-            "strategy_id": sid,
-            "user_id": "u1",
-            "proposer_agent_id": "p1",
-            "approver_agent_id": "a1",
-        },
-    )
-    assert resp.status_code == 500
-    assert api_main._workflow_state.audit_log == []
+    status = api_client.get("/workflow/status").json()
+    assert status["audit_log"] == []
 
 
 def test_workflow_status_and_queues(api_client) -> None:
@@ -787,12 +976,49 @@ def test_create_memo_returns_memo(api_client) -> None:
     assert "bear case" in body["memo"]["dissenting_views"]
 
 
-def test_create_memo_502_when_advisory_result_missing_memo(api_client, monkeypatch) -> None:
-    """A committee_memo payload without ``memo`` must return 502, not an unhandled 500."""
+def test_create_memo_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'memo' surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": ["bear case"],
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_create_memo_502_on_non_dict_advisory_result(api_client, monkeypatch, bad_result) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": ["bear case"],
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_create_memo_502_on_non_dict_memo(api_client, monkeypatch) -> None:
+    """A 'memo' key present but not a dict must raise 502, not an unhandled
+    Pydantic ValidationError from InvestmentCommitteeMemo.model_validate."""
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(
-        api_main, "_execute_advisory", lambda op, payload, *, key: {"unexpected": True}
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"memo": "not-a-dict"}
     )
     resp = api_client.post(
         "/memos",
@@ -800,11 +1026,105 @@ def test_create_memo_502_when_advisory_result_missing_memo(api_client, monkeypat
             "user_id": "u1",
             "recommendation": "Buy",
             "rationale": "valuations attractive",
-            "dissenting_views": [],
+            "dissenting_views": ["bear case"],
         },
     )
     assert resp.status_code == 502
-    assert resp.json()["detail"] == "Memo generation result is missing"
+    assert resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Strategy Lab read-only routes
+# ---------------------------------------------------------------------------
+
+
+def test_promotion_decision_invalid_decision_payload_returns_500(api_client, monkeypatch) -> None:
+    """A present but schema-invalid 'decision' is a server/integration fault → 500,
+    matching advisor routes' handling of malformed Temporal payloads."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"decision": {"not": "valid"}}
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert "decision" in resp.json()["detail"].lower() or "invalid" in resp.json()["detail"].lower()
+
+
+def test_promotion_decision_escalation_missing_payload_id_does_not_mutate_audit_log(
+    api_client, monkeypatch
+) -> None:
+    """A known-queue escalation missing payload_id must 502 before any shared-state
+    mutation — not extend audit_log then raise KeyError inside the lock."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "audit_log_appended": [f"promotion:{sid}:paper"],
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 502
+    assert "escalation" in resp.json()["detail"].lower()
+    assert api_main._workflow_state.audit_log == []
+    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+
+
+def test_promotion_decision_non_dict_escalation_does_not_mutate_audit_log(
+    api_client, monkeypatch
+) -> None:
+    """A truthy non-dict escalation_enqueued must 502 before mutating shared state."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "audit_log_appended": [f"promotion:{sid}:paper"],
+            "escalation_enqueued": "not-a-dict",
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 502
+    assert api_main._workflow_state.audit_log == []
+    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
 
 
 def test_create_memo_invalid_memo_payload_returns_500(api_client, monkeypatch) -> None:
@@ -1458,13 +1778,148 @@ def test_get_advisor_session_returns_found_false_for_missing(api_client) -> None
     assert resp.json()["found"] is False
 
 
-def test_start_advisor_session_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
-    """A workflow result missing expected keys surfaces as a clean 500, not a KeyError."""
+def test_start_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing expected keys surfaces as a clean 502, not a KeyError."""
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"session": {}})
     resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
-    assert resp.status_code == 500
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_start_advisor_session_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_start_advisor_session_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """'advisor_message'/'session' present but wrong-typed must not fall through
+    to a Pydantic ValidationError / TypeError — it's still a malformed result."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"advisor_message": 123, "session": None},
+    )
+    resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_send_advisor_message_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing expected keys surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"advisor_message": "hi"}
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_send_advisor_message_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_send_advisor_message_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """All required keys present but wrong-typed (e.g. missing_fields not a
+    list) must not fall through to a Pydantic ValidationError / TypeError."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "advisor_message": "hi",
+            "session_status": "active",
+            "current_topic": "goals",
+            "missing_fields": "not-a-list",
+        },
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_complete_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing 'user_id'/'ips' surfaces as a clean 502, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    # Bypass the "missing required fields" 400 branch so we reach the guard under test.
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"user_id": "u1"}
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_result", [None, ["not", "a", "dict"], "not-a-dict"])
+def test_complete_advisor_session_502_on_non_dict_advisory_result(
+    api_client, monkeypatch, bad_result
+) -> None:
+    """A non-dict _execute_advisory return must hit the isinstance guard, not TypeError."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: bad_result)
+    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_complete_advisor_session_502_on_wrong_typed_fields(api_client, monkeypatch) -> None:
+    """'user_id'/'ips' present but wrong-typed must not fall through to a
+    Pydantic ValidationError / TypeError — it's still a malformed result."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"user_id": 123, "ips": "not-a-dict"},
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert resp.status_code == 502
     assert resp.json()["detail"]
 
 
@@ -1481,20 +1936,6 @@ def test_start_advisor_session_malformed_session_payload_returns_500(
         lambda op, payload, *, key: {"advisor_message": "hi", "session": {"not": "valid"}},
     )
     resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
-    assert resp.status_code == 500
-    assert resp.json()["detail"]
-
-
-def test_send_advisor_message_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
-    from investment_team.api import main as api_main
-
-    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
-    sid = start.json()["session_id"]
-
-    monkeypatch.setattr(
-        api_main, "_execute_advisory", lambda op, payload, *, key: {"advisor_message": "hi"}
-    )
-    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
     assert resp.status_code == 500
     assert resp.json()["detail"]
 
@@ -1541,22 +1982,6 @@ def test_send_advisor_message_404_when_session_removed_concurrently(
     resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
     assert resp.status_code == 404
     assert dispatched == []
-
-
-def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
-    from investment_team.api import main as api_main
-
-    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
-    sid = start.json()["session_id"]
-
-    # Bypass the "missing required fields" 400 branch so we reach the guard under test.
-    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
-    monkeypatch.setattr(
-        api_main, "_execute_advisory", lambda op, payload, *, key: {"user_id": "u1"}
-    )
-    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
-    assert resp.status_code == 500
-    assert resp.json()["detail"]
 
 
 def test_complete_advisor_session_malformed_ips_payload_returns_500(

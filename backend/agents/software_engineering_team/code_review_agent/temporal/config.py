@@ -6,9 +6,8 @@ nothing is configured it targets the application's own deployed Temporal
 container (``temporal:7233`` — the address the docker stack already wires into
 every service), and an operator overrides that by pointing ``TEMPORAL_ADDRESS``
 at a different Temporal server. Setting ``TEMPORAL_ADDRESS`` to an empty /
-``disabled`` / ``none`` / ``off`` value, selecting the ``dummy`` LLM harness, or
-running under ``pytest`` falls the agent back to the in-process thread-mode
-coordinator.
+``disabled`` / ``none`` / ``off`` value, or selecting the ``dummy`` LLM harness,
+falls the agent back to the in-process thread-mode coordinator.
 
 There is deliberately **no** code-review-specific address override: the code
 review worker connects through the process-wide ``shared.temporal`` client, which
@@ -32,7 +31,6 @@ Invariants:
 from __future__ import annotations
 
 import os
-import sys
 from typing import Optional
 
 from shared.env_config import env_int
@@ -86,8 +84,8 @@ def resolve_code_review_temporal_address() -> Optional[str]:
 def _force_enabled() -> bool:
     """Test hook: ``CODE_REVIEW_TEMPORAL_FORCE`` in a truthy spelling.
 
-    Lets an integration test opt back into Temporal mode despite the ``pytest``
-    guard below. Never load-bearing outside tests.
+    Lets an integration test opt back into Temporal mode despite the ``dummy``
+    harness guard below. Never load-bearing outside tests.
     """
     return os.environ.get("CODE_REVIEW_TEMPORAL_FORCE", "").strip().lower() in _TRUE_VALUES
 
@@ -102,19 +100,16 @@ def code_review_temporal_enabled() -> bool:
 
     Postconditions:
         - Returns ``True`` iff a Temporal address resolves and no disabling
-          condition applies. The disabling conditions are: the ``dummy`` LLM
-          harness, and running under ``pytest`` (so the existing in-process test
-          suite never dials a Temporal server) — both overridable by the
-          ``CODE_REVIEW_TEMPORAL_FORCE`` test hook.
+          condition applies. The disabling condition is the ``dummy`` LLM
+          harness — overridable by the ``CODE_REVIEW_TEMPORAL_FORCE`` test hook.
         - Never returns ``True`` when :func:`resolve_code_review_temporal_address`
           is ``None``.
         - Never raises.
+        - Never inspects ``sys.modules``.
     """
     if _force_enabled():
         return resolve_code_review_temporal_address() is not None
     if _dummy_harness():
-        return False
-    if "pytest" in sys.modules:
         return False
     return resolve_code_review_temporal_address() is not None
 
