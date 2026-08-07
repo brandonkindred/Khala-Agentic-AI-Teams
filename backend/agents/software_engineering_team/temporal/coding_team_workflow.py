@@ -164,10 +164,11 @@ class CodingTeamWorkflow:
         - ``self._buffered_signals`` holds at most one early-arrived answer
           batch per not-yet-activated ``resume_token`` — an entry is
           inserted only when no pause is active yet (``submit_answers``
-          received a signal ahead of ``run``'s loop arming that token) and is
-          always removed, whether or not it was ever consumed, the moment
-          ``run`` arms that same token — so a buffered entry never outlives
-          the pause round it was minted for.
+          received a signal ahead of ``run``'s loop arming that token). The
+          moment ``run`` arms a pause token it applies the matching entry
+          (if any) and clears the entire dict (HITL contract §2), so stale
+          keys buffered during the no-active-pause window cannot accumulate
+          across pause rounds in durable workflow state.
     """
 
     def __init__(self) -> None:
@@ -288,14 +289,15 @@ class CodingTeamWorkflow:
               ``wait_condition`` forever with no diagnostic. Otherwise
               records it as ``self._active_resume_token``, then immediately
               applies any early signal already buffered for that exact token
-              (``self._buffered_signals.pop(resume_token, None)`` — ``None``
-              when nothing was buffered, otherwise the buffered ``answers``
-              list, either way assigned to ``self._submitted_answers``)
-              before arming ``workflow.wait_condition`` for a token-matching
-              ``submit_answers`` signal to set it (see ``submit_answers``'s
-              contract) — a buffered entry already satisfies that predicate,
-              so the wait resolves immediately without an extra signal round
-              trip. Once resolved, it sets
+              and discards every other buffered key (HITL contract §2 —
+              ``self._submitted_answers = self._buffered_signals.pop(
+              resume_token, None)`` then ``self._buffered_signals.clear()``;
+              ``None`` when nothing matched, otherwise the buffered
+              ``answers`` list) before arming ``workflow.wait_condition`` for
+              a token-matching ``submit_answers`` signal to set it (see
+              ``submit_answers``'s contract) — a buffered entry already
+              satisfies that predicate, so the wait resolves immediately
+              without an extra signal round trip. Once resolved, it sets
               ``request["acknowledged_resume_token"]`` to that same token —
               telling ``run_coding_team_orchestrator``'s re-entry check
               (``_check_pending_pause_reentry``) which persisted pause this
@@ -370,6 +372,10 @@ class CodingTeamWorkflow:
                     raise ValueError(f"Paused activity result missing a valid resume_token: {result!r}")
                 self._active_resume_token = resume_token
                 self._submitted_answers = self._buffered_signals.pop(resume_token, None)
+                # Contract §2: once a pause token activates, every other buffered
+                # key is stale (tokens are never reused) — drop them so retries
+                # across many pause rounds cannot grow durable workflow state.
+                self._buffered_signals.clear()
                 await workflow.wait_condition(lambda: self._submitted_answers is not None)
                 request["acknowledged_resume_token"] = self._active_resume_token
                 self._submitted_answers = None

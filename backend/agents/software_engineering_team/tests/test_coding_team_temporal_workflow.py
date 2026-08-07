@@ -267,14 +267,17 @@ def test_run_consumes_buffered_signal_immediately_without_waiting(
     assert workflow_obj._buffered_signals == {}
 
 
-def test_run_buffered_entry_for_a_different_token_is_left_alone(
+def test_run_discards_non_matching_buffered_entries_when_arming_pause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A buffered entry for a token that never gets armed (e.g. a stale/garbage
-    early signal) is not touched by an unrelated pause round arming a
-    different token -- pop() only removes the exact matching key."""
+    """Arming a pause applies the matching buffered entry (if any) and discards
+    every other key -- HITL contract §2: stale/duplicate tokens buffered while
+    ``_active_resume_token`` was None must not accumulate across pause rounds."""
     workflow_obj = CodingTeamWorkflow()
-    workflow_obj.submit_answers({"resume_token": "unrelated-token", "answers": [{"q": 1}]})
+    workflow_obj.submit_answers({"resume_token": "stale-token", "answers": [{"q": 1}]})
+    workflow_obj.submit_answers(
+        {"resume_token": "j1:1", "answers": [{"question_id": "q1", "answer": "yes"}]}
+    )
 
     request = {"repo_path": "/repo", "plan_input": {"objective": "o"}}
     _patch_execute(
@@ -286,14 +289,15 @@ def test_run_buffered_entry_for_a_different_token_is_left_alone(
     )
 
     async def _fake_wait(pred, timeout=None):
-        workflow_obj.submit_answers({"resume_token": "j1:1", "answers": [{"question_id": "q1"}]})
+        # Matching entry was applied at arm-time; wait should already be satisfied.
         assert pred()
+        assert workflow_obj._submitted_answers == [{"question_id": "q1", "answer": "yes"}]
 
     monkeypatch.setattr("temporalio.workflow.wait_condition", _fake_wait)
 
     asyncio.run(workflow_obj.run(request))
 
-    assert workflow_obj._buffered_signals == {"unrelated-token": [{"q": 1}]}
+    assert workflow_obj._buffered_signals == {}
 
 
 def test_submit_answers_sets_state_directly(monkeypatch: pytest.MonkeyPatch) -> None:
