@@ -1,20 +1,21 @@
-"""Smoke: teams/conversations routers exist, mount, and resolve through the hub."""
+"""Smoke: teams/conversations/testing routers exist, mount, and resolve through the hub."""
 
 from __future__ import annotations
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.routing import APIRoute
 
 from agent_team_studio.agentic_team_provisioning.models import (
     CreateConversationRequest,
     CreateTeamRequest,
+    SendTestChatMessageRequest,
     SetTeamModeRequest,
     TeamMode,
 )
 
-# Representative extracted paths — enough to catch a dropped include_router while
-# hub aliases (_teams_router / _conversations_router) remain assigned.
+# All extracted paths — catches a dropped include_router while hub aliases remain,
+# and catches a single omitted handler inside a mounted router.
 _EXTRACTED_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/teams"),
@@ -29,7 +30,17 @@ _EXTRACTED_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
         ("PUT", "/teams/{team_id}/mode"),
         ("POST", "/teams/{team_id}/test-chat/sessions"),
         ("GET", "/teams/{team_id}/test-chat/sessions"),
+        ("GET", "/teams/{team_id}/test-chat/sessions/{session_id}"),
+        ("PUT", "/teams/{team_id}/test-chat/sessions/{session_id}/name"),
+        ("DELETE", "/teams/{team_id}/test-chat/sessions/{session_id}"),
+        ("POST", "/teams/{team_id}/test-chat/sessions/{session_id}/messages"),
+        ("GET", "/teams/{team_id}/test-chat/sessions/{session_id}/export"),
+        ("PUT", "/teams/{team_id}/test-chat/messages/{message_id}/rating"),
+        ("GET", "/teams/{team_id}/test-chat/quality-scores"),
         ("POST", "/teams/{team_id}/test-pipeline/runs"),
+        ("GET", "/teams/{team_id}/test-pipeline/runs"),
+        ("GET", "/teams/{team_id}/test-pipeline/runs/{run_id}"),
+        ("POST", "/teams/{team_id}/test-pipeline/runs/{run_id}/input"),
         ("POST", "/teams/{team_id}/test-pipeline/runs/{run_id}/cancel"),
     }
 )
@@ -98,6 +109,19 @@ def test_extracted_teams_and_conversations_paths_are_mounted() -> None:
     assert not missing, f"extracted routes not mounted on app: {sorted(missing)}"
 
 
+def test_main_exposes_test_agent_hub_aliases() -> None:
+    """Hub must bind ``_build_test_agent`` / ``_call_test_agent`` as real import aliases.
+
+    Monkeypatch alone cannot prove this: ``setattr`` creates missing attributes.
+    Preconditions: ``main`` finished module import.
+    Postconditions: both names are callable on ``main`` without prior setattr.
+    """
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+
+    assert callable(getattr(main_mod, "_build_test_agent", None))
+    assert callable(getattr(main_mod, "_call_test_agent", None))
+
+
 def test_teams_service_create_team_reads_store_from_main(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hub dereference: patching ``main._store`` must be visible to the teams service."""
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod
@@ -144,3 +168,53 @@ def test_testing_service_reads_test_store_from_main(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(main_mod, "_test_store", _Boom())
     with pytest.raises(RuntimeError, match="hub-test-store-hit"):
         testing_svc.set_team_mode(team_id="t1", req=SetTeamModeRequest(mode=TeamMode.TESTING))
+
+
+def test_testing_service_send_message_uses_hub_build_test_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hub dereference: ``send_test_chat_message`` must call ``main._build_test_agent``.
+
+    Preconditions: session/roster fakes succeed so the agent-invocation path runs.
+    Postconditions: a boom from ``main._build_test_agent`` surfaces as HTTP 502
+        (wrapped by the service), proving the hub alias was dereferenced.
+    """
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import testing as testing_svc
+    from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
+
+    session_id = "sess-wiring"
+    team_id = "team-wiring"
+    session_row = {
+        "session_id": session_id,
+        "team_id": team_id,
+        "agent_name": "Probe Agent",
+        "session_name": "",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+
+    class _Store:
+        def get_chat_session(self, sid: str):
+            return session_row if sid == session_id else None
+
+        def list_chat_messages(self, sid: str):
+            return []
+
+    monkeypatch.setattr(main_mod, "_test_store", _Store())
+    monkeypatch.setattr(
+        main_mod,
+        "_find_agent_in_roster",
+        lambda tid, name: AgenticTeamAgent(agent_name=name, role="probe"),
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("hub-build-test-agent-hit")
+
+    monkeypatch.setattr(main_mod, "_build_test_agent", _boom)
+
+    with pytest.raises(HTTPException) as exc_info:
+        testing_svc.send_test_chat_message(
+            team_id, session_id, SendTestChatMessageRequest(content="hi")
+        )
+    assert exc_info.value.status_code == 502

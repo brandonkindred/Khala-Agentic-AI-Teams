@@ -144,13 +144,20 @@ def rename_test_chat_session(team_id: str, session_id: str, req: RenameTestChatS
 
 
 def delete_test_chat_session(team_id: str, session_id: str):
-    """Delete a chat test session and its messages."""
+    """Delete a chat test session and its messages.
+
+    Preconditions: ``team_id`` and ``session_id`` are non-empty strings.
+    Postconditions: ``204`` and the session (plus messages) removed when the
+        session belongs to ``team_id``; ``404`` when the session is unknown or
+        owned by a different team (store unchanged).
+    """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     session_row = _main._test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
         raise HTTPException(status_code=404, detail="Session not found")
     _main._test_store.delete_chat_session(session_id)
+    return Response(status_code=204)
 
 
 def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessageRequest):
