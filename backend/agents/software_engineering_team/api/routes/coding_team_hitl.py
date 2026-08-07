@@ -101,26 +101,37 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> Status
 
 @router.post("/run/{job_id}/resume", response_model=RunResponse)
 def resume_job(job_id: str) -> RunResponse:
-    """Restart a paused coding-team job's orchestrator after answers were stored but its thread died.
+    """Resume a paused coding-team job.
 
-    No-op-safe: if a thread is still running (or a wait loop heartbeats from another worker), it
-    will resume on its own and this just reports status. GitHub-issue jobs are restarted through
-    the full hook path so publication (PR, issue comments) is preserved; that path needs a GitHub
-    token, sourced by decrypting the one persisted (as opaque ciphertext) on the job record at
-    creation (falling back to the ``GITHUB_TOKEN`` env).
+    Two paths, told apart by whether the job record carries a ``resume_token``
+    (set only by a ``pause_strategy="return"`` pause):
 
-    Authentication/authorization is enforced by the unified API security gateway in front of all
-    team mounts; like every other coding-team route, this endpoint assumes that perimeter.
+    - **Temporal-native pause** (``resume_token`` present): signal the running
+      ``CodingTeamWorkflow`` with ``submit_answers``, carrying the job's
+      ``resume_token`` and already-stored ``submitted_answers`` (or ``[]``).
+      No claim, thread spawn, plan recovery, or GitHub-token resolution.
+    - **Thread-mode / GitHub-hook pause** (``resume_token`` absent): unchanged —
+      no-op when a live thread or fresh wait-loop heartbeat exists; otherwise
+      claim and spawn the orchestrator (hook path for GitHub-issue jobs).
+
+    Authentication/authorization is enforced by the unified API security gateway
+    in front of all team mounts; like every other coding-team route, this
+    endpoint assumes that perimeter.
 
     Preconditions:
-        - The job exists, is not terminal, and (once liveness can't be proven) is paused in the
-          ``waiting_for_user`` state — the only state a resume is both needed and provably safe.
+        - The job exists and is not terminal.
+        - For the Temporal path: ``status`` is ``waiting_for_user``.
+        - For the thread-mode path: once liveness can't be proven, the job is
+          paused in ``waiting_for_user``, has recoverable plan/repo_path, and
+          (for GitHub-issue jobs) a usable token.
     Postconditions:
-        - Raises 404 (unknown job), 400 (terminal job, a non-paused job that can't be proven
-          alive, missing repo_path/plan, or a GitHub-issue job with no usable token); returns
-          "already running" without spawning when a live thread, fresh heartbeat, or concurrent
-          claim exists; otherwise spawns the orchestrator (hook path for GitHub-issue jobs) and
-          reports "Job resumed."
+        - Raises 404 (unknown job) or 400 (terminal / not paused / thread-mode
+          plan or token failures) with the same details as before this branch.
+        - Temporal path: delivers ``submit_answers`` to
+          ``coding_team-{job_id}`` and returns ``"Job resumed."``.
+        - Thread-mode path: returns ``"already running"`` without spawning when
+          a live thread, fresh heartbeat, or concurrent claim exists; otherwise
+          spawns and returns ``"Job resumed."``.
     """
     data = _main.get_job(job_id)
     if not data:
@@ -130,6 +141,25 @@ def resume_job(job_id: str) -> RunResponse:
             status_code=400,
             detail=f"Job is {data.get('status', 'terminal')} and cannot be resumed.",
         )
+    resume_token = data.get("resume_token")
+    if resume_token:
+        if data.get("status") != hitl.WAITING_STATUS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Job is {data.get('status', 'in an unknown state')}, not paused waiting for "
+                    "answers; only a paused (waiting_for_user) job can be resumed."
+                ),
+            )
+        signal_workflow_sync(
+            f"{WORKFLOW_ID_PREFIX}{job_id}",
+            "submit_answers",
+            {
+                "resume_token": resume_token,
+                "answers": data.get("submitted_answers") or [],
+            },
+        )
+        return RunResponse(job_id=job_id, status="running", message="Job resumed.")
     if _main._is_run_thread_alive(job_id) or _main._answer_wait_heartbeat_fresh(data):
         # The thread registry is process-local; a fresh answer-wait heartbeat means the job's
         # wait loop is alive in another worker — resuming here would double-drive the job.
