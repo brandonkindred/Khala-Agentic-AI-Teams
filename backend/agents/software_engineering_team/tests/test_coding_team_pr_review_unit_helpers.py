@@ -13,6 +13,7 @@ note, author resolution, and the reviewer-dispatch/merge logic in
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -211,11 +212,12 @@ class TestRunningSiblingOnCheckoutUnit:
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [sibling])
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Directory symlinks require privileges on Windows")
     def test_symlinked_path_matches_canonically(self, monkeypatch, tmp_path) -> None:
         real_dir = tmp_path / "real"
         real_dir.mkdir()
         link = tmp_path / "link"
-        os.symlink(real_dir, link)
+        os.symlink(real_dir, link, target_is_directory=(sys.platform == "win32"))
         sibling = {"job_id": "sibling-1", "repo_path": str(link)}
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [sibling])
         assert pr_review._running_sibling_on_checkout(str(real_dir), "own-job") == sibling
