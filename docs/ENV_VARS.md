@@ -299,15 +299,15 @@ app's own deployed Temporal container). There is intentionally no code-review-on
 address override: the worker connects through the process-wide shared Temporal
 client, which reads only `TEMPORAL_ADDRESS`, so `TEMPORAL_ADDRESS` is the single
 override for where reviews run. Setting `TEMPORAL_ADDRESS` to an empty /
-`disabled` / `none` / `off` / `0` / `false` / `no` value, or selecting
-`LLM_PROVIDER=dummy`, falls back to thread mode. Only the
+`disabled` / `none` / `off` / `0` / `false` / `no` value falls back to
+thread mode. Only the
 code review agent's *default* is flipped on; every other team's thread-default
 dispatch decision is unchanged.
 
 ### CODE_REVIEW_TEMPORAL_FORCE
-Test-only escape hatch (truthy: `1`/`true`/`yes`/`on`) that re-enables code-review
-Temporal mode despite the `dummy` guard, provided an address still resolves. Not
-load-bearing outside integration tests.
+Test-only escape hatch (truthy: `1`/`true`/`yes`/`on`). Retained for tests that
+set the flag explicitly; enablement remains address-only (a disable-sentinel
+`TEMPORAL_ADDRESS` still yields thread mode). Not load-bearing outside tests.
 
 ### TEMPORAL_PAYLOAD_COMPRESSION
 Boolean (default `false` — opt-in). The shared Temporal client
