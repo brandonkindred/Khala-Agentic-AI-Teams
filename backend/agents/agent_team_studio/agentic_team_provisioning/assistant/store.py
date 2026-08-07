@@ -22,6 +22,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     ConversationMessage,
     ProcessDefinition,
 )
+from agent_team_studio.agentic_team_provisioning.roster_resolve import migrate_roster_row
 from shared.postgres import get_conn
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
@@ -506,25 +507,55 @@ class AgenticTeamStore:
             return self._load_team_agents(cur, team_id)
 
     def _load_team_agents(self, cur, team_id: str) -> list[AgenticTeamAgent]:
+        """Load roster rows, eagerly migrating legacy fat JSON to thin refs.
+
+        Preconditions: ``cur`` is an open cursor in a live transaction.
+        Postconditions: returns validated thin :class:`AgenticTeamAgent` rows;
+            rewrites any row where :func:`migrate_roster_row` reports ``changed``.
+        """
         cur.execute(
             "SELECT data_json FROM agentic_team_agents WHERE team_id = %s ORDER BY agent_name",
             (team_id,),
         )
-        return [AgenticTeamAgent.model_validate(r["data_json"]) for r in cur.fetchall()]
+        agents: list[AgenticTeamAgent] = []
+        now = datetime.now(tz=timezone.utc)
+        for r in cur.fetchall():
+            raw = r["data_json"]
+            if isinstance(raw, str):
+                import json
+
+                raw = json.loads(raw)
+            agent, changed = migrate_roster_row(team_id, dict(raw))
+            if changed:
+                self._upsert_team_agent_row(cur, team_id, agent, now)
+            agents.append(agent)
+        return agents
 
     def _get_team_agent(self, cur, team_id: str, agent_name: str) -> Optional[AgenticTeamAgent]:
         """Read one roster agent by name on an open cursor (under the caller's lock).
 
         Preconditions: ``cur`` is an open cursor in a live transaction.
         Postconditions: returns the :class:`AgenticTeamAgent` named ``agent_name`` for
-            ``team_id`` if present, else ``None``. Reads only — no mutation.
+            ``team_id`` if present (migrated to thin shape when needed), else ``None``.
+            Rewrites the row when :func:`migrate_roster_row` reports ``changed``.
         """
         cur.execute(
             "SELECT data_json FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s",
             (team_id, agent_name),
         )
         row = cur.fetchone()
-        return AgenticTeamAgent.model_validate(row["data_json"]) if row else None
+        if not row:
+            return None
+        raw = row["data_json"]
+        if isinstance(raw, str):
+            import json
+
+            raw = json.loads(raw)
+        agent, changed = migrate_roster_row(team_id, dict(raw))
+        if changed:
+            now = datetime.now(tz=timezone.utc)
+            self._upsert_team_agent_row(cur, team_id, agent, now)
+        return agent
 
     # ------------------------------------------------------------------
     # Conversations
