@@ -472,7 +472,9 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
             _reregister_generated_manifest(team_id, updated)
 
     try:
-        updated = _main._store.update_team_agent(team_id, agent_name, _merge, on_updated=_reregister)
+        updated = _main._store.update_team_agent(
+            team_id, agent_name, _merge, on_updated=_reregister
+        )
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=f"Invalid agent update: {e.errors()}")
     if updated is None:

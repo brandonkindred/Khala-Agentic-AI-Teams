@@ -1,4 +1,18 @@
-"""FastAPI application for the Agentic Team Provisioning service."""
+"""FastAPI application for the Agentic Team Provisioning service.
+
+This module is the app-assembly hub. Extracted concerns live in:
+
+* ``api.routes.teams`` / ``api.services.teams`` — teams CRUD + roster
+* ``api.routes.conversations`` / ``api.services.conversations`` — conversations
+
+Remaining endpoint groups (processes, jobs, questions, assets, forms, mode,
+test-chat, test-pipeline) still live here pending later splits.
+
+This module remains the owning namespace for collaborators the test suite
+monkeypatches (``_store``, ``_agent``, ``_test_store``, ``_pipeline_runner``,
+``_save_agents_from_llm``, ``_roster_agent_from_manifest``, …). Route and
+service modules dereference those names through ``main`` at call time.
+"""
 
 from __future__ import annotations
 

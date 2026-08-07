@@ -53,7 +53,9 @@ def validate_team_roster(team_id: str):
     return teams_svc.validate_team_roster(team_id)
 
 
-@router.post("/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201)
+@router.post(
+    "/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201
+)
 def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     return teams_svc.add_agent_from_registry(team_id, req)
 
