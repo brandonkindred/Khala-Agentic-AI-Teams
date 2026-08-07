@@ -1048,6 +1048,30 @@ def _branding_phase5_structured_output_stub(model_name: str) -> Optional[Dict[st
     return None
 
 
+def _branding_structured_output_stub_by_model_name(
+    model_name: str, system_lowered: str = ""
+) -> Optional[Dict[str, Any]]:
+    """Resolve a branding stub by structured-output model class name.
+
+    Tries Phase 2, then Phase 4, then Phase 5. Shared by ``complete_json``,
+    ``chat``, and ``stream`` so all three keep one precedence order.
+
+    Preconditions:
+        ``model_name`` is a string; ``system_lowered`` is already lowercased
+        (may be empty) and is forwarded to Phase 4 for channel extraction only.
+    Postconditions:
+        Returns the first matching stub dict, or ``None`` so callers fall
+        through to text-anchor / generic paths.
+    """
+    stub = _branding_phase2_structured_output_stub(model_name)
+    if stub is not None:
+        return stub
+    stub = _branding_phase4_structured_output_stub(model_name, system_lowered)
+    if stub is not None:
+        return stub
+    return _branding_phase5_structured_output_stub(model_name)
+
+
 def _branding_phase5_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
     """Text-anchor fallback for Phase 5 branding structured-output stubs.
 
@@ -1359,11 +1383,11 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         ``description_lowered`` is already lowercased by the caller.
     Postconditions:
         Returns ``True`` if the stable-name check, either description
-        substring heuristic, or ``name`` is one of the six known Phase 2
-        classes — the last arm matches Strands' actual invariant (it names
-        the tool after the model's ``__name__``) independent of description
-        wording a future SDK version could change. Checks membership rather
-        than calling ``_branding_phase2_structured_output_stub`` so a pure
+        substring heuristic, or ``name`` is one of the known Phase 2, Phase 4,
+        or Phase 5 structured-output classes — the last arm matches Strands'
+        actual invariant (it names the tool after the model's ``__name__``)
+        independent of description wording a future SDK version could change.
+        Checks membership rather than calling the stub resolver so a pure
         boolean check doesn't also construct (and discard) a payload dict.
     """
     return (
@@ -1371,6 +1395,8 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         or "structuredoutputtool" in description_lowered
         or "structured_output" in description_lowered
         or name in _PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES
+        or name in _PHASE4_STRUCTURED_OUTPUT_MODEL_NAMES
+        or name in _PHASE5_STRUCTURED_OUTPUT_MODEL_NAMES
     )
 
 
@@ -1551,9 +1577,9 @@ class DummyLLMClient(LLMClient):
         When ``tool_specs`` contains a StructuredOutputTool (added by Strands
         when ``structured_output_model=...`` is used), yields a tool-use event
         invoking that tool with data from
-        ``_branding_phase2_structured_output_stub`` when the tool's name
-        resolves to a known Phase 2 model class, falling back to the
-        ``complete_json`` pattern matcher otherwise (mirrors ``chat()``, which
+        ``_branding_structured_output_stub_by_model_name`` when the tool's name
+        resolves to a known Phase 2, Phase 4, or Phase 5 model class, falling
+        back to the ``complete_json`` pattern matcher otherwise (mirrors ``chat()``, which
         is the method Strands actually calls for branding traffic via
         ``LLMClientModel``; this native ``stream()`` matters for a bare
         ``Agent(model=DummyLLMClient())``). Otherwise yields a plain text
@@ -1598,7 +1624,10 @@ class DummyLLMClient(LLMClient):
         # the other order would compute rich-response data that ignores the
         # tool identity entirely.
         deterministic = (
-            _branding_phase2_structured_output_stub(structured_tool_name)
+            _branding_structured_output_stub_by_model_name(
+                structured_tool_name,
+                (system_prompt or "").lower(),
+            )
             if structured_tool_name
             else None
         )
@@ -1701,10 +1730,10 @@ class DummyLLMClient(LLMClient):
     ) -> Dict[str, Any]:
         """Return a JSON-shaped stub for the given prompt.
 
-        Routes the Branding Phase 2 "Narrative & Messaging" cluster only when
-        ``structured_output_model`` is provided (see
-        ``_branding_phase2_structured_output_stub``); Phase 2 prompts without
-        that parameter do not match system-prompt text anchors here — use
+        Routes Branding Phase 2, Phase 4, and Phase 5 structured-output classes
+        by model name when ``structured_output_model`` is provided (see
+        ``_branding_structured_output_stub_by_model_name``); Phase 2 prompts
+        without that parameter do not match system-prompt text anchors here — use
         ``chat``/``stream`` Strands tool-name dispatch instead. For every other
         prompt shape this dummy stubs, pattern-matches against ``prompt`` (and,
         for a few teams, ``system_prompt``) for anchor tokens and returns the
@@ -1762,20 +1791,21 @@ class DummyLLMClient(LLMClient):
         # structured_output_model=X) caller (e.g. this suite's tests). chat()
         # and stream() do NOT reach this branch: they never call complete_json
         # with this parameter at all — their own dispatch blocks call
-        # _branding_phase2_structured_output_stub directly with just the tool's
-        # name string (the only identifier Strands' event loop ever gives them,
-        # per that helper's own docstring), bypassing this parameter entirely.
+        # _branding_structured_output_stub_by_model_name directly with just the
+        # tool's name string (the only identifier Strands' event loop ever gives
+        # them), bypassing this parameter entirely.
         # Route by class *name* — sidesteps fragility from prompt rewording or
         # incidentally-mentioned field names silently returning the wrong shape.
-        # Only a known subset of classes are wired up; anything else falls
-        # through unchanged.
+        # Phase 2, Phase 4, and Phase 5 model classes are wired up; anything
+        # else falls through unchanged.
         if structured_output_model is not None:
             assert isinstance(structured_output_model, type), (
                 f"structured_output_model must be a Pydantic model class, "
                 f"got {structured_output_model!r}"
             )
-            deterministic = _branding_phase2_structured_output_stub(
-                structured_output_model.__name__
+            deterministic = _branding_structured_output_stub_by_model_name(
+                structured_output_model.__name__,
+                (system_prompt or "").lower(),
             )
             if deterministic is not None:
                 return deterministic
@@ -2398,9 +2428,10 @@ class DummyLLMClient(LLMClient):
 
         1. **Strands structured output** (``tools`` contains a
            ``StructuredOutputTool``): return a single tool call invoking it
-           with data from ``_branding_phase2_structured_output_stub`` when the
-           tool's name resolves to a known Phase 2 model class (Strands names
-           the tool after ``output_model.__name__``), falling back to the
+           with data from ``_branding_structured_output_stub_by_model_name`` when
+           the tool's name resolves to a known Phase 2, Phase 4, or Phase 5
+           model class (Strands names the tool after ``output_model.__name__``),
+           falling back to the
            ``complete_json`` pattern matcher otherwise. This is the path real
            ``build_agent(structured_output=...)`` callers actually take —
            Strands drives ``structured_output_model=`` agents through the
@@ -2449,7 +2480,10 @@ class DummyLLMClient(LLMClient):
                 # structured_output= agents (Strands drives them through the
                 # tool-calling loop, not Model.structured_output()), so this
                 # check matters more than the one in complete_json itself.
-                data = _branding_phase2_structured_output_stub(structured_tool.get("name") or "")
+                data = _branding_structured_output_stub_by_model_name(
+                    structured_tool.get("name") or "",
+                    (system_prompt or "").lower(),
+                )
                 if data is None:
                     # Produce stub data via the pattern matcher and invoke the
                     # structured output tool with it. Strands will validate the
