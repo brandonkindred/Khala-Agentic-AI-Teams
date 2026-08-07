@@ -123,7 +123,13 @@ def default_cognition_block() -> CognitionSpec:
     )
 
 
-def build_agent_manifest(team_id: str, agent_name: str, *, summary: str | None = None) -> AgentManifest:
+def build_agent_manifest(
+    team_id: str,
+    agent_name: str,
+    *,
+    summary: str | None = None,
+    skill_tags: list[str] | None = None,
+) -> AgentManifest:
     """Build a validated ``agent_registry`` manifest for one roster agent.
 
     Preconditions:
@@ -135,6 +141,8 @@ def build_agent_manifest(team_id: str, agent_name: str, *, summary: str | None =
           ["default_guardrails"]``), ``team == "agentic_team_provisioning"``,
           ``source.entrypoint`` points at the roster-agent factory, and ``id`` is
           the stable, practically unique :func:`manifest_agent_id`.
+        * ``tags`` always includes ``"generated"`` and the team key, then any
+          non-blank ``skill_tags`` (deduped, order preserved).
     """
     # Explicit validation rather than ``assert`` (which ``python -O`` strips): these
     # are real boundary preconditions — silently skipping them under ``-O`` would
@@ -146,13 +154,18 @@ def build_agent_manifest(team_id: str, agent_name: str, *, summary: str | None =
 
     manifest_id = manifest_agent_id(team_id, agent_name)
     resolved_summary = (summary or "").strip() or f"Generated agent {agent_name}"
+    tags: list[str] = ["generated", _TEAM_KEY]
+    for tag in skill_tags or []:
+        cleaned = str(tag).strip()
+        if cleaned and cleaned not in tags:
+            tags.append(cleaned)
 
     manifest = AgentManifest(
         id=manifest_id,
         team=_TEAM_KEY,
         name=agent_name,
         summary=resolved_summary,
-        tags=["generated", _TEAM_KEY],
+        tags=tags,
         inputs=IOSchema(
             schema_ref=_INPUT_SCHEMA_REF,
             description="Roster metadata + user message; a shared entrypoint serves every "
@@ -207,6 +220,7 @@ def register_team_manifests(
     agents: list[AgenticTeamAgent],
     *,
     summaries: dict[str, str] | None = None,
+    skill_tags: dict[str, list[str]] | None = None,
     conn: object | None = None,
 ) -> ManifestRegistrationResult:
     """Build and install the live registry entries for a team's roster.
@@ -247,7 +261,8 @@ def register_team_manifests(
           omit another worker's stale ids. Per-agent ``summary`` is taken from
           ``summaries[agent_name]`` when provided, else the existing registry
           manifest's summary when present, else the default from
-          :func:`build_agent_manifest`.
+          :func:`build_agent_manifest`. Optional ``skill_tags[agent_name]`` are
+          merged into Manifest ``tags`` (after the generated/team markers).
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -265,6 +280,7 @@ def register_team_manifests(
 
     registry = get_registry()
     summary_map = summaries or {}
+    skill_tags_map = skill_tags or {}
     manifests: list[AgentManifest] = []
     for a in agents:
         summary = summary_map.get(a.agent_name)
@@ -272,7 +288,14 @@ def register_team_manifests(
             existing = registry.get(a.manifest_id) if a.manifest_id else None
             if existing is not None:
                 summary = existing.summary
-        manifests.append(build_agent_manifest(team_id, a.agent_name, summary=summary))
+        manifests.append(
+            build_agent_manifest(
+                team_id,
+                a.agent_name,
+                summary=summary,
+                skill_tags=skill_tags_map.get(a.agent_name),
+            )
+        )
     new_ids = {m.id for m in manifests}
     # Snapshot prior team-generated manifests before mutating. Scope strictly to
     # this team's generated ids (prefix + the "generated" tag) so a hand-authored

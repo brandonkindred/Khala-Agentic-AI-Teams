@@ -261,6 +261,7 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         return
     generated: list[AgenticTeamAgent] = []
     summaries: dict[str, str] = {}
+    skill_tags: dict[str, list[str]] = {}
     for a in agents_data:
         name = a.get("agent_name", "")
         if not name:
@@ -268,6 +269,9 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         role = a.get("role", "")
         if role:
             summaries[name] = role
+        skills = a.get("skills") or []
+        if isinstance(skills, list) and skills:
+            skill_tags[name] = [str(s) for s in skills if str(s).strip()]
         generated.append(
             AgenticTeamAgent(
                 agent_name=name,
@@ -287,7 +291,9 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         # roster + registry back together. Raises on registry failure so
         # merge_generated_agents rolls back the roster write and keeps both
         # stores consistent.
-        register_team_manifests(team_id, merged, summaries=summaries, conn=conn)
+        register_team_manifests(
+            team_id, merged, summaries=summaries, skill_tags=skill_tags, conn=conn
+        )
 
     # Merge under a team-row lock so the read (preserve registry agents), the write,
     # and the registry register all happen in one atomic, serialized transaction.

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import pytest
 from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+from pydantic import ValidationError
 
 from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
 from agent_team_studio.agentic_team_provisioning.roster_resolve import (
+    coerce_roster_agent,
     migrate_roster_row,
     persona_from_manifest,
     resolve_persona,
@@ -41,6 +44,54 @@ def test_persona_from_manifest_empty_cognition_tools() -> None:
     assert view.tools == []
     assert view.skills == []
     assert view.expertise == ["demo"]
+
+
+def test_persona_from_manifest_whitespace_summary_falls_back_to_name() -> None:
+    """Blank/whitespace summary must not leave role empty when name is set."""
+    view = persona_from_manifest(_manifest(summary="   \t  "))
+    assert view.role == "Planner"
+
+
+def test_coerce_roster_agent_accepts_fat_history_with_null_manifest_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Temporal history may still carry fat rows; coerce must not ValidationError."""
+    team_id = "team-1"
+    raw = {
+        "agent_name": "worker",
+        "role": "doer",
+        "skills": ["x"],
+        "capabilities": [],
+        "tools": [],
+        "expertise": [],
+        "source": "generated",
+        "manifest_id": None,
+    }
+    expected_id = manifest_agent_id(team_id, "worker")
+
+    class _Reg:
+        def __init__(self) -> None:
+            self._m: dict = {}
+
+        def get(self, agent_id: str):
+            return self._m.get(agent_id)
+
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            self._m[manifest.id] = manifest
+
+    reg = _Reg()
+    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+
+    with pytest.raises(ValidationError):
+        AgenticTeamAgent.model_validate(raw)
+
+    agent = coerce_roster_agent(team_id, raw)
+    assert isinstance(agent, AgenticTeamAgent)
+    assert agent.model_dump(mode="json") == {
+        "agent_name": "worker",
+        "source": "generated",
+        "manifest_id": expected_id,
+    }
 
 
 def test_resolve_persona_looks_up_registry(monkeypatch: pytest.MonkeyPatch) -> None:

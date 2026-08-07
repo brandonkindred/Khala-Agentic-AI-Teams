@@ -69,14 +69,6 @@ describe('AgenticTeamApiService', () => {
     req.flush(null);
   });
 
-  it('updateTeamAgent', () => {
-    service.updateTeamAgent('t1', 'Writer', { role: 'New role' }).subscribe();
-    const req = httpMock.expectOne(`${base}/teams/t1/agents/Writer`);
-    expect(req.request.method).toBe('PUT');
-    expect(req.request.body).toEqual({ role: 'New role' });
-    req.flush({});
-  });
-
   it('listProcesses', () => {
     service.listProcesses('t1').subscribe();
     httpMock.expectOne(`${base}/teams/t1/processes`).flush([]);

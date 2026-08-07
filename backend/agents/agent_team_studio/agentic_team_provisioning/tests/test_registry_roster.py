@@ -508,6 +508,37 @@ def test_llm_save_stamps_manifest_id_on_generated(
     }
 
 
+def test_llm_save_maps_skills_to_manifest_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """LLM-emitted skills become Manifest tags and surface on enriched GET as skills."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["seo", "headline-writing", "seo"],
+            }
+        ],
+    )
+
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert "seo" in roster[0]["skills"]
+    assert "headline-writing" in roster[0]["skills"]
+    mid = manifest_agent_id(team_id, "Writer")
+    manifest = registry.get(mid)
+    assert manifest is not None
+    assert "seo" in manifest.tags
+    assert "headline-writing" in manifest.tags
+    assert "generated" in manifest.tags
+    assert manifest.tags.count("seo") == 1
+
+
 def test_register_team_manifests_skips_registry_agents(
     client: TestClient, registry: _FakeRegistry
 ) -> None:

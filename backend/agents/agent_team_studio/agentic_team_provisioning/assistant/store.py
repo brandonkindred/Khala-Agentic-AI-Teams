@@ -496,7 +496,15 @@ class AgenticTeamStore:
                 "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
                 (now, team_id),
             )
-            deleted = AgenticTeamAgent.model_validate(row["data_json"])
+            raw = row["data_json"]
+            if isinstance(raw, str):
+                import json
+
+                raw = json.loads(raw)
+            # Coerce legacy fat RETURNING payloads (manifest_id may be null) so
+            # unregister hooks still receive a thin ref with a stamped id.
+            deleted, _changed = migrate_roster_row(team_id, dict(raw))
+            deleted = AgenticTeamAgent.model_validate(deleted.model_dump(mode="json"))
             if on_deleted is not None:
                 on_deleted(deleted)
             return deleted

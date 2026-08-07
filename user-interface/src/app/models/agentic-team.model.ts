@@ -62,15 +62,6 @@ export interface AddAgentFromRegistryRequest {
   manifest_id: string;
 }
 
-/** Request body for `PUT /teams/{id}/agents/{agent_name}` — every field optional. */
-export interface UpdateAgentRequest {
-  role?: string;
-  skills?: string[];
-  capabilities?: string[];
-  tools?: string[];
-  expertise?: string[];
-}
-
 export interface RosterGap {
   category: string;
   detail: string;

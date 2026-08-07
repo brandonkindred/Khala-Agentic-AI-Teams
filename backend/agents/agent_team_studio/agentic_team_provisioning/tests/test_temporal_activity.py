@@ -124,6 +124,35 @@ def test_run_step_activity_action_records_and_returns(
     assert row["step_results"][0]["output"] == "hello output"
 
 
+def test_run_step_activity_coerces_fat_history_agents(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In-flight Temporal payloads may still serialize fat roster rows with null manifest_id."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    _stub_llm(monkeypatch, "coerced ok")
+
+    fat_agents = [
+        {
+            "agent_name": "worker",
+            "role": "doer",
+            "skills": ["legacy"],
+            "capabilities": [],
+            "tools": [],
+            "expertise": [],
+            "source": "generated",
+            "manifest_id": None,
+        }
+    ]
+    out = wf.run_step_activity("r1", fat_agents, _ACTION_PROCESS, "s1", "prev")
+    assert out == "coerced ok"
+    row = store.get_pipeline_run("r1")
+    assert len(row["step_results"]) == 1
+    assert row["step_results"][0]["status"] == "completed"
+    assert row["step_results"][0]["output"] == "coerced ok"
+
+
 def test_run_step_activity_is_idempotent_per_step(
     fake_pg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

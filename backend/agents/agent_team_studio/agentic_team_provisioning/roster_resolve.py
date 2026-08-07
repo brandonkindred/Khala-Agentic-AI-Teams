@@ -47,8 +47,10 @@ def persona_from_manifest(manifest: AgentManifest) -> RosterPersonaView:
     tools: list[str] = []
     if manifest.cognition and manifest.cognition.tools:
         tools = list(manifest.cognition.tools)
+    summary = (manifest.summary or "").strip()
+    name = (manifest.name or "").strip()
     return RosterPersonaView(
-        role=(manifest.summary or manifest.name or "").strip(),
+        role=summary or name,
         skills=list(manifest.tags or []),
         capabilities=[],
         tools=tools,
@@ -135,3 +137,22 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
         registry.register(manifest)
 
     return _thin_agent(agent_name=agent_name, source=source, manifest_id=mid), True
+
+
+def coerce_roster_agent(team_id: str, raw: dict) -> AgenticTeamAgent:
+    """Normalize a legacy or thin roster dict into a validated thin ``AgenticTeamAgent``.
+
+    Used by Temporal activities (workflow history may still carry fat rows) and any
+    path that must accept pre-thin JSON without going through the Postgres loaders.
+
+    Preconditions:
+        * ``team_id`` is a non-empty string.
+        * ``raw`` is a mapping with ``agent_name`` (same rules as
+          :func:`migrate_roster_row`).
+    Postconditions:
+        * Returns a validated thin :class:`AgenticTeamAgent` (``agent_name``,
+          ``source``, ``manifest_id`` only). May register a generated Manifest when
+          migrating a fat generated row that lacked ``manifest_id``.
+    """
+    agent, _changed = migrate_roster_row(team_id, raw)
+    return AgenticTeamAgent.model_validate(agent.model_dump(mode="json"))

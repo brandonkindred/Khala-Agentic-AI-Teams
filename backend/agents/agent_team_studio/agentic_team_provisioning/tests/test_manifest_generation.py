@@ -63,6 +63,16 @@ def test_build_agent_manifest_summary_falls_back_without_role():
     assert manifest.summary == "Generated agent Nameless"
 
 
+def test_build_agent_manifest_includes_skill_tags():
+    manifest = build_agent_manifest(
+        "t", "Writer", summary="Writes", skill_tags=["seo", " ", "seo", "copy"]
+    )
+    assert manifest.tags[:2] == ["generated", "agentic_team_provisioning"]
+    assert "seo" in manifest.tags
+    assert "copy" in manifest.tags
+    assert manifest.tags.count("seo") == 1
+
+
 def test_build_agent_manifest_rejects_empty_team_id():
     # Explicit ValueError (not assert) so the precondition survives ``python -O``.
     with pytest.raises(ValueError, match="team_id must be non-empty"):

@@ -94,6 +94,57 @@ def test_list_team_agents_migrates_fat_row(fake_pg: dict, monkeypatch: pytest.Mo
     assert fake_pg["team_agents"][(team_id, "Writer")]["data_json"] == stored
 
 
+def test_delete_team_agent_migrates_fat_returning(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DELETE ... RETURNING of legacy fat JSON must migrate before model_validate."""
+    store = AgenticTeamStore()
+    team = store.create_team(name="T-del-fat", description="")
+    team_id = team.team_id
+    fat = {
+        "agent_name": "Writer",
+        "role": "Writes docs",
+        "skills": ["seo"],
+        "capabilities": [],
+        "tools": [],
+        "expertise": [],
+        "source": "generated",
+        "manifest_id": None,
+    }
+    now = datetime.now(tz=timezone.utc)
+    fake_pg["team_agents"][(team_id, "Writer")] = {
+        "team_id": team_id,
+        "agent_name": "Writer",
+        "data_json": fat,
+        "created_at": now,
+        "updated_at": now,
+    }
+    expected_id = manifest_agent_id(team_id, "Writer")
+
+    class _Reg:
+        def __init__(self) -> None:
+            self._m: dict = {}
+
+        def get(self, agent_id: str):
+            return self._m.get(agent_id)
+
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            self._m[manifest.id] = manifest
+
+    reg = _Reg()
+    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+
+    deleted = store.delete_team_agent(team_id, "Writer")
+    assert deleted is not None
+    assert deleted.manifest_id == expected_id
+    assert deleted.model_dump(mode="json") == {
+        "agent_name": "Writer",
+        "source": "generated",
+        "manifest_id": expected_id,
+    }
+    assert (team_id, "Writer") not in fake_pg["team_agents"]
+
+
 def test_save_and_load_team_agents(fake_pg: dict):
     store = AgenticTeamStore()
     team = store.create_team(name="T", description="")
