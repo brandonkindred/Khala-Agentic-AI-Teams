@@ -425,9 +425,7 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
     active_runs = {run_id: {"run_id": run_id, "status": "running"}}
     monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
     persisted = []
-    monkeypatch.setattr(
-        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a)
-    )
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a))
 
     captured = {}
 
@@ -509,9 +507,7 @@ def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
     active_runs = {run_id: {"run_id": run_id, "status": "running"}}
     monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
     persisted = []
-    monkeypatch.setattr(
-        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a)
-    )
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a))
 
     captured = {}
 
@@ -555,9 +551,7 @@ def test_fail_strategy_lab_run_cleanup_survives_cleanup_job_failure(monkeypatch)
     active_runs = {run_id: {"run_id": run_id, "status": "running"}}
     monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
     persisted = []
-    monkeypatch.setattr(
-        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a)
-    )
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a))
 
     def _boom(_job_id):
         raise RuntimeError("event bus is on fire")

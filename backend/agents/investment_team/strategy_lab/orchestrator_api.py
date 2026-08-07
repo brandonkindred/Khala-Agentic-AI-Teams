@@ -48,8 +48,8 @@ from shared.concurrency import parallel_map
 
 if TYPE_CHECKING:
     from investment_team.api.main import (
-        StrategyLabCycleProgress,
         RunStrategyLabRequest,
+        StrategyLabCycleProgress,
         StrategyLabRunStatusResponse,
         _compute_signal_brief_snapshot,
         _finalize_strategy_lab_cycle_record,
