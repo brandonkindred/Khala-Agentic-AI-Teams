@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 from pydantic import ValidationError
 
+from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     manifest_agent_id,
@@ -129,7 +129,9 @@ def test_resolve_persona_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None
         resolve_persona("missing.id")
 
 
-def test_migrate_generated_stamps_manifest_id_and_strips_fat(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_migrate_generated_stamps_manifest_id_and_strips_fat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     team_id = "team-1"
     raw = {
         "agent_name": "Writer",

@@ -65,11 +65,11 @@ from agent_team_studio.agentic_team_provisioning.models import (
     TeamPendingQuestion,
     UpdateFormRecordRequest,
 )
+from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agent_team_studio.agentic_team_provisioning.roster_resolve import (
     EMPTY_ROSTER_PERSONA,
     resolve_persona,
 )
-from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
     build_agent as _build_test_agent,  # noqa: F401 — hub alias: services.testing + tests
 )
@@ -286,7 +286,6 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     # Merge under a team-row lock so the read (preserve registry agents), the write,
     # and the registry register all happen in one atomic, serialized transaction.
     _store.merge_generated_agents(team_id, generated, on_merged=_register)
-
 
 
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
