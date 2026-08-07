@@ -39,9 +39,11 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> Status
       race a worker crash into silently dropping the answer), then ``CodingTeamWorkflow`` is signaled
       directly so it re-invokes the pipeline activity with ``acknowledged_resume_token`` set to
       this same token.
-    - **Thread-mode / GitHub-hook pause** (``resume_token`` absent): answers are stored
-      only; the caller must resume via a Temporal-native pause or other orchestration path.
-      No auto-resume or thread restart.
+    - **Thread-mode / GitHub-hook pause** (``resume_token`` absent): answers are stored via
+      ``store_submit_answers``, which clears ``waiting_for_answers`` so a still-alive blocked
+      wait loop can proceed. There is no thread restart if that loop already died (e.g. after a
+      process restart), and ``POST /run/{job_id}/resume`` cannot recover these jobs (it requires
+      a ``resume_token``).
 
     Authentication/authorization is enforced by the unified API security gateway in front of all
     team mounts; like every other coding-team route, this endpoint assumes that perimeter.
