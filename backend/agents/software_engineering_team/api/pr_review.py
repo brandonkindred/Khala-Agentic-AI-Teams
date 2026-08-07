@@ -18,6 +18,10 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
+from software_engineering_team.code_review_agent.change_surface import (
+    ChangeSurface,
+    build_change_surface_from_patches,
+)
 from software_engineering_team.api.advisory_lock import advisory_lock
 from software_engineering_team.api.coding_team_models import (
     ReviewPrRequest,
@@ -411,6 +415,36 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
         blocks.append(f"### {f.filename} ###\n{rendered}")
         reviewed += 1
     return ReviewCode("\n\n".join(blocks), reviewed)
+
+
+def _build_change_surface_for_reviewable(
+    files: List[Any],
+    head_files: Dict[str, str],
+) -> ChangeSurface:
+    """Build a change surface for head-backed reviewable patched files.
+
+    Preconditions:
+        - ``files`` is the PR changed-file list (may be empty). Each entry
+          exposes ``.filename``, ``.status``, and ``.patch``.
+        - ``head_files`` maps path → non-blank head text for successfully
+          fetched files.
+
+    Postconditions:
+        - Considers only files that pass ``_is_whole_file_reviewable`` and
+          whose ``filename`` is present in ``head_files``.
+        - Returns ``build_change_surface_from_patches`` for those patches with
+          ``new_contents=head_files`` (empty ``ChangeSurface`` when no
+          candidates or the builder omits all paths).
+        - Never raises for well-typed inputs.
+    """
+    patches = {
+        f.filename: f.patch
+        for f in files
+        if _is_whole_file_reviewable(f) and f.filename in head_files
+    }
+    if not patches:
+        return ChangeSurface(blocks={})
+    return build_change_surface_from_patches(patches, new_contents=head_files)
 
 
 # Optional dependency: author tagging for persisted review history. Imported once
@@ -1096,6 +1130,7 @@ class ReviewModeDecision(NamedTuple):
     valid_by_path: Dict[str, List[int]]
     changed_by_path: Dict[str, List[int]]
     head_files: Dict[str, str]
+    change_surface: ChangeSurface
     code: str
     files_reviewed: int
     repo_reader: Any
@@ -1143,8 +1178,10 @@ def _decide_review_mode(
           ``code`` is built (via :func:`_build_review_code`) ONLY from the
           files that failed to fetch, and ``files_reviewed`` sums both; when
           none fetched, ``code`` is built from all ``files`` and
-          ``files_reviewed`` is the hunk count. ``repo_reader`` is always
-          constructed for ``pr.head_sha``, whole-file success or not.
+          ``files_reviewed`` is the hunk count. ``change_surface`` is the
+          head-backed builder result (empty when no head-backed reviewable
+          files). ``repo_reader`` is always constructed for ``pr.head_sha``,
+          whole-file success or not.
         - Never raises for GitHub-fetch failures (:func:`_fetch_head_files`
           degrades internally); any other exception propagates to the
           caller's outer handler.
@@ -1253,10 +1290,12 @@ def _decide_review_mode(
             len(reviewable),
         )
     repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
+    change_surface = _build_change_surface_for_reviewable(files, head_files)
     return ReviewModeDecision(
         valid_by_path=valid_by_path,
         changed_by_path=changed_by_path,
         head_files=head_files,
+        change_surface=change_surface,
         code=code,
         files_reviewed=files_reviewed,
         repo_reader=repo_reader,

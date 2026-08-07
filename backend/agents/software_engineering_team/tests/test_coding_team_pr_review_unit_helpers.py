@@ -22,6 +22,7 @@ import pytest
 import software_engineering_team.api.coding_team_main as main
 from software_engineering_team.api import pr_review
 from software_engineering_team.api.coding_team_state import _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S
+from software_engineering_team.github_source import PullRequestFile
 
 _STALE_S = pr_review._REVIEW_GUARD_HEARTBEAT_STALE_S
 
@@ -673,3 +674,39 @@ class TestFinalizeReviewUnit:
         assert jobs[0]["error"] == "boom"
         assert reviews[0]["completed"] is True
         assert reviews[0]["error"] == "boom"
+
+
+# ---------------------------------------------------------------------------
+# _build_change_surface_for_reviewable
+# ---------------------------------------------------------------------------
+
+
+class TestBuildChangeSurfaceForReviewable:
+    def test_head_backed_usable_patch_builds_surface(self) -> None:
+        content = "def f():\n    return 1\n"
+        patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+        files = [PullRequestFile("mod.py", "modified", patch, 1, 1, None)]
+        head = {"mod.py": content}
+        surface = pr_review._build_change_surface_for_reviewable(files, head)
+        assert not surface.is_empty
+        assert "mod.py" in surface.blocks
+        assert "### mod.py ###" in surface.code
+
+    def test_missing_head_omits_path_empty_surface(self) -> None:
+        patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+        files = [PullRequestFile("mod.py", "modified", patch, 1, 1, None)]
+        surface = pr_review._build_change_surface_for_reviewable(files, {})
+        assert surface.is_empty
+
+    def test_removed_and_no_patch_excluded(self) -> None:
+        content = "def f():\n    return 1\n"
+        patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+        files = [
+            PullRequestFile("gone.py", "removed", patch, 0, 1, None),
+            PullRequestFile("bin.png", "added", "", 0, 0, None),
+            PullRequestFile("ok.py", "modified", patch, 1, 1, None),
+        ]
+        surface = pr_review._build_change_surface_for_reviewable(
+            files, {"gone.py": content, "ok.py": content}
+        )
+        assert list(surface.blocks.keys()) == ["ok.py"]

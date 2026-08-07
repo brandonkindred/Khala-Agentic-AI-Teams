@@ -4595,6 +4595,30 @@ class TestDecideReviewModeUnit:
         assert set(result.head_files) == {"a.py", "b.py"}
         assert set(result.valid_by_path["a.py"]) == {1}
         assert set(result.changed_by_path["a.py"]) == {1}
+        from software_engineering_team.code_review_agent.change_surface import ChangeSurface
+
+        assert isinstance(result.change_surface, ChangeSurface)
+
+    def test_decide_review_mode_attaches_head_backed_change_surface(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        content = "def f():\n    return 1\n"
+        patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+        files = [PullRequestFile("mod.py", "modified", patch, 1, 1, None)]
+
+        result = pr_review._decide_review_mode(
+            _file_contents_client(lambda o, r, path, ref: content),
+            "job1",
+            "o",
+            "r",
+            7,
+            _mode_pr(),
+            files,
+        )
+        assert result is not None
+        assert not result.change_surface.is_empty
+        assert "mod.py" in result.change_surface.blocks
+        assert result.code == ""  # whole-file fetch still primary for dispatch this leaf
 
     def test_partial_fetch_falls_back_to_hunks_for_the_missing_subset(self) -> None:
         from software_engineering_team.api import pr_review
@@ -4618,6 +4642,7 @@ class TestDecideReviewModeUnit:
         assert "b.py" in result.code  # missing file's hunk was rendered
         assert "a.py" not in result.code  # fetched file's hunk was NOT rendered
         assert result.files_reviewed == 2  # 1 whole + 1 hunk
+        assert "b.py" not in result.change_surface.blocks
 
     def test_total_fetch_failure_renders_every_files_hunks(self) -> None:
         from software_engineering_team.api import pr_review
@@ -4637,6 +4662,7 @@ class TestDecideReviewModeUnit:
         assert result.head_files == {}
         assert result.code
         assert result.files_reviewed == 1
+        assert result.change_surface.is_empty
 
     def test_total_fetch_failure_with_blank_hunk_render_is_a_noop(
         self, monkeypatch: pytest.MonkeyPatch
