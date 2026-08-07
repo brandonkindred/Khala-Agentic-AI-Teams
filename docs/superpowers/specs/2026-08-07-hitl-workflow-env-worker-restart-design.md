@@ -36,6 +36,8 @@ and a pause-status query remain separate work.
 | Worker lifecycle | Keep one environment alive; stop Worker A after pause is parked; start Worker B on the same task queue |
 | Sync before stop | Poll `handle.fetch_history()` until an `ACTIVITY_TASK_COMPLETED` is followed by a later `WORKFLOW_TASK_COMPLETED` |
 | Signal timing | Exactly one `submit_answers` while Worker A is down (server-buffered); no resend loop |
+| Sticky execution | Test workers use `max_cached_workflows=0` so Worker B can pick up a task scheduled after Worker A stopped without waiting on sticky schedule-to-start timeout |
+| Time skipping | Wrap pause/signal/result waits in `env.auto_time_skipping_disabled()` so unbounded `wait_condition` does not auto-advance to the workflow run timeout |
 | Determinism guard | Replay completed history with `Replayer(workflows=[CodingTeamWorkflow])` |
 | Production code | Unchanged |
 
@@ -46,10 +48,13 @@ Test sequence:
 1. Start time-skipping `WorkflowEnvironment` and Worker A with the fake pipeline activity.
 2. Start `CodingTeamWorkflow`; first activity call returns `{"outcome": "paused", "resume_token": ...}`.
 3. Poll history until pause is parked (`ACTIVITY_TASK_COMPLETED` then a later `WORKFLOW_TASK_COMPLETED`). Fail with a clear diagnostic if that does not happen within ~10s.
-4. Stop Worker A (environment stays up).
+4. Stop Worker A (environment stays up). Test workers disable sticky caching
+   (`max_cached_workflows=0`) so the signal-triggered workflow task is not
+   pinned to Worker A.
 5. Send one `submit_answers` signal with the matching `resume_token` and a well-formed `answers` list.
 6. Start Worker B on the same task queue / workflows / activities.
-7. Await workflow result (timeout ~30s); assert terminal `{"job_id": ..., "status": "completed"}`.
+7. Await workflow result under `auto_time_skipping_disabled` (timeout ~30s);
+   assert terminal `{"job_id": ..., "status": "completed"}`.
 8. Replay recorded history; must not raise non-determinism errors.
 
 If `wait_condition` / signal wiring regresses, or history sync is wrong and the
