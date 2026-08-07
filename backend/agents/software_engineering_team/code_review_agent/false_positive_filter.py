@@ -694,6 +694,31 @@ class CodebaseIndex:
                         return results
         return results
 
+    def find_references(
+        self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT
+    ) -> str:
+        """Search in-memory sources for ``symbol`` and return capped path:line hits.
+
+        Thin wrapper over :meth:`search`: same corpus (submission files plus the
+        existing-codebase excerpt), case-insensitive substring match, and cap.
+        Does not consult the repo reader and does not attach excerpts.
+
+        Preconditions:
+            - ``max_matches`` > 0.
+
+        Postconditions:
+            - On hits, returns newline-joined ``path:line`` strings for the first
+              ``max_matches`` occurrences in path-then-line order (no line text).
+            - On no hits (including a blank/whitespace-only ``symbol``), returns
+              ``No references for {symbol!r}.``
+            - Never raises for missing symbols; raises ``ValueError`` when
+              ``max_matches`` is non-positive (delegated via ``search``).
+        """
+        hits = self.search(symbol, max_matches=max_matches)
+        if not hits:
+            return f"No references for {symbol!r}."
+        return "\n".join(f"{path}:{lineno}" for path, lineno, _text in hits)
+
 
 def _strip_numbered_prefixes(
     content: str, line_number: int

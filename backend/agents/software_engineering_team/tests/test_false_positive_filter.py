@@ -556,6 +556,44 @@ def test_search_rejects_nonpositive_max(bad_max: int) -> None:
         CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=bad_max)
 
 
+def test_find_references_returns_capped_path_line_hits() -> None:
+    """Hits are path:line only (no line text), across files and the excerpt."""
+    idx = CodebaseIndex(
+        files={
+            "a.py": "def foo():\n    pass\n",
+            "b.py": "FOO_CONST = 1\n",
+        },
+        existing_codebase="legacy_foo()\n",
+    )
+    result = idx.find_references("foo")
+    assert result == (
+        "a.py:1\n"
+        "b.py:1\n"
+        f"{CodebaseIndex.EXISTING_CODEBASE_PATH}:1"
+    )
+
+
+def test_find_references_empty_and_blank_symbol() -> None:
+    """Unknown or whitespace-only symbol returns the empty-references message."""
+    idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
+    assert idx.find_references("zzz-not-there") == "No references for 'zzz-not-there'."
+    assert idx.find_references("   ") == "No references for '   '."
+
+
+def test_find_references_respects_max_matches() -> None:
+    """Result is capped at max_matches path:line lines."""
+    idx = CodebaseIndex(files={"a.py": "x\n" * 100})
+    result = idx.find_references("x", max_matches=5)
+    assert result.splitlines() == [f"a.py:{i}" for i in range(1, 6)]
+
+
+@pytest.mark.parametrize("bad_max", [0, -1, -100])
+def test_find_references_rejects_nonpositive_max(bad_max: int) -> None:
+    """Non-positive max_matches raises ValueError (same precondition as search)."""
+    with pytest.raises(ValueError):
+        CodebaseIndex(files={"a.py": "x"}).find_references("x", max_matches=bad_max)
+
+
 # --------------------------------------------------------------------------- tools
 
 
