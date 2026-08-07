@@ -1,18 +1,17 @@
 # Strategy Lab API orchestration: inventory and extract boundaries
 
-This note inventories the Strategy Lab run/cycle helpers that still live in
-`investment_team/api/main.py`, documents the target ownership for
-`strategy_lab/orchestrator_api.py`, and records how shared state (`lock`,
-record maps) will be accessed when bodies move. Read this before relocating
-helpers — it is the map for "where does this belong" so later extraction
-steps do not invent ownership mid-refactor.
+This note inventories Strategy Lab run/cycle helpers and documents ownership
+between `investment_team/api/main.py` and
+`strategy_lab/orchestrator_api.py`. Cluster 1's persist/reconcile/progress
+pieces and Cluster 5's purge helpers now have real implementations in
+`orchestrator_api.py`; `api.main` re-exports them for compatibility.
 
 Companion notes: `MIXIN_BOUNDARIES.md` (pipeline mixin family),
 `run_state.py` (already-extracted in-memory run registry + shared `lock`).
 
-**This step does not change runtime semantics.** Bodies remain in `api.main`;
-`orchestrator_api.py` is a thin re-export façade so Temporal activities can
-import the stable target path early.
+**This extraction does not change runtime semantics.** `api.main` remains the
+FastAPI route and model owner, while it re-exports the extracted helper objects
+so existing imports retain identity.
 
 ---
 
@@ -53,19 +52,19 @@ for the façade step.
 
 ---
 
-## Helper inventory (still in `api.main`)
+## Helper inventory
 
-### Cluster 1 — Run-state I/O
+### Cluster 1 — Run-state I/O (partially extracted)
 
 | Helper | Role | Primary callers |
 |---|---|---|
-| `_persist_run_state` | Create/update lab-run job | routes; Temporal `persist_run_state_activity`; `_fail_strategy_lab_run` |
-| `_reconcile_run_progress` | Sync in-memory progress from job service | `list` / `status` / `stream` / `jobs` routes |
+| `_persist_run_state` | Create/update lab-run job | `orchestrator_api` implementation; `api.main` re-export |
+| `_reconcile_run_progress` | Sync in-memory progress from job service | `orchestrator_api` implementation; `api.main` re-export |
 | `_run_state_to_response` | Map state dict → status response model | status / list routes |
 | `_build_run_state` | Mint run-state dict for run/resume/restart | run / resume / restart routes |
-| `_job_progress_percent` | Clamp progress % | `list_strategy_lab_jobs` |
-| `_STRATEGY_LAB_PROGRESS_FIELDS` | Field allowlist for reconcile | `_reconcile_run_progress` |
-| `STRATEGY_LAB_TERMINAL_STATUSES` | Terminal status frozenset | reconcile, fail, routes |
+| `_job_progress_percent` | Clamp progress % | `orchestrator_api` implementation; `api.main` re-export |
+| `_STRATEGY_LAB_PROGRESS_FIELDS` | Field allowlist for reconcile | `orchestrator_api` implementation; `api.main` re-export |
+| `STRATEGY_LAB_TERMINAL_STATUSES` | Terminal status frozenset | `orchestrator_api` implementation; `api.main` re-export |
 
 ### Cluster 2 — Dispatch / failure / concurrency guards
 
@@ -107,15 +106,15 @@ wave — do not silently duplicate it.
 | `_strategy_lab_run_failure` | Optional failure string for a run | status surfaces |
 | `_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES` | `cancelled`/`failed`/`interrupted` | external-terminal helpers |
 
-### Cluster 5 — Storage purge / prior-record snapshot
+### Cluster 5 — Storage purge / prior-record snapshot (extracted)
 
 | Helper | Role | Primary callers |
 |---|---|---|
-| `_snapshot_prior_records` | Locked parse+sort of lab records | cycles; `snapshot_prior_records_activity`; signal brief |
-| `_delete_jobs_concurrently` | Bounded parallel `delete_job` | purge helpers |
-| `_delete_paper_sessions_for_lab_record` | Delete paper jobs for one lab id | `delete_strategy_lab_record` |
-| `_purge_strategy_lab_job_storage` | Full lab + paper storage purge | `clear_strategy_lab_storage` |
-| `_PURGE_MAX_WORKERS`, `_PURGE_TIMEOUT_S` | Purge fan-out knobs | purge helpers |
+| `_snapshot_prior_records` | Locked parse+sort of lab records | `orchestrator_api` implementation; `api.main` re-export |
+| `_delete_jobs_concurrently` | Bounded parallel `delete_job` | `orchestrator_api` implementation; `api.main` re-export |
+| `_delete_paper_sessions_for_lab_record` | Delete paper jobs for one lab id | `orchestrator_api` implementation; `api.main` re-export |
+| `_purge_strategy_lab_job_storage` | Full lab + paper storage purge | `orchestrator_api` implementation; `api.main` re-export |
+| `_PURGE_MAX_WORKERS`, `_PURGE_TIMEOUT_S` | Purge fan-out knobs | `orchestrator_api` constants; `api.main` re-export |
 
 ### Explicitly not claimed by `orchestrator_api`
 
@@ -135,12 +134,12 @@ wave — do not silently duplicate it.
 
 ```
 activities.persist_run_state_activity
-  → orchestrator_api._persist_run_state  →  api.main._persist_run_state
+  → orchestrator_api._persist_run_state
        → run_state.get_lab_run_job_client
 
 activities.snapshot_prior_records_activity
-  → orchestrator_api._snapshot_prior_records  →  api.main._snapshot_prior_records
-       → run_state.lock + _strategy_lab_records (still constructed in api.main)
+  → orchestrator_api._snapshot_prior_records
+       → run_state.lock + lazy api.main._strategy_lab_records
 
 activities.compute_signal_brief_activity
   → orchestrator_api._compute_signal_brief_snapshot  →  api.main...
@@ -174,22 +173,28 @@ activities.finalize_cycle_record_activity
 
 ---
 
-## Façade step (current)
+## Current export boundary
 
-`orchestrator_api.py` re-exports only the six Temporal-hot helpers:
+`orchestrator_api.py` implements these Cluster 1/5 helpers:
 
 1. `_persist_run_state`
-2. `_snapshot_prior_records`
-3. `_compute_signal_brief_snapshot`
-4. `_is_strategy_lab_run_externally_stopped`
-5. `_strategy_lab_external_terminal_status`
-6. `_finalize_strategy_lab_cycle_record`
+2. `_reconcile_run_progress`
+3. `_job_progress_percent`
+4. `_STRATEGY_LAB_PROGRESS_FIELDS`
+5. `STRATEGY_LAB_TERMINAL_STATUSES`
+6. `_snapshot_prior_records`
+7. `_delete_jobs_concurrently`
+8. `_delete_paper_sessions_for_lab_record`
+9. `_purge_strategy_lab_job_storage`
+10. `_PURGE_MAX_WORKERS` / `_PURGE_TIMEOUT_S`
 
-Resolution is lazy (`__getattr__` → `api.main`) so importing the façade does
-not eagerly load the FastAPI module, and monkeypatches on `api.main` still
-apply when activities import inside the activity body.
+`api.main` imports and re-exports those exact objects. Only the four remaining
+Temporal-hot helpers use lazy resolution (`__getattr__` → `api.main`):
+`_compute_signal_brief_snapshot`, `_is_strategy_lab_run_externally_stopped`,
+`_strategy_lab_external_terminal_status`, and
+`_finalize_strategy_lab_cycle_record`.
 
-`strategy_lab/temporal/activities.py` imports those six from
+`strategy_lab/temporal/activities.py` imports its helpers from
 `orchestrator_api` instead of `api.main`.
 
 ---

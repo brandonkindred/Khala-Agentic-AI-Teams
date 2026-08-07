@@ -167,12 +167,12 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
-    from investment_team.api import main as api_main
+def test_persist_run_state_activity_delegates_to_orchestrator_api(monkeypatch):
+    from investment_team.strategy_lab import orchestrator_api
 
     captured = {}
     monkeypatch.setattr(
-        api_main,
+        orchestrator_api,
         "_persist_run_state",
         lambda run_id, state, *, create=False: captured.update(
             run_id=run_id, state=state, create=create
@@ -183,9 +183,9 @@ def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
     assert captured == {"run_id": "run-1", "state": {"status": "running"}, "create": True}
 
 
-def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
-    from investment_team.api import main as api_main
+def test_snapshot_prior_records_activity_delegates_to_orchestrator_api(monkeypatch):
     from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab import orchestrator_api
 
     record = StrategyLabRecord(
         lab_record_id="rec-1",
@@ -205,7 +205,9 @@ def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
         analysis_narrative="n",
         created_at="2023-01-01T00:00:00Z",
     )
-    monkeypatch.setattr(api_main, "_snapshot_prior_records", lambda *, reverse=False: [record])
+    monkeypatch.setattr(
+        orchestrator_api, "_snapshot_prior_records", lambda *, reverse=False: [record]
+    )
 
     result = act.snapshot_prior_records_activity()
     assert result[0]["lab_record_id"] == "rec-1"

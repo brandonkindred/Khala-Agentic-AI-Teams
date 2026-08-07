@@ -1013,6 +1013,7 @@ def test_list_strategy_lab_runs_reconciles_terminal_job_service_status(
     """An in-memory run marked "running" is reconciled to the job service's
     terminal status (and its error message) in the listing."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     # In-memory says "running" but job service has the run as "cancelled".
     api_main._active_runs["run-1"] = {
@@ -1026,7 +1027,7 @@ def test_list_strategy_lab_runs_reconciles_terminal_job_service_status(
             {"job_id": "run-1", "status": "cancelled", "error": "user request"},
         ]
     )
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     resp = api_client.get("/strategy-lab/runs")
     assert resp.status_code == 200
@@ -1043,6 +1044,7 @@ def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
     """Mid-run progress must reach the client even while the job service still
     reports a non-terminal status -- not just status/error at completion."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     api_main._active_runs["run-prog2"] = {
         "run_id": "run-prog2",
@@ -1071,7 +1073,7 @@ def test_list_strategy_lab_runs_reconciles_progress_while_non_terminal(
             }
         ]
     )
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     resp = api_client.get("/strategy-lab/runs")
     assert resp.status_code == 200
@@ -1374,6 +1376,7 @@ def test_list_strategy_lab_jobs_same_id_reconciles_terminal_and_dedupes(
     in ``_reconcile_run_progress`` leaves absent fields alone).
     """
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     shared_id = "dup-run"
     api_main._active_runs[shared_id] = {
@@ -1397,7 +1400,7 @@ def test_list_strategy_lab_jobs_same_id_reconciles_terminal_and_dedupes(
             }
         ]
     )
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     resp = api_client.get("/strategy-lab/jobs")
 
@@ -1426,6 +1429,7 @@ def test_list_strategy_lab_jobs_reconciles_progress_while_non_terminal(
     reconciliation is not gated on a terminal transition.
     """
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     run_id = "prog-run"
     api_main._active_runs[run_id] = {
@@ -1448,7 +1452,7 @@ def test_list_strategy_lab_jobs_reconciles_progress_while_non_terminal(
             }
         ]
     )
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     resp = api_client.get("/strategy-lab/jobs")
 
@@ -1942,6 +1946,7 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
     """An in-memory "running" status is reconciled to the job service's
     terminal status/error in the single-run status response."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     api_main._active_runs["run-r"] = {
         "run_id": "run-r",
@@ -1950,7 +1955,7 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
         "total_cycles": 3,
     }
     stub = _StubLabClient(jobs=[{"job_id": "run-r", "status": "failed", "error": "boom"}])
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
     resp = api_client.get("/strategy-lab/runs/run-r/status")
     body = resp.json()
     assert body["status"] == "failed"
@@ -2002,6 +2007,7 @@ def test_get_strategy_lab_run_status_reconciles_progress_while_non_terminal(
     """Mid-run progress must reach the client even while the job service still
     reports a non-terminal status -- not just status/error at completion."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     api_main._active_runs["run-prog"] = {
         "run_id": "run-prog",
@@ -2028,7 +2034,7 @@ def test_get_strategy_lab_run_status_reconciles_progress_while_non_terminal(
             }
         ]
     )
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     resp = api_client.get("/strategy-lab/runs/run-prog/status")
     assert resp.status_code == 200
@@ -2051,6 +2057,7 @@ def test_get_strategy_lab_run_status_logs_reconciliation_failure(
     """A job-service failure during reconciliation is logged (at DEBUG) and the
     endpoint still returns 200 with the last-known in-memory status."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api, run_state
 
     api_main._active_runs["run-broken"] = {
         "run_id": "run-broken",
@@ -2063,9 +2070,9 @@ def test_get_strategy_lab_run_status_logs_reconciliation_failure(
         def get_job(self, *a, **k):
             raise RuntimeError("backend down")
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
 
-    with caplog.at_level("DEBUG", logger=api_main.logger.name):
+    with caplog.at_level("DEBUG", logger=orchestrator_api.logger.name):
         resp = api_client.get("/strategy-lab/runs/run-broken/status")
 
     body = resp.json()
@@ -2471,6 +2478,7 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
 
     from investment_team.api import job_event_bus
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     api_main._active_runs["stream-prog"] = {
         "run_id": "stream-prog",
@@ -2497,7 +2505,7 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
             }
         ]
     )
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
 
     pre_events = deque([{"type": "complete", "summary": "ok"}])
 
