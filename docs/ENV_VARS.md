@@ -1428,10 +1428,12 @@ in-memory LRU (today's single-process behavior). Compose wires Redis **only on `
 placeholder `please-change-me`, same as Neo4j) with blank `REDIS_URL`, so Python builds
 `redis://[:quoted-password@]host:port/db` and percent-encodes the password. Do **not** embed an
 unquoted password in a compose `REDIS_URL` default — characters like `@` / `:` / `/` break URL
-userinfo parsing. Set `REDIS_URL=` and `REDIS_HOST=` (empty) on SE to fall back to in-process
-memory. `REDIS_URL` wins over host/port/password when non-blank. `REDIS_HOST` must be a bare
-hostname or bare IPv6 literal (no embedded port — use `REDIS_PORT`; no zone-ID / scoped addresses —
-use `REDIS_URL` for those). Backend unavailability fails open to a cache miss (recompute),
+userinfo parsing. For in-process memory on SE, set `REDIS_HOST=` (empty) and leave `REDIS_URL`
+blank — compose uses `${REDIS_HOST-redis}` (no `:`) so an empty value is preserved rather than
+re-defaulting to `redis`. `REDIS_URL` wins over host/port/password when non-blank. `REDIS_HOST`
+must be a bare hostname or bare IPv6 literal (no embedded port — use `REDIS_PORT`; no zone-ID /
+scoped addresses — use `REDIS_URL` for those). Backend unavailability fails open to a cache miss
+(recompute),
 never a review failure. When Redis is unreachable (or the `redis` wheel is missing),
 `shared.cache` logs a warning that includes the exception class and falls back to the
 in-process LRU / a local recompute — reviews continue without raising. Operators can

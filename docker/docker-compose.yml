@@ -64,11 +64,13 @@ x-team-env-base: &team-env-base
 # Prefer REDIS_HOST + REDIS_PASSWORD parts over embedding the password in
 # REDIS_URL — Python `shared.cache.config.redis_url()` percent-encodes the
 # password. Compose cannot safely quote arbitrary passwords into a URL default.
-# Set REDIS_URL= (empty) and REDIS_HOST= (empty) for in-process memory.
+# In-process memory: set REDIS_HOST= (empty) and leave REDIS_URL blank.
+# Use `${REDIS_HOST-redis}` (no `:`) so an empty .env value is preserved —
+# `${REDIS_HOST:-redis}` would treat empty as unset and re-default to redis.
 # See docs/ENV_VARS.md (REDIS_*).
 x-se-redis-env: &se-redis-env
   REDIS_PASSWORD: ${REDIS_PASSWORD:-please-change-me}
-  REDIS_HOST: ${REDIS_HOST:-redis}
+  REDIS_HOST: ${REDIS_HOST-redis}
   REDIS_PORT: ${REDIS_PORT:-6379}
   REDIS_DB: ${REDIS_DB:-0}
   # Unset/blank REDIS_URL → build from HOST/PORT/PASSWORD (URL-encoded).
