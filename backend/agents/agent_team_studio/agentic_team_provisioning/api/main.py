@@ -11,7 +11,8 @@ live here pending later splits.
 
 This module remains the owning namespace for collaborators the test suite
 monkeypatches (``_store``, ``_agent``, ``_test_store``, ``_pipeline_runner``,
-``_save_agents_from_llm``, ``_roster_agent_from_manifest``, …). Route and
+``_save_agents_from_llm``, ``_roster_agent_from_manifest``, ``_build_test_agent``,
+``_call_test_agent``, …). Route and
 service modules dereference those names through ``main`` at call time.
 """
 
