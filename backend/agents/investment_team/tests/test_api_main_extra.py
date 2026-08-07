@@ -2348,37 +2348,47 @@ def test_normalize_persisted_job_defaults_status_from_fallback() -> None:
 def test_reconcile_run_progress_tolerates_none_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """A persisted record with ``"data": None`` (present but null, distinct
     from the key being absent) must not raise ``TypeError`` -- regression
-    test for the same defect class as ``normalize_persisted_job`` (issue
-    #4325) but in ``_reconcile_run_progress``'s own, separate fallback.
+    test for the same defect class as ``normalize_persisted_job`` but in
+    ``_reconcile_run_progress``'s own, separate fallback.
+
+    Preconditions:
+        - ``orchestrator_api._active_runs`` / ``_get_lab_run_job_client`` are
+          the names the moved body closes over (not ``api.main`` aliases).
+    Postconditions:
+        - Call returns without ``TypeError``; in-memory ``completed_cycles``
+          stays unchanged when the None-data fallback has no progress fields.
     """
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-none-data"
-    monkeypatch.setattr(
-        api_main,
-        "_active_runs",
-        {
-            run_id: {
-                "run_id": run_id,
-                "status": "running",
-                "total_cycles": 4,
-                "completed_cycles": 1,
-            }
-        },
-    )
+    shared_runs = {
+        run_id: {
+            "run_id": run_id,
+            "status": "running",
+            "total_cycles": 4,
+            "completed_cycles": 1,
+        }
+    }
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared_runs)
 
     class _Stub:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def get_job(self, jid: str):
+            self.calls += 1
             return {"job_id": run_id, "status": "running", "data": None}
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+    stub = _Stub()
+    monkeypatch.setattr(orchestrator_api, "_get_lab_run_job_client", lambda: stub)
 
-    api_main._reconcile_run_progress(run_id)
+    orchestrator_api._reconcile_run_progress(run_id)
 
     # No crash, and the in-memory entry's existing progress is left intact
     # since the fallback ("data" -> the persisted record itself) contains
     # none of _STRATEGY_LAB_PROGRESS_FIELDS.
-    assert api_main._active_runs[run_id]["completed_cycles"] == 1
+    assert stub.calls == 1
+    assert shared_runs[run_id]["completed_cycles"] == 1
 
 
 # ---------------------------------------------------------------------------
