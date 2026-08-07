@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +20,13 @@ from investment_team.agents import (
     FinancialAdvisorAgent,
     InvestmentCommitteeAgent,
     PolicyGuardianAgent,
+)
+from investment_team.exceptions import (
+    InvestmentBacktestError,
+    LookaheadViolationError,
+    MarketDataUnavailableError,
+    MissingStrategyCodeError,
+    StrategyExecutionError,
 )
 from investment_team.market_data_cache.postgres import SCHEMA as MD_CACHE_SCHEMA
 from investment_team.market_lab_data import (
@@ -156,7 +162,7 @@ from job_service_client import (
     validate_job_for_action,
 )
 from shared.app import create_team_app
-from shared.env_config import env_float
+from shared.env_config import env_bool, env_float
 from shared.sse import sse_job_stream_async, sse_line
 
 logger = logging.getLogger(__name__)
@@ -1129,9 +1135,13 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         ``request.user_id`` must already have an IPS created via
         ``create_profile``.
     Postconditions:
-        Raises 404 if no IPS exists for ``request.user_id``. Otherwise
-        persists a new ``PortfolioProposal`` under a freshly generated
+        Persists a new ``PortfolioProposal`` under a freshly generated
         ``proposal_id`` and returns it.
+
+    Raises:
+        - ``HTTPException(404)`` if no IPS exists for ``request.user_id``.
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          that is not a dict, or whose ``proposal`` value is not a dict.
     """
     with _lock:
         ips = _profiles.get(request.user_id)
@@ -1145,6 +1155,12 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         {"proposal_id": proposal_id, "request": request.model_dump(mode="json")},
         key=proposal_id,
     )
+    if not isinstance(result, dict) or not isinstance(result.get("proposal"), dict):
+        logger.error("Invalid advisory response for proposal %s: %r", proposal_id, result)
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return CreateProposalResponse(
         proposal_id=proposal_id, proposal=PortfolioProposal.model_validate(result["proposal"])
     )
@@ -1181,6 +1197,11 @@ def validate_proposal(
         Raises 404 if the proposal or the user's IPS is missing. Otherwise
         returns whether the proposal passed IPS validation and any
         violations found; does not mutate the stored proposal.
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          that is not a dict, whose ``valid`` value is not a bool, or whose
+          ``violations`` value is not a list.
     """
     with _lock:
         proposal = _proposals.get(proposal_id)
@@ -1196,6 +1217,18 @@ def validate_proposal(
         {"proposal_id": proposal_id, "user_id": request.user_id},
         key=proposal_id,
     )
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("valid"), bool)
+        or not isinstance(result.get("violations"), list)
+    ):
+        logger.error(
+            "Invalid advisory response for proposal %s validation: %r", proposal_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return ValidateProposalResponse(
         proposal_id=proposal_id,
         valid=result["valid"],
@@ -1267,6 +1300,12 @@ def validate_strategy(
         Raises 404 if the strategy is missing. Otherwise returns the
         ``ValidationReport`` produced by the validation checks, whether the
         strategy passed, and any failures found.
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          that is not a dict, is missing ``validation``, ``passed``, or
+          ``failures``, or whose ``validation``/``passed``/``failures``
+          values are not a dict/bool/list respectively.
     """
     with _lock:
         strategy = _strategies.get(strategy_id)
@@ -1279,6 +1318,21 @@ def validate_strategy(
         {"strategy_id": strategy_id, "request": request.model_dump(mode="json")},
         key=strategy_id,
     )
+    required_keys = ("validation", "passed", "failures")
+    if (
+        not isinstance(result, dict)
+        or any(key not in result for key in required_keys)
+        or not isinstance(result["validation"], dict)
+        or not isinstance(result["passed"], bool)
+        or not isinstance(result["failures"], list)
+    ):
+        logger.error(
+            "Invalid advisory response for strategy %s validation: %r", strategy_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return ValidateStrategyResponse(
         strategy_id=strategy_id,
         validation=ValidationReport.model_validate(result["validation"]),
@@ -1366,7 +1420,7 @@ def _run_backtest_background(
           ``job_id`` (e.g. a Temporal activity retry that lands after a worker
           crash left the job at RUNNING) therefore overwrites the same record
           instead of orphaning a duplicate. Returns ``_BT_JOB_STATUS_COMPLETED``.
-        - On ``BacktestExecutionError`` or other exceptions: job status becomes
+        - On ``InvestmentBacktestError`` or other exceptions: job status becomes
           FAILED with an error string, unless a cancel check already returned.
           Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
@@ -1409,10 +1463,11 @@ def _run_backtest_background(
             backtest_id=backtest_id,
         )
         return _BT_JOB_STATUS_COMPLETED
-    except BacktestExecutionError as exc:
+    except InvestmentBacktestError as exc:
+        logger.error("Backtest job %s failed with domain error: %s", job_id, exc)
         if _bt_is_job_cancelled(job_id):
             return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc.detail))
+        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
         return _BT_JOB_STATUS_FAILED
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
@@ -1436,11 +1491,11 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
         `GET /backtests/status/{job_id}` for the outcome. Strategies with
         generated ``strategy_code`` run in a sandbox (the normal Strategy
         Lab path); strategies without ``strategy_code`` are not rejected
-        synchronously here — the job is created and only fails
-        asynchronously once the background worker (``_run_backtest_background``)
-        reaches ``_run_real_data_backtest``, which raises 422. That failure
-        surfaces as job ``status="failed"`` with the 422 detail in
-        ``error``, not as an HTTP 422 response from this endpoint.
+        synchronously here — the job is accepted and
+        ``_run_real_data_backtest`` raises ``MissingStrategyCodeError``
+        inside ``_run_backtest_background`` once the job runs, which the
+        job store surfaces as a FAILED status (poll the job to see the
+        error), not a live HTTP 422 response from this endpoint.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1607,11 +1662,12 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     Raises:
         - ``HTTPException(404)`` if ``strategy_id`` or the user's IPS is not found.
         - ``HTTPException(400)`` if the strategy has no validation report.
-        - ``HTTPException(500)`` if the advisory result is missing a
-          ``decision`` field, has a non-list/non-string ``audit_log_appended``,
-          has a malformed ``escalation_enqueued`` payload (non-dict, missing
-          ``queue``/``payload_id``/``priority``, or unknown queue name), or
-          whose ``decision`` fails ``PromotionDecision`` validation.
+        - ``HTTPException(502)`` if the advisory result is not a dict, is missing
+          a ``decision`` field, has a non-list/non-string ``audit_log_appended``,
+          or has a malformed ``escalation_enqueued`` payload (non-dict, missing
+          ``queue``/``payload_id``/``priority``, or unknown queue name).
+        - ``HTTPException(500)`` if ``decision`` fails ``PromotionDecision``
+          validation.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1646,22 +1702,39 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     # escalation queue item — before mutating any shared _workflow_state, so
     # a malformed activity result never leaves the audit log or queues
     # partially updated.
-    decision_data = result.get("decision")
-    if not decision_data:
+    if not isinstance(result, dict):
+        logger.error(
+            "Invalid advisory response for strategy %s promotion: %r", request.strategy_id, result
+        )
         raise HTTPException(
-            status_code=500, detail="Promotion decision result is missing required 'decision' field"
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
+    if "decision" not in result or result["decision"] is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result is missing required 'decision' field",
+        )
+    decision_data = result["decision"]
+    if not isinstance(decision_data, dict):
+        logger.error(
+            "Invalid advisory decision for strategy %s promotion: %r",
+            request.strategy_id,
+            decision_data,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
         )
     try:
         decision = PromotionDecision.model_validate(decision_data)
     except ValidationError as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Invalid decision payload: {exc}"
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Invalid decision payload: {exc}") from exc
 
     audit_entries = result.get("audit_log_appended") or []
     if not isinstance(audit_entries, list) or not all(isinstance(e, str) for e in audit_entries):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Promotion decision result has invalid 'audit_log_appended' entries",
         )
 
@@ -1670,7 +1743,7 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     if escalation is not None:
         if not isinstance(escalation, dict):
             raise HTTPException(
-                status_code=500,
+                status_code=502,
                 detail="Promotion decision result has invalid 'escalation_enqueued' payload",
             )
         queue_name = escalation.get("queue")
@@ -1678,19 +1751,19 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         priority = escalation.get("priority")
         if not isinstance(queue_name, str) or not queue_name:
             raise HTTPException(
-                status_code=500,
+                status_code=502,
                 detail="Promotion decision result has invalid escalation queue name",
             )
         if queue_name not in _workflow_state.queues:
-            raise HTTPException(status_code=500, detail=f"Unknown escalation queue '{queue_name}'")
+            raise HTTPException(status_code=502, detail=f"Unknown escalation queue '{queue_name}'")
         if not isinstance(payload_id, str) or not payload_id:
             raise HTTPException(
-                status_code=500,
+                status_code=502,
                 detail="Promotion decision result has invalid escalation payload_id",
             )
         if not isinstance(priority, str) or not priority:
             raise HTTPException(
-                status_code=500,
+                status_code=502,
                 detail="Promotion decision result has invalid escalation priority",
             )
         queue_item = QueueItem(queue=queue_name, payload_id=payload_id, priority=priority)
@@ -1735,10 +1808,14 @@ def workflow_queues() -> QueuesResponse:
     Postconditions:
         Takes no inputs; always returns 200. Returns a ``_lock``-protected
         snapshot of every queue name currently present in
-        ``_workflow_state.queues`` — an empty dict if none have been
-        populated yet, since queues are created lazily (e.g. by
-        ``promotion_decision``'s escalation path). Each queue name maps to
-        its full ordered list of items, converted to ``QueueItemResponse``.
+        ``_workflow_state.queues`` — pre-populated with the fixed set of
+        known queue names (``research``, ``portfolio_design``,
+        ``validation``, ``promotion``, ``execution``, ``escalation``) by
+        ``WorkflowState``'s ``default_factory``; ``promotion_decision``
+        only appends to one of these existing queues after validating the
+        escalation payload's ``queue`` value against them, it does not
+        create new queue keys. Each queue name maps to its full ordered
+        list of items, converted to ``QueueItemResponse``.
     """
     with _lock:
         queues = {}
@@ -1768,8 +1845,8 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         - ``HTTPException(503)`` when Temporal is disabled/unavailable; on
           any other workflow failure, the ``HTTPException`` that
           ``_translate_advisory_failure`` maps it to.
-        - ``HTTPException(502)`` when the advisory result lacks a ``memo``
-          payload.
+        - ``HTTPException(502)`` when the advisory result is not a dict or
+          lacks a dict-shaped ``memo`` payload.
         - ``HTTPException(500)`` if the ``memo`` field fails
           ``InvestmentCommitteeMemo`` validation.
     """
@@ -1783,12 +1860,14 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    memo_data = result.get("memo")
-    if not memo_data:
-        logger.error("committee_memo activity returned no memo: %r", result)
-        raise HTTPException(status_code=502, detail="Memo generation result is missing")
+    if not isinstance(result, dict) or not isinstance(result.get("memo"), dict):
+        logger.error("Invalid advisory response for memo (user %s): %r", request.user_id, result)
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     try:
-        memo = InvestmentCommitteeMemo.model_validate(memo_data)
+        memo = InvestmentCommitteeMemo.model_validate(result["memo"])
     except ValidationError as exc:
         raise HTTPException(status_code=500, detail=f"Invalid memo payload: {exc}") from exc
     return CreateMemoResponse(memo=memo)
@@ -1797,21 +1876,6 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
 # ---------------------------------------------------------------------------
 # Strategy Lab — ideation, backtesting, and analysis
 # ---------------------------------------------------------------------------
-
-
-class BacktestExecutionError(Exception):
-    """Raised by ``_run_real_data_backtest`` when a backtest cannot be executed.
-
-    Framework-agnostic replacement for raising ``HTTPException`` from this
-    non-route business-logic helper, so it stays callable and unit-testable
-    outside an HTTP context. ``status_code``/``detail`` mirror
-    ``HTTPException``'s attributes for the caller's convenience.
-    """
-
-    def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
 
 
 def _run_real_data_backtest(
@@ -1828,21 +1892,33 @@ def _run_real_data_backtest(
 
     Only Strategy-Lab-generated scripts may produce trades. The prior
     LLM-per-bar fallback has been removed; strategies without
-    ``strategy_code`` now raise ``BacktestExecutionError`` (422).
+    ``strategy_code`` raise ``MissingStrategyCodeError``.
+
+    This is a service-layer helper — it raises the domain exceptions in
+    ``investment_team.exceptions`` rather than ``HTTPException``, so it stays
+    usable from non-HTTP callers (Temporal activities, CLI tools, tests).
+    Callers with an HTTP request context are responsible for translating
+    those exceptions into the appropriate ``HTTPException``.
 
     Returns (BacktestResult, trade_ledger).
+
+    Raises:
+        - ``MissingStrategyCodeError`` if ``strategy.strategy_code`` is unset.
+        - ``MarketDataUnavailableError`` if no market data could be fetched
+          for the requested symbols/range.
+        - ``LookaheadViolationError`` if the generated script accessed
+          look-ahead (future) market data.
+        - ``StrategyExecutionError`` if the generated script otherwise fails
+          during execution.
     """
     # Lazy import: yfinance is slow to import; defer until a request arrives.
     from investment_team.market_data_service import MarketDataService
 
     if not strategy.strategy_code:
-        raise BacktestExecutionError(
-            status_code=422,
-            detail=(
-                "strategy_code is required. The legacy LLM-per-bar backtest "
-                "path has been removed; regenerate the strategy via the "
-                "Strategy Lab ideation agent."
-            ),
+        raise MissingStrategyCodeError(
+            "strategy_code is required. The legacy LLM-per-bar backtest "
+            "path has been removed; regenerate the strategy via the "
+            "Strategy Lab ideation agent."
         )
 
     market_service = MarketDataService()
@@ -1862,9 +1938,8 @@ def _run_real_data_backtest(
     )
 
     if not market_data:
-        raise BacktestExecutionError(
-            status_code=502,
-            detail="Failed to fetch historical market data. Please check the date range and try again.",
+        raise MarketDataUnavailableError(
+            "Failed to fetch historical market data. Please check the date range and try again."
         )
 
     from investment_team.trading_service.modes.backtest import run_backtest
@@ -1881,21 +1956,15 @@ def _run_real_data_backtest(
     service_result = run.service_result
 
     if service_result.lookahead_violation:
-        raise BacktestExecutionError(
-            status_code=422,
-            detail=(
-                f"Strategy code attempted to access look-ahead data: {(service_result.error or '')}"
-            ),
+        raise LookaheadViolationError(
+            f"Strategy code attempted to access look-ahead data: {(service_result.error or '')}"
         )
     if service_result.error:
         # Any service-level error must fail the request — mid-run crashes
         # append closed trades *before* raising, so a non-empty ledger here
         # still represents a partial/failed execution and must not be
         # reported as a successful backtest.
-        raise BacktestExecutionError(
-            status_code=422,
-            detail=f"Strategy code execution failed: {service_result.error}",
-        )
+        raise StrategyExecutionError(f"Strategy code execution failed: {service_result.error}")
 
     logger.info(
         "Backtest complete for %s: %d trades",
@@ -2455,16 +2524,10 @@ def _strategy_lab_signal_expert_enabled() -> bool:
     the market-data fetch and ``SignalIntelligenceExpert`` call entirely and
     fails open with a ``{"skipped": True, ...}`` brief instead.
 
-    Reads the ``STRATEGY_LAB_SIGNAL_EXPERT_ENABLED`` env var, defaulting to
-    enabled (``"true"``) when unset. Case-insensitive; ``"true"``, ``"1"``,
-    and ``"yes"`` are treated as enabled -- any other explicit value
-    (including an empty string) is treated as disabled.
+    Reads the ``STRATEGY_LAB_SIGNAL_EXPERT_ENABLED`` env var via
+    ``shared.env_config.env_bool``, defaulting to enabled when unset.
     """
-    return os.environ.get("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "true").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    return env_bool("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", default=True)
 
 
 def _compute_signal_brief_snapshot(
@@ -2779,18 +2842,34 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
           corresponding activity's preconditions; ``key`` is a stable id for the
           logical operation.
     Postconditions:
-        - Returns the workflow's result dict. Raises ``HTTPException(503)`` when
-          Temporal is disabled/unavailable; on any other workflow failure,
-          raises the ``HTTPException`` :func:`_translate_advisory_failure` maps
-          it to (never an opaque unhandled exception).
+        - Returns the raw workflow result dict verbatim; this helper does not
+          validate the presence or shape of any expected key, so callers must
+          guard the result themselves (an ``isinstance``/key-presence/value-type
+          check) and raise ``HTTPException(502)`` for a malformed payload
+          before indexing into it. Raises ``HTTPException(503)`` when Temporal
+          is disabled/unavailable, when the Temporal client didn't become
+          ready in time (a bare ``RuntimeError`` from
+          ``shared.temporal._await_client``, mapped here to the same 503 as
+          the up-front check), or when the ``investment_team.temporal.
+          start_workflow`` module fails to import (a deployment/packaging
+          defect, not a downstream advisory-workflow failure, so it is kept
+          distinct from :func:`_translate_advisory_failure`'s 502 fallback).
+          On any other workflow failure, raises the ``HTTPException``
+          :func:`_translate_advisory_failure` maps it to (never an opaque
+          unhandled exception).
     """
     _require_temporal()
-    from investment_team.temporal.start_workflow import execute_advisory_workflow
-
     try:
+        from investment_team.temporal.start_workflow import execute_advisory_workflow
+
         return execute_advisory_workflow(op, payload, key=key)
     except HTTPException:
         raise
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Required advisory workflow module is unavailable.",
+        ) from exc
     except RuntimeError as exc:
         # ``shared.temporal._await_client`` raises exactly
         # RuntimeError("Temporal client not available; is the team's worker
@@ -2834,14 +2913,16 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
     Postconditions:
         - Returns (does not raise) an ``HTTPException``, found by walking ``exc``'s
           cause chain: the mapped 404/400 for an ``ApplicationError`` whose
-          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 500 (with the
+          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 502 (with the
           error's own message as detail) for an ``ApplicationError`` whose
           ``type`` is NOT a recognized key (``_ADVISORY_ERROR_TYPE_STATUS.get``'s
-          fallback); 409 for a ``WorkflowAlreadyStartedError`` (workflow-id
-          collision); or 502 when the cause chain contains neither (e.g. a bare
+          fallback — so an unmapped advisory failure type never surfaces as an
+          opaque unhandled 500); 409 for a ``WorkflowAlreadyStartedError``
+          (workflow-id collision); or 502 with a generic dispatch-failure
+          detail when the cause chain contains neither (e.g. a bare
           transport-level error) — the only case this function has no
-          error-specific detail to surface, unlike the 500 case above, which
-          always carries the underlying ``ApplicationError``'s message.
+          error-specific detail to surface, unlike the ``ApplicationError``
+          case above, which always carries the underlying error's own message.
     """
     from temporalio.exceptions import ApplicationError as _AppErr
     from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -2856,7 +2937,7 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
             break
         seen.add(id(cause))
         if isinstance(cause, _AppErr):
-            status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 500)
+            status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 502)
             return HTTPException(status_code=status, detail=cause.message)
         if isinstance(cause, WorkflowAlreadyStartedError):
             return HTTPException(
@@ -3320,7 +3401,9 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # `_persist_run_state` below would regress the durable high-water
         # mark, un-fencing everything that restart just fenced out.
         try:
-            current_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+            current_generation = _get_run_generation_strict(
+                run_id, client=_get_lab_run_job_client()
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=503,
@@ -3382,9 +3465,13 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # multi-process limitation already accepted for the per-run_id
         # transition lock.
         try:
-            dispatch_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+            dispatch_generation = _get_run_generation_strict(
+                run_id, client=_get_lab_run_job_client()
+            )
         except Exception as exc:
-            _fail_strategy_lab_run(run_id, f"Failed to revalidate generation before dispatch: {exc}")
+            _fail_strategy_lab_run(
+                run_id, f"Failed to revalidate generation before dispatch: {exc}"
+            )
             raise HTTPException(
                 status_code=503,
                 detail="Failed to revalidate the current generation before resuming; job service unavailable.",
@@ -3835,9 +3922,13 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # narrowing already applied to resume's dispatch, and the same
         # out-of-scope multi-process limitation acknowledged there.
         try:
-            dispatch_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+            dispatch_generation = _get_run_generation_strict(
+                run_id, client=_get_lab_run_job_client()
+            )
         except Exception as exc:
-            _fail_strategy_lab_run(run_id, f"Failed to revalidate generation before dispatch: {exc}")
+            _fail_strategy_lab_run(
+                run_id, f"Failed to revalidate generation before dispatch: {exc}"
+            )
             raise HTTPException(
                 status_code=503,
                 detail="Failed to revalidate the current generation before restarting; job service unavailable.",
@@ -3875,7 +3966,10 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # that the intended restart is already in flight.
         try:
             _dispatch_strategy_lab_run(
-                run_id, request, generation=restarted_state["generation"], allow_already_started=False
+                run_id,
+                request,
+                generation=restarted_state["generation"],
+                allow_already_started=False,
             )
         except HTTPException as exc:
             if exc.status_code == 409:
@@ -4930,11 +5024,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
 def _live_paper_enabled() -> bool:
     """Return True when the live paper-trading path is opted in via env var."""
-    return os.environ.get("INVESTMENT_LIVE_PAPER_ENABLED", "false").lower() in {
-        "true",
-        "1",
-        "yes",
-    }
+    return env_bool("INVESTMENT_LIVE_PAPER_ENABLED", default=False)
 
 
 # Per-session in-process StopController registry used by
@@ -5701,9 +5791,11 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
           created ``AdvisorSession``.
 
     Raises:
-        - ``HTTPException(500)`` if the advisory workflow returns a result
-          missing ``advisor_message`` or ``session``, or whose ``session``
-          fails ``AdvisorSession`` validation.
+        - ``HTTPException(502)`` if the advisory workflow returns a non-dict
+          result, a dict missing ``advisor_message`` or ``session``, or whose
+          ``advisor_message``/``session`` values are not a str/dict respectively.
+        - ``HTTPException(500)`` if ``session`` fails ``AdvisorSession``
+          validation.
     """
     session_id = f"adv-{uuid.uuid4().hex}"
     result = _execute_advisory(
@@ -5711,9 +5803,13 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
         {"session_id": session_id, "user_id": request.user_id},
         key=session_id,
     )
-    if "advisor_message" not in result or "session" not in result:
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("advisor_message"), str)
+        or not isinstance(result.get("session"), dict)
+    ):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor execution returned unexpected response structure",
         )
     try:
@@ -5747,9 +5843,11 @@ def send_advisor_message(
         - ``HTTPException(404)`` if ``session_id`` does not match a known session
           — either when this route is first called, or if the session is
           concurrently removed between the initial check and workflow dispatch.
-        - ``HTTPException(500)`` if the advisory workflow returns a result
+        - ``HTTPException(502)`` if the advisory workflow returns a result
           missing ``advisor_message``, ``session_status``, ``current_topic``,
-          or ``missing_fields``.
+          or ``missing_fields``, or whose ``advisor_message``/
+          ``session_status``/``current_topic`` values are not a str or whose
+          ``missing_fields`` value is not a list.
     """
     with _lock:
         session = _advisor_sessions.get(session_id)
@@ -5774,9 +5872,16 @@ def send_advisor_message(
         key=session_id,
     )
     required_keys = ("advisor_message", "session_status", "current_topic", "missing_fields")
-    if any(key not in result for key in required_keys):
+    if (
+        not isinstance(result, dict)
+        or any(key not in result for key in required_keys)
+        or not isinstance(result["advisor_message"], str)
+        or not isinstance(result["session_status"], str)
+        or not isinstance(result["current_topic"], str)
+        or not isinstance(result["missing_fields"], list)
+    ):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor execution returned unexpected response structure",
         )
     return SendAdvisorMessageResponse(
@@ -5825,9 +5930,10 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
     Raises:
         - ``HTTPException(404)`` if ``session_id`` does not match a known session.
         - ``HTTPException(400)`` if required fields are still missing.
-        - ``HTTPException(500)`` if the advisory workflow returns a result
-          missing ``user_id`` or ``ips``, or whose ``ips`` fails ``IPS``
-          validation.
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          missing ``user_id`` or ``ips``, or whose ``user_id``/``ips`` values
+          are not a str/dict respectively.
+        - ``HTTPException(500)`` if ``ips`` fails ``IPS`` validation.
     """
     with _lock:
         raw_session = _advisor_sessions.get(session_id)
@@ -5848,9 +5954,13 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         )
 
     result = _execute_advisory("advisor_complete", {"session_id": session_id}, key=session_id)
-    if "user_id" not in result or "ips" not in result:
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("user_id"), str)
+        or not isinstance(result.get("ips"), dict)
+    ):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor completion returned unexpected response structure",
         )
     try:

@@ -284,6 +284,7 @@ def test_signal_paper_trading_stop_sends_stop_signal(monkeypatch) -> None:
 
 def test_worker_boots_all_three_queues(monkeypatch) -> None:
     from investment_team.strategy_lab.temporal import worker as sl_worker
+    from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE as STRATEGY_LAB_QUEUE
     from investment_team.temporal import worker as worker_mod
 
     monkeypatch.setattr(worker_mod, "is_temporal_enabled", lambda: True)
@@ -293,13 +294,20 @@ def test_worker_boots_all_three_queues(monkeypatch) -> None:
         "start_team_worker",
         lambda team, wfs, acts, *, task_queue, **kw: started.append((team, task_queue)) or True,
     )
-    monkeypatch.setattr(sl_worker, "start_strategy_lab_temporal_worker_thread", lambda: True)
+    strategy_lab_started = []
+    monkeypatch.setattr(
+        sl_worker,
+        "start_strategy_lab_temporal_worker_thread",
+        lambda: strategy_lab_started.append(True) or True,
+    )
 
     assert worker_mod.start_investment_temporal_worker_thread() is True
     teams = {t for t, _ in started}
     queues = {q for _, q in started}
     assert {"investment", "investment_advisory"} <= teams
     assert {"investment-queue", "investment-advisory-queue"} <= queues
+    assert strategy_lab_started == [True]  # third queue: the strategy-lab worker thread started
+    assert STRATEGY_LAB_QUEUE == "strategy-lab-queue"
 
 
 def test_investment_queue_worker_uses_tuned_concurrency(monkeypatch) -> None:
@@ -355,6 +363,7 @@ def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> N
     from temporalio.exceptions import ActivityError, ApplicationError
 
     import shared.temporal
+    from investment_team.temporal import start_workflow as sw
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
@@ -372,7 +381,7 @@ def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> N
         act_err.__cause__ = app_err
         raise WorkflowFailureError(cause=act_err)
 
-    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+    monkeypatch.setattr(sw, "execute_advisory_workflow", _raise)
 
     with pytest.raises(HTTPException) as ei:
         REAL_EXECUTE_ADVISORY("validate_proposal", {}, key="prop-1")
@@ -387,7 +396,7 @@ def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> N
         ("MissingFields", 400),
         ("NoValidation", 400),
         ("ValueError", 400),
-        ("SomethingUnmapped", 500),
+        ("SomethingUnmapped", 502),
     ],
 )
 def test_translate_advisory_failure_maps_application_error_types(
@@ -428,13 +437,32 @@ def test_execute_advisory_maps_client_not_ready_runtime_error_to_503(monkeypatch
     generic 502 ``_translate_advisory_failure`` defaults to for an unrecognized
     error."""
     import shared.temporal
+    from investment_team.temporal import start_workflow as sw
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _raise(*a, **kw):
         raise RuntimeError("Temporal client not available; is the team's worker running?")
 
-    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+    monkeypatch.setattr(sw, "execute_advisory_workflow", _raise)
+
+    with pytest.raises(HTTPException) as ei:
+        REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
+    assert ei.value.status_code == 503
+
+
+def test_execute_advisory_maps_import_error_to_503(monkeypatch) -> None:
+    """A deployment/packaging defect that breaks the deferred
+    ``investment_team.temporal.start_workflow`` import is not itself an
+    advisory-workflow failure — it must surface as a distinct 503, not the
+    generic 502 ``_translate_advisory_failure`` defaults to for an
+    unrecognized error."""
+    import sys
+
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setitem(sys.modules, "investment_team.temporal.start_workflow", None)
 
     with pytest.raises(HTTPException) as ei:
         REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
