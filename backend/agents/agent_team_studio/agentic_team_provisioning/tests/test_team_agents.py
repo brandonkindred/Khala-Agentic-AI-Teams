@@ -75,10 +75,6 @@ def test_list_team_agents_migrates_fat_row(fake_pg: dict, monkeypatch: pytest.Mo
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr(
-        "agent_team_studio.agentic_team_provisioning.roster_resolve.get_registry",
-        lambda: reg,
-    )
     monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
 
     loaded = store.list_team_agents(team_id)

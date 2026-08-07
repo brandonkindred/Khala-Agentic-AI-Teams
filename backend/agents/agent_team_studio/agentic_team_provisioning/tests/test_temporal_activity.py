@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+    build_agent_manifest,
+    manifest_agent_id,
+)
 from agent_team_studio.agentic_team_provisioning.temporal import workflows as wf
 from agent_team_studio.agentic_team_provisioning.testing.store import (
     AgenticTestStore,
@@ -28,6 +32,7 @@ def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 def _seed_team(db: dict, team_id: str = "t1") -> None:
+    _ensure_worker_manifest()
     now = datetime.now(tz=timezone.utc)
     db["teams"][team_id] = {
         "team_id": team_id,
@@ -70,7 +75,23 @@ _ACTION_PROCESS = {
         }
     ],
 }
-_TEAM_AGENTS = [{"agent_name": "worker", "role": "doer"}]
+_TEAM_ID = "t1"
+_WORKER_MANIFEST_ID = manifest_agent_id(_TEAM_ID, "worker")
+_TEAM_AGENTS = [
+    {
+        "agent_name": "worker",
+        "source": "generated",
+        "manifest_id": _WORKER_MANIFEST_ID,
+    }
+]
+
+
+def _ensure_worker_manifest() -> None:
+    from agent_registry import get_registry
+
+    registry = get_registry()
+    if registry.get(_WORKER_MANIFEST_ID) is None:
+        registry.register(build_agent_manifest(_TEAM_ID, "worker", summary="doer"))
 
 
 # ---------------------------------------------------------------------------

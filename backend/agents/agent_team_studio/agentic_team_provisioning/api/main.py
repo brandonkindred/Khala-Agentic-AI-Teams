@@ -208,6 +208,24 @@ def enrich_roster_agent(agent: AgenticTeamAgent) -> EnrichedRosterAgent:
     )
 
 
+def _chat_context_agents(team_id: str) -> list[dict[str, str]] | None:
+    """Serialize roster agents for the process-designer LLM context.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: returns ``None`` when the roster is empty; otherwise a list of
+        ``{"agent_name", "role"}`` dicts with ``role`` resolved from each agent's
+        linked ``AgentManifest``.
+    """
+    agents = _store.list_team_agents(team_id)
+    if not agents:
+        return None
+    out: list[dict[str, str]] = []
+    for a in agents:
+        enriched = enrich_roster_agent(a)
+        out.append({"agent_name": enriched.agent_name, "role": enriched.role})
+    return out
+
+
 def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None) -> None:
     """Persist the LLM ``agents`` block, preserving any registry-source roster entries.
 
@@ -896,10 +914,7 @@ def create_conversation(req: CreateConversationRequest):
     if req.initial_message:
         _store.append_message(conversation_id, "user", req.initial_message)
 
-        existing_agents = [
-            {"agent_name": a.agent_name, "role": a.role}
-            for a in _store.list_team_agents(req.team_id)
-        ] or None
+        existing_agents = _chat_context_agents(req.team_id)
 
         reply, process, suggestions, agents_data = _agent.respond(
             conversation_history=[],
@@ -953,9 +968,7 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     process_id = _store.get_conversation_process_id(conversation_id)
     current_process = _store.get_process(process_id) if process_id else None
 
-    existing_agents = [
-        {"agent_name": a.agent_name, "role": a.role} for a in _store.list_team_agents(team_id)
-    ] or None
+    existing_agents = _chat_context_agents(team_id)
 
     existing_messages = _store.get_messages(conversation_id)
     history = [(m.role, m.content) for m in existing_messages]

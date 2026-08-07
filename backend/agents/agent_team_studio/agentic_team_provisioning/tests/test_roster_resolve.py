@@ -50,10 +50,7 @@ def test_resolve_persona_looks_up_registry(monkeypatch: pytest.MonkeyPatch) -> N
         def get(self, agent_id: str):
             return m if agent_id == m.id else None
 
-    monkeypatch.setattr(
-        "agent_team_studio.agentic_team_provisioning.roster_resolve.get_registry",
-        lambda: _Reg(),
-    )
+    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
     assert resolve_persona("demo.planner").role == "Plans work"
 
 
@@ -62,10 +59,7 @@ def test_resolve_persona_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None
         def get(self, agent_id: str):
             return None
 
-    monkeypatch.setattr(
-        "agent_team_studio.agentic_team_provisioning.roster_resolve.get_registry",
-        lambda: _Reg(),
-    )
+    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
     with pytest.raises(LookupError):
         resolve_persona("missing.id")
 
@@ -95,10 +89,6 @@ def test_migrate_generated_stamps_manifest_id_and_strips_fat(monkeypatch: pytest
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr(
-        "agent_team_studio.agentic_team_provisioning.roster_resolve.get_registry",
-        lambda: reg,
-    )
     monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
 
     agent, changed = migrate_roster_row(team_id, raw)
@@ -142,10 +132,7 @@ def test_migrate_with_manifest_id_and_fat_keys_changed(monkeypatch: pytest.Monke
         def get(self, agent_id: str):
             return object() if agent_id == manifest_id else None
 
-    monkeypatch.setattr(
-        "agent_team_studio.agentic_team_provisioning.roster_resolve.get_registry",
-        lambda: _Reg(),
-    )
+    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
 
     agent, changed = migrate_roster_row("team-1", raw)
     assert changed is True
