@@ -1,42 +1,46 @@
 """Agent Studio Stage-1 build-flow API (mounted at ``/api/agent-studio``).
 
-Thin HTTP surface over the Agent Studio Temporal workflows:
+Conversation / agent handlers are a thin HTTP surface over Temporal workflows:
 
     POST /api/agent-studio/conversations                       — start an authoring chat (new | refine)
     POST /api/agent-studio/conversations/{id}/messages         — send a message; assistant updates the draft
     POST /api/agent-studio/agents/from-registry/{agent_id}     — clone a registry agent into a refine draft
     POST /api/agent-studio/agents                              — save + register a finished definition
 
-User-scoped Studio drafts (opaque ``{name?, payload?}`` bodies; tenancy via
-:func:`get_current_user_id`, overridable in tests via ``app.dependency_overrides``):
+Those Temporal handlers dispatch a durable workflow → activity via
+:mod:`agent_team_studio.agent_studio.temporal.dispatch` and block for the result.
+There is no non-Temporal fallback for conversations/agents — the activity does the
+real work by delegating to the process-wide
+:class:`~agent_team_studio.agent_studio.service.AgentStudioService` singleton
+(:func:`agent_team_studio.agent_studio.runtime.get_studio_service`). The worker runs
+in-process (started from the unified-API lifespan), so those activity threads share
+that singleton's conversation store with these handlers.
+
+User-scoped Studio drafts are **sync store CRUD** (not Temporal) over
+:func:`agent_team_studio.agent_studio.drafts_runtime.get_draft_store`. Bodies are an
+opaque ``{name?, payload?}`` envelope; tenancy uses :func:`get_current_user_id`
+(overridable in tests via ``app.dependency_overrides``):
 
     POST   /api/agent-studio/drafts              — create-only
-    PUT    /api/agent-studio/drafts/{draft_id}   — full update
+    PUT    /api/agent-studio/drafts/{draft_id}   — partial update (omitted fields unchanged)
     GET    /api/agent-studio/drafts              — list summaries
     GET    /api/agent-studio/drafts/{draft_id}   — load full draft
     PATCH  /api/agent-studio/drafts/{draft_id}   — rename
     DELETE /api/agent-studio/drafts/{draft_id}   — delete
 
-Agent Studio is **Temporal-only**: every handler dispatches its operation as a
-durable workflow → activity via :mod:`agent_team_studio.agent_studio.temporal.dispatch` and blocks for
-the result. There is no non-Temporal fallback — the activity does the real work by
-delegating to the process-wide :class:`~agent_team_studio.agent_studio.service.AgentStudioService`
-singleton (:func:`agent_team_studio.agent_studio.runtime.get_studio_service`). The worker runs
-in-process (started from the unified-API lifespan), so those activity threads share
-that singleton's conversation store with these handlers.
-
 Tool discovery for the definition panel reuses the existing ``GET /api/llm-tools/``
 (no new route here). Handlers are synchronous ``def`` so FastAPI runs them in its
-threadpool, keeping the blocking workflow round-trip off the event loop. Errors map
-cleanly: :class:`ValueError` → 400, :class:`LookupError` → 404 — the dispatch layer
-re-raises those native exceptions from the workflow failure so this mapping is
-unchanged by the Temporal round-trip.
+threadpool (Temporal round-trips and store I/O stay off the event loop). Errors map
+cleanly: :class:`ValueError` → 400, :class:`LookupError` / missing draft → 404 —
+the Temporal dispatch layer re-raises those native exceptions from workflow failure
+so conversation/agent mapping is unchanged by the Temporal round-trip.
 
-Auth: these routes carry no per-route authentication dependency, consistent with the
+Auth: these routes carry no real authentication dependency, consistent with the
 other team routers on the Unified API. Authentication/authorization is expected to be
-enforced upstream (reverse proxy / API gateway). The ``SecurityGatewayMiddleware``
-fronting all ``/api/*`` routes is an abuse/prompt-injection scanner, **not** an
-authn/authz layer.
+enforced upstream (reverse proxy / API gateway). Drafts tenancy is currently a
+pluggable user-id dependency that defaults to ``DEFAULT_USER_ID`` until real auth is
+wired. The ``SecurityGatewayMiddleware`` fronting all ``/api/*`` routes is an
+abuse/prompt-injection scanner, **not** an authn/authz layer.
 """
 
 from __future__ import annotations
@@ -111,10 +115,12 @@ def update_draft(
     req: SaveDraftRequest,
     user_id: Annotated[str, Depends(get_current_user_id)],
 ) -> AgentStudioDraftSummary:
-    """Replace name/payload on an owned draft.
+    """Partially update an owned draft; omitted ``name``/``payload`` stay unchanged.
 
     Postconditions:
         * Returns updated summary, or 404 when missing/wrong user. ``ValueError`` → 400.
+        * Fields left ``None`` in ``req`` are not cleared — send ``payload: {}`` to
+          replace the payload with an empty object.
     """
     try:
         draft = get_draft_store().update(user_id, draft_id, name=req.name, payload=req.payload)

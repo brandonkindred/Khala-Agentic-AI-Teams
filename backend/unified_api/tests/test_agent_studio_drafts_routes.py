@@ -62,10 +62,49 @@ def test_put_updates_owned_draft(client: TestClient) -> None:
     assert full["payload"] == {"a": 2}
 
 
+def test_put_omitted_fields_leave_prior_values(client: TestClient) -> None:
+    """PUT is a partial patch: omitted name/payload must not clear existing values."""
+    _as_user(client, "alice")
+    draft_id = client.post(
+        "/api/agent-studio/drafts",
+        json={"name": "Keep", "payload": {"stage": 1}},
+    ).json()["draft_id"]
+
+    name_only = client.put(f"/api/agent-studio/drafts/{draft_id}", json={"name": "Renamed"})
+    assert name_only.status_code == 200
+    assert name_only.json()["name"] == "Renamed"
+    after_name = client.get(f"/api/agent-studio/drafts/{draft_id}").json()
+    assert after_name["payload"] == {"stage": 1}
+
+    payload_only = client.put(f"/api/agent-studio/drafts/{draft_id}", json={"payload": {"stage": 2}})
+    assert payload_only.status_code == 200
+    after_payload = client.get(f"/api/agent-studio/drafts/{draft_id}").json()
+    assert after_payload["name"] == "Renamed"
+    assert after_payload["payload"] == {"stage": 2}
+
+    empty_body = client.put(f"/api/agent-studio/drafts/{draft_id}", json={})
+    assert empty_body.status_code == 200
+    unchanged = client.get(f"/api/agent-studio/drafts/{draft_id}").json()
+    assert unchanged["name"] == "Renamed"
+    assert unchanged["payload"] == {"stage": 2}
+
+
 def test_put_missing_returns_404(client: TestClient) -> None:
     _as_user(client, "alice")
     resp = client.put("/api/agent-studio/drafts/missing", json={"name": "x"})
     assert resp.status_code == 404
+
+
+def test_get_and_delete_missing_return_404(client: TestClient) -> None:
+    _as_user(client, "alice")
+    assert client.get("/api/agent-studio/drafts/missing").status_code == 404
+    assert client.delete("/api/agent-studio/drafts/missing").status_code == 404
+
+
+def test_create_whitespace_name_returns_400(client: TestClient) -> None:
+    _as_user(client, "alice")
+    resp = client.post("/api/agent-studio/drafts", json={"name": "   "})
+    assert resp.status_code == 400
 
 
 def test_rename_and_delete(client: TestClient) -> None:

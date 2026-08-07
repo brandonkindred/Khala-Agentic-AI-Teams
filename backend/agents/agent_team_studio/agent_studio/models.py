@@ -207,6 +207,9 @@ class AgentStudioDraft(BaseModel):
 class SaveDraftRequest(BaseModel):
     """Create/update body: optional label + opaque stage/handoff payload.
 
+    On ``PUT``, omitted fields (``None``) leave the stored value unchanged; send
+    an explicit ``payload`` object (including ``{}``) to replace it.
+
     Invariants:
         * ``payload``, when provided, is a JSON object (``dict``); the store
           rejects non-dicts with ``ValueError``.
