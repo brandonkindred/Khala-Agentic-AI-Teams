@@ -96,3 +96,35 @@ def test_build_from_patches_omits_when_no_added_lines() -> None:
         new_contents={"mod.py": _PY_CONTENT},
     )
     assert surface.is_empty
+
+
+def test_build_from_patches_two_hunks_same_function_emits_one_span() -> None:
+    """Two hunks in one function must not duplicate the expanded construct."""
+    content = "def f():\n    a = 1\n    b = 2\n    return a + b\n"
+    # Hunk 1 touches new-file line 2; hunk 2 touches new-file line 4.
+    patch = (
+        "@@ -1,3 +1,3 @@\n"
+        " def f():\n"
+        "-    a = 0\n"
+        "+    a = 1\n"
+        "     b = 2\n"
+        "@@ -3,2 +3,2 @@\n"
+        "     b = 2\n"
+        "-    return a\n"
+        "+    return a + b\n"
+    )
+    surface = build_change_surface_from_patches(
+        {"f.py": patch},
+        new_contents={"f.py": content},
+    )
+    assert not surface.is_empty
+    body = surface.blocks["f.py"]
+    assert body.count("def f():") == 1
+    assert "..." not in body
+    assert body == (
+        "1: def f():\n"
+        "2:     a = 1\n"
+        "3:     b = 2\n"
+        "4:     return a + b"
+    )
+    assert surface.code == f"### f.py ###\n{body}"

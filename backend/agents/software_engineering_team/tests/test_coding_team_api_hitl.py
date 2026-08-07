@@ -1853,3 +1853,100 @@ def test_answers_thread_mode_unaffected_when_no_resume_token(monkeypatch):
 
     assert r.status_code == 200
     assert stored["answers"][0]["question_id"] == "q1"
+
+
+# --------------------------------------------------------------------------- /resume: Temporal-native pause
+
+
+def test_resume_temporal_native_signals_workflow(monkeypatch):
+    """A Temporal-native pause (resume_token on the job) must wake CodingTeamWorkflow
+    via submit_answers instead of claim+spawn."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    answers = [{"question_id": "q1", "selected_option_id": "strict"}]
+    job = _job(
+        resume_token="j1:tok-1",
+        submitted_answers=answers,
+        status="waiting_for_user",
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+
+    signaled: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        hitl_route,
+        "signal_workflow_sync",
+        lambda workflow_id, signal, payload: signaled.update(
+            workflow_id=workflow_id, signal=signal, payload=payload
+        ),
+    )
+
+    def _must_not_spawn(*_a, **_k):  # pragma: no cover - Temporal path only
+        raise AssertionError("claim/spawn path must not run for a Temporal-native resume")
+
+    monkeypatch.setattr(api, "_claim_and_spawn_resume", _must_not_spawn)
+    monkeypatch.setattr(api, "_is_run_thread_alive", _must_not_spawn)
+    monkeypatch.setattr(api, "_answer_wait_heartbeat_fresh", _must_not_spawn)
+    monkeypatch.setattr(api, "_recover_resume_plan", _must_not_spawn)
+    monkeypatch.setattr(api, "_resolve_github_job_token", _must_not_spawn)
+
+    r = client.post("/run/j1/resume")
+
+    assert r.status_code == 200
+    assert r.json()["message"] == "Job resumed."
+    assert r.json()["status"] == "running"
+    assert signaled["workflow_id"] == "coding_team-j1"
+    assert signaled["signal"] == "submit_answers"
+    assert signaled["payload"] == {"resume_token": "j1:tok-1", "answers": answers}
+
+
+def test_resume_temporal_native_signals_empty_answers_when_none_stored(monkeypatch):
+    """If submitted_answers is missing, the signal still carries answers: []."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    job = _job(resume_token="j1:tok-2", status="waiting_for_user")
+    # _job has no submitted_answers key
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+
+    signaled: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        hitl_route,
+        "signal_workflow_sync",
+        lambda workflow_id, signal, payload: signaled.update(
+            workflow_id=workflow_id, signal=signal, payload=payload
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "_claim_and_spawn_resume",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("must not claim/spawn")
+        ),
+    )
+
+    r = client.post("/run/j1/resume")
+
+    assert r.status_code == 200
+    assert signaled["payload"] == {"resume_token": "j1:tok-2", "answers": []}
+
+
+def test_resume_400_when_terminal_even_with_resume_token(monkeypatch):
+    """Terminal check runs before the Temporal branch; resume_token must not change the 400."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    def _must_not_signal(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not signal a terminal job")
+
+    monkeypatch.setattr(hitl_route, "signal_workflow_sync", _must_not_signal)
+    monkeypatch.setattr(
+        api,
+        "_claim_and_spawn_resume",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+
+    for status in ("completed", "completed_with_failures", "failed", "cancelled"):
+        monkeypatch.setattr(
+            api, "get_job", lambda jid, s=status: _job(status=s, resume_token="j1:tok-x")
+        )
+        r = client.post("/run/j1/resume")
+        assert r.status_code == 400
+        assert "cannot be resumed" in r.json()["detail"]
