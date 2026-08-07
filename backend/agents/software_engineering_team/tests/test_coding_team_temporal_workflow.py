@@ -337,6 +337,7 @@ def test_github_pipeline_exception_calls_failure_notice(monkeypatch: pytest.Monk
 
     workflow_obj = CodingTeamWorkflow()
     calls: list = []
+    notice_requests: list[dict] = []
 
     async def _fake_exec(fn, request, **_kw):
         calls.append(fn)
@@ -345,6 +346,7 @@ def test_github_pipeline_exception_calls_failure_notice(monkeypatch: pytest.Monk
         if fn is run_pipeline_activity:
             raise RuntimeError("orchestrator boom")
         if fn is github_failure_notice_activity:
+            notice_requests.append(dict(request))
             return {"job_id": "job-1", "status": "failed"}
         raise AssertionError(f"unexpected activity {fn}")
 
@@ -362,6 +364,121 @@ def test_github_pipeline_exception_calls_failure_notice(monkeypatch: pytest.Monk
         run_pipeline_activity,
         github_failure_notice_activity,
     ]
+    assert notice_requests[0]["message"] == "pipeline failed: orchestrator boom"
+    assert notice_requests[0]["kind"] == "failure"
+
+
+def test_github_failure_notice_failure_still_reraises_pipeline_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If failure-notice itself raises, the original pipeline exception must still propagate."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            raise RuntimeError("orchestrator boom")
+        if fn is github_failure_notice_activity:
+            raise RuntimeError("notice boom")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="orchestrator boom"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_failure_notice_activity,
+    ]
+
+
+def test_github_empty_pipeline_exception_message_still_posts_nonempty_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exceptions with empty str() must still produce a non-empty failure-notice message."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    class _EmptyStrError(RuntimeError):
+        def __str__(self) -> str:
+            return ""
+
+    workflow_obj = CodingTeamWorkflow()
+    notice_requests: list[dict] = []
+
+    async def _fake_exec(fn, request, **_kw):
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            raise _EmptyStrError()
+        if fn is github_failure_notice_activity:
+            notice_requests.append(dict(request))
+            return {"job_id": "job-1", "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(_EmptyStrError):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert notice_requests[0]["message"] == "pipeline failed"
+
+
+def test_github_missing_resume_token_skips_failure_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contract-violation missing resume_token must not post a GitHub failure notice."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            return {"outcome": "paused", "job_id": "job-1"}
+        if fn is github_failure_notice_activity:
+            raise AssertionError("failure notice must not run for resume_token contract break")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(ValueError, match="missing a valid resume_token"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [github_branch_prep_activity, run_pipeline_activity]
 
 
 def test_github_failed_pipeline_status_skips_publish(monkeypatch: pytest.MonkeyPatch) -> None:

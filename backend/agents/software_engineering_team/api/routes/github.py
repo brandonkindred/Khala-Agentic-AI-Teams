@@ -66,7 +66,11 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                 if picked is None:
                     raise HTTPException(status_code=404, detail="no ready issues")
                 issue, ready = picked
-            default_branch = client.get_repo(request.owner, request.repo).default_branch
+            default_branch = (
+                None
+                if request.base_branch
+                else client.get_repo(request.owner, request.repo).default_branch
+            )
         except NotAnIssueError as e:
             # Operator passed a PR number — that's a 400, not an upstream error.
             raise HTTPException(status_code=400, detail=str(e)) from e
@@ -119,6 +123,11 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     _main.update_job(job_id, **job_fields)
 
     base = request.base_branch or default_branch
+    if not base:
+        raise HTTPException(
+            status_code=500,
+            detail="unable to resolve base branch for GitHub-issue run",
+        )
     integration_branch = f"khala/issue-{issue.number}"
     try:
         start_coding_team_workflow(

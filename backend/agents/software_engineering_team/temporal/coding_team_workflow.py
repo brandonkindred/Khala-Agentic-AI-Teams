@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from software_engineering_team.temporal.coding_team_github_activities import (
     github_branch_prep_activity,
     github_failure_notice_activity,
     github_publish_activity,
+)
+
+# Bounded retry for short GitHub-hook activities (prep/publish/notice). Pipeline
+# keeps its own long start_to_close timeout without a shared retry policy here.
+_GITHUB_ACTIVITY_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(seconds=30),
+    backoff_coefficient=2.0,
 )
 
 
@@ -272,6 +283,7 @@ class CodingTeamWorkflow:
                     "issue_number": github.get("issue_number"),
                 },
                 start_to_close_timeout=github_timeout,
+                retry_policy=_GITHUB_ACTIVITY_RETRY,
             )
             if not prep.get("ok"):
                 return await workflow.execute_activity(
@@ -285,6 +297,7 @@ class CodingTeamWorkflow:
                         "kind": "failure",
                     },
                     start_to_close_timeout=github_timeout,
+                    retry_policy=_GITHUB_ACTIVITY_RETRY,
                 )
 
         try:
@@ -316,19 +329,42 @@ class CodingTeamWorkflow:
                 )
                 request.pop("acknowledged_resume_token", None)
         except Exception as exc:
+            # Contract-violation ValueError for a missing resume_token must fail the
+            # workflow task without a GitHub failure notice — that path is not an
+            # orchestrator/activity failure worth posting to the issue.
+            if isinstance(exc, ValueError) and "missing a valid resume_token" in str(exc):
+                raise
             if isinstance(github, dict) and github:
-                await workflow.execute_activity(
-                    github_failure_notice_activity,
-                    {
-                        "job_id": request["job_id"],
-                        "owner": github["owner"],
-                        "repo": github["repo"],
-                        "number": github["issue_number"],
-                        "message": str(exc),
-                        "kind": "failure",
-                    },
-                    start_to_close_timeout=github_timeout,
-                )
+                notice_message = f"pipeline failed: {exc}" if str(exc) else "pipeline failed"
+                try:
+                    await workflow.execute_activity(
+                        github_failure_notice_activity,
+                        {
+                            "job_id": request["job_id"],
+                            "owner": github["owner"],
+                            "repo": github["repo"],
+                            "number": github["issue_number"],
+                            "message": notice_message,
+                            "kind": "failure",
+                        },
+                        start_to_close_timeout=github_timeout,
+                        retry_policy=_GITHUB_ACTIVITY_RETRY,
+                    )
+                except Exception:
+                    # Never let a notice failure mask the original pipeline exception
+                    # or hang the workflow via unbounded activity retries. Log best-effort:
+                    # workflow.logger requires the Temporal runtime (unit tests call
+                    # ``run()`` directly), so fall back to stdlib logging.
+                    try:
+                        workflow.logger.exception(
+                            "github_failure_notice_activity failed after pipeline error; "
+                            "re-raising original"
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "github_failure_notice_activity failed after pipeline error; "
+                            "re-raising original"
+                        )
             raise
 
         if isinstance(github, dict) and github:
@@ -350,6 +386,7 @@ class CodingTeamWorkflow:
                     "cleanup_checkout_on_success": bool(github.get("cleanup_checkout_on_success")),
                 },
                 start_to_close_timeout=github_timeout,
+                retry_policy=_GITHUB_ACTIVITY_RETRY,
             )
         return result
 

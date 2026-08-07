@@ -908,6 +908,7 @@ class _FakeClient:
         self.comments: list[tuple[int, str]] = []
         self.fail_comments = False
         self.fail_get_repo = False
+        self.get_repo_calls = 0
 
     def list_open_issues(self, _o: str, _r: str, label: Optional[str] = None):
         for i in self._issues:
@@ -925,6 +926,7 @@ class _FakeClient:
         return list(self._sub_map.get(n, []))
 
     def get_repo(self, _o: str, _r: str) -> Repo:
+        self.get_repo_calls += 1
         if self.fail_get_repo:
             raise GitHubAPIError(500, "boom")
         return self._repo
@@ -1278,8 +1280,15 @@ def _body(issue_number: int = 1, **overrides: Any) -> dict[str, Any]:
     }
 
 
-def _post_run_from_github_and_run_hooks(patched_app, json: dict[str, Any]):
-    """Post to the route, then explicitly invoke the legacy GitHub hook flow.
+def _post_run_from_github_then_run_legacy_hooks(patched_app, json: dict[str, Any]):
+    """Post to the route, then explicitly drive the *legacy* hook path.
+
+    This is NOT route/Temporal coverage. ``POST /run-from-github`` starts
+    ``CodingTeamWorkflow`` and never calls ``_run_with_github_hooks``; this
+    helper posts (asserting Temporal start succeeds) and then synchronously
+    invokes ``_run_with_github_hooks`` so legacy hook-focused unit tests can
+    still exercise comments, busy-checkout, publish-window, and cleanup
+    behavior that has not yet been moved into Temporal activities.
 
     Preconditions:
         - ``patched_app`` is the endpoint fixture from this module, with a captured
@@ -1288,8 +1297,8 @@ def _post_run_from_github_and_run_hooks(patched_app, json: dict[str, Any]):
     Postconditions:
         - Returns the route response unchanged.
         - For 200 responses, the route has started the workflow and this helper
-          has synchronously driven ``_run_with_github_hooks`` for hook-focused
-          assertions.
+          has synchronously driven ``_run_with_github_hooks`` for legacy-hook
+          assertions only.
     """
     resp = patched_app["client"].post("/run-from-github", json=json)
     if resp.status_code != 200:
@@ -1303,6 +1312,10 @@ def _post_run_from_github_and_run_hooks(patched_app, json: dict[str, Any]):
     token = json.get("github_token") or os.environ["GITHUB_TOKEN"]
     api._run_with_github_hooks(started["job_id"], request, plan, issue, token)
     return resp
+
+
+# Backward-compatible alias used by legacy-hook unit tests below.
+_post_run_from_github_and_run_hooks = _post_run_from_github_then_run_legacy_hooks
 
 
 class TestEndpointHappyPath:
@@ -1364,6 +1377,40 @@ class TestEndpointHappyPath:
             "cleanup_checkout_on_success": True,
         }
         assert "token" not in started["github"]
+        assert gh.get_repo_calls == 1
+
+    def test_run_from_github_skips_get_repo_when_base_branch_supplied(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """When the caller supplies base_branch, do not call get_repo for default_branch."""
+        import software_engineering_team.api.routes.github as gh_routes
+
+        started: dict[str, Any] = {}
+
+        def _capture(job_id: str, repo_path: str, plan_input: dict[str, Any], github=None) -> None:
+            started["github"] = github
+
+        monkeypatch.setattr(gh_routes, "start_coding_team_workflow", _capture)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(
+                1,
+                repo_path=patched_app["repo_path"],
+                base_branch="release",
+            ),
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert started["github"]["base"] == "release"
+        assert gh.get_repo_calls == 0
 
     def test_run_from_github_marks_job_failed_and_503_when_temporal_dispatch_raises(
         self, patched_app, monkeypatch
