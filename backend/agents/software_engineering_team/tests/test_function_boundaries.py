@@ -284,3 +284,30 @@ def test_strip_numbered_prefixes_empty_content() -> None:
     assert stripped == ""
     assert physical == 1
     assert mapper is None
+
+
+# --------------------------------------------------------------------------- iter_constructs
+
+
+from code_review_agent.function_boundaries import iter_constructs
+
+
+def test_iter_constructs_qualifies_methods_and_lists_all() -> None:
+    src = (
+        "class C:\n"
+        "    def m(self):\n"
+        "        return 1\n"
+        "\n"
+        "def top():\n"
+        "    return 2\n"
+    )
+    constructs = iter_constructs(src)
+    names = {c.name for c in constructs}
+    assert names == {"C", "C.m", "top"}
+    method = next(c for c in constructs if c.name == "C.m")
+    assert method.kind == "function"
+    assert method.start_line == 2 and method.end_line == 3
+
+
+def test_iter_constructs_parse_failure_returns_empty() -> None:
+    assert iter_constructs("def broken(\n") == []

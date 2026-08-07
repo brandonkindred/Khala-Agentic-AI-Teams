@@ -203,6 +203,54 @@ def _enclosing_construct_ast(content: str, line_number: int) -> Optional[Enclosi
     )
 
 
+def iter_constructs(content: str) -> List[EnclosingConstruct]:
+    """Return every function/method/class construct in ``content``.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+
+    Postconditions:
+        - Returns ``[]`` when ``content`` fails to parse as Python. Never raises.
+        - Otherwise returns one ``EnclosingConstruct`` per ``FunctionDef``,
+          ``AsyncFunctionDef``, and ``ClassDef``, with method names qualified
+          as ``ClassName.method`` when nested in a class body (same rules as
+          :func:`enclosing_construct`). Ranges use ``node_start_line`` /
+          ``node_end_line`` (decorators included on start).
+    """
+    try:
+        tree = ast.parse(content)
+    except Exception:
+        return []
+
+    nodes: List[Tuple[int, int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        start_line = node_start_line(node)
+        end_line = node_end_line(node)
+        kind = "class" if isinstance(node, ast.ClassDef) else "function"
+        nodes.append((start_line, end_line, node.name, kind))
+
+    results: List[EnclosingConstruct] = []
+    for start_line, end_line, name, kind in nodes:
+        qualified = name
+        if kind == "function":
+            enclosing_classes = [
+                (cend - cstart, cname)
+                for cstart, cend, cname, ckind in nodes
+                if ckind == "class" and cstart <= start_line and cend >= end_line
+            ]
+            if enclosing_classes:
+                _, class_name = min(enclosing_classes)
+                qualified = f"{class_name}.{name}"
+        results.append(
+            EnclosingConstruct(
+                start_line=start_line, end_line=end_line, name=qualified, kind=kind
+            )
+        )
+    return results
+
+
 def enclosing_construct(
     content: str,
     line_number: int,
