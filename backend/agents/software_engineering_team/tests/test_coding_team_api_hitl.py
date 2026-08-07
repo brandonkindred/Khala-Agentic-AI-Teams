@@ -1884,6 +1884,32 @@ def test_answers_temporal_native_rejects_missing_resume_token(monkeypatch):
     assert r.status_code == 409
 
 
+def test_answers_without_resume_token_stores_only_no_auto_resume(monkeypatch):
+    """Block-mode /answers stores answers and must not call auto-resume or signal."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    job = _job()  # no resume_token
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    stored: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        api, "store_submit_answers", lambda jid, answers: stored.update(answers=answers)
+    )
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+
+    def _must_not(*_a, **_k):  # pragma: no cover
+        raise AssertionError("must not auto-resume or signal for block-mode answers")
+
+    monkeypatch.setattr(api, "_try_auto_resume", _must_not)
+    monkeypatch.setattr(hitl_route, "signal_workflow_sync", _must_not)
+
+    r = client.post(
+        "/run/j1/answers",
+        json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]},
+    )
+    assert r.status_code == 200
+    assert stored["answers"][0]["question_id"] == "q1"
+
+
 def test_answers_thread_mode_unaffected_when_no_resume_token(monkeypatch):
     """A job with no resume_token (block-mode / GitHub-hook pause) keeps today's exact
     behavior -- the new Temporal-signal branch must never be reached."""
@@ -1912,6 +1938,23 @@ def test_answers_thread_mode_unaffected_when_no_resume_token(monkeypatch):
 
 
 # --------------------------------------------------------------------------- /resume: Temporal-native pause
+
+
+def test_resume_400_when_no_resume_token(monkeypatch):
+    """Without resume_token, /resume must not claim/spawn — Temporal-native only."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(status="waiting_for_user"))
+    monkeypatch.setattr(
+        hitl_route,
+        "signal_workflow_sync",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not signal")),
+    )
+
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 400
+    detail = r.json()["detail"].lower()
+    assert "resume_token" in detail or "temporal" in detail
 
 
 def test_resume_temporal_native_signals_workflow(monkeypatch):
