@@ -898,14 +898,17 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
     """Format one find_references hit as path:line plus optional construct excerpt.
 
     Preconditions:
-        - ``lineno`` >= 1.
+        - ``lineno`` >= 1 and is a 1-based storage index from ``search`` /
+          ``_search_repo_references`` (physical line in the stored blob).
 
     Postconditions:
-        - Always starts with ``{path}:{lineno}``.
+        - Always starts with ``{path}:{display_line}`` where ``display_line`` is
+          the original ``N:`` file line when content is pre-numbered, else
+          ``lineno``.
         - When readable ``.py``/``.pyi`` content has an enclosing construct at
-          ``lineno``, appends a blank-line-free construct slice from
+          the physical hit line, appends a construct slice from
           ``_format_construct_slice`` (same shape as ``read_function``).
-        - Otherwise returns only ``{path}:{lineno}`` (no fallback window).
+        - Otherwise returns only the locator (no fallback window).
         - Never raises.
     """
     loc = f"{path}:{lineno}"
@@ -919,9 +922,14 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
     if ext.lower() not in (".py", ".pyi"):
         return loc
     try:
-        stripped, physical, mapper = strip_numbered_prefixes(content, lineno)
+        # ``lineno`` from search is a storage/physical index. ``strip_numbered_prefixes``
+        # remaps an *original* file line; pass a dummy original and keep ``lineno``
+        # as the physical index (same pattern as ``read_function_by_name``).
+        stripped, _, mapper = strip_numbered_prefixes(content, 1)
+        if mapper is not None:
+            loc = f"{path}:{mapper(lineno)}"
         construct = enclosing_construct(
-            stripped, physical, annotated_hunks=mapper is not None
+            stripped, lineno, annotated_hunks=mapper is not None
         )
     except Exception:  # noqa: BLE001 - excerpt failure must not abort find_references
         return loc

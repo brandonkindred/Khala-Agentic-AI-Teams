@@ -782,6 +782,24 @@ def test_find_references_unresolved_construct_is_path_line_only() -> None:
     assert _NO_REPO in result
 
 
+def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -> None:
+    """Annotated hunk hits remap storage indices to original lines and the right construct."""
+    src = (
+        "100: def earlier():\n"
+        "101:     pass\n"
+        "102: \n"
+        "103: def later():\n"
+        "104:     return NEEDLE\n"
+    )
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:104"]
+    assert "function later" in result
+    assert "return NEEDLE" in result
+    assert "function earlier" not in result
+    assert _NO_REPO in result
+
+
 # --------------------------------------------------------------------------- tools
 
 
