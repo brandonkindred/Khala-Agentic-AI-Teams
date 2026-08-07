@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import code_review_agent.previous_content as previous_content
 from code_review_agent.previous_content import (
     PreviousContentDiskResult,
     PreviousContentResult,
@@ -46,6 +47,15 @@ def test_git_hit_returns_blob_text(tmp_path: Path) -> None:
     assert isinstance(result, PreviousContentResult)
     assert result.contents == {"a.py": "old = 1\n"}
     assert result.misses == frozenset()
+
+
+def test_git_miss_for_oversize_blob(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(previous_content, "DEFAULT_MAX_FILE_BYTES", 3)
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "big.py", "y = 2\n")
+    result = read_previous_content_from_git(str(repo), "HEAD", ["big.py"])
+    assert "big.py" not in result.contents
+    assert result.misses == frozenset({"big.py"})
 
 
 def test_git_miss_for_absent_path(tmp_path: Path) -> None:

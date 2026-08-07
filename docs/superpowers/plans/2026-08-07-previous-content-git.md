@@ -1,31 +1,33 @@
-# Git-Revision Previous Content Resolution Implementation Plan
+# Git Previous Content Resolution Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a fail-open helper that reads file blobs from a caller-supplied git revision via `git show`, returning the same hit/miss result shape as the on-disk leaf.
+**Goal:** Add a fail-open helper that reads file text from a caller-supplied git revision under `repo_path` (via `git show`) and returns hits plus explicit misses without aborting the batch when git is unavailable.
 
-**Architecture:** Extend `code_review_agent/previous_content.py`: rename the result type to `PreviousContentResult` (keep `PreviousContentDiskResult` as an alias), add `read_previous_content_from_git` that preflights revision resolution then calls `shared.git.git_utils._run_git(..., merge_stderr=False)` per path. No aggregator or review wiring.
+**Architecture:** Extend `code_review_agent/previous_content.py`: rename the shared result type to `PreviousContentResult` (keep `PreviousContentDiskResult` as an alias), add `read_previous_content_from_git` that validates strip-nonempty `repo_path`/`revision`, preflights the repo+revision, then per unique path runs `git show <rev>:<path>` via `shared.git.git_utils._run_git(..., merge_stderr=False)`. No aggregator or review wiring.
 
-**Tech Stack:** Python 3.10+, `shared.git.git_utils._run_git`, pytest (`tmp_path` + real `git init` fixture)
+**Tech Stack:** Python 3.10+, dataclasses, pytest (`tmp_path` + real `git init` fixture), `shared.git.git_utils._run_git`, `DEFAULT_MAX_FILE_BYTES` from `repo_reader`
 
 ## Global Constraints
 
 - Work only in worktree `.worktrees/5435-resolve-previous-content-git` on branch `5435-resolve-previous-content-git`
-- Design-by-Contract docstrings (`Preconditions:` / `Postconditions:` / `Invariants:` where relevant) on every new/changed public type and function
+- Design-by-Contract docstrings (`Preconditions:` / `Postconditions:` / `Invariants:` where relevant) on every new or renamed public type and function
 - Never put GitHub issue numbers in code, comments, commit messages, or docs (PR body only)
 - Ruff line-length 120; Python 3.10 target
 - Coverage ≥ 90% on new/changed code
-- Caller-supplied `revision` required (no default `HEAD` / `HEAD~1` policy in this leaf)
-- Blank/whitespace `repo_path` or `revision` → `ValueError`; all other git/environment failures → misses, never abort
-- Out of scope: disk behavior changes beyond rename/alias; aggregating disk+git; change-surface / `CodeReviewInput` wiring
+- Revision is required (caller-supplied); no default `HEAD` / `HEAD~1` policy
+- Fail-open once preconditions hold: never raise for missing blobs, bad revisions, missing `.git`, timeouts, or other git/environment failures
+- Blank/whitespace `repo_path` or `revision` → `ValueError`
+- Size cap: inherit `DEFAULT_MAX_FILE_BYTES` (1_000_000); oversize → miss
+- Out of scope: on-disk reader behavior changes beyond shared type rename/alias; aggregating disk + git; change-surface / `CodeReviewInput` / `v2_review` wiring; choosing which revision the pipeline should pass
 
 ## File map
 
 | File | Role |
 |---|---|
-| `backend/agents/software_engineering_team/code_review_agent/previous_content.py` | Rename result; alias; add `read_previous_content_from_git` |
-| `backend/agents/software_engineering_team/tests/test_previous_content_git.py` | Create: git hit/miss/unavailable/blank tests |
-| `backend/agents/software_engineering_team/tests/test_previous_content_ondisk.py` | Unchanged imports (alias keeps `PreviousContentDiskResult` working); run to confirm |
+| `backend/agents/software_engineering_team/code_review_agent/previous_content.py` | Modify: rename result → `PreviousContentResult`, alias, add `read_previous_content_from_git` |
+| `backend/agents/software_engineering_team/tests/test_previous_content_git.py` | Create: unit tests (real mini-repo hit + fail-open / blank / bad rev) |
+| `backend/agents/software_engineering_team/tests/test_previous_content_ondisk.py` | Touch only if alias/isinstance assertions need updating (prefer leave as-is; alias keeps imports working) |
 | `backend/shared/git/git_utils.py` | Reuse `_run_git` only; do not modify |
 | `backend/agents/software_engineering_team/code_review_agent/repo_reader.py` | Reuse `DEFAULT_MAX_FILE_BYTES` only; do not modify |
 
@@ -33,25 +35,24 @@ Spec: `docs/superpowers/specs/2026-08-07-previous-content-git-design.md`
 
 ---
 
-### Task 1: Shared result rename + git previous-content reader
+### Task 1: Git previous-content reader + unit tests
 
 **Files:**
 - Modify: `backend/agents/software_engineering_team/code_review_agent/previous_content.py`
 - Create: `backend/agents/software_engineering_team/tests/test_previous_content_git.py`
-- Verify unchanged behavior: `backend/agents/software_engineering_team/tests/test_previous_content_ondisk.py`
+- Reuse (do not modify): `backend/shared/git/git_utils.py`, `backend/agents/software_engineering_team/code_review_agent/repo_reader.py`
 
 **Interfaces:**
 - Consumes:
   - `shared.git.git_utils._run_git(repo_path: Path, cmd: list[str], timeout: int = 30, *, merge_stderr: bool = True) -> tuple[int, str]`
-  - `code_review_agent.repo_reader.DEFAULT_MAX_FILE_BYTES`
-  - Existing `read_previous_content_from_disk` / `DiskRepoReader` (unchanged logic)
+  - `DEFAULT_MAX_FILE_BYTES` from `code_review_agent.repo_reader`
+  - Existing `read_previous_content_from_disk` (unchanged behavior)
 - Produces:
   - `PreviousContentResult(contents: dict[str, str], misses: frozenset[str])` (frozen dataclass)
-  - `PreviousContentDiskResult = PreviousContentResult`
+  - `PreviousContentDiskResult = PreviousContentResult` (alias)
   - `read_previous_content_from_git(repo_path: str, revision: str, paths: Iterable[str]) -> PreviousContentResult`
-  - `read_previous_content_from_disk(...) -> PreviousContentResult` (same behavior; return type uses shared name)
 
-- [ ] **Step 1: Write the failing git tests**
+- [ ] **Step 1: Write the failing tests**
 
 Create `backend/agents/software_engineering_team/tests/test_previous_content_git.py`:
 
@@ -65,7 +66,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from code_review_agent.previous_content import (
     PreviousContentDiskResult,
     PreviousContentResult,
@@ -73,54 +73,78 @@ from code_review_agent.previous_content import (
 )
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
-def _init_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init")
-    _git(repo, "config", "user.email", "test@test.com")
-    _git(repo, "config", "user.name", "Test")
-    _git(repo, "config", "commit.gpgsign", "false")
-    return repo
-
-
-def _commit_file(repo: Path, rel: str, content: str) -> None:
-    path = repo / rel
+def _init_repo_with_file(root: Path, rel: str, content: str) -> None:
+    _git(root, "init")
+    _git(root, "config", "user.email", "t@t.com")
+    _git(root, "config", "user.name", "T")
+    _git(root, "config", "commit.gpgsign", "false")
+    path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    _git(repo, "add", rel)
-    _git(repo, "commit", "-m", f"add {rel}")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "init")
 
 
-def test_alias_previous_content_disk_result_is_shared_type() -> None:
+def test_alias_is_previous_content_result() -> None:
     assert PreviousContentDiskResult is PreviousContentResult
 
 
-def test_git_hit_returns_blob_text(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    _commit_file(repo, "a.py", "old = 1\n")
-    result = read_previous_content_from_git(str(repo), "HEAD", ["a.py"])
+def test_hit_returns_blob_at_revision(tmp_path: Path) -> None:
+    _init_repo_with_file(tmp_path, "a.py", "old = 1\n")
+    result = read_previous_content_from_git(str(tmp_path), "HEAD", ["a.py"])
     assert isinstance(result, PreviousContentResult)
     assert result.contents == {"a.py": "old = 1\n"}
     assert result.misses == frozenset()
 
 
-def test_git_miss_for_absent_path(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    _commit_file(repo, "a.py", "x\n")
-    result = read_previous_content_from_git(str(repo), "HEAD", ["missing.py"])
-    assert "missing.py" not in result.contents
+def test_miss_for_path_absent_at_revision(tmp_path: Path) -> None:
+    _init_repo_with_file(tmp_path, "a.py", "x\n")
+    result = read_previous_content_from_git(str(tmp_path), "HEAD", ["missing.py"])
+    assert result.contents == {}
     assert result.misses == frozenset({"missing.py"})
 
 
-def test_fail_open_batch_one_hit_one_miss(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    _commit_file(repo, "present.py", "x = 1\n")
+def test_unavailable_repo_all_misses_no_raise(tmp_path: Path) -> None:
+    # No git init — plain directory.
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    result = read_previous_content_from_git(str(tmp_path), "HEAD", ["a.py"])
+    assert result.contents == {}
+    assert result.misses == frozenset({"a.py"})
+
+
+def test_bad_revision_all_misses_no_raise(tmp_path: Path) -> None:
+    _init_repo_with_file(tmp_path, "a.py", "x\n")
     result = read_previous_content_from_git(
-        str(repo),
+        str(tmp_path),
+        "definitely-not-a-real-revision",
+        ["a.py"],
+    )
+    assert result.contents == {}
+    assert result.misses == frozenset({"a.py"})
+
+
+def test_blank_revision_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        read_previous_content_from_git(str(tmp_path), "", ["a.py"])
+    with pytest.raises(ValueError):
+        read_previous_content_from_git(str(tmp_path), "   ", ["a.py"])
+
+
+def test_blank_repo_path_raises() -> None:
+    with pytest.raises(ValueError):
+        read_previous_content_from_git("", "HEAD", ["a.py"])
+    with pytest.raises(ValueError):
+        read_previous_content_from_git("   ", "HEAD", ["a.py"])
+
+
+def test_fail_open_batch_one_hit_one_miss(tmp_path: Path) -> None:
+    _init_repo_with_file(tmp_path, "present.py", "x = 1\n")
+    result = read_previous_content_from_git(
+        str(tmp_path),
         "HEAD",
         ["present.py", "absent.py"],
     )
@@ -128,87 +152,58 @@ def test_fail_open_batch_one_hit_one_miss(tmp_path: Path) -> None:
     assert result.misses == frozenset({"absent.py"})
 
 
-def test_no_git_repo_all_misses(tmp_path: Path) -> None:
-    bare = tmp_path / "not-a-repo"
-    bare.mkdir()
-    result = read_previous_content_from_git(str(bare), "HEAD", ["a.py", "b.py"])
-    assert result.contents == {}
-    assert result.misses == frozenset({"a.py", "b.py"})
-
-
-def test_bad_revision_all_misses(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    _commit_file(repo, "a.py", "x\n")
-    result = read_previous_content_from_git(str(repo), "no-such-rev-zzzz", ["a.py"])
-    assert result.contents == {}
-    assert result.misses == frozenset({"a.py"})
-
-
-def test_blank_revision_raises(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    with pytest.raises(ValueError):
-        read_previous_content_from_git(str(repo), "", ["a.py"])
-    with pytest.raises(ValueError):
-        read_previous_content_from_git(str(repo), "   ", ["a.py"])
-
-
-def test_blank_repo_path_raises() -> None:
-    with pytest.raises(ValueError):
-        read_previous_content_from_git("", "HEAD", ["a.py"])
-
-
 def test_empty_paths_returns_empty_result(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    _commit_file(repo, "a.py", "x\n")
-    result = read_previous_content_from_git(str(repo), "HEAD", [])
+    _init_repo_with_file(tmp_path, "a.py", "x\n")
+    result = read_previous_content_from_git(str(tmp_path), "HEAD", [])
     assert result.contents == {}
     assert result.misses == frozenset()
 
 
-def test_unsafe_path_is_miss(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    _commit_file(repo, "a.py", "x\n")
-    result = read_previous_content_from_git(str(repo), "HEAD", ["../secret"])
-    assert result.contents == {}
-    assert result.misses == frozenset({"../secret"})
+def test_duplicate_path_strings_read_once(tmp_path: Path) -> None:
+    _init_repo_with_file(tmp_path, "a.py", "once\n")
+    result = read_previous_content_from_git(str(tmp_path), "HEAD", ["a.py", "a.py"])
+    assert result.contents == {"a.py": "once\n"}
+    assert result.misses == frozenset()
+    assert len(result.contents) + len(result.misses) == 1
 
 
-def test_blank_path_string_is_miss(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    _commit_file(repo, "a.py", "x\n")
-    result = read_previous_content_from_git(str(repo), "HEAD", [""])
+def test_blank_and_unsafe_paths_are_misses(tmp_path: Path) -> None:
+    _init_repo_with_file(tmp_path, "a.py", "x\n")
+    result = read_previous_content_from_git(
+        str(tmp_path),
+        "HEAD",
+        ["", "../escape.py", "ok/../../evil.py"],
+    )
     assert result.contents == {}
-    assert result.misses == frozenset({""})
+    assert result.misses == frozenset({"", "../escape.py", "ok/../../evil.py"})
 ```
 
-- [ ] **Step 2: Run git tests to verify they fail**
+- [ ] **Step 2: Run tests to verify they fail**
 
-From `backend/` (use the worktree’s or linked venv pytest):
+Run from `backend/`:
 
 ```bash
 pytest agents/software_engineering_team/tests/test_previous_content_git.py -v
 ```
 
-Expected: FAIL with `ImportError` / missing `PreviousContentResult` or `read_previous_content_from_git`.
+Expected: FAIL with `ImportError` for `PreviousContentResult` / `read_previous_content_from_git` (not defined yet), or `AttributeError` on missing symbols.
 
-- [ ] **Step 3: Implement rename + git reader**
+- [ ] **Step 3: Write minimal implementation**
 
-Replace `backend/agents/software_engineering_team/code_review_agent/previous_content.py` with:
+Update `backend/agents/software_engineering_team/code_review_agent/previous_content.py` to the following shape (preserve disk reader behavior; extend module docstring):
 
 ```python
-"""Resolve previous file content from on-disk workspace or a git revision.
+"""Resolve previous file content from on-disk workspace and git revisions.
 
-Disk reads return the literal current bytes under ``repo_path`` (often already
-post-execution *new* content). Git reads return blobs at a caller-supplied
-revision via ``git show``. Neither path judges trustworthiness or aggregates
-sources — callers compose results. Per-path failures are misses; only blank
-``repo_path`` / ``revision`` raise.
+Disk reads return literal current bytes under ``repo_path`` (often post-execution
+*new* content). Git reads return blobs at a caller-supplied revision via
+``git show``. Per-path failures are misses; only blank ``repo_path`` /
+``revision`` (git path) raise.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import os
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set
 
@@ -231,6 +226,23 @@ class PreviousContentResult:
 
 
 PreviousContentDiskResult = PreviousContentResult
+
+
+def _normalize_git_path(path: str) -> Optional[str]:
+    """Return a repo-relative path safe to pass to ``git show``, or ``None``.
+
+    Postconditions:
+        - Blank / whitespace-only → ``None``.
+        - Leading ``/`` stripped.
+        - Any ``..`` path segment → ``None`` (do not pass escape-like specs to git).
+    """
+    key = (path or "").strip().lstrip("/")
+    if not key:
+        return None
+    parts = key.split("/")
+    if any(part == ".." for part in parts):
+        return None
+    return key
 
 
 def read_previous_content_from_disk(
@@ -275,45 +287,12 @@ def read_previous_content_from_disk(
     return PreviousContentResult(contents=contents, misses=frozenset(misses))
 
 
-def _unique_paths(paths: Iterable[str]) -> List[str]:
-    """Return first-seen unique path strings."""
-    seen: Set[str] = set()
-    out: List[str] = []
-    for path in paths:
-        if path in seen:
-            continue
-        seen.add(path)
-        out.append(path)
-    return out
-
-
-def _normalize_git_path(path: str) -> Optional[str]:
-    """Return a repo-relative path safe for ``git show rev:path``, or None.
-
-    Postconditions:
-        - Returns ``None`` for blank paths, paths with ``..`` segments, or
-          absolute-looking segments after strip/lstrip of ``/``.
-        - Otherwise returns the stripped path without a leading ``/``.
-    """
-    key = (path or "").strip().lstrip("/")
-    if not key:
-        return None
-    parts = key.replace("\\", "/").split("/")
-    if any(part == ".." or part == "" for part in parts):
-        return None
-    return "/".join(parts)
-
-
-def _all_misses(paths: List[str]) -> PreviousContentResult:
-    return PreviousContentResult(contents={}, misses=frozenset(paths))
-
-
 def read_previous_content_from_git(
     repo_path: str,
     revision: str,
     paths: Iterable[str],
 ) -> PreviousContentResult:
-    """Read file blobs at ``revision`` under ``repo_path`` via ``git show``.
+    """Read blob text at ``revision`` for each path under ``repo_path``.
 
     Preconditions:
         - ``repo_path`` is strip-nonempty; otherwise raise ``ValueError``.
@@ -321,14 +300,14 @@ def read_previous_content_from_git(
         - ``paths`` is an iterable of strings (may be empty).
 
     Postconditions:
-        - Returns ``PreviousContentResult`` for the unique path strings.
-        - If the path is not a usable git repo or ``revision`` does not
-          resolve to a commit, every unique path is a miss (no raise).
-        - Per-path: unsafe/blank path, missing blob, non-zero ``git show``,
-          or oversize blob → miss; success → hit with stdout text.
+        - Returns ``PreviousContentResult`` partitioning unique path strings into
+          hits (``git show <revision>:<path>`` text within ``DEFAULT_MAX_FILE_BYTES``)
+          and misses.
         - Duplicate identical path strings are read once.
         - Empty ``paths`` yields empty ``contents`` and empty ``misses``.
-        - Never raises for git/environment failures once preconditions hold.
+        - Once preconditions hold, never raises for missing blobs, bad revisions,
+          missing ``.git``, timeouts, or other git/environment failures — those
+          degrade to misses (all unique paths on repo/revision preflight failure).
     """
     stripped_repo = (repo_path or "").strip()
     if not stripped_repo:
@@ -337,82 +316,96 @@ def read_previous_content_from_git(
     if not stripped_rev:
         raise ValueError("revision must be a non-empty string")
 
-    unique = _unique_paths(paths)
+    unique: List[str] = []
+    seen: Set[str] = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+
     if not unique:
         return PreviousContentResult(contents={}, misses=frozenset())
 
     root = Path(stripped_repo)
-    # Preflight: usable .git and resolvable commit.
+    # Preflight: usable work tree + resolvable commit-ish.
     if not (root / ".git").exists():
-        return _all_misses(unique)
-    verify_rc, _ = _run_git(
+        return PreviousContentResult(contents={}, misses=frozenset(unique))
+    code, _ = _run_git(
         root,
         ["git", "rev-parse", "--verify", f"{stripped_rev}^{{commit}}"],
-        merge_stderr=True,
+        merge_stderr=False,
     )
-    if verify_rc != 0:
-        return _all_misses(unique)
+    if code != 0:
+        return PreviousContentResult(contents={}, misses=frozenset(unique))
 
     contents: Dict[str, str] = {}
     misses: Set[str] = set()
     for path in unique:
-        normalized = _normalize_git_path(path)
-        if normalized is None:
+        norm = _normalize_git_path(path)
+        if norm is None:
             misses.add(path)
             continue
-        spec = f"{stripped_rev}:{normalized}"
-        rc, out = _run_git(
+        # Size first (mirrors shared.git read_paths_at_merge_base) so huge blobs
+        # are never loaded whole.
+        sz_code, sz_out = _run_git(
             root,
-            ["git", "show", spec],
+            ["git", "cat-file", "-s", f"{stripped_rev}:{norm}"],
             merge_stderr=False,
         )
-        if rc != 0:
+        if sz_code != 0:
             misses.add(path)
             continue
-        if len(out.encode("utf-8", errors="surrogateescape")) > DEFAULT_MAX_FILE_BYTES:
+        try:
+            blob_size = int(sz_out.strip())
+        except ValueError:
             misses.add(path)
             continue
-        contents[path] = out
+        if blob_size > DEFAULT_MAX_FILE_BYTES:
+            misses.add(path)
+            continue
+        show_code, show_out = _run_git(
+            root,
+            ["git", "show", f"{stripped_rev}:{norm}"],
+            merge_stderr=False,
+        )
+        if show_code != 0:
+            misses.add(path)
+            continue
+        # Match merge-base reader: UTF-8/JSON-safe text from surrogateescape stdout.
+        text = show_out.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+        contents[path] = text
 
     return PreviousContentResult(contents=contents, misses=frozenset(misses))
 ```
 
 Notes for the implementer:
 
-- Prefer `f"{stripped_rev}^{{commit}}"` so the shell/git sees `rev^{commit}`.
-- Do not modify `repo_reader.py` or `shared/git/git_utils.py`.
-- Keep disk loop behavior identical; only rename the result type.
+- Keep result keys as the **original** path strings from the input (not only the normalized form), matching the disk leaf.
+- Do not import or call the disk reader from the git function (no aggregation).
+- Prefer `root / ".git"` existence plus `rev-parse --verify <rev>^{commit}` for preflight; both failing → all unique paths miss.
 
-- [ ] **Step 4: Run git tests to verify they pass**
-
-```bash
-pytest agents/software_engineering_team/tests/test_previous_content_git.py -v
-```
-
-Expected: all tests PASS.
-
-- [ ] **Step 5: Confirm on-disk suite still passes**
-
-```bash
-pytest agents/software_engineering_team/tests/test_previous_content_ondisk.py -v
-```
-
-Expected: 7 passed (alias keeps `PreviousContentDiskResult` imports working).
-
-- [ ] **Step 6: Coverage + lint**
+- [ ] **Step 4: Run new git tests and existing disk tests**
 
 ```bash
 pytest agents/software_engineering_team/tests/test_previous_content_git.py \
-  agents/software_engineering_team/tests/test_previous_content_ondisk.py \
-  --cov=code_review_agent.previous_content --cov-report=term-missing
-
-ruff check agents/software_engineering_team/code_review_agent/previous_content.py \
-  agents/software_engineering_team/tests/test_previous_content_git.py
+       agents/software_engineering_team/tests/test_previous_content_ondisk.py -v
 ```
 
-Expected: ≥ 90% line coverage on `previous_content.py`; ruff clean.
+Expected: all PASS. Disk tests still pass because `PreviousContentDiskResult` is an alias of `PreviousContentResult` and `isinstance` / constructors remain compatible.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Lint the touched files**
+
+```bash
+ruff check agents/software_engineering_team/code_review_agent/previous_content.py \
+           agents/software_engineering_team/tests/test_previous_content_git.py
+ruff format agents/software_engineering_team/code_review_agent/previous_content.py \
+            agents/software_engineering_team/tests/test_previous_content_git.py
+```
+
+Expected: clean / formatted.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add \
@@ -421,25 +414,24 @@ git add \
 git commit -m "$(cat <<'EOF'
 Add fail-open git-revision previous-content reader for SE review.
 
-Shares PreviousContentResult with the disk leaf and resolves blobs via
-git show so callers can fill old_contents from a configured revision.
 EOF
 )"
 ```
 
 ---
 
-## Spec coverage (self-review)
+## Spec coverage checklist
 
 | Spec requirement | Task |
 |---|---|
-| Caller-supplied `revision` | Task 1 |
-| `PreviousContentResult` + disk alias | Task 1 |
-| `read_previous_content_from_git` + `_run_git` / `merge_stderr=False` | Task 1 |
-| Blank repo/revision → `ValueError` | Task 1 |
-| Unusable git / bad rev → all misses | Task 1 |
-| Per-path miss / path safety / size cap | Task 1 |
-| Real mini-repo + fail-open tests | Task 1 |
-| No aggregator / wiring | Not in plan |
-
-No placeholders; signatures match the design doc.
+| `read_previous_content_from_git(repo_path, revision, paths)` | Task 1 |
+| `PreviousContentResult` + `PreviousContentDiskResult` alias | Task 1 |
+| Required non-blank `revision`; blank → `ValueError` | Task 1 |
+| `_run_git(..., merge_stderr=False)` for `git show` | Task 1 |
+| Fail-open: unavailable git / bad revision → all misses | Task 1 |
+| Per-path miss; batch continues | Task 1 |
+| Path safety (`..`, blank) → miss | Task 1 |
+| `DEFAULT_MAX_FILE_BYTES` oversize → miss | Task 1 (via `cat-file -s`) |
+| Unit tests: hit, miss, unavailable, bad rev, blank inputs | Task 1 |
+| No disk behavior change beyond rename/alias | Task 1 |
+| No aggregator / CodeReviewInput wiring | (out of scope — no task) |
