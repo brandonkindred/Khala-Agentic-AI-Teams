@@ -350,9 +350,15 @@ def api_client(monkeypatch):
     from fastapi.testclient import TestClient
 
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
+    from investment_team.strategy_lab import run_state as _run_state
 
-    monkeypatch.setattr(api_main, "_active_runs", {})
+    active_runs = {}
+    monkeypatch.setattr(api_main, "_active_runs", active_runs)
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    monkeypatch.setattr(_run_state, "active_runs", active_runs)
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: None)
     return TestClient(api_main.app)
 
 
@@ -413,11 +419,15 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
     _active_runs entry forever — repeated requests during an outage would
     otherwise grow it unboundedly until a process restart.
     _fail_strategy_lab_run schedules a 900s delayed cleanup for this."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-cleanup-me"
-    monkeypatch.setattr(api_main, "_active_runs", {run_id: {"run_id": run_id, "status": "running"}})
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    active_runs = {run_id: {"run_id": run_id, "status": "running"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    persisted = []
+    monkeypatch.setattr(
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a)
+    )
 
     captured = {}
 
@@ -430,17 +440,18 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
         def start(self):
             captured["started"] = True
 
-    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _FakeTimer)
 
-    api_main._fail_strategy_lab_run(run_id, "boom")
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
 
-    assert api_main._active_runs[run_id]["status"] == "failed"
+    assert active_runs[run_id]["status"] == "failed"
+    assert persisted[0][0] == run_id
     assert captured["delay"] == 900.0
     assert captured["started"] is True
 
     # Firing the captured callback (simulating the timer elapsing) pops the entry.
     captured["callback"]()
-    assert run_id not in api_main._active_runs
+    assert run_id not in active_runs
 
 
 def test_fail_strategy_lab_run_persists_outside_the_lock(monkeypatch) -> None:
@@ -453,23 +464,24 @@ def test_fail_strategy_lab_run_persists_outside_the_lock(monkeypatch) -> None:
     _active_runs entry after _fail_strategy_lab_run returns must not affect
     what was captured for persistence.
     """
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-persist-unlocked"
     state = {"run_id": run_id, "status": "running"}
-    monkeypatch.setattr(api_main, "_active_runs", {run_id: state})
-    monkeypatch.setattr(api_main.threading, "Timer", lambda *a, **k: mock.Mock())
+    active_runs = {run_id: state}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", lambda *a, **k: mock.Mock())
 
     observed = {}
 
     def _fake_persist(rid, persisted_state, **kwargs):
         observed["run_id"] = rid
         observed["state"] = dict(persisted_state)
-        observed["lock_held"] = api_main._lock.locked()
+        observed["lock_held"] = orchestrator_api._lock.locked()
 
-    monkeypatch.setattr(api_main, "_persist_run_state", _fake_persist)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _fake_persist)
 
-    api_main._fail_strategy_lab_run(run_id, "boom")
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
 
     assert observed["run_id"] == run_id
     assert observed["lock_held"] is False
@@ -491,12 +503,15 @@ def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
     resumed run's live tracking entry or its event-bus subscribers —
     otherwise a second run could start concurrently with the still-executing
     resumed workflow."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-resumed-before-cleanup"
     active_runs = {run_id: {"run_id": run_id, "status": "running"}}
-    monkeypatch.setattr(api_main, "_active_runs", active_runs)
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    persisted = []
+    monkeypatch.setattr(
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a)
+    )
 
     captured = {}
 
@@ -506,12 +521,14 @@ def test_fail_strategy_lab_run_cleanup_is_noop_after_resume_supersedes_it(
             self.daemon = None
 
         def start(self):
-            pass
+            captured["started"] = True
 
-    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _FakeTimer)
 
-    api_main._fail_strategy_lab_run(run_id, "boom")
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
     assert active_runs[run_id]["status"] == "failed"
+    assert persisted[0][0] == run_id
+    assert captured["started"] is True
 
     # Simulate a resume: a brand-new state object replaces the failed one
     # (mirrors resume_strategy_lab_run, which never mutates in place).
@@ -532,11 +549,15 @@ def test_fail_strategy_lab_run_cleanup_survives_cleanup_job_failure(monkeypatch)
     cleanup_job() raises, the callback must log and swallow it rather than
     let the exception escape unhandled on the timer thread."""
     from investment_team.api import job_event_bus
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-cleanup-job-boom"
-    monkeypatch.setattr(api_main, "_active_runs", {run_id: {"run_id": run_id, "status": "running"}})
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    active_runs = {run_id: {"run_id": run_id, "status": "running"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
+    persisted = []
+    monkeypatch.setattr(
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a)
+    )
 
     def _boom(_job_id):
         raise RuntimeError("event bus is on fire")
@@ -551,17 +572,19 @@ def test_fail_strategy_lab_run_cleanup_survives_cleanup_job_failure(monkeypatch)
             self.daemon = None
 
         def start(self):
-            pass
+            captured["started"] = True
 
-    monkeypatch.setattr(api_main.threading, "Timer", _FakeTimer)
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _FakeTimer)
 
-    api_main._fail_strategy_lab_run(run_id, "boom")
+    orchestrator_api._fail_strategy_lab_run(run_id, "boom")
+    assert persisted[0][0] == run_id
+    assert captured["started"] is True
 
     # The callback must not raise despite cleanup_job() blowing up, and the
     # _active_runs entry must still be popped (that happens before the
     # cleanup_job() call).
     captured["callback"]()
-    assert run_id not in api_main._active_runs
+    assert run_id not in active_runs
 
 
 def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -> None:
