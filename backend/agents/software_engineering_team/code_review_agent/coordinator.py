@@ -151,6 +151,7 @@ from .models import (
     CodeReviewOutput,
     CodeReviewUnavailableError,
     ReviewProgressCallback,
+    _normalized_severity,
     notify_review_progress,
 )
 from .profiles import ReviewProfile
@@ -365,7 +366,7 @@ def _cap_issues(
         enumerate(issues),
         key=lambda pair: (
             _CAP_SEVERITY_RANK.get(
-                (pair[1].severity or "").strip().lower(), _CAP_UNKNOWN_SEVERITY_RANK
+                _normalized_severity(pair[1].severity), _CAP_UNKNOWN_SEVERITY_RANK
             ),
             pair[0],
         ),
@@ -400,7 +401,9 @@ def _reconcile_approval(
           it mixes every chunk's text, so synthesizing a rejection from it
           could attribute an approving chunk's words to a rejecting chunk.
     """
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [
+        i for i in issues if _normalized_severity(i.severity) in ("critical", "high")
+    ]
     approved = llm_approved and not critical_or_high
     if not approved and not critical_or_high:
         if issues:
@@ -656,10 +659,12 @@ def run_coordinator(
           dedupe/severity gate above, ``synthesize_spec_compliance`` is called
           exactly once over the final merged issue list; its note replaces the
           per-chunk ``spec_compliance_notes`` passed into
-          ``synthesize_review_findings``. When the flag is off (the default) or
-          the profile is not ``CODE_REVIEW``, behavior is unchanged: every chunk
-          gets its per-chunk spec/AC context and ``synthesize_spec_compliance``
-          is never called.
+          ``synthesize_review_findings``. If that call raises, the failure is
+          logged and narrative merge falls back to per-chunk-sourced notes
+          (``single_pass_spec_notes`` left ``None``). When the flag is off (the
+          default) or the profile is not ``CODE_REVIEW``, behavior is unchanged:
+          every chunk gets its per-chunk spec/AC context and
+          ``synthesize_spec_compliance`` is never called.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
@@ -953,9 +958,15 @@ def run_coordinator(
     # unchanged.
     single_pass_spec_notes: Optional[str] = None
     if spec_compliance_single_pass:
-        single_pass_spec_notes = synthesize_spec_compliance(
-            llm, input_data=input_data, issues=deduped
-        )
+        try:
+            single_pass_spec_notes = synthesize_spec_compliance(
+                llm, input_data=input_data, issues=deduped
+            )
+        except Exception:
+            logger.exception(
+                "CodeReviewCoordinator: spec-compliance single pass failed; falling back"
+            )
+            single_pass_spec_notes = None
 
     merged_summary, spec_notes = _merge_narrative(
         llm,

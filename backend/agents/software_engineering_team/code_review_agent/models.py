@@ -439,6 +439,22 @@ class CodeReviewIssue(BaseModel):
 # this type directly rather than hand-copying its values, so a change here is
 # never silently missed downstream.
 CodeReviewIssueSeverity = Literal["critical", "high", "medium", "low", "info"]
+
+
+def _normalized_severity(severity: Optional[str]) -> str:
+    """Fold a severity token for rank / blocking comparisons.
+
+    Preconditions:
+        - ``severity`` is ``None`` or a string (may be empty / padded / mixed-case).
+
+    Postconditions:
+        - Returns ``(severity or "").strip().lower()``.
+        - Never raises; empty / ``None`` → ``""``.
+        - Pure; no side effects.
+    """
+    return (severity or "").strip().lower()
+
+
 _ChunkReviewIssueCategory = Literal[
     "naming",
     "structure",
@@ -589,7 +605,7 @@ class ChunkReviewLLMResponse(BaseModel):
 
         Computes the same "actionable critical/high issue" predicate
         ``coordinator._reconcile_approval`` derives from its ``issues``
-        parameter (severity in critical/high), narrowed by the two
+        parameter (normalized severity in critical/high), narrowed by the two
         conditions ``chunking._issues_from_chunk_output`` uses to drop an
         issue before it ever reaches that gate: a blank description, or a
         suggestion that is, in its entirety, a no-op admission
@@ -602,7 +618,7 @@ class ChunkReviewLLMResponse(BaseModel):
         critical/high issue, ``False`` requires at least one.
         """
         has_actionable_critical_or_high = any(
-            issue.severity in ("critical", "high")
+            _normalized_severity(issue.severity) in ("critical", "high")
             and issue.description.strip()
             and not is_no_op_suggestion(issue.suggestion)
             for issue in self.issues

@@ -4,8 +4,8 @@ These tests mock ``shared.postgres.get_conn`` with a tiny dict-backed
 fake that approximates Postgres behaviour just enough to exercise the
 store's SQL shape, parameter binding, and control flow. They run
 without a live Postgres; the integration coverage against a real
-``postgres:18`` service container lives in the ``test-shared-postgres``
-CI job that PR 0 added.
+``postgres:16-alpine`` service container lives in the ``test-shared-postgres``
+CI job.
 
 The fake keeps three Python structures that mirror the three
 ``startup_advisor_*`` tables (conversations, messages, artifacts) and

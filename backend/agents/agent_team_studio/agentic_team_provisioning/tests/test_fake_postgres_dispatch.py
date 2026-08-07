@@ -106,6 +106,37 @@ def test_resume_and_resume_temporal_are_mutually_exclusive():
     assert resume(resume_temporal_sql) is False
 
 
+def test_upsert_and_insert_team_agent_are_mutually_exclusive():
+    """Plain INSERT and ON CONFLICT upsert matchers must not both match upsert SQL.
+
+    Preconditions: ``_dispatch()`` exposes ``handle_upsert_team_agent`` and
+        ``handle_insert_team_agent`` matchers.
+    Postconditions: upsert SQL matches only the upsert matcher; plain INSERT
+        SQL matches only the insert matcher.
+    """
+    matchers = _matchers()
+    upsert = matchers["handle_upsert_team_agent"]
+    insert = matchers["handle_insert_team_agent"]
+
+    upsert_sql = (
+        "insert into agentic_team_agents "
+        "(team_id, agent_name, data_json, created_at, updated_at) "
+        "values (%s, %s, %s, %s, %s) "
+        "on conflict (team_id, agent_name) do update set "
+        "data_json = excluded.data_json, updated_at = excluded.updated_at"
+    )
+    insert_sql = (
+        "insert into agentic_team_agents "
+        "(team_id, agent_name, data_json, created_at, updated_at) "
+        "values (%s, %s, %s, %s, %s)"
+    )
+
+    assert upsert(upsert_sql) is True
+    assert insert(upsert_sql) is False
+    assert insert(insert_sql) is True
+    assert upsert(insert_sql) is False
+
+
 # -- rowcount fidelity ----------------------------------------------------------
 
 
