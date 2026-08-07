@@ -18,10 +18,14 @@ from .models import (
     RosterGap,
     RosterValidationResult,
 )
-from .roster_resolve import resolve_persona
+from .roster_resolve import RosterPersonaView, resolve_persona
 
 
-def validate_roster(team: AgenticTeam) -> RosterValidationResult:
+def validate_roster(
+    team: AgenticTeam,
+    *,
+    personas: dict[str, RosterPersonaView] | None = None,
+) -> RosterValidationResult:
     """Run all roster coverage checks and return a structured result."""
     gaps: list[RosterGap] = []
     roster_map: dict[str, AgenticTeamAgent] = {a.agent_name: a for a in team.agents}
@@ -32,7 +36,7 @@ def validate_roster(team: AgenticTeam) -> RosterValidationResult:
 
     if team.processes:
         gaps.extend(_check_unused_agents(roster_map, used_agent_names))
-    gaps.extend(_check_roster_depth(team.agents))
+    gaps.extend(_check_roster_depth(team.agents, personas=personas))
 
     is_fully_staffed = len(gaps) == 0
     summary = _build_summary(team, gaps, is_fully_staffed)
@@ -114,11 +118,19 @@ def _check_unused_agents(
     return gaps
 
 
-def _check_roster_depth(agents: list[AgenticTeamAgent]) -> list[RosterGap]:
+def _check_roster_depth(
+    agents: list[AgenticTeamAgent],
+    *,
+    personas: dict[str, RosterPersonaView] | None = None,
+) -> list[RosterGap]:
     """Flag agents that lack detail — they need at least one of skills/capabilities/tools/expertise."""
     gaps: list[RosterGap] = []
     for a in agents:
-        persona = resolve_persona(a.manifest_id)
+        persona = (
+            personas[a.manifest_id]
+            if personas is not None and a.manifest_id in personas
+            else resolve_persona(a.manifest_id)
+        )
         missing: list[str] = []
         if not persona.skills:
             missing.append("skills")

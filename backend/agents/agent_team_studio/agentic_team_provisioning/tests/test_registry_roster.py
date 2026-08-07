@@ -13,7 +13,11 @@ from fastapi.testclient import TestClient
 
 from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
-from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
+from agent_team_studio.agentic_team_provisioning.models import (
+    AgenticTeamAgent,
+    ProcessDefinition,
+    ProcessStep,
+)
 from agent_team_studio.agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 
 _SOURCE = SourceInfo(entrypoint="pkg.mod:Agent")
@@ -861,3 +865,30 @@ def test_merge_generated_agents_passes_conn_and_propagates_on_merged_failure(
 
     assert len(seen_conn) == 1
     assert seen_conn[0] is not None
+
+
+def test_recommend_agents_scores_resolved_persona(client: TestClient) -> None:
+    """Recommend handler token-overlap uses Manifest-projected skills, not stored fat fields."""
+    team_id = _new_team()
+    add = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"}
+    )
+    assert add.status_code == 201
+
+    process = ProcessDefinition(
+        process_id="p-seo",
+        name="SEO research",
+        description="Find seo keywords for the outline",
+        steps=[ProcessStep(step_id="s1", name="Keyword seo scan", description="")],
+    )
+    AgenticTeamStore().save_process(team_id, process)
+
+    resp = client.post("/processes/p-seo/steps/s1/recommend-agents")
+    assert resp.status_code == 200
+    recs = resp.json()["recommended_agents"]
+    assert len(recs) >= 1
+    top = recs[0]
+    assert top["agent_name"] == "blogging.planner"
+    assert top["role"] == "Plans SEO-aware blog outlines"
+    assert "seo" in top["skills"]
+    assert top["match_score"] >= 1.0

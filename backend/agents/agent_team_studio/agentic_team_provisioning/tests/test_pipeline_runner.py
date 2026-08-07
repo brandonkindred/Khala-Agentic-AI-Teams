@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from agent_registry.models import AgentManifest
+from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 from agent_team_studio.agentic_team_provisioning.models import (
     AgenticTeamAgent,
     ProcessDefinition,
@@ -25,6 +27,37 @@ from agent_team_studio.agentic_team_provisioning.models import (
 )
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
 from shared.concurrency import BackgroundHeartbeat
+
+_TEAM_ID = "t1"
+
+
+class _FakeRegistry:
+    def __init__(self) -> None:
+        self._by_id: dict[str, AgentManifest] = {}
+
+    def get(self, agent_id: str) -> AgentManifest | None:
+        return self._by_id.get(agent_id)
+
+    def register(self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False) -> None:
+        del source_path, require_persist
+        self._by_id[manifest.id] = manifest
+
+
+@pytest.fixture
+def registry(monkeypatch: pytest.MonkeyPatch) -> _FakeRegistry:
+    reg = _FakeRegistry()
+    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    return reg
+
+
+def _worker_agent(registry: _FakeRegistry, *, summary: str = "doer") -> AgenticTeamAgent:
+    manifest = build_agent_manifest(_TEAM_ID, "worker", summary=summary)
+    registry.register(manifest)
+    return AgenticTeamAgent(
+        agent_name="worker",
+        source="generated",
+        manifest_id=manifest.id,
+    )
 
 
 def _now() -> datetime:
@@ -377,7 +410,46 @@ def _action_process() -> ProcessDefinition:
     )
 
 
-def test_action_step_runs_agent_and_completes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_action_step_resolves_persona_from_manifest(
+    monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _capture_build(agent_name, role, skills, capabilities, tools, expertise):
+        captured.update(
+            {
+                "agent_name": agent_name,
+                "role": role,
+                "skills": skills,
+                "capabilities": capabilities,
+                "tools": tools,
+                "expertise": expertise,
+            }
+        )
+        return object()
+
+    monkeypatch.setattr(
+        "agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner.build_agent",
+        _capture_build,
+    )
+    monkeypatch.setattr(
+        "agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner.call_agent",
+        lambda _agent, _inp: "agent output",
+    )
+    store = _FakeStore()
+    store.seed("r1", initial_input="seed")
+    agent = _worker_agent(registry, summary="Does the work")
+    runner = _make_runner(store)
+    runner.start_run("r1", [agent], _action_process())
+
+    assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "completed")
+    assert captured["role"] == "Does the work"
+    assert captured["agent_name"] == "worker"
+
+
+def test_action_step_runs_agent_and_completes(
+    monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry
+) -> None:
     monkeypatch.setattr(
         "agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner.build_agent",
         lambda *a, **k: object(),
@@ -388,7 +460,7 @@ def test_action_step_runs_agent_and_completes(monkeypatch: pytest.MonkeyPatch) -
     )
     store = _FakeStore()
     store.seed("r1", initial_input="seed")
-    agent = AgenticTeamAgent(agent_name="worker", role="doer")
+    agent = _worker_agent(registry)
     runner = _make_runner(store)
     runner.start_run("r1", [agent], _action_process())
 
@@ -442,7 +514,7 @@ def test_cancellation_before_step_stops_run() -> None:
     assert store.get_pipeline_run("r1")["status"] == "cancelled"
 
 
-def test_run_failure_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_failure_marks_failed(monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry) -> None:
     def _boom(*_a, **_k):
         raise RuntimeError("kaboom")
 
@@ -451,7 +523,7 @@ def test_run_failure_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     store = _FakeStore()
     store.seed("r1")
-    agent = AgenticTeamAgent(agent_name="worker", role="doer")
+    agent = _worker_agent(registry)
     runner = _make_runner(store)
     runner.start_run("r1", [agent], _action_process())
 
@@ -459,7 +531,9 @@ def test_run_failure_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert store.get_pipeline_run("r1")["error"] == "kaboom"
 
 
-def test_long_step_is_not_false_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_long_step_is_not_false_reaped(
+    monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry
+) -> None:
     """A slow synchronous step keeps heartbeating (background thread), so a concurrent
     reap with a short staleness window must NOT fail the live run."""
     monkeypatch.setattr(
@@ -478,7 +552,7 @@ def test_long_step_is_not_false_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
     # Mirror create_pipeline_run, which seeds heartbeat_at so a brand-new run is never
     # reaped in the window before the background heartbeat thread's first tick.
     store.seed("r1", heartbeat_at=_now())
-    agent = AgenticTeamAgent(agent_name="worker", role="doer")
+    agent = _worker_agent(registry)
     runner = _make_runner(store)
     # Staleness far shorter than the step; heartbeat interval far shorter than staleness.
     runner._stale_s = 0.1
@@ -494,7 +568,9 @@ def test_long_step_is_not_false_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "completed")
 
 
-def test_out_of_band_termination_is_not_resurrected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_out_of_band_termination_is_not_resurrected(
+    monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry
+) -> None:
     """If a run is terminated (e.g. reaped) mid-step, the executor must not clobber it
     back to completed via the final write."""
     monkeypatch.setattr(
@@ -515,7 +591,7 @@ def test_out_of_band_termination_is_not_resurrected(monkeypatch: pytest.MonkeyPa
         "agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner.call_agent",
         _reap_midstep,
     )
-    agent = AgenticTeamAgent(agent_name="worker", role="doer")
+    agent = _worker_agent(registry)
     runner = _make_runner(store)
     runner.start_run("r1", [agent], _action_process())
 

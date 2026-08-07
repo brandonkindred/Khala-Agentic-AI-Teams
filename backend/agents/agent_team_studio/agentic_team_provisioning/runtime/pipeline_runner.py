@@ -34,6 +34,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     ProcessStep,
     StepType,
 )
+from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_persona
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
     build_agent,
     call_agent,
@@ -276,13 +277,14 @@ class PipelineRunner:
         see ``system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md``. Do not add a
         registry-execution branch here without first resolving that spike.
         """
+        persona = resolve_persona(agent_def.manifest_id)
         agent_instance = build_agent(
             agent_def.agent_name,
-            agent_def.role,
-            agent_def.skills,
-            agent_def.capabilities,
-            agent_def.tools,
-            agent_def.expertise,
+            persona.role,
+            persona.skills,
+            persona.capabilities,
+            persona.tools,
+            persona.expertise,
         )
         return call_agent(agent_instance, prompt)
 

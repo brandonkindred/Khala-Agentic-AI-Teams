@@ -31,7 +31,6 @@ from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     manifest_agent_id,
     register_team_manifests,
 )
-from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_persona
 from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_GENERATED,
     SOURCE_REGISTRY,
@@ -40,7 +39,6 @@ from agent_team_studio.agentic_team_provisioning.models import (
     AgenticTeam,
     AgenticTeamAgent,
     AgentQualityScore,
-    EnrichedRosterAgent,
     AssetInfo,
     ConversationStateResponse,
     ConversationSummaryResponse,
@@ -49,6 +47,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     CreateTeamRequest,
     CreateTeamResponse,
     CreateTestChatSessionRequest,
+    EnrichedRosterAgent,
     FormRecord,
     GeneratedManifestsResponse,
     ProcessDefinition,
@@ -80,6 +79,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     UpdateFormRecordRequest,
 )
 from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
+from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_persona
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
     build_agent as _build_test_agent,
 )
@@ -820,9 +820,12 @@ def recommend_agents_for_step(process_id: str, step_id: str):
                 t.lower() for t in f"{step.name} {step.description}".split() if len(t) > 2
             }
             for agent in team.agents:
+                persona = resolve_persona(agent.manifest_id)
                 agent_tokens = {
                     t.lower()
-                    for t in (agent.skills + agent.capabilities + agent.tools + agent.expertise)
+                    for t in (
+                        persona.skills + persona.capabilities + persona.tools + persona.expertise
+                    )
                 }
                 overlap = len(search_tokens & agent_tokens)
                 if overlap > 0:
@@ -830,9 +833,9 @@ def recommend_agents_for_step(process_id: str, step_id: str):
                         RecommendedAgent(
                             agent_name=agent.agent_name,
                             source="roster",
-                            role=agent.role,
-                            skills=agent.skills,
-                            tools=agent.tools,
+                            role=persona.role,
+                            skills=persona.skills,
+                            tools=persona.tools,
                             match_score=float(overlap),
                         )
                     )
@@ -1382,8 +1385,9 @@ def get_test_chat_session(team_id: str, session_id: str):
     if not messages:
         try:
             agent_def = _find_agent_in_roster(team_id, session.agent_name)
+            persona = resolve_persona(agent_def.manifest_id)
             prompts = generate_starter_prompts(
-                agent_def.agent_name, agent_def.role, agent_def.skills, agent_def.expertise
+                agent_def.agent_name, persona.role, persona.skills, persona.expertise
             )
         except HTTPException as exc:
             # Only the genuine "agent not on roster" case falls back to an empty
@@ -1464,13 +1468,14 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     # rules + memory digest are rendered on the gated sandbox invoke path, where
     # the shim opens the channel.
     try:
+        persona = resolve_persona(agent_def.manifest_id)
         agent_instance = _build_test_agent(
             agent_def.agent_name,
-            agent_def.role,
-            agent_def.skills,
-            agent_def.capabilities,
-            agent_def.tools,
-            agent_def.expertise,
+            persona.role,
+            persona.skills,
+            persona.capabilities,
+            persona.tools,
+            persona.expertise,
         )
         response_text = _call_test_agent(agent_instance, full_context)
     except Exception as exc:
