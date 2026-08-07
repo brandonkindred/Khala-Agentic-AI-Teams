@@ -1165,16 +1165,14 @@ def _decide_review_mode(
     pr: Any,
     files: List[Any],
 ) -> Optional[ReviewModeDecision]:
-    """Decide, PER FILE, whether each reviewable file is reviewed whole or via diff hunks.
+    """Decide, PER FILE, whether each reviewable file is reviewed via change
+    surface, whole-file fallback, or diff hunks.
 
-    Whole-file vs. hunk review is decided PER FILE, not per PR: every
-    reviewable file whose head content fetches successfully is reviewed
-    whole; only the files whose fetch fails fall back to hunk rendering (see
-    :func:`_run_reviewer`), so one file's failed fetch never discards another
-    file's successfully-fetched whole-file body. The hunk ``code`` blob is
-    built only for the files that actually need it, never unconditionally, so
-    a PR whose whole-file fetch fully succeeds pays nothing for hunk
-    rendering.
+    Surface is preferred when the head-backed builder covers a path; decision
+    ``head_files`` holds whole-file fallback inputs only for fetched paths the
+    surface did not cover. HTTP fetch still runs for all reviewable files (for
+    surface expansion). Hunk ``code`` is built only for paths in
+    ``reviewable - surface_paths - set(head_files)``.
 
     Also runs the review's two "nothing to review" gates itself and completes
     the job as a no-op (via :func:`_complete_review_noop`) when they fire, so
@@ -1186,22 +1184,19 @@ def _decide_review_mode(
           :func:`_fetch_pr_metadata` (may be empty).
     Postconditions:
         - Returns ``None`` when ``files`` is empty, when no file passes
-          :func:`_is_whole_file_reviewable`, or when the total-hunk-fallback
-          branch renders empty ``code`` — in every case
+          :func:`_is_whole_file_reviewable`, or when surface, whole-file
+          fallback, and hunk fallback all yield nothing — in every case
           :func:`_complete_review_noop` has already posted the courtesy
           comment and finalized the job ``COMPLETED``; the caller must return
           immediately without further GitHub calls.
-        - Otherwise returns a :class:`ReviewModeDecision` where: ``head_files``
-          is fetched via :func:`_fetch_head_files` for the reviewable files;
-          when every reviewable file fetched whole, ``code == ""`` and
-          ``files_reviewed == len(head_files)``; when only some fetched,
-          ``code`` is built (via :func:`_build_review_code`) ONLY from the
-          files that failed to fetch, and ``files_reviewed`` sums both; when
-          none fetched, ``code`` is built from all ``files`` and
-          ``files_reviewed`` is the hunk count. ``change_surface`` is the
-          head-backed builder result (empty when no head-backed reviewable
-          files). ``repo_reader`` is always constructed for ``pr.head_sha``,
-          whole-file success or not.
+        - Otherwise returns a :class:`ReviewModeDecision` where:
+          ``head_files`` ⊆ fetched paths and
+          ``set(head_files) ∩ set(change_surface.blocks) = ∅``; hunk ``code``
+          covers only ``reviewable - surface_paths - set(head_files)``;
+          ``files_reviewed`` counts each covered path once
+          (``len(surface_paths) + len(head_files) + hunk_reviewed``).
+          ``change_surface`` is the head-backed builder result.
+          ``repo_reader`` is always constructed for ``pr.head_sha``.
         - Never raises for GitHub-fetch failures (:func:`_fetch_head_files`
           degrades internally); any other exception propagates to the
           caller's outer handler.
@@ -1248,69 +1243,60 @@ def _decide_review_mode(
     # route to a proposal, not a PR comment.
     changed_by_path = {f.filename: parse_valid_lines(f.patch, added_only=True) for f in files}
 
-    # Prefer whole-file review over diff hunks: complete files remove
-    # the hunk-boundary "truncation" false positive, and the repo
-    # reader lets the false-positive filter confirm existing
-    # (unchanged) repo files a finding claims are missing. A file
-    # whose whole-file fetch fails falls back to ITS OWN hunk
-    # rendering rather than reverting the whole PR to hunk mode — a
-    # partial fetch failure must not discard the whole-file bodies
-    # that DID come back.
-    head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
-    missing = reviewable - set(head_files)
+    # Prefer change surface, then whole-file fallback, then diff hunks per
+    # file. Fetch head content for every reviewable file (surface expansion
+    # needs it); partition fetched paths out of whole-file inputs when the
+    # surface already covers them.
+    fetched = _fetch_head_files(client, owner, repo, files, pr.head_sha)
+    change_surface = _build_change_surface_for_reviewable(files, fetched)
+    surface_paths = set(change_surface.blocks)
+
+    # Whole-file reviewer inputs: fetched paths the surface did not cover.
+    head_files = {
+        path: text for path, text in fetched.items() if path not in surface_paths
+    }
+
+    uncovered = reviewable - surface_paths - set(head_files)
     code = ""
-    if head_files and not missing:
-        # Every reviewable file fetched whole: the hunk blob would be
-        # thrown away unread, so skip rendering it entirely.
-        files_reviewed = len(head_files)
-    elif head_files:
-        # Partial fetch: hunk-render ONLY the files that failed to
-        # fetch whole; files that DID fetch stay in whole-file mode.
-        fallback_files = [f for f in files if f.filename in missing]
+    hunk_reviewed = 0
+    if uncovered:
+        fallback_files = [f for f in files if f.filename in uncovered]
         code, hunk_reviewed = _build_review_code(fallback_files)
-        files_reviewed = len(head_files) + hunk_reviewed
-        logger.info(
-            "PR review #%s: fetched %d/%d whole files; the remaining "
-            "%d file(s) fall back to hunk review",
+
+    files_reviewed = len(surface_paths | set(head_files)) + hunk_reviewed
+
+    if not surface_paths and not head_files and not code:
+        # Total failure with blank hunks (deletion-only, etc.)
+        _complete_review_noop(
+            client,
+            job_id,
+            owner,
+            repo,
             pr_number,
+            pr,
+            comment="Code review: no reviewable file content.",
+            status_text="No reviewable file content",
+        )
+        return None
+
+    if uncovered:
+        logger.info(
+            "PR review #%s: surface=%d whole-file-fallback=%d hunk-fallback=%d "
+            "(reviewable=%d)",
+            pr_number,
+            len(surface_paths),
             len(head_files),
+            len(uncovered),
             len(reviewable),
-            len(missing),
         )
-    else:
-        # Total fetch failure: unchanged from before this change —
-        # render every changed file's hunks (not just `reviewable`,
-        # since _build_review_code applies its own equivalent filter
-        # internally).
-        code, files_reviewed = _build_review_code(files)
-        if not code:
-            # Belt-and-suspenders: `reviewable` is non-empty (the gate
-            # above passed) but every reviewable file's diff hunk
-            # happened to render blank (e.g. a hunk that only removes
-            # lines, adding no +/context line for
-            # render_annotated_hunks to emit). _build_review_code
-            # filters on the same non-removed+has-patch predicate as
-            # _is_whole_file_reviewable, so this is the only place
-            # `code` can still end up empty once `reviewable` passed.
-            _complete_review_noop(
-                client,
-                job_id,
-                owner,
-                repo,
-                pr_number,
-                pr,
-                comment="Code review: no reviewable file content.",
-                status_text="No reviewable file content",
-            )
-            return None
+    elif surface_paths and not head_files and not uncovered:
         logger.info(
-            "PR review #%s: whole-file fetch failed for all %d "
-            "reviewable file(s); falling back to hunk review",
+            "PR review #%s: reviewing %d file(s) via change surface only",
             pr_number,
-            len(reviewable),
+            len(surface_paths),
         )
+
     repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
-    change_surface = _build_change_surface_for_reviewable(files, head_files)
     return ReviewModeDecision(
         valid_by_path=valid_by_path,
         changed_by_path=changed_by_path,
