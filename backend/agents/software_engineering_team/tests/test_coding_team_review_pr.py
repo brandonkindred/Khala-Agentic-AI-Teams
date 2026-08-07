@@ -3278,11 +3278,12 @@ class TestWholeFileReview:
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Whole-file mode: files mapping passed, pre_numbered off, reader supplied.
-        assert captured["files"] == {"a.py": "def a():\n    return 1\n"}
-        assert captured["pre_numbered"] is False
+        # Surface-first: head-backed change surface is the primary pre-numbered
+        # code input; whole-file files= is skipped when the surface is nonempty.
+        assert "files" not in captured
+        assert captured["pre_numbered"] is True
+        assert "### a.py ###" in captured["code"]
         assert isinstance(captured["repo_reader"], GitHubRepoReader)
-        assert "code" not in captured or not captured.get("code")
 
     def test_endpoint_falls_back_to_hunks_when_no_head_files(self, review_app, monkeypatch) -> None:
         gh = review_app["github"]["client"]
@@ -3331,15 +3332,13 @@ class TestWholeFileReview:
         monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
+        # Surface-first primary attempt uses the hunk-framed focus note
+        # (_hunk_review_focus), not the whole-file files= note.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
         assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
-        # Whole-file-specific wording, and NOT the hunk-mode wording -- so a
-        # regression collapsing _whole_file_focus into _hunk_review_focus (or
-        # vice versa) can't hide behind the shared prefix check above.
-        assert "complete file contents" in captured["task_requirements"]
-        assert "diff hunks" not in captured["task_requirements"]
+        assert "diff hunks" in captured["task_requirements"]
+        assert "complete file contents" not in captured["task_requirements"]
 
     def test_partial_head_fetch_reviews_fetched_subset_whole_and_missing_subset_via_hunks(
         self, review_app, monkeypatch
@@ -3363,34 +3362,29 @@ class TestWholeFileReview:
         monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Only 1 of 2 reviewable files fetched whole -> a.py must NOT silently
-        # revert to hunk mode, and b.py must NOT be silently dropped: two
-        # calls, one whole-file (a.py only), one hunk (b.py only).
+        # Partial head fetch: surface-primary for fetched a.py + hunk code for
+        # missing b.py. Both attempts are pre-numbered code= (no files=).
         assert len(calls) == 2
-        whole_call = next(c for c in calls if c.get("files"))
-        hunk_call = next(c for c in calls if c.get("code"))
-        assert whole_call["files"] == {"a.py": "whole a\n"}
-        assert whole_call["pre_numbered"] is False
+        assert all("files" not in c for c in calls)
+        assert all(c["pre_numbered"] is True for c in calls)
+        surface_call = next(c for c in calls if "### a.py ###" in c.get("code", ""))
+        hunk_call = next(c for c in calls if "### b.py ###" in c.get("code", ""))
+        assert "### b.py ###" not in surface_call["code"]
+        assert "### a.py ###" not in hunk_call["code"]
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
         )
 
-        assert REVIEW_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
-        assert not hunk_call.get("files")
-        assert hunk_call["pre_numbered"] is True
-        assert "b.py" in hunk_call["code"]
-        assert "a.py" not in hunk_call["code"]
-        # Hunk call must also carry the focus note, and with hunk-specific
-        # wording -- not just the prefix shared with the whole-file note,
-        # which alone wouldn't catch a hunk/whole-file mode mixup.
+        assert REVIEW_FOCUS_NOTE_PREFIX in surface_call["task_requirements"]
+        assert "diff hunks" in surface_call["task_requirements"]
         assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
         assert "pre_existing" in hunk_call["task_requirements"]
         assert "diff hunks" in hunk_call["task_requirements"]
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["files_reviewed"] == 2  # 1 whole + 1 hunk
+        assert job["review_summary"]["files_reviewed"] == 2  # 1 surface + 1 hunk
 
     def test_partial_head_fetch_posts_findings_from_both_whole_file_and_hunk_subsets(
         self, review_app, monkeypatch
@@ -3405,7 +3399,8 @@ class TestWholeFileReview:
 
         class _SplitProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                if kw.get("files"):
+                code = kw.get("code") or ""
+                if "### a.py ###" in code:
                     return _FakeOutput(
                         issues=[
                             _FakeReviewIssue(

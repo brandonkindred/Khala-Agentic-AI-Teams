@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
