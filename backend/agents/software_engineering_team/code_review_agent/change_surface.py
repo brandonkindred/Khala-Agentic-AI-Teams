@@ -11,7 +11,8 @@ This module locks types, signatures, and empty/no-op builder contracts.
 otherwise a heuristic start or capped context window. ``extract_touched_lines``
 wraps GitHub unified-patch helpers for added-only touched lines.
 ``render_patch_hunks`` wraps annotated hunk rendering for the same patch text.
-Surface assembly is owned by follow-on work.
+Surface assembly from unified patches is implemented; the old/new pairs
+path remains follow-on work.
 
 Pure helpers: no I/O, no LLM clients, no package-level side effects.
 """
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Collection, Mapping, Optional, Sequence
 
@@ -247,6 +249,34 @@ def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
     return "\n".join(chunks)
 
 
+def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
+    """Build one path's pre-numbered body, or ``None`` to omit the path.
+
+    Preconditions:
+        - ``path`` is the review path key (may be empty string).
+        - ``patch`` is one file's unified-diff text.
+        - ``content`` is the full new-file text for expansion (caller must not
+          pass blank content; blank is treated as omit).
+
+    Postconditions:
+        - Blank ``content`` → ``None``.
+        - Empty ``extract_touched_lines(patch)`` → ``None``.
+        - Otherwise expands, merges, and pre-numbers; empty body → ``None``.
+        - Never raises.
+    """
+    if not (content or "").strip():
+        return None
+    touched = extract_touched_lines(patch)
+    if not touched:
+        return None
+    ranges = expand_touched_ranges(content, touched, path=path)
+    merged = _merge_line_ranges(ranges)
+    body = _pre_number_ranges(content, merged)
+    if not body.strip():
+        return None
+    return body
+
+
 def build_change_surface_from_patches(
     patches: Mapping[str, str],
     *,
@@ -258,26 +288,32 @@ def build_change_surface_from_patches(
         - ``patches`` maps path → one file's unified-diff text (GitHub
           ``files[].patch`` style). May be empty.
         - ``new_contents``, when provided, maps path → full new-file content
-          needed later for enclosing-construct expansion. Omitted/`None` is
-          allowed; assembly that needs expansion will require it in follow-on
-          work.
+          used for enclosing-construct expansion. Omitted/`None` means no
+          content for any path (all non-blank patches are omitted).
 
     Postconditions:
         - ``patches == {}`` or every patch value is blank → empty
           ``ChangeSurface`` (``code == ""``, ``blocks == {}``).
-        - Otherwise raises ``NotImplementedError`` until patch assembly
-          (#5390) is implemented. Future non-stub behavior: emit pre-numbered
-          ``### path ###`` blocks with enclosing-construct expansion; identical
-          / empty renders omit that path.
-        - ``new_contents`` is reserved for expansion and does not affect the
-          empty/no-op decision in this stub.
+        - For each path with a non-blank patch, in iteration order: omit when
+          ``new_contents`` is missing/blank for that path, when there are no
+          added touched lines, or when the assembled body is empty; otherwise
+          include a pre-numbered expanded body.
+        - ``ChangeSurface.code`` equals ``format_change_surface_code(blocks)``.
+        - Never raises for well-typed string mappings.
     """
     if not _mapping_has_nonblank_value(patches):
         return _empty_surface()
-    raise NotImplementedError(
-        "build_change_surface_from_patches assembly is not implemented yet "
-        "(change-surface patch path)"
-    )
+    contents = new_contents or {}
+    blocks: OrderedDict[str, str] = OrderedDict()
+    for path, patch in patches.items():
+        if not (patch or "").strip():
+            continue
+        body = _assemble_path_block(path, patch, contents.get(path, ""))
+        if body is not None:
+            blocks[path] = body
+    if not blocks:
+        return _empty_surface()
+    return ChangeSurface(blocks=blocks)
 
 
 def build_change_surface_from_pairs(

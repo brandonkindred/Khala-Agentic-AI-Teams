@@ -8,7 +8,12 @@ from software_engineering_team.code_review_agent.change_surface import (
     LineRange,
     _merge_line_ranges,
     _pre_number_ranges,
+    build_change_surface_from_patches,
 )
+
+_PY_CONTENT = "def outer():\n    return 1\n\nx = 1\n"
+# Touch the body line of ``outer`` (new-file line 2).
+_PY_PATCH = "@@ -1,2 +1,2 @@\n def outer():\n-    return 0\n+    return 1\n"
 
 
 def test_merge_line_ranges_overlaps_and_adjacent() -> None:
@@ -36,3 +41,58 @@ def test_pre_number_ranges_inserts_gap_marker() -> None:
     content = "a\nb\nc\nd\ne\n"
     body = _pre_number_ranges(content, (LineRange(1, 1), LineRange(4, 5)))
     assert body == "1: a\n...\n4: d\n5: e"
+
+
+def test_build_from_patches_single_file_expands_construct() -> None:
+    surface = build_change_surface_from_patches(
+        {"mod.py": _PY_PATCH},
+        new_contents={"mod.py": _PY_CONTENT},
+    )
+    assert not surface.is_empty
+    assert list(surface.blocks.keys()) == ["mod.py"]
+    # AST expansion of line 2 → enclosing ``outer`` (lines 1-2).
+    assert surface.blocks["mod.py"] == "1: def outer():\n2:     return 1"
+    assert surface.code == "### mod.py ###\n1: def outer():\n2:     return 1"
+
+
+def test_build_from_patches_multi_file() -> None:
+    ts_content = "function f() {\n  return 1;\n}\n"
+    ts_patch = "@@ -1,3 +1,3 @@\n function f() {\n-  return 0;\n+  return 1;\n }\n"
+    surface = build_change_surface_from_patches(
+        OrderedDict(
+            [
+                ("mod.py", _PY_PATCH),
+                ("f.ts", ts_patch),
+            ]
+        ),
+        new_contents={"mod.py": _PY_CONTENT, "f.ts": ts_content},
+    )
+    assert list(surface.blocks.keys()) == ["mod.py", "f.ts"]
+    assert "### mod.py ###" in surface.code
+    assert "### f.ts ###" in surface.code
+
+
+def test_build_from_patches_omits_without_new_contents() -> None:
+    surface = build_change_surface_from_patches(
+        {"mod.py": _PY_PATCH},
+        new_contents=None,
+    )
+    assert surface.is_empty
+
+
+def test_build_from_patches_omits_path_missing_content_keeps_other() -> None:
+    surface = build_change_surface_from_patches(
+        OrderedDict([("skip.py", _PY_PATCH), ("mod.py", _PY_PATCH)]),
+        new_contents={"mod.py": _PY_CONTENT},
+    )
+    assert list(surface.blocks.keys()) == ["mod.py"]
+
+
+def test_build_from_patches_omits_when_no_added_lines() -> None:
+    # Context-only hunk: no '+' lines → empty touched set → omit.
+    patch = "@@ -1,2 +1,2 @@\n def outer():\n     return 1\n"
+    surface = build_change_surface_from_patches(
+        {"mod.py": patch},
+        new_contents={"mod.py": _PY_CONTENT},
+    )
+    assert surface.is_empty
