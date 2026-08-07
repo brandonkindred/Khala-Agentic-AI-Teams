@@ -172,6 +172,48 @@ def test_register_team_manifests_uses_existing_registry_summary(monkeypatch: pyt
     assert result.manifests[0].summary == "kept summary"
 
 
+def test_register_team_manifests_preserves_existing_skill_tags(monkeypatch: pytest.MonkeyPatch):
+    """Omitting skill_tags (startup path) must not wipe previously stamped skill tags."""
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    team_id = "team-1"
+    prior = build_agent_manifest(
+        team_id, "A", summary="kept summary", skill_tags=["seo", "copy"]
+    )
+    reg.register(prior)
+
+    result = register_team_manifests(team_id, [_thin(team_id, "A")])
+
+    assert result.manifests[0].summary == "kept summary"
+    assert "seo" in result.manifests[0].tags
+    assert "copy" in result.manifests[0].tags
+    assert reg.get(result.manifests[0].id).tags == result.manifests[0].tags
+
+
+def test_register_team_manifests_explicit_skill_tags_replace(monkeypatch: pytest.MonkeyPatch):
+    """When skill_tags is provided for an agent, those values replace prior skill tags."""
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    team_id = "team-1"
+    prior = build_agent_manifest(team_id, "A", summary="s", skill_tags=["old-skill"])
+    reg.register(prior)
+
+    result = register_team_manifests(
+        team_id, [_thin(team_id, "A")], skill_tags={"A": ["new-skill"]}
+    )
+
+    assert "new-skill" in result.manifests[0].tags
+    assert "old-skill" not in result.manifests[0].tags
+
+
 def test_register_team_manifests_replaces_stale_roster(monkeypatch: pytest.MonkeyPatch):
     import agent_registry
     from agent_registry.loader import AgentRegistry

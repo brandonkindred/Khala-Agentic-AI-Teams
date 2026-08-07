@@ -6,7 +6,10 @@ import pytest
 from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 from pydantic import ValidationError
 
-from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+    build_agent_manifest,
+    manifest_agent_id,
+)
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
 from agent_team_studio.agentic_team_provisioning.roster_resolve import (
     coerce_roster_agent,
@@ -147,7 +150,46 @@ def test_migrate_generated_stamps_manifest_id_and_strips_fat(monkeypatch: pytest
     assert agent.agent_name == "Writer"
     assert agent.source == "generated"
     assert agent.manifest_id == expected_id
-    assert reg.get(expected_id) is not None
+    stamped = reg.get(expected_id)
+    assert stamped is not None
+    assert "seo" in stamped.tags
+    assert stamped.summary == "Writes docs"
+
+
+def test_migrate_with_manifest_id_merges_fat_skills(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fat skills alongside an already-stamped manifest_id must fold into Manifest tags."""
+    team_id = "team-1"
+    mid = manifest_agent_id(team_id, "Writer")
+    prior = build_agent_manifest(team_id, "Writer", summary="old", skill_tags=["prior"])
+    raw = {
+        "agent_name": "Writer",
+        "role": "Writes docs",
+        "skills": ["seo"],
+        "source": "generated",
+        "manifest_id": mid,
+    }
+
+    class _Reg:
+        def __init__(self) -> None:
+            self._m = {mid: prior}
+
+        def get(self, agent_id: str):
+            return self._m.get(agent_id)
+
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            self._m[manifest.id] = manifest
+
+    reg = _Reg()
+    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+
+    agent, changed = migrate_roster_row(team_id, raw)
+    assert changed is True
+    assert agent.manifest_id == mid
+    updated = reg.get(mid)
+    assert updated is not None
+    assert "prior" in updated.tags
+    assert "seo" in updated.tags
+    assert updated.summary == "Writes docs"
 
 
 def test_migrate_registry_without_manifest_id_raises() -> None:
@@ -170,7 +212,9 @@ def test_migrate_already_thin_unchanged() -> None:
 
 
 def test_migrate_with_manifest_id_and_fat_keys_changed(monkeypatch: pytest.MonkeyPatch) -> None:
-    manifest_id = "agentic_team_provisioning.abc.writer-1"
+    team_id = "team-1"
+    manifest_id = manifest_agent_id(team_id, "Writer")
+    prior = build_agent_manifest(team_id, "Writer", summary="old")
     raw = {
         "agent_name": "Writer",
         "source": "generated",
@@ -180,13 +224,22 @@ def test_migrate_with_manifest_id_and_fat_keys_changed(monkeypatch: pytest.Monke
     }
 
     class _Reg:
+        def __init__(self) -> None:
+            self._m = {manifest_id: prior}
+
         def get(self, agent_id: str):
-            return object() if agent_id == manifest_id else None
+            return self._m.get(agent_id)
 
-    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            self._m[manifest.id] = manifest
 
-    agent, changed = migrate_roster_row("team-1", raw)
+    reg = _Reg()
+    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+
+    agent, changed = migrate_roster_row(team_id, raw)
     assert changed is True
     assert agent.agent_name == "Writer"
     assert agent.source == "generated"
     assert agent.manifest_id == manifest_id
+    assert "seo" in reg.get(manifest_id).tags
+    assert reg.get(manifest_id).summary == "Writes docs"

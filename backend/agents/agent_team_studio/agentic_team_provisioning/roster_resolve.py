@@ -8,6 +8,7 @@ from agent_registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     manifest_agent_id,
+    skill_tags_from_manifest,
 )
 from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_GENERATED,
@@ -89,6 +90,68 @@ def _thin_agent(*, agent_name: str, source: str, manifest_id: str) -> AgenticTea
     )
 
 
+def _skill_tags_from_fat_raw(raw: dict) -> list[str]:
+    """Extract deduped non-blank skill strings from a legacy fat roster dict."""
+    skills = raw.get("skills") or []
+    if not isinstance(skills, list):
+        return []
+    tags: list[str] = []
+    for skill in skills:
+        cleaned = str(skill).strip()
+        if cleaned and cleaned not in tags:
+            tags.append(cleaned)
+    return tags
+
+
+def _ensure_generated_manifest_from_fat(
+    team_id: str,
+    agent_name: str,
+    manifest_id: str,
+    raw: dict,
+    registry,
+) -> None:
+    """Register or update a generated Manifest from legacy fat persona fields.
+
+    Preconditions:
+        * ``team_id`` / ``agent_name`` / ``manifest_id`` are non-empty.
+        * ``registry`` supports ``get`` / ``register``.
+    Postconditions:
+        * Ensures a Manifest at ``manifest_id``. Fat ``role`` → summary;
+          fat ``skills`` → skill tags (merged with any existing non-marker tags).
+        * Does not clear existing skill tags when fat ``skills`` is empty/absent.
+    """
+    fat_skills = _skill_tags_from_fat_raw(raw)
+    role = raw.get("role")
+    role_summary = str(role).strip() if role is not None and str(role).strip() else None
+    existing = registry.get(manifest_id)
+    if existing is None:
+        registry.register(
+            build_agent_manifest(
+                team_id,
+                agent_name,
+                summary=role_summary,
+                skill_tags=fat_skills or None,
+            )
+        )
+        return
+
+    merged_skills = skill_tags_from_manifest(existing)
+    for tag in fat_skills:
+        if tag not in merged_skills:
+            merged_skills.append(tag)
+    summary = role_summary if role_summary is not None else existing.summary
+    if merged_skills == skill_tags_from_manifest(existing) and summary == existing.summary:
+        return
+    registry.register(
+        build_agent_manifest(
+            team_id,
+            agent_name,
+            summary=summary,
+            skill_tags=merged_skills,
+        )
+    )
+
+
 def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]:
     """Eagerly migrate one legacy fat roster row to a thin ref + stamped ``manifest_id``.
 
@@ -103,8 +166,9 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
           stamped ``manifest_id``, or fat keys still present in ``raw``.
         * ``changed`` is ``False`` when ``raw`` is already thin-only with
           ``manifest_id`` set.
-        * For ``source == "generated"`` without ``manifest_id``, registers a
-          manifest when the registry lacks the stable id.
+        * For ``source == "generated"``, ensures a Manifest exists and copies
+          legacy fat ``role`` / ``skills`` onto summary / tags when present
+          (merging skill tags with any already on the Manifest).
     Raises:
         * ``ValueError`` when ``source == "registry"`` and ``manifest_id`` is missing.
     """
@@ -122,20 +186,22 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
         raise ValueError("registry roster row requires manifest_id")
 
     if has_manifest_id:
+        mid = str(manifest_id)
+        # Generated rows may still carry denormalized fat skills alongside a stamped
+        # id — fold them into the Manifest before stripping the roster JSON.
+        if source == SOURCE_GENERATED and _raw_has_fat_keys(raw):
+            from agent_registry import get_registry
+
+            _ensure_generated_manifest_from_fat(team_id, agent_name, mid, raw, get_registry())
         return (
-            _thin_agent(agent_name=agent_name, source=source, manifest_id=str(manifest_id)),
+            _thin_agent(agent_name=agent_name, source=source, manifest_id=mid),
             _raw_has_fat_keys(raw),
         )
 
     mid = manifest_agent_id(team_id, agent_name)
     from agent_registry import get_registry
 
-    registry = get_registry()
-    if registry.get(mid) is None:
-        summary = raw.get("role") or None
-        manifest = build_agent_manifest(team_id, agent_name, summary=summary)
-        registry.register(manifest)
-
+    _ensure_generated_manifest_from_fat(team_id, agent_name, mid, raw, get_registry())
     return _thin_agent(agent_name=agent_name, source=source, manifest_id=mid), True
 
 

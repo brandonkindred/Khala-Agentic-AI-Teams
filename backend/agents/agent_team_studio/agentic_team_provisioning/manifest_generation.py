@@ -180,6 +180,16 @@ def build_agent_manifest(
     return AgentManifest.model_validate(manifest.model_dump(mode="json"))
 
 
+def skill_tags_from_manifest(manifest: AgentManifest) -> list[str]:
+    """Return non-marker tags from a Manifest (persona skill tags).
+
+    Preconditions: ``manifest`` is a validated :class:`AgentManifest`.
+    Postconditions: returns tags excluding the ``"generated"`` and team-key markers
+        stamped by :func:`build_agent_manifest`, order preserved.
+    """
+    return [t for t in (manifest.tags or []) if t not in ("generated", _TEAM_KEY)]
+
+
 def is_generated_manifest(manifest: AgentManifest) -> bool:
     """Whether ``manifest`` is a roster-generated agent (vs. a hand-authored /
     catalog registry agent).
@@ -261,8 +271,11 @@ def register_team_manifests(
           omit another worker's stale ids. Per-agent ``summary`` is taken from
           ``summaries[agent_name]`` when provided, else the existing registry
           manifest's summary when present, else the default from
-          :func:`build_agent_manifest`. Optional ``skill_tags[agent_name]`` are
-          merged into Manifest ``tags`` (after the generated/team markers).
+          :func:`build_agent_manifest`. When ``skill_tags`` includes
+          ``agent_name``, those values replace prior skill tags; when the agent
+          is absent from ``skill_tags`` (including startup / omitted map),
+          non-marker tags on the existing Manifest are preserved — same fallback
+          pattern as ``summaries``.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -280,20 +293,27 @@ def register_team_manifests(
 
     registry = get_registry()
     summary_map = summaries or {}
-    skill_tags_map = skill_tags or {}
+    # ``None`` means "caller omitted skill_tags" — treat like an empty map so per-agent
+    # absence falls back to the existing Manifest (startup retroactive register).
+    skill_tags_map = skill_tags if skill_tags is not None else {}
     manifests: list[AgentManifest] = []
     for a in agents:
+        existing = registry.get(a.manifest_id) if a.manifest_id else None
         summary = summary_map.get(a.agent_name)
-        if summary is None:
-            existing = registry.get(a.manifest_id) if a.manifest_id else None
-            if existing is not None:
-                summary = existing.summary
+        if summary is None and existing is not None:
+            summary = existing.summary
+        if a.agent_name in skill_tags_map:
+            agent_skill_tags: list[str] | None = skill_tags_map[a.agent_name]
+        elif existing is not None:
+            agent_skill_tags = skill_tags_from_manifest(existing)
+        else:
+            agent_skill_tags = None
         manifests.append(
             build_agent_manifest(
                 team_id,
                 a.agent_name,
                 summary=summary,
-                skill_tags=skill_tags_map.get(a.agent_name),
+                skill_tags=agent_skill_tags,
             )
         )
     new_ids = {m.id for m in manifests}
