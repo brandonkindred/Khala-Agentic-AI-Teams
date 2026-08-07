@@ -6,8 +6,8 @@ nothing is configured it targets the application's own deployed Temporal
 container (``temporal:7233`` — the address the docker stack already wires into
 every service), and an operator overrides that by pointing ``TEMPORAL_ADDRESS``
 at a different Temporal server. Setting ``TEMPORAL_ADDRESS`` to an empty /
-``disabled`` / ``none`` / ``off`` value, or selecting the ``dummy`` LLM harness,
-falls the agent back to the in-process thread-mode coordinator.
+``disabled`` / ``none`` / ``off`` value falls the agent back to the
+in-process thread-mode coordinator.
 
 There is deliberately **no** code-review-specific address override: the code
 review worker connects through the process-wide ``shared.temporal`` client, which
@@ -84,33 +84,24 @@ def resolve_code_review_temporal_address() -> Optional[str]:
 def _force_enabled() -> bool:
     """Test hook: ``CODE_REVIEW_TEMPORAL_FORCE`` in a truthy spelling.
 
-    Lets an integration test opt back into Temporal mode despite the ``dummy``
-    harness guard below. Never load-bearing outside tests.
+    Lets an integration test opt into Temporal mode when an address still
+    resolves. Never load-bearing outside tests.
     """
     return os.environ.get("CODE_REVIEW_TEMPORAL_FORCE", "").strip().lower() in _TRUE_VALUES
-
-
-def _dummy_harness() -> bool:
-    """True when the no-LLM ``dummy`` provider harness is selected."""
-    return os.environ.get("LLM_PROVIDER", "").strip().lower() == "dummy"
 
 
 def code_review_temporal_enabled() -> bool:
     """Whether ``CodeReviewAgent.run`` should dispatch to Temporal by default.
 
     Postconditions:
-        - Returns ``True`` iff a Temporal address resolves and no disabling
-          condition applies. The disabling condition is the ``dummy`` LLM
-          harness — overridable by the ``CODE_REVIEW_TEMPORAL_FORCE`` test hook.
+        - Returns ``True`` iff a Temporal address resolves.
         - Never returns ``True`` when :func:`resolve_code_review_temporal_address`
           is ``None``.
         - Never raises.
-        - Never inspects ``sys.modules``.
+        - Never inspects ``sys.modules`` or ``LLM_PROVIDER``.
     """
     if _force_enabled():
         return resolve_code_review_temporal_address() is not None
-    if _dummy_harness():
-        return False
     return resolve_code_review_temporal_address() is not None
 
 

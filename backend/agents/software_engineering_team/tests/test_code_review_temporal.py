@@ -120,11 +120,14 @@ def test_force_flag_still_requires_an_address(monkeypatch: pytest.MonkeyPatch) -
     assert cfg.code_review_temporal_enabled() is False
 
 
-def test_dummy_harness_disables(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dummy_provider_does_not_disable_temporal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LLM_PROVIDER=dummy selects the no-LLM harness only; it must not force
+    # the code-review Temporal gate off when an address resolves.
     _clear_env(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "")  # not forced
-    assert cfg.code_review_temporal_enabled() is False
+    assert cfg.code_review_temporal_enabled() is True
 
 
 @pytest.mark.parametrize(
