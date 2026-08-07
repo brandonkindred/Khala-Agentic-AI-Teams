@@ -5,8 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 import code_review_agent.previous_content as previous_content
+import pytest
 from code_review_agent.previous_content import (
     PreviousContentDiskResult,
     PreviousContentResult,
@@ -105,6 +105,8 @@ def test_blank_revision_raises(tmp_path: Path) -> None:
 def test_blank_repo_path_raises() -> None:
     with pytest.raises(ValueError):
         read_previous_content_from_git("", "HEAD", ["a.py"])
+    with pytest.raises(ValueError):
+        read_previous_content_from_git("   ", "HEAD", ["a.py"])
 
 
 def test_empty_paths_returns_empty_result(tmp_path: Path) -> None:
@@ -129,3 +131,31 @@ def test_blank_path_string_is_miss(tmp_path: Path) -> None:
     result = read_previous_content_from_git(str(repo), "HEAD", [""])
     assert result.contents == {}
     assert result.misses == frozenset({""})
+
+
+def test_git_duplicate_path_strings_read_once(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "a.py", "once\n")
+    result = read_previous_content_from_git(str(repo), "HEAD", ["a.py", "a.py"])
+    assert result.contents == {"a.py": "once\n"}
+    assert result.misses == frozenset()
+    assert len(result.contents) + len(result.misses) == 1
+
+
+def test_git_oversize_skips_git_show(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(previous_content, "DEFAULT_MAX_FILE_BYTES", 3)
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "big.py", "y = 2\n")
+    show_calls: list[list[str]] = []
+    original_run_git = previous_content._run_git
+
+    def _patched_run_git(root: Path, args: list[str], *, merge_stderr: bool = True) -> tuple[int, str]:
+        if args[:2] == ["git", "show"]:
+            show_calls.append(args)
+        return original_run_git(root, args, merge_stderr=merge_stderr)
+
+    monkeypatch.setattr(previous_content, "_run_git", _patched_run_git)
+    result = read_previous_content_from_git(str(repo), "HEAD", ["big.py"])
+    assert "big.py" not in result.contents
+    assert result.misses == frozenset({"big.py"})
+    assert show_calls == []

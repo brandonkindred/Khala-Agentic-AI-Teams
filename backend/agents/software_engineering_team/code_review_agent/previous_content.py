@@ -126,8 +126,9 @@ def read_previous_content_from_git(
         - Returns ``PreviousContentResult`` for the unique path strings.
         - If the path is not a usable git repo or ``revision`` does not
           resolve to a commit, every unique path is a miss (no raise).
-        - Per-path: unsafe/blank path, missing blob, non-zero ``git show``,
-          or oversize blob → miss; success → hit with stdout text.
+        - Per-path: unsafe/blank path, missing blob, non-zero ``git cat-file`` /
+          ``git show``, or oversize blob (checked via ``git cat-file -s`` before
+          ``git show``) → miss; success → hit with UTF-8-safe stdout text.
         - Duplicate identical path strings are read once.
         - Empty ``paths`` yields empty ``contents`` and empty ``misses``.
         - Never raises for git/environment failures once preconditions hold.
@@ -163,6 +164,22 @@ def read_previous_content_from_git(
             misses.add(path)
             continue
         spec = f"{stripped_rev}:{normalized}"
+        sz_rc, sz_out = _run_git(
+            root,
+            ["git", "cat-file", "-s", spec],
+            merge_stderr=False,
+        )
+        if sz_rc != 0:
+            misses.add(path)
+            continue
+        try:
+            blob_size = int(sz_out.strip())
+        except ValueError:
+            misses.add(path)
+            continue
+        if blob_size > DEFAULT_MAX_FILE_BYTES:
+            misses.add(path)
+            continue
         rc, out = _run_git(
             root,
             ["git", "show", spec],
@@ -171,9 +188,6 @@ def read_previous_content_from_git(
         if rc != 0:
             misses.add(path)
             continue
-        if len(out.encode("utf-8", errors="surrogateescape")) > DEFAULT_MAX_FILE_BYTES:
-            misses.add(path)
-            continue
-        contents[path] = out
+        contents[path] = out.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
     return PreviousContentResult(contents=contents, misses=frozenset(misses))
