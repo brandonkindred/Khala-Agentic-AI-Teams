@@ -2,9 +2,10 @@
 
 Disk reads return the literal current bytes under ``repo_path`` (often already
 post-execution *new* content). Git reads return blobs at a caller-supplied
-revision via ``git show``. Neither path judges trustworthiness or aggregates
-sources — callers compose results. Per-path failures are misses; only blank
-``repo_path`` / ``revision`` raise.
+revision via ``git show``. ``merge_previous_content`` and
+``resolve_previous_content`` aggregate disk/git partitions (git-first).
+Per-path failures are misses; only blank ``repo_path`` / ``revision`` raise
+on leaf git reads.
 """
 
 from __future__ import annotations
@@ -207,3 +208,72 @@ def read_previous_content_from_git(
         contents[path] = out.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
     return PreviousContentResult(contents=contents, misses=frozenset(misses))
+
+
+def merge_previous_content(
+    preferred: PreviousContentResult,
+    fallback: PreviousContentResult,
+) -> PreviousContentResult:
+    """Merge two previous-content partitions, preferring ``preferred`` hits.
+
+    Preconditions:
+        - ``preferred`` and ``fallback`` are ``PreviousContentResult`` values
+          (may be empty).
+
+    Postconditions:
+        - Hits start as ``preferred.contents``; each path in
+          ``fallback.contents`` not already preferred is taken from fallback.
+        - Path universe is the union of both results' ``contents`` keys and
+          ``misses``; final ``misses`` are universe minus final hit keys.
+        - Preferred wins on overlap. Pure: no I/O; never raises for empty or
+          partial inputs.
+    """
+    contents: Dict[str, str] = dict(preferred.contents)
+    for path, text in fallback.contents.items():
+        if path not in contents:
+            contents[path] = text
+    universe: Set[str] = set(preferred.contents)
+    universe.update(preferred.misses)
+    universe.update(fallback.contents)
+    universe.update(fallback.misses)
+    misses = frozenset(universe - contents.keys())
+    return PreviousContentResult(contents=contents, misses=misses)
+
+
+def resolve_previous_content(
+    repo_path: str,
+    paths: Iterable[str],
+    revision: str | None = None,
+) -> PreviousContentResult:
+    """Resolve previous content git-first, falling back to disk for misses.
+
+    Preconditions:
+        - ``repo_path`` is strip-nonempty; otherwise raise ``ValueError``.
+        - ``paths`` is an iterable of strings (may be empty).
+        - ``revision`` may be ``None``/blank (disk-only) or strip-nonempty
+          (git-first).
+
+    Postconditions:
+        - Empty ``paths`` → empty ``contents`` and empty ``misses``.
+        - Blank/missing ``revision`` → ``read_previous_content_from_disk``.
+        - Non-blank ``revision`` → git for all paths; disk only for git
+          misses; merge with git preferred. If git has no misses, return git.
+        - Never raises for leaf/environment failures once ``repo_path`` is valid.
+    """
+    stripped_repo = (repo_path or "").strip()
+    if not stripped_repo:
+        raise ValueError("repo_path must be a non-empty path")
+
+    unique = _unique_paths(paths)
+    if not unique:
+        return PreviousContentResult(contents={}, misses=frozenset())
+
+    stripped_rev = (revision or "").strip()
+    if not stripped_rev:
+        return read_previous_content_from_disk(stripped_repo, unique)
+
+    git = read_previous_content_from_git(stripped_repo, stripped_rev, unique)
+    if not git.misses:
+        return git
+    disk = read_previous_content_from_disk(stripped_repo, git.misses)
+    return merge_previous_content(git, disk)
