@@ -30,17 +30,19 @@ runs five phases in strict order:
    (`shared/phases/execution.py:785-1221`), an outer `while` loop bounded by
    `max_total_cycles`:
    - **Code Review** (`gate_config.run_code_review_gate` →
-     `run_code_review_phase_impl`, `shared/phases/review.py:45-187`): build
-     verification → lint → code-review-agent, run sequentially inside this one
-     gate. Has its own inner retry loop, up to `code_review_retry_cap`, that
-     batch-fixes and re-checks *before* the outer cycle advances.
+     `run_code_review_phase_impl`, `shared/phases/review.py:41-123`): the
+     code-review-agent step (build verification and linting are not part of this
+     shared impl — they run on the frontend CR gate via `run_microtask_review`,
+     or on other pre-review / `run_review` paths). Has its own inner retry loop,
+     up to `code_review_retry_cap`, that batch-fixes and re-checks *before* the
+     outer cycle advances.
    - **QA** (`gate_config.run_qa_gate` → `run_qa_testing_phase_impl`,
-     `shared/phases/review.py:391-436`, sharing the parameterised
-     `_run_agent_testing_phase` body at lines 213-357). On failure, batch-fixes once
+     `shared/phases/review.py:329-375`, sharing the parameterised
+     `_run_agent_testing_phase` body at lines 149-295). On failure, batch-fixes once
      and `continue`s — which restarts the outer loop **from Code Review**, not just
      QA.
    - **Security** (`gate_config.run_security_gate` →
-     `run_security_testing_phase_impl`, `shared/phases/review.py:439-475`, same
+     `run_security_testing_phase_impl`, `shared/phases/review.py:378-414`, same
      shared `_run_agent_testing_phase` body). Same restart-from-Code-Review behavior
      on an *ordinary* per-cycle failure — batch-fix and unconditionally `continue`;
      `security_failure_always_stops` plays no role in this per-cycle path. That flag
@@ -77,11 +79,11 @@ runs five phases in strict order:
 | Gate | Implementation | Reads | Writes |
 |---|---|---|---|
 | Coding | `_execute_coding_phase` (`execution.py:693-782`) | `mt` (id/title/description/tool_agent), `task`, `planning_result.language`, `architecture`, `existing_code`, `repo_path`, running `all_files` — `mt.depends_on` is read by the *caller* (`run_gated_execution_impl`) before this phase runs, not by this function itself (see Scope, above) | `mt.output_files`, `microtask_files`, disk writes, updates `all_files` in place |
-| Build verification | inside `run_code_review_phase_impl` (`review.py:45-187`) | `repo_path` (runs build against the on-disk worktree), `deps.build_verifier` | `ReviewIssue(source="build")` on failure; **also**, on failure, `_run_build_verification` → `_try_build_fix_one_at_a_time` writes repaired files directly to the worktree (`out_path.write_text`, `build_fix.py:542-547`) before re-checking — not a read-only step (does not short-circuit lint/code-review) |
-| Lint | inside `run_code_review_phase_impl` | `repo_path` (linter runs against the on-disk worktree via `LintToolInput(repo_path=...)`, `review.py:121-127`), `deps.linting_tool_agent`; `microtask_files` is used only afterward to filter which lint issues are kept | `ReviewIssue(source="lint")` |
-| Code review (agent) | `_code_review_step` via `run_code_review_phase_impl` | `microtask_files`, `review_context` (architecture/spec); `enable_llm_review_grounding` (a plain parameter of `run_code_review_phase_impl`, **not** a `ReviewConfig` attribute — the caller `_run_review_cycles` forwards it via `getattr(config, "enable_llm_review_grounding", True)` off the higher-level `MicrotaskReviewConfig`, `execution.py:902`/`985`) | `ReviewIssue(source="code_review", ...)`; combined `GateOutcome(passed, issues, summary, raw_issue_count)` (`execution.py:360-377`) |
-| QA (backend) | `run_qa_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:391-436`, body at `213-357`) | `microtask_files` (post-CR content), `deps.qa_agent`, `agent_review_cache`, and **only** `deps.tool_agents["testing_qa"]` — the shared body filters by `spec.tool_kind` (`review.py:295-297`) before calling any tool agent | `GateOutcome` with `source="qa"` issues |
-| Security (backend) | `run_security_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:439-475`, same shared body) | `microtask_files`, `deps.security_agent`, `agent_review_cache`, and **only** `deps.tool_agents["security"]`, filtered the same way | `GateOutcome` with `source="security"` issues |
+| Build verification | inside `run_review` / `run_microtask_review` (`shared/v2_review.py:721-731` / `888-899`; not in `run_code_review_phase_impl`) | `repo_path` (runs build against the on-disk worktree), `deps.build_verifier` | `ReviewIssue(source="build")` on failure; **also**, on failure, `_run_build_verification` → `_try_build_fix_one_at_a_time` writes repaired files directly to the worktree (`out_path.write_text`, `build_fix.py:542-547`) before re-checking — not a read-only step (does not short-circuit lint/code-review) |
+| Lint | inside `run_review` / `run_microtask_review` (`shared/v2_review.py:733-763` / `901-937`) | `repo_path` (linter runs against the on-disk worktree via `LintToolInput(repo_path=...)`, `v2_review.py:737-748`), `deps.linting_tool_agent`; `microtask_files` is used only afterward to filter which lint issues are kept | `ReviewIssue(source="lint")` |
+| Code review (agent) | `_code_review_step` via `run_code_review_phase_impl` (`review.py:41-123`) | `microtask_files`, `review_context` (architecture/spec); `enable_llm_review_grounding` (a plain parameter of `run_code_review_phase_impl`, **not** a `ReviewConfig` attribute — the caller `_run_review_cycles` forwards it via `getattr(config, "enable_llm_review_grounding", True)` off the higher-level `MicrotaskReviewConfig`, `execution.py:902`/`985`) | `ReviewIssue(source="code_review", ...)`; combined `GateOutcome(passed, issues, summary, raw_issue_count)` (`execution.py:360-377`) |
+| QA (backend) | `run_qa_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:329-375`, body at `149-295`) | `microtask_files` (post-CR content), `deps.qa_agent`, `agent_review_cache`, and **only** `deps.tool_agents["testing_qa"]` — the shared body filters by `spec.tool_kind` (`review.py:233-235`) before calling any tool agent | `GateOutcome` with `source="qa"` issues |
+| Security (backend) | `run_security_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:378-414`, same shared body) | `microtask_files`, `deps.security_agent`, `agent_review_cache`, and **only** `deps.tool_agents["security"]`, filtered the same way | `GateOutcome` with `source="security"` issues |
 | QA / Security (frontend) | `_qa_gate` (`frontend_code_v2_team/phases/execution.py:213-244`) / `_security_gate` (`247-278`) → `run_microtask_review` (`shared/v2_review.py:750-938`, invoked via `from .review import run_microtask_review` inside each gate) | `microtask_files`, `deps.qa_agent` or `deps.security_agent`, `deps.tool_agent_cache` (a content-addressed `AgentReviewCache`, reset per microtask cycle in `_run_review_cycles`, forwarded so a tool agent already run by the CR gate this cycle is reused instead of re-invoked — see the caching design below), and `_scoped_tool_agents(deps.tool_agents, kind)` — **only their own kind** (`testing_qa` / `security`), not the full mapping (see note below) | `GateOutcome`, filtered post hoc to `source="qa"` or `source="security"` |
 | Documentation | `_run_documentation_phase` (`execution.py:1224-1347`) | `microtask_files` (last review-accepted write), `deps.tool_agents[DOCUMENTATION]`, `task.description` | Refined `doc_files` merged into `microtask_files`/`all_files`/`mt.output_files`; sets `mt.status = COMPLETED` |
 
@@ -124,7 +126,7 @@ Edge classification:
   Security. The two gates read/write disjoint issue namespaces (`source="qa"` vs
   `source="security"`) and, on the **backend**, call different agents/tool-agent
   kinds with no data exchange between them (`_run_agent_testing_phase` filters
-  `tool_agents` down to the single `spec.tool_kind` entry, `review.py:295-297`).
+  `tool_agents` down to the single `spec.tool_kind` entry, `review.py:233-235`).
   Nothing about Security's verdict depends on QA's *content* there. The only
   reason Security currently waits for QA is that the loop structure runs them
   sequentially and a QA failure `continue`s before Security is ever reached.
@@ -263,7 +265,9 @@ Edge classification:
 **Needs restructuring before it can be parallelized (not a drop-in change):**
 
 - Build verification, lint, and the code-review-agent call inside the Code Review
-  gate (`review.py:45-187`) are not read-only against a shared immutable snapshot:
+  gate (frontend: `run_microtask_review` in `shared/v2_review.py`; backend CR
+  agent step: `run_code_review_phase_impl` at `review.py:41-123`) are not
+  read-only against a shared immutable snapshot:
   build verification's failure path mutates the worktree in place via
   `_try_build_fix_one_at_a_time` (`build_fix.py:542-547`). Parallelizing these
   three requires first separating read-only verification from in-place repair (or

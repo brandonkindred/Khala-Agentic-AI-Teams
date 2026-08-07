@@ -1175,6 +1175,64 @@ def test_run_paper_trading_dispatch_failure_swallows_signal_error(
     assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
 
 
+def test_run_paper_trading_preserves_http_when_fail_session_raises(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Dispatch raised an HTTPException; best-effort failure recording must not
+    mask it. If ``_fail_paper_trading_session`` itself raises (concurrent
+    removal, unparseable record, store fault), the caller must still receive
+    the original status and detail — not an unrelated cleanup error."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    original_detail = "Temporal unavailable — intended status"
+
+    def _boom(session_id, payload):
+        raise api_main.HTTPException(status_code=503, detail=original_detail)
+
+    def _fail_boom(session_id, error):
+        raise RuntimeError("session concurrently removed / unparseable")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", lambda sid: None)
+    monkeypatch.setattr(api_main, "_fail_paper_trading_session", _fail_boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == original_detail
+
+
+def test_run_paper_trading_preserves_wrapped_503_when_fail_session_raises(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Same cleanup-masking guard for a non-HTTP dispatch error: the route's
+    wrapped 503 must surface even when failure recording blows up."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    monkeypatch.setattr(
+        api_main,
+        "_start_paper_trading",
+        lambda sid, payload: (_ for _ in ()).throw(RuntimeError("worker client not connected")),
+    )
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", lambda sid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_fail_paper_trading_session",
+        lambda sid, error: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+    )
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+
+
 def test_max_hours_rejects_absurd_values(api_client) -> None:
     """An unbounded max_hours would overflow timedelta construction inside
     workflow code; the field must reject values above the documented cap."""

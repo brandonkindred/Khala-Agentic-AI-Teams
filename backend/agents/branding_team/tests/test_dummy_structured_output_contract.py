@@ -181,20 +181,35 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
 _CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
 
 # Model classes DummyLLMClient.complete_json routes by structured_output_model
-# class name (see _branding_phase2_structured_output_stub in
+# class name (see _branding_structured_output_stub_by_model_name in
 # llm_service.clients.dummy) rather than by scanning system-prompt text.
-# For these six, an unrouted/misleading prompt no longer prevents a valid
-# payload — that is the point of issue #4252's fix, and is asserted
-# separately in test_model_routed_payload_validates_regardless_of_prompt_text
-# below instead of test_generic_prompt_payload_is_rejected_by_every_schema.
+# Phase 2, 4, and 5 output models use this path; for them, an unrouted or
+# misleading prompt no longer prevents a valid payload — that is the point of
+# issue #4252's fix, and is asserted separately in
+# test_model_routed_payload_validates_regardless_of_prompt_text below instead
+# of test_generic_prompt_payload_is_rejected_by_every_schema.
 _MODEL_ROUTED_CLASS_NAMES: frozenset[str] = frozenset(
     {
+        # Phase 2 — Narrative & Messaging
         "BrandStoryOutput",
         "BrandArchetypesOutput",
         "TaglineOutput",
         "MessagingFrameworkOutput",
         "PersonaProfilesOutput",
         "WritingGuidelinesOutput",
+        # Phase 4 — Experience & Channel Activation
+        "BrandExperiencePrinciplesOutput",
+        "ChannelGuidelineOutput",
+        "BrandArchitectureOutput",
+        "BrandInActionOutput",
+        # Phase 5 — Governance & Evolution
+        "OwnershipOutput",
+        "ApprovalWorkflowsOutput",
+        "AssetWikiOutput",
+        "TrainingOnboardingOutput",
+        "BrandHealthKPIsOutput",
+        "EvolutionFrameworkOutput",
+        "BrandGuidelinesOutput",
     }
 )
 _TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(

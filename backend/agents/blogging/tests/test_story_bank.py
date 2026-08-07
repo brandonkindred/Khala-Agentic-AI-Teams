@@ -4,8 +4,8 @@ Same dict-backed fake-Postgres pattern as the other PR-N store tests:
 a ``_FakeCursor`` routes each SQL statement the module issues to an
 in-process handler so we can exercise save/read/rerank/list/delete
 without a live Postgres. Integration coverage against a real
-``postgres:18`` service container runs in the ``test-shared-postgres``
-CI job from PR 0.
+``postgres:16-alpine`` service container runs in the ``test-shared-postgres``
+CI job.
 """
 
 from __future__ import annotations

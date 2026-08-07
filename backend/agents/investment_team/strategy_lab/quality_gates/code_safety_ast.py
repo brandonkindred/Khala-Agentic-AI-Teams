@@ -360,11 +360,9 @@ def _is_positive_int_constant(node: ast.AST) -> bool:
 
 def _get_call_name(node: ast.Call) -> str:
     """Extract the function name from a Call node (handles simple names and attribute access)."""
-    if isinstance(node.func, ast.Name):
-        return node.func.id
-    if isinstance(node.func, ast.Attribute):
-        return node.func.attr
-    return ""
+    from investment_team.strategy_lab.ast_utils.names import call_name
+
+    return call_name(node)
 
 
 # Hook methods whose ``submit_order`` calls actually reach the engine.

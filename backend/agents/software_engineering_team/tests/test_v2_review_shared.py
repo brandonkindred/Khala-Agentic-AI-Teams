@@ -140,6 +140,33 @@ def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> No
     assert result.passed  # lint failure was swallowed; no blocking issue
 
 
+def test_run_review_forwards_language_to_llm_review_fn(tmp_path: Path) -> None:
+    """The code-review step's LLM fallback must see the caller's ``language``
+    (not silently drop it) -- a fallback that forwards it to ``CodeReviewInput``
+    (e.g. backend's coordinator-backed fallback) would otherwise review the
+    code under ``CodeReviewInput``'s ``typescript`` default regardless of the
+    caller's actual language."""
+    captured: dict = {}
+
+    def _spy_llm_review_fn(*, llm, task, files, **kw):
+        captured["language"] = kw.get("language")
+        return []
+
+    runners = _noop_runners()
+    runners["llm_review_fn"] = _spy_llm_review_fn
+
+    run_review(
+        config=_build_config(),
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        language="python",
+        **runners,
+    )
+    assert captured["language"] == "python"
+
+
 def test_lint_passed_defends_missing_execution_result() -> None:
     """A lint-tool result lacking ``execution_result`` entirely (not just a
     falsy inner ``.success``) must not raise -- only the innermost lookup was

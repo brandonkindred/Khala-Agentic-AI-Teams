@@ -23,11 +23,12 @@ from llm_service.clients.dummy import (
     _STRIP_VERBS,
     CODE_REVIEW_MIN_PROMPT_LENGTH,
     _aggregated_user_tool_text,
-    _branding_phase2_structured_output_stub,
+    _branding_structured_output_stub_by_model_name,
     _content_to_text,
     _extract_name_from_hint,
     _last_user_text,
     _placeholder_slug,
+    is_dummy_llm_client_wrapped,
 )
 
 
@@ -102,6 +103,85 @@ def test_structured_output_model_routes_by_class_despite_misleading_prompt() -> 
     assert "elevator_pitches" in j
     assert "messaging_framework" not in j
     TaglineOutput.model_validate(j)
+
+
+def test_phase45_structured_output_model_wins_over_channel_guide_prompt() -> None:
+    """Model-class routing must ignore Phase 4 channel-guide prompt anchors.
+
+    A system prompt that would text-route to ChannelGuidelineOutput must still
+    yield the OwnershipOutput stub when that class is passed as
+    structured_output_model.
+    """
+    from branding_team.models import OwnershipOutput
+
+    c = DummyLLMClient()
+    misleading_system_prompt = "Define content_types and frequency_guidance for channel: 'website'."
+    j = c.complete_json(
+        "go",
+        system_prompt=misleading_system_prompt,
+        temperature=0.0,
+        structured_output_model=OwnershipOutput,
+    )
+    assert "ownership_model" in j
+    assert "decision_authority" in j
+    assert "channel" not in j
+    assert "content_types" not in j
+    OwnershipOutput.model_validate(j)
+
+
+def test_channel_guideline_model_extracts_channel_from_system_prompt() -> None:
+    """ChannelGuidelineOutput model routing fills channel from the prompt."""
+    from branding_team.models import ChannelGuidelineOutput
+
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt=(
+            "You are a Website Channel Specialist. channel: 'website'\n"
+            "Define content_types and frequency_guidance."
+        ),
+        temperature=0.0,
+        structured_output_model=ChannelGuidelineOutput,
+    )
+    assert j["channel"] == "website"
+    ChannelGuidelineOutput.model_validate(j)
+
+
+def test_channel_guideline_model_defaults_channel_when_absent() -> None:
+    """ChannelGuidelineOutput model routing defaults channel when prompt has none."""
+    from branding_team.models import ChannelGuidelineOutput
+
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt="Return channel guidelines without a quoted channel id.",
+        temperature=0.0,
+        structured_output_model=ChannelGuidelineOutput,
+    )
+    assert j["channel"] == "channel"
+    ChannelGuidelineOutput.model_validate(j)
+
+
+def test_phase2_system_prompt_without_model_does_not_route_by_text_anchors() -> None:
+    """Phase 2 stubs must not be selected from system-prompt substrings alone.
+
+    A MessageMapper-shaped system prompt (messaging_framework +
+    audience_message_maps) previously returned a MessagingFrameworkOutput
+    payload via text-anchor fallback. Without structured_output_model, that
+    path must not fire — incidental field-name mentions must not choose a
+    schema.
+    """
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt=(
+            "messaging_framework and audience_message_maps for the messaging specialist"
+        ),
+        temperature=0.0,
+    )
+    assert "messaging_framework" not in j
+    assert "audience_message_maps" not in j
+    assert "brand_story" not in j
 
 
 def test_structured_output_model_none_preserves_text_routing() -> None:
@@ -469,17 +549,17 @@ def test_code_review_min_prompt_length_constant() -> None:
     assert CODE_REVIEW_MIN_PROMPT_LENGTH == 200
 
 
-_BRANDING_PHASE2_SYSTEM_PROMPTS = [
+_BRANDING_PHASE2_MODEL_CASES = [
     (
-        "brand_story and boilerplate_variants for the brand story specialist",
+        "BrandStoryOutput",
         {"brand_story", "hero_narrative", "boilerplate_variants"},
     ),
     (
-        "personality_traits — carry forward brand_story for the archetype specialist",
+        "BrandArchetypesOutput",
         {"brand_story", "hero_narrative", "boilerplate_variants", "brand_archetypes"},
     ),
     (
-        "tagline_rationale and elevator_pitches for the tagline specialist",
+        "TaglineOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -491,7 +571,7 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
         },
     ),
     (
-        "messaging_framework and audience_message_maps for the messaging specialist",
+        "MessagingFrameworkOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -505,7 +585,7 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
         },
     ),
     (
-        "jobs_to_be_done and media_habits for the persona specialist",
+        "PersonaProfilesOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -520,7 +600,7 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
         },
     ),
     (
-        "writing_guidelines and editorial_quality_bar for the voice specialist",
+        "WritingGuidelinesOutput",
         {
             "brand_story",
             "hero_narrative",
@@ -538,16 +618,23 @@ _BRANDING_PHASE2_SYSTEM_PROMPTS = [
 ]
 
 
-@pytest.mark.parametrize("system_prompt,expected_keys", _BRANDING_PHASE2_SYSTEM_PROMPTS)
+@pytest.mark.parametrize("model_name,expected_keys", _BRANDING_PHASE2_MODEL_CASES)
 def test_branding_phase2_branches_return_cumulative_keys(
-    system_prompt: str, expected_keys: set[str]
+    model_name: str, expected_keys: set[str]
 ) -> None:
-    """Each Phase 2 branding specialist must carry forward exactly the keys
-    its predecessors introduced, plus its own — pinning the incremental
-    ``_branding_phase2_narrative_*`` helper composition against silent
-    branch desync."""
+    """Each Phase 2 branding specialist stub must carry forward exactly the
+    keys its predecessors introduced, plus its own — pinned by explicit
+    ``structured_output_model`` class name, not system-prompt substrings.
+    """
+    import branding_team.models as branding_models
+
+    output_model = getattr(branding_models, model_name)
     c = DummyLLMClient()
-    j = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    j = c.complete_json(
+        "dummy prompt",
+        temperature=0.0,
+        structured_output_model=output_model,
+    )
     assert set(j.keys()) == expected_keys
 
 
@@ -555,10 +642,15 @@ def test_branding_phase2_branch_results_do_not_share_mutable_state() -> None:
     """Each ``complete_json`` call must hand back independent objects so
     mutating one response's nested lists/dicts can't leak into another call's
     response."""
+    from branding_team.models import BrandStoryOutput
+
     c = DummyLLMClient()
-    system_prompt = _BRANDING_PHASE2_SYSTEM_PROMPTS[0][0]
-    first = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
-    second = c.complete_json("dummy prompt", system_prompt=system_prompt, temperature=0.0)
+    first = c.complete_json(
+        "dummy prompt", temperature=0.0, structured_output_model=BrandStoryOutput
+    )
+    second = c.complete_json(
+        "dummy prompt", temperature=0.0, structured_output_model=BrandStoryOutput
+    )
     first["boilerplate_variants"].append("mutated")
     assert "mutated" not in second["boilerplate_variants"]
 
@@ -636,22 +728,17 @@ def test_accessibility_branch_not_shadowed_by_code_review_catch_all() -> None:
 
 
 def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelines() -> None:
-    """The VoicePrinciplesDrafter branch must return ``editorial_quality_bar``
-    nested inside ``writing_guidelines`` (matching ``WritingGuidelinesBody``),
-    not as a sibling top-level key.
+    """WritingGuidelinesOutput stub must nest ``editorial_quality_bar`` inside
+    ``writing_guidelines``, not as a sibling top-level key.
     """
+    from branding_team.models import WritingGuidelinesOutput
+
     c = DummyLLMClient()
-    system_prompt = (
-        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs "
-        "from previous nodes and the mission's desired_voice, carry the prior fields forward "
-        "unchanged and produce writing_guidelines:\n"
-        "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
-        "2. style_dos — 3-4 writing best practices\n"
-        "3. style_donts — 3-4 things to avoid\n"
-        "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
-        "This is the final step in narrative development."
+    j = c.complete_json(
+        "go",
+        temperature=0.0,
+        structured_output_model=WritingGuidelinesOutput,
     )
-    j = c.complete_json("go", system_prompt=system_prompt, temperature=0.0)
     assert isinstance(j["writing_guidelines"], dict)
     guidelines = j["writing_guidelines"]
     for field in ("voice_principles", "style_dos", "style_donts", "editorial_quality_bar"):
@@ -659,14 +746,37 @@ def test_voice_principles_branch_nests_editorial_quality_bar_in_writing_guidelin
     assert "editorial_quality_bar" not in j
 
 
+def test_is_dummy_llm_client_wrapped_for_bare_client() -> None:
+    """A bare DummyLLMClient is detected directly."""
+    assert is_dummy_llm_client_wrapped(DummyLLMClient()) is True
+
+
+def test_is_dummy_llm_client_wrapped_for_non_dummy() -> None:
+    """A non-dummy client (or None) is not mistaken for a DummyLLMClient."""
+    assert is_dummy_llm_client_wrapped(object()) is False
+    assert is_dummy_llm_client_wrapped(None) is False
+
+
+def test_is_dummy_llm_client_wrapped_unwraps_client_attribute() -> None:
+    """A Strands ``LLMClientModel``-style wrapper exposing ``.client`` is unwrapped
+    so a DummyLLMClient reached through it is still detected."""
+
+    class _FakeWrapper:
+        def __init__(self, client: Any) -> None:
+            self.client = client
+
+    assert is_dummy_llm_client_wrapped(_FakeWrapper(DummyLLMClient())) is True
+    assert is_dummy_llm_client_wrapped(_FakeWrapper(object())) is False
+
+
 # ---------------------------------------------------------------------------
-# chat() / stream() deterministic routing (issue #4252 round 2): this is the
-# path Strands actually drives structured_output_model= agents through —
-# LLMClientModel.stream() converts tool_specs to OpenAI-style tools and calls
-# chat(); a bare Agent(model=DummyLLMClient()) calls stream() directly with
-# tool_specs. Both must route by the StructuredOutputTool's name (which
-# Strands sets to the model's __name__) rather than depend on complete_json's
-# text-anchor scan, which is what issue #4252 flags as fragile.
+# chat() / stream() deterministic routing: this is the path Strands actually
+# drives structured_output_model= agents through — LLMClientModel.stream()
+# converts tool_specs to OpenAI-style tools and calls chat(); a bare
+# Agent(model=DummyLLMClient()) calls stream() directly with tool_specs. Both
+# must route by the StructuredOutputTool's name (which Strands sets to the
+# model's __name__) for every model-routed branding structured-output class,
+# rather than depend on complete_json's text-anchor scan.
 # ---------------------------------------------------------------------------
 
 
@@ -691,25 +801,38 @@ def _openai_structured_output_tools(model_name: str) -> list[dict[str, Any]]:
     ]
 
 
-_PHASE2_ROUTED_MODEL_NAMES: tuple[str, ...] = (
+_MODEL_ROUTED_MODEL_NAMES: tuple[str, ...] = (
+    # Phase 2 — Narrative & Messaging
     "BrandStoryOutput",
     "BrandArchetypesOutput",
     "TaglineOutput",
     "MessagingFrameworkOutput",
     "PersonaProfilesOutput",
     "WritingGuidelinesOutput",
+    # Phase 4 — Experience & Channel Activation
+    "BrandExperiencePrinciplesOutput",
+    "ChannelGuidelineOutput",
+    "BrandArchitectureOutput",
+    "BrandInActionOutput",
+    # Phase 5 — Governance & Evolution
+    "OwnershipOutput",
+    "ApprovalWorkflowsOutput",
+    "AssetWikiOutput",
+    "TrainingOnboardingOutput",
+    "BrandHealthKPIsOutput",
+    "EvolutionFrameworkOutput",
+    "BrandGuidelinesOutput",
 )
 
 
-@pytest.mark.parametrize("model_name", _PHASE2_ROUTED_MODEL_NAMES)
+@pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 def test_chat_routes_structured_output_tool_by_name_despite_misleading_prompt(
     model_name: str,
 ) -> None:
     """chat() must route by the tool's name, not by scanning the user prompt,
-    for every Phase 2 class, not just one. Asserts exact equality against
-    _branding_phase2_structured_output_stub's own output rather than a
-    hand-picked subset of keys, so a wrong/extra/missing key in any class's
-    payload would fail this test too, not just an unrecognized-name miss.
+    for every model-routed branding class. Asserts exact equality against
+    _branding_structured_output_stub_by_model_name's output rather than a
+    hand-picked subset of keys.
     """
     c = DummyLLMClient()
     messages = [
@@ -718,7 +841,7 @@ def test_chat_routes_structured_output_tool_by_name_despite_misleading_prompt(
     ]
     result = c.chat(messages, tools=_openai_structured_output_tools(model_name))
     args = result["__tool_calls__"][0]["function"]["arguments"]
-    assert args == _branding_phase2_structured_output_stub(model_name)
+    assert args == _branding_structured_output_stub_by_model_name(model_name)
 
 
 def test_chat_unrecognized_tool_name_falls_back_to_text_scan() -> None:
@@ -777,12 +900,12 @@ async def test_stream_unrecognized_tool_name_falls_back_to_text_scan() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", _PHASE2_ROUTED_MODEL_NAMES)
+@pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(
     model_name: str,
 ) -> None:
     """stream() must route by tool_specs' name, not by scanning the user text,
-    for every Phase 2 class, not just one — mirrors the chat() test above,
+    for every model-routed branding class — mirrors the chat() test above,
     including asserting exact equality rather than a hand-picked key subset.
     """
     c = DummyLLMClient()
@@ -806,4 +929,4 @@ async def test_stream_routes_structured_output_tool_by_name_despite_misleading_p
         if tool_input:
             chunks.append(tool_input)
     data = json.loads(chunks[0])
-    assert data == _branding_phase2_structured_output_stub(model_name)
+    assert data == _branding_structured_output_stub_by_model_name(model_name)

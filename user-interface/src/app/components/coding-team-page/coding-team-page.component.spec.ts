@@ -1290,6 +1290,31 @@ describe('CodingTeamPageComponent', () => {
       expect(component.hasPendingQuestions()).toBe(false);
     });
 
+    it('shows Resume Run only for Temporal-native pauses with resume_token', async () => {
+      await setup();
+      showRun({
+        status: 'waiting_for_user',
+        waiting_for_answers: false,
+        resume_token: 'j1:tok-1',
+      });
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.textContent).toContain('Signal the Temporal workflow');
+      expect(el.textContent).toContain('Resume Run');
+      expect(el.querySelector('button[aria-label="Resume the coding-team run"]')).not.toBeNull();
+    });
+
+    it('hides Resume Run for block-mode pauses without resume_token', async () => {
+      await setup();
+      showRun({
+        status: 'waiting_for_user',
+        waiting_for_answers: false,
+      });
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.textContent).toContain('cannot be resumed from here');
+      expect(el.textContent).not.toContain('Resume Run');
+      expect(el.querySelector('button[aria-label="Resume the coding-team run"]')).toBeNull();
+    });
+
     it('shows the waiting badge in the detail header while paused', async () => {
       await setup();
       showRun({ waiting_for_answers: true, pending_questions: [QUESTION] });

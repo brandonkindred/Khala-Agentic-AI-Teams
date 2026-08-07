@@ -1,13 +1,10 @@
-"""Postgres schema for the Agent Studio authoring-conversation store.
+"""Postgres schema for Agent Studio conversation + drafts stores.
 
 Pure data module — importing it has no side effects. DDL runs when the unified
 API lifespan calls ``shared.postgres.register_team_schemas(SCHEMA)``.
 
-Backs the durable, cross-worker authoring conversation store (the in-memory store
-is retained for the Postgres-less local/dev path). A conversation's in-progress
-:class:`~agent_team_studio.agent_studio.models.AgentDefinition` lives in ``definition_json``; each
-turn's messages are rows in ``agent_studio_conv_messages``. Per-conversation turn
-serialization uses a ``SELECT … FOR UPDATE`` row lock on the conversation row.
+Backs (1) the durable authoring conversation store and (2) the user-scoped
+``agent_studio_drafts`` table for save/resume of Studio handoff + stage work.
 """
 
 from __future__ import annotations
@@ -36,10 +33,21 @@ SCHEMA: TeamSchema = TeamSchema(
         )""",
         """CREATE INDEX IF NOT EXISTS idx_agent_studio_conv_messages_conv
             ON agent_studio_conv_messages(conversation_id, id)""",
+        """CREATE TABLE IF NOT EXISTS agent_studio_drafts (
+            draft_id     TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            payload_json JSONB NOT NULL,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_agent_studio_drafts_user_updated
+            ON agent_studio_drafts (user_id, updated_at DESC)""",
     ],
     table_names=[
         # Messages first: FK-dependent child truncated before its parent.
         "agent_studio_conv_messages",
         "agent_studio_conversations",
+        "agent_studio_drafts",
     ],
 )

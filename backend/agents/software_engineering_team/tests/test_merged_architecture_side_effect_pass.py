@@ -732,3 +732,187 @@ def test_format_changed_files_page_bounds_by_char_budget() -> None:
     assert page.count("\n") < 50
     assert "offset=" in page
     assert "of 50" in page
+
+
+def test_split_changed_files_into_batches_single_batch_when_under_budget() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import (
+        _split_changed_files_into_batches,
+    )
+
+    items = [("a.py", "x" * 50), ("b.py", "y" * 50)]
+    assert _split_changed_files_into_batches(items, max_chars=10_000) == [items]
+
+
+def test_split_changed_files_into_batches_empty_items() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import (
+        _split_changed_files_into_batches,
+    )
+
+    assert _split_changed_files_into_batches([], max_chars=1_000) == []
+
+
+def test_split_changed_files_into_batches_splits_when_over_budget() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import (
+        _estimated_file_block_chars,
+        _split_changed_files_into_batches,
+    )
+
+    items = [("a.py", "x" * 100), ("b.py", "y" * 100), ("c.py", "z" * 100)]
+    per_file = _estimated_file_block_chars(*items[0])
+    # Budget fits one file plus a sliver — a second file always overflows it.
+    batches = _split_changed_files_into_batches(items, max_chars=per_file + 10)
+    assert batches == [[items[0]], [items[1]], [items[2]]]
+
+
+def test_split_changed_files_into_batches_keeps_oversized_file_alone() -> None:
+    from code_review_agent.merged_architecture_side_effect_pass import (
+        _split_changed_files_into_batches,
+    )
+
+    items = [("small.py", "a" * 10), ("huge.py", "b" * 10_000)]
+    batches = _split_changed_files_into_batches(items, max_chars=500)
+    assert batches[0] == [items[0]]
+    assert batches[-1] == [items[1]]
+    assert sum(len(b) for b in batches) == len(items)
+
+
+def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> None:
+    """Several small files that together still fit the per-call budget must
+    make exactly one LLM call, not one per file — no behavior change for
+    submissions under the budget."""
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "def a():\n    return 1\n",
+        "b.py": "def b():\n    return 2\n",
+        "c.py": "def c():\n    return 3\n",
+    }
+    find_architecture_and_side_effect_issues(_Client(), _input(files=files))
+    assert len(prompts) == 1
+
+
+def test_splits_into_multiple_batches_for_oversized_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the changed-file set's total estimated size exceeds one call's
+    inline-code budget, the merged pass issues one independent LLM call per
+    batch and concatenates each batch's findings into the same two lists."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        pass_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=0,
+            max_inline_code_chars=200,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                for path in ("a.py", "b.py", "c.py"):
+                    if f"### {path} ###" in prompt:
+                        return {
+                            "architecture_findings": [
+                                {
+                                    "severity": "medium",
+                                    "category": "architecture",
+                                    "file_path": path,
+                                    "description": f"finding for {path}",
+                                    "suggestion": "n/a",
+                                }
+                            ],
+                            "side_effect_findings": [],
+                        }
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "x = 1\n" * 10,
+        "b.py": "y = 2\n" * 10,
+        "c.py": "z = 3\n" * 10,
+    }
+    arch, side = find_architecture_and_side_effect_issues(_Client(), _input(files=files))
+
+    assert len(prompts) == 3
+    assert {f.description for f in arch} == {
+        "finding for a.py",
+        "finding for b.py",
+        "finding for c.py",
+    }
+    assert side == []
+    # Every batch's manifest still lists all three changed files (whole-
+    # submission awareness), even though its content section shows only one.
+    for prompt in prompts:
+        manifest_section = prompt.split("**Full content of the changed files", 1)[0]
+        assert "a.py" in manifest_section
+        assert "b.py" in manifest_section
+        assert "c.py" in manifest_section
+    assert any("batch 1 of 3" in p for p in prompts)
+    assert any("batch 3 of 3" in p for p in prompts)
+
+
+def test_one_batch_failure_does_not_discard_other_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed reply for one batch must not wipe out findings already
+    collected from other, successful batches."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        pass_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=0,
+            max_inline_code_chars=200,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                if "### a.py ###" in prompt:
+                    return "not even a dict-shaped reply"  # type: ignore[return-value]
+                if "### b.py ###" in prompt:
+                    return {
+                        "architecture_findings": [
+                            {
+                                "severity": "medium",
+                                "category": "architecture",
+                                "file_path": "b.py",
+                                "description": "finding for b.py",
+                                "suggestion": "n/a",
+                            }
+                        ],
+                        "side_effect_findings": [],
+                    }
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "x = 1\n" * 10,
+        "b.py": "y = 2\n" * 10,
+        "c.py": "z = 3\n" * 10,
+    }
+    arch, side = find_architecture_and_side_effect_issues(_Client(), _input(files=files))
+    assert [f.description for f in arch] == ["finding for b.py"]
+    assert side == []

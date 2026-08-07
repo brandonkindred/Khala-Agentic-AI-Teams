@@ -79,7 +79,11 @@ def test_dummy_stub_matches_agent_output_model(
     agent = factory()
     prompt = make_mission().model_dump_json(indent=2)
 
-    result = DummyLLMClient().complete_json(prompt, system_prompt=agent.system_prompt)
+    result = DummyLLMClient().complete_json(
+        prompt,
+        system_prompt=agent.system_prompt,
+        structured_output_model=output_model,
+    )
 
     assert isinstance(result, dict)
     output_model.model_validate(result)
