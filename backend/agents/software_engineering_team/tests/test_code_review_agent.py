@@ -36,7 +36,7 @@ def _input(code: str = "### app/main.py ###\ndef foo(): pass", **overrides: Any)
 
 
 def test_small_code_returns_code_review_output() -> None:
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(_input())
     assert isinstance(result, CodeReviewOutput)
     # Dummy stub returns no issues + approved=True via the "senior code reviewer" branch.
@@ -56,7 +56,7 @@ def test_small_code_with_all_optional_fields_does_not_crash() -> None:
         decisions=[],
         diagrams={},
     )
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(
         _input(
             task_requirements="Must support unicode",
@@ -83,7 +83,7 @@ def test_large_code_routes_through_coordinator() -> None:
     big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
     code = big_file_1 + "\n\n" + big_file_2
 
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(_input(code=code))
     assert isinstance(result, CodeReviewOutput)
     assert result.approved is True
@@ -144,7 +144,8 @@ def test_reconcile_low_only_reject_now_fails_schema_validation() -> None:
                 "summary": "One nit",
                 "spec_compliance_notes": "",
             }
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -169,7 +170,8 @@ def test_reconcile_zero_issue_reject_with_summary_now_fails_schema_validation() 
                 "summary": "Code lacks error handling around DB calls",
                 "spec_compliance_notes": "",
             }
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -189,7 +191,8 @@ def test_reconcile_zero_issue_zero_summary_reject_now_fails_schema_validation() 
     agent = CodeReviewAgent(
         llm_client=_StubClient(
             {"approved": False, "issues": [], "summary": "", "spec_compliance_notes": ""}
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -202,7 +205,7 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
     ``LLMClient``, so no persistent state from a previous review (message
     history, cached model, etc.) can leak into the next one.
     """
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     for i in range(4):
         result = agent.run(_input(code=f"### app/m{i}.py ###\ndef f{i}(): pass"))
         assert isinstance(result, CodeReviewOutput)
@@ -223,7 +226,7 @@ def test_small_code_routes_through_coordinator_chunk_path() -> None:
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(_input())
     assert result.approved is True
     # 1 chunk-review call + 1 side-effect/blast-radius pass call (additive,
@@ -242,7 +245,8 @@ def test_single_chunk_propagates_notes_through_agent() -> None:
                 "summary": "Looks good.",
                 "spec_compliance_notes": "Meets the acceptance criteria.",
             }
-        )
+        ),
+        force_in_process=True,
     )
     result = agent.run(_input())
     assert result.approved is True
@@ -250,7 +254,7 @@ def test_single_chunk_propagates_notes_through_agent() -> None:
 
 
 def test_agent_accepts_files_dict_input() -> None:
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(
         CodeReviewInput(
             files={"app/main.py": "def foo(): pass"},
@@ -294,7 +298,7 @@ def test_run_raises_unavailable_when_review_cannot_complete() -> None:
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             raise LLMRateLimitError("429")
 
-    agent = CodeReviewAgent(llm_client=_AlwaysRateLimited())
+    agent = CodeReviewAgent(llm_client=_AlwaysRateLimited(), force_in_process=True)
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
 
@@ -326,7 +330,8 @@ def test_reconcile_approved_true_with_critical_issue_now_fails_schema_validation
                 "summary": "LGTM",
                 "spec_compliance_notes": "",
             }
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -351,7 +356,7 @@ def test_run_reports_progress_steps_in_order() -> None:
     reviewing (per chunk) → finalizing → done with non-decreasing fractions
     ending at 1.0."""
     calls: list = []
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(_input(), progress_callback=_recording_callback(calls))
     assert result.approved is True
     steps = [c[0] for c in calls]
@@ -367,7 +372,7 @@ def test_run_reports_progress_steps_in_order() -> None:
 
 def test_no_callback_behaves_identically() -> None:
     """progress_callback=None (the default) must not change the review result."""
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     with_cb_calls: list = []
     result_no_cb = agent.run(_input())
     result_with_cb = agent.run(_input(), progress_callback=_recording_callback(with_cb_calls))
@@ -383,7 +388,7 @@ def test_large_code_forwards_callback_to_coordinator() -> None:
     code = big_file_1 + "\n\n" + big_file_2
 
     calls: list = []
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(_input(code=code), progress_callback=_recording_callback(calls))
     assert isinstance(result, CodeReviewOutput)
     details = [c[1] for c in calls]
@@ -419,7 +424,7 @@ def test_raising_callback_is_swallowed_and_never_changes_the_review(caplog):
     def _boom(step: str, detail: str, fraction: float) -> None:
         raise RuntimeError("store down")
 
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     baseline = agent.run(_input())
     with caplog.at_level(logging.WARNING):
         result = agent.run(_input(), progress_callback=_boom)

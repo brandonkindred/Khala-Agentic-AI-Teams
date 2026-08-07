@@ -209,7 +209,7 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
     """Running the engine with a profile routes that profile's system prompt to
     the chunk reviewer."""
     probe = _SystemPromptProbe()
-    CodeReviewAgent(probe).run(CodeReviewInput(code="def f():\n    return 1", profile=profile))
+    CodeReviewAgent(probe, force_in_process=True).run(CodeReviewInput(code="def f():\n    return 1", profile=profile))
     assert probe.system_prompts, "expected at least one chunk-review call"
     assert any(anchor in sp for sp in probe.system_prompts)
 
@@ -255,7 +255,7 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     # promises — the engine's LLM client, the CodeReviewInput, and the raw
     # issue list the chunk reviewer produced (asserting these guards against a
     # silent regression in how the coordinator invokes the filter).
-    CodeReviewAgent(_IssueProbe()).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
     assert len(calls) == 1
     spy_llm, spy_input, spy_issues = calls[0]
     assert isinstance(spy_input, CodeReviewInput)
@@ -263,7 +263,7 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     assert isinstance(spy_issues, list) and spy_issues, "expected the raw chunk issues"
 
     # Skipped: the filter is bypassed entirely.
-    CodeReviewAgent(_IssueProbe()).run(
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
         CodeReviewInput(files={"a.py": "x = 1"}, skip_false_positive_filter=True)
     )
     assert len(calls) == 1  # unchanged — no second call
@@ -293,12 +293,12 @@ def test_skip_tail_passes_bypasses_both_tail_passes(monkeypatch) -> None:
     monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged_spy)
 
     # Default: both tail passes run once.
-    CodeReviewAgent(_IssueProbe()).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
     assert len(filter_calls) == 1
     assert len(merged_calls) == 1
 
     # Skipped: neither tail pass runs.
-    CodeReviewAgent(_IssueProbe()).run(
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
         CodeReviewInput(files={"a.py": "x = 1"}, skip_tail_passes=True)
     )
     assert len(filter_calls) == 1  # unchanged — no second call
