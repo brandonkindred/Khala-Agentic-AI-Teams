@@ -1,4 +1,4 @@
-"""coding_team API — orchestrator wiring, resume plan recovery, and the github-hook run flow.
+"""coding_team API — orchestrator wiring and the github-hook run flow.
 
 Monkeypatched collaborators are dereferenced through the ``main`` module object
 at call time so ``monkeypatch.setattr(main, ...)`` keeps taking effect after the
@@ -8,8 +8,7 @@ split; models are imported directly.
 from __future__ import annotations
 
 import logging
-import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from shared.env_config import env_bool
 from shared.git.git_utils import DEVELOPMENT_BRANCH
@@ -25,7 +24,6 @@ from software_engineering_team.github_source import (
 )
 from software_engineering_team.job_store import DEFAULT_CACHE_DIR
 from software_engineering_team.models import CodingTeamPlanInput, JobStatus
-from software_engineering_team.token_crypto import decrypt_token
 
 logger = logging.getLogger(__name__)
 
@@ -90,67 +88,6 @@ def run_orchestrator_wired(
         pause_strategy=pause_strategy,
         acknowledged_resume_token=acknowledged_resume_token,
     )
-
-
-def _recover_resume_plan(
-    job_id: str, plan_raw: Dict[str, Any], repo_path: Optional[str]
-) -> Optional[Tuple[str, CodingTeamPlanInput]]:
-    """Validate a job record's ``(plan_raw, repo_path)`` into a resume plan, or ``None`` if unusable.
-
-    The caller owns deriving ``plan_raw``/``repo_path`` from the job record (each caller already
-    needs ``plan_raw`` for its own non-dict ``plan_input`` handling — the route rejects it, auto-resume
-    coerces it to ``{}`` — so this function takes the already-derived values instead of re-deriving
-    them and blurring why a ``None`` was returned).
-
-    Preconditions:
-        - ``plan_raw`` is a dict; ``repo_path`` is the job's resume repo_path, or falsy if the
-          record carries none.
-    Postconditions:
-        - Returns ``(repo_path, plan)`` when ``repo_path`` is truthy and ``plan_raw`` validates;
-          ``None`` when ``repo_path`` is falsy (not logged — the caller can distinguish this from
-          a validation failure by checking ``repo_path`` itself) or when validation fails (logged).
-          Never raises.
-    """
-    if not repo_path:
-        return None
-    try:
-        plan = plan_from_input(plan_raw, repo_path)
-    except Exception:
-        logger.exception("Resume for job %s skipped: invalid plan_input.", job_id)
-        return None
-    return repo_path, plan
-
-
-def _resolve_github_job_token(
-    job_id: str, data: Dict[str, Any]
-) -> Optional[Tuple[bool, Dict[str, Any], Optional[str]]]:
-    """Classify a resume as GitHub-issue or plain and resolve its token.
-
-    Preconditions:
-        - ``data`` is the job record for ``job_id``.
-    Postconditions:
-        - Returns ``(is_github_job, github_context, token)``: a plain job yields
-          ``(False, ctx, None)``; a GitHub-issue job with a usable token (persisted
-          encrypted at creation, else ``GITHUB_TOKEN``) yields ``(True, ctx, token)``.
-        - Returns ``None`` when a GitHub-issue job has no usable token — the publish
-          flow (PR, issue comments) cannot be resumed, so the caller must bail with
-          the manual-resume hint rather than silently complete without a PR. Never
-          raises.
-    """
-    ctx = data.get("github_context") or {}
-    is_github_job = bool(
-        ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
-    )
-    # Prefer the token persisted (encrypted) at job creation; fall back to GITHUB_TOKEN env.
-    token = (
-        (decrypt_token(data.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN"))
-        if is_github_job
-        else None
-    )
-    if is_github_job and not token:
-        logger.warning("Resume for GitHub job %s skipped: no GitHub token available.", job_id)
-        return None
-    return is_github_job, ctx, token
 
 
 def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional[str]:

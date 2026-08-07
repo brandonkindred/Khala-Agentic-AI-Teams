@@ -694,3 +694,22 @@ def test_resume_400_when_terminal_even_with_resume_token(monkeypatch):
         r = client.post("/run/j1/resume")
         assert r.status_code == 400
         assert "cannot be resumed" in r.json()["detail"]
+
+
+def test_resume_400_when_not_waiting_even_with_resume_token(monkeypatch):
+    """resume_token alone is not enough — only waiting_for_user jobs may be signaled."""
+    from software_engineering_team.api.routes import coding_team_hitl as hitl_route
+
+    monkeypatch.setattr(
+        api, "get_job", lambda jid: _job(status="running", resume_token="j1:tok-x")
+    )
+    monkeypatch.setattr(
+        hitl_route,
+        "signal_workflow_sync",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not signal")),
+    )
+
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 400
+    detail = r.json()["detail"].lower()
+    assert "not paused" in detail or "waiting_for_user" in detail

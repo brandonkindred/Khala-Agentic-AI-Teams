@@ -112,8 +112,6 @@ from software_engineering_team.api.orchestration import (  # noqa: F401
     _has_merged_tasks,
     _record_failure,
     _record_review_outage,
-    _recover_resume_plan,
-    _resolve_github_job_token,
     _run_with_github_hooks,
     _running_job_for_issue,
     _truncate_title,
