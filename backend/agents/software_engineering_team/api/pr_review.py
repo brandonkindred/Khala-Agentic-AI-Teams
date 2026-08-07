@@ -72,9 +72,8 @@ def _review_job_heartbeat_live(job: Dict[str, Any]) -> bool:
         whose age is in ``[-_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
         _REVIEW_GUARD_HEARTBEAT_STALE_S)`` — a stamp up to the skew tolerance in the
         future still counts as live (NTP drift), but a stamp further in the future is
-        NOT live (implausible skew or corrupt data), mirroring
-        ``_answer_wait_heartbeat_fresh``: a dead job with a far-future stamp must not
-        block new reviews until that future time passes. A MISSING or unparseable
+        NOT live (implausible skew or corrupt data): a dead job with a far-future stamp
+        must not block new reviews until that future time passes. A MISSING or unparseable
         stamp returns True (treated as live): the job service stamps
         ``last_heartbeat_at`` on every create/update, so an absent stamp means an
         unfamiliar store, and the guard must fail toward blocking duplicates, not toward

@@ -1396,7 +1396,7 @@ class TestReviewEndpoint:
     def test_far_future_heartbeat_treated_as_stale_not_live(self, review_app, monkeypatch) -> None:
         """A stamp beyond the clock-skew tolerance in the future is implausible (bad
         clock or corrupt data) — it must NOT count as live, or a dead job would block
-        reviews until that future time passes. Mirrors _answer_wait_heartbeat_fresh."""
+        reviews until that future time passes."""
         from datetime import datetime, timedelta, timezone
 
         api = review_app["api"]

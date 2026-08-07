@@ -65,12 +65,10 @@ from software_engineering_team.api.coding_team_models import (  # noqa: F401
     SubmitAnswersRequest,
 )
 from software_engineering_team.api.coding_team_state import (  # noqa: F401
-    _ANSWER_WAIT_HEARTBEAT_STALE_S,
     _BISECT_CONTINUATION_BODY,
     _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
     _HTTP_UNPROCESSABLE,
     _active_run_threads,
-    _answer_wait_heartbeat_fresh,
     _claim_run_thread,
     _clear_run_thread,
     _coerce_progress,

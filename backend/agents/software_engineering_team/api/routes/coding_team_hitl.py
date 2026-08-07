@@ -19,7 +19,7 @@ router = APIRouter()
 
 @router.post("/run/{job_id}/answers", response_model=StatusResponse)
 def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> StatusResponse:
-    """Submit answers to a paused coding-team job's pending questions and resume it.
+    """Submit answers to a paused coding-team job's pending questions.
 
     Two distinct pause mechanisms, told apart by whether the job record carries a
     ``resume_token`` (set only by a ``pause_strategy="return"`` pause — see

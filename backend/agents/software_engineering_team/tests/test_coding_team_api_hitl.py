@@ -278,29 +278,6 @@ def test_persisted_token_is_encrypted_not_plaintext(monkeypatch):
         assert "github_token" not in row
 
 
-def test_answer_wait_heartbeat_fresh_handles_garbage():
-    assert api._answer_wait_heartbeat_fresh({}) is False
-    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": "not-a-date"}) is False
-    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": ""}) is False
-    # Naive timestamps are treated as UTC rather than rejected.
-    from datetime import datetime, timezone
-
-    naive_now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": naive_now}) is True
-
-
-def test_answer_wait_heartbeat_future_is_not_fresh():
-    """A future-dated heartbeat (clock skew / corruption) must not block resume until that time —
-    it is treated as stale, not fresh."""
-    from datetime import datetime, timedelta, timezone
-
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": future}) is False
-    # And a normal recent stamp is still fresh.
-    recent = (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()
-    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": recent}) is True
-
-
 # --------------------------------------------------------------------------- /run/{id}/resume
 
 
@@ -452,30 +429,6 @@ def test_status_agents_defaults_to_tech_lead_only_without_stacks(monkeypatch):
     agents = client.get("/status/j1").json()["agents"]
     assert [a["agent_id"] for a in agents] == ["tech_lead"]
     assert agents[0]["status"] == "planning"
-
-
-# --------------------------------------------------------------------------- clock-skew tolerance
-
-
-def test_heartbeat_fresh_tolerates_small_forward_clock_skew():
-    """A heartbeat stamped slightly in the future (NTP drift on a faster-clocked worker) must
-    still be treated as fresh, so a live wait loop in that worker doesn't appear dead to the
-    checking worker and prompt a spurious second orchestrator spawn."""
-    from datetime import datetime, timedelta, timezone
-
-    skewed = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
-    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": skewed}) is True
-
-
-def test_heartbeat_implausibly_future_stamp_is_not_fresh():
-    """A stamp far in the future (more than _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S ahead) is
-    corruption or severe misconfiguration — it must NOT block resume indefinitely."""
-    from datetime import datetime, timedelta, timezone
-
-    far_future = (
-        datetime.now(timezone.utc) + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S + 30)
-    ).isoformat()
-    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": far_future}) is False
 
 
 # --------------------------------------------------------------------------- /answers: Temporal-native pause
