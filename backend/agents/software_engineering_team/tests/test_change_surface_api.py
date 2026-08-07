@@ -90,9 +90,15 @@ def test_build_from_patches_all_blank_patches() -> None:
     assert surface.is_empty
 
 
-def test_build_from_patches_nonempty_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        build_change_surface_from_patches({"a.py": "@@ -1,1 +1,1 @@\n+x"})
+def test_build_from_patches_nonempty_assembles_when_content_provided() -> None:
+    content = "def outer():\n    return 1\n"
+    patch = "@@ -1,2 +1,2 @@\n def outer():\n-    return 0\n+    return 1\n"
+    surface = build_change_surface_from_patches(
+        {"a.py": patch},
+        new_contents={"a.py": content},
+    )
+    assert not surface.is_empty
+    assert "### a.py ###" in surface.code
 
 
 def test_build_from_pairs_empty_new_contents() -> None:
