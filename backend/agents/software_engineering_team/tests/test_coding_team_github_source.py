@@ -908,6 +908,7 @@ class _FakeClient:
         self.comments: list[tuple[int, str]] = []
         self.fail_comments = False
         self.fail_get_repo = False
+        self.get_repo_calls = 0
 
     def list_open_issues(self, _o: str, _r: str, label: Optional[str] = None):
         for i in self._issues:
@@ -925,6 +926,7 @@ class _FakeClient:
         return list(self._sub_map.get(n, []))
 
     def get_repo(self, _o: str, _r: str) -> Repo:
+        self.get_repo_calls += 1
         if self.fail_get_repo:
             raise GitHubAPIError(500, "boom")
         return self._repo
@@ -1179,7 +1181,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     Wire the coding_team API with:
       * a FakeJobServiceClient backing job_store
       * GitHubClient replaced with a stub (per test, via the returned setter)
-      * _start_hook_thread invoked synchronously
+      * start_coding_team_workflow captured for route-level dispatch assertions
       * git helpers that succeed by default
       * orchestrator no-op that records a merged task
     """
@@ -1207,12 +1209,30 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     monkeypatch.setattr(api_main, "GitHubClient", _make_client)
 
-    # Run the hook synchronously inside the request.
-    monkeypatch.setattr(
-        api_main,
-        "_start_hook_thread",
-        lambda *a, **kw: api_main._run_with_github_hooks(*a, **kw),
-    )
+    import software_engineering_team.api.routes.github as gh_routes
+
+    started: list[dict[str, Any]] = []
+
+    def _capture_start(job_id: str, repo_path: str, plan_input: dict[str, Any], github=None) -> None:
+        """Record Temporal workflow starts for route-level assertions.
+
+        Preconditions:
+            - The route passed the job id, repo path, plan input, and optional
+              GitHub metadata it would send to Temporal.
+        Postconditions:
+            - ``started`` contains one additional capture dictionary preserving
+              the call arguments.
+        """
+        started.append(
+            {
+                "job_id": job_id,
+                "repo_path": repo_path,
+                "plan_input": plan_input,
+                "github": github,
+            }
+        )
+
+    monkeypatch.setattr(gh_routes, "start_coding_team_workflow", _capture_start, raising=False)
 
     # Git helpers: success by default.
     monkeypatch.setattr(api_main, "_prepare_issue_branch", lambda *a, **kw: (True, None, []))
@@ -1246,6 +1266,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         "set_github": lambda fc: holder.__setitem__("client", fc),
         "github": lambda: holder["client"],
         "jobs": fake_jobs,
+        "started_workflows": started,
     }
 
 
@@ -1259,16 +1280,178 @@ def _body(issue_number: int = 1, **overrides: Any) -> dict[str, Any]:
     }
 
 
+def _post_run_from_github_then_run_legacy_hooks(patched_app, json: dict[str, Any]):
+    """Post to the route, then explicitly drive the *legacy* hook path.
+
+    This is NOT route/Temporal coverage. ``POST /run-from-github`` starts
+    ``CodingTeamWorkflow`` and never calls ``_run_with_github_hooks``; this
+    helper posts (asserting Temporal start succeeds) and then synchronously
+    invokes ``_run_with_github_hooks`` so legacy hook-focused unit tests can
+    still exercise comments, busy-checkout, publish-window, and cleanup
+    behavior that has not yet been moved into Temporal activities.
+
+    Preconditions:
+        - ``patched_app`` is the endpoint fixture from this module, with a captured
+          workflow start for successful ``/run-from-github`` responses.
+        - ``json`` is a valid ``RunFromGitHubRequest`` payload for the fake app.
+    Postconditions:
+        - Returns the route response unchanged.
+        - For 200 responses, the route has started the workflow and this helper
+          has synchronously driven ``_run_with_github_hooks`` for legacy-hook
+          assertions only.
+    """
+    resp = patched_app["client"].post("/run-from-github", json=json)
+    if resp.status_code != 200:
+        return resp
+
+    started = patched_app["started_workflows"][-1]
+    api = patched_app["api"]
+    request = api.RunFromGitHubRequest(**json)
+    issue = patched_app["github"]().get_issue(request.owner, request.repo, resp.json()["issue_number"])
+    plan = CodingTeamPlanInput.model_validate(started["plan_input"])
+    token = json.get("github_token") or os.environ["GITHUB_TOKEN"]
+    api._run_with_github_hooks(started["job_id"], request, plan, issue, token)
+    return resp
+
+
+# Backward-compatible alias used by legacy-hook unit tests below.
+_post_run_from_github_and_run_hooks = _post_run_from_github_then_run_legacy_hooks
+
+
 class TestEndpointHappyPath:
+    def test_run_from_github_starts_coding_team_workflow(self, patched_app, monkeypatch) -> None:
+        import software_engineering_team.api.routes.github as gh_routes
+
+        monkeypatch.setattr(
+            patched_app["api"],
+            "_start_hook_thread",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("hook thread must not run")),
+        )
+
+        started: dict[str, Any] = {}
+
+        def _capture(job_id: str, repo_path: str, plan_input: dict[str, Any], github=None) -> None:
+            """Capture the workflow start from this focused route test.
+
+            Preconditions:
+                - The route supplies the same arguments it would pass to the
+                  Temporal start helper in production.
+            Postconditions:
+                - ``started`` contains the captured arguments keyed by name.
+            """
+            started["job_id"] = job_id
+            started["repo_path"] = repo_path
+            started["plan_input"] = plan_input
+            started["github"] = github
+
+        monkeypatch.setattr(gh_routes, "start_coding_team_workflow", _capture)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(
+                1,
+                repo_path=patched_app["repo_path"],
+                remote="upstream",
+                cleanup_checkout_on_success=True,
+            ),
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert started["repo_path"] == patched_app["repo_path"]
+        assert started["plan_input"]["requirements_title"] == "Add feature"
+        assert started["github"] == {
+            "owner": "o",
+            "repo": "r",
+            "issue_number": 1,
+            "issue_title": "Add feature",
+            "remote": "upstream",
+            "base": "trunk",
+            "integration_branch": "khala/issue-1",
+            "cleanup_checkout_on_success": True,
+        }
+        assert "token" not in started["github"]
+        assert gh.get_repo_calls == 1
+
+    def test_run_from_github_skips_get_repo_when_base_branch_supplied(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """When the caller supplies base_branch, do not call get_repo for default_branch."""
+        import software_engineering_team.api.routes.github as gh_routes
+
+        started: dict[str, Any] = {}
+
+        def _capture(job_id: str, repo_path: str, plan_input: dict[str, Any], github=None) -> None:
+            started["github"] = github
+
+        monkeypatch.setattr(gh_routes, "start_coding_team_workflow", _capture)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(
+                1,
+                repo_path=patched_app["repo_path"],
+                base_branch="release",
+            ),
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert started["github"]["base"] == "release"
+        assert gh.get_repo_calls == 0
+
+    def test_run_from_github_marks_job_failed_and_503_when_temporal_dispatch_raises(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """When Temporal dispatch fails, the route must mark the job failed and return 503."""
+        import software_engineering_team.api.routes.github as gh_routes
+
+        def _raise(*a, **k):
+            raise RuntimeError("temporal down")
+
+        monkeypatch.setattr(gh_routes, "start_coding_team_workflow", _raise)
+
+        gh = _FakeClient(
+            issues=[_issue(1, title="Add feature")],
+            sub_map={1: []},
+            repo=Repo(default_branch="trunk"),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+
+        assert resp.status_code == 503
+        jobs = patched_app["jobs"].list_jobs()
+        assert len(jobs) == 1
+        job = patched_app["jobs"].get_job(jobs[0]["job_id"])
+        assert job is not None
+        assert job["status"] == "failed"
+        assert "Temporal dispatch failed" in job["error"]
+
     def test_picks_ready_issue_and_opens_pr(self, patched_app) -> None:
         gh = _FakeClient(
             issues=[_issue(11, title="Add feature")],
             sub_map={11: []},
         )
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json={
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            {
                 "owner": "o",
                 "repo": "r",
                 "repo_path": patched_app["repo_path"],
@@ -1374,9 +1557,9 @@ class TestEndpointHappyPath:
         gh = _FakeClient(issues=[_issue(11, title="Add feature")], sub_map={11: []})
         patched_app["set_github"](gh)
 
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json={"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            {"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
@@ -1398,9 +1581,9 @@ class TestEndpointHappyPath:
 class TestEndpointFailures:
     def test_no_token_returns_400(self, patched_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json={"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            {"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
         )
         assert resp.status_code == 400
         assert "GITHUB_TOKEN" in resp.json()["detail"]
@@ -1419,9 +1602,9 @@ class TestEndpointFailures:
             sub_map={1: [SubIssue(2, "open", "blocker")]},
         )
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json={"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            {"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
         )
         assert resp.status_code == 404
         assert gh.created_pulls == []
@@ -1433,9 +1616,9 @@ class TestEndpointFailures:
             sub_map={1: [SubIssue(2, "open", "blocker")]},
         )
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 409
         assert "blocked by sub-issues [2]" in resp.json()["detail"]
@@ -1444,20 +1627,14 @@ class TestEndpointFailures:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
         gh.fail_get_repo = True
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
-        # Hook ran synchronously, so 200 is returned but the job is failed.
-        assert resp.status_code == 200
-        job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["status"] == "failed"
-        assert "get_repo" in job["error"]
+        assert resp.status_code == 502
+        assert patched_app["started_workflows"] == []
         assert gh.created_pulls == []
-        # Token is validated *before* the start-comment fires, so when get_repo
-        # fails we should see exactly the failure comment.
-        assert any("failed: " in body for _, body in gh.comments)
-        assert not any("started job" in body for _, body in gh.comments)
+        assert gh.comments == []
 
     def test_orchestrator_raises(self, patched_app, monkeypatch) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
@@ -1467,9 +1644,9 @@ class TestEndpointFailures:
             raise RuntimeError("orchestrator exploded")
 
         monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _boom)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
@@ -1494,9 +1671,9 @@ class TestEndpointFailures:
             )
 
         monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _no_merge)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
@@ -1525,9 +1702,9 @@ class TestEndpointFailures:
             )
 
         monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _no_real_merge)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
@@ -1552,9 +1729,9 @@ class TestEndpointFailures:
             )
 
         monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _already_done)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
@@ -1568,9 +1745,9 @@ class TestEndpointFailures:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
         patched_app["set_github"](gh)
         monkeypatch.setattr(patched_app["api"], "_fast_forward", lambda *a, **kw: (False, "ff err"))
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         # Regression: previously left status="completed" with an error field.
@@ -1581,9 +1758,9 @@ class TestEndpointFailures:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
         patched_app["set_github"](gh)
         monkeypatch.setattr(patched_app["api"], "_push_branch", lambda *a, **kw: (False, "auth"))
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -1596,9 +1773,9 @@ class TestEndpointFailures:
 
         gh.find_existing_pr = _raise_lookup  # type: ignore[assignment]
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -1612,9 +1789,9 @@ class TestEndpointFailures:
 
         gh.create_pull_request = _raise_create  # type: ignore[assignment]
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -1644,9 +1821,9 @@ class TestEndpointFailures:
             "_prepare_issue_branch",
             lambda *a, **kw: (False, "no remote", []),
         )
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
@@ -1668,9 +1845,9 @@ class TestEndpointReuse:
             ),
         )
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200
         # No new PR created, but job records the existing PR url.
@@ -1715,9 +1892,9 @@ class TestEndpointReuse:
         )
         patched_app["set_github"](gh)
 
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json={"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            {"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
         )
         assert resp.status_code == 200, resp.text
 
@@ -1777,9 +1954,9 @@ class TestEndpointReuse:
 
         # First (failing) run: seed a stale partial-failure warning on the PR body.
         monkeypatch.setattr(api, "run_coding_team_orchestrator", _partial_orchestrator)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200, resp.text
         assert gh.created_pulls == []
@@ -1789,9 +1966,9 @@ class TestEndpointReuse:
 
         # Retry with a clean (all-merged) orchestrator.
         monkeypatch.setattr(api, "run_coding_team_orchestrator", _clean_orchestrator)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         assert resp.status_code == 200, resp.text
         assert gh.created_pulls == []
@@ -2100,8 +2277,8 @@ class TestActiveIssueMarkerLifecycle:
         if orchestrator is not None:
             monkeypatch.setattr(api, "run_coding_team_orchestrator", orchestrator)
         patched_app["set_github"](github_client)
-        resp = patched_app["client"].post(
-            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app, _body(3, repo_path=patched_app["repo_path"])
         )
         assert resp.status_code == 200
         return cleared
@@ -2164,9 +2341,9 @@ class TestActiveIssueMarkerLifecycle:
 
         monkeypatch.setattr(api, "run_coding_team_orchestrator", already_done)
         patched_app["set_github"](_FakeClient(issues=[_issue(3)], sub_map={3: []}))
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(3, repo_path=patched_app["repo_path"], cleanup_checkout_on_success=True),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(3, repo_path=patched_app["repo_path"], cleanup_checkout_on_success=True),
         )
         assert resp.status_code == 200
         assert removed == [patched_app["repo_path"]]
@@ -2205,8 +2382,8 @@ class TestActiveIssueMarkerLifecycle:
         )
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = patched_app["client"].post(
-            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app, _body(3, repo_path=patched_app["repo_path"])
         )
         assert resp.status_code == 200
         bodies = [body for _n, body in client.comments]
@@ -2225,8 +2402,8 @@ class TestActiveIssueMarkerLifecycle:
         monkeypatch.setattr(api, "_prepare_issue_branch", fake_prep)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = patched_app["client"].post(
-            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app, _body(3, repo_path=patched_app["repo_path"])
         )
         assert resp.status_code == 200
         assert seen["issue_number"] == 3
@@ -2236,9 +2413,9 @@ class TestStatusResponseSurfacing:
     def test_status_returns_github_fields(self, patched_app) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
         patched_app["set_github"](gh)
-        post = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(1, repo_path=patched_app["repo_path"]),
+        post = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(1, repo_path=patched_app["repo_path"]),
         )
         job_id = post.json()["job_id"]
         status = patched_app["client"].get(f"/status/{job_id}")
@@ -2285,7 +2462,9 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app, _body(3, repo_path=repo_path)
+        )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -2316,7 +2495,9 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app, _body(3, repo_path=repo_path)
+        )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -2333,7 +2514,9 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app, _body(3, repo_path=repo_path)
+        )
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
@@ -2364,7 +2547,9 @@ class TestPublishWindowLiveness:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app, _body(3, repo_path=repo_path)
+        )
         assert resp.status_code == 200
         # The orchestrator declared success before the push, but the job must
         # still be non-terminal (and visible to the busy-checkout guard)…
@@ -2639,9 +2824,9 @@ class TestEphemeralCheckoutCleanup:
         monkeypatch.delenv("AGENT_CACHE", raising=False)
         gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(11, repo_path=str(checkout), cleanup_checkout_on_success=True),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(11, repo_path=str(checkout), cleanup_checkout_on_success=True),
         )
         assert resp.status_code == 200, resp.text
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
@@ -2686,9 +2871,9 @@ class TestEphemeralCheckoutCleanup:
         monkeypatch.setattr(api, "run_coding_team_orchestrator", _partial_orchestrator)
         gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
         patched_app["set_github"](gh)
-        resp = patched_app["client"].post(
-            "/run-from-github",
-            json=_body(11, repo_path=str(checkout), cleanup_checkout_on_success=True),
+        resp = _post_run_from_github_and_run_hooks(
+            patched_app,
+            _body(11, repo_path=str(checkout), cleanup_checkout_on_success=True),
         )
         assert resp.status_code == 200, resp.text
         job = patched_app["jobs"].get_job(resp.json()["job_id"])

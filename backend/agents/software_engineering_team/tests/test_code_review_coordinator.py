@@ -165,7 +165,10 @@ def test_cap_then_reconcile_keeps_critical_and_rejects() -> None:
     assert any(i.severity == "critical" for i in out)
 
 
-@pytest.mark.parametrize("severity", ["High", "HIGH", " critical "])
+@pytest.mark.parametrize(
+    "severity",
+    ["High", "HIGH", " high ", "Critical", "CRITICAL", " critical "],
+)
 def test_reconcile_approval_treats_mixed_case_critical_high_as_blocking(
     severity: str,
 ) -> None:
@@ -176,9 +179,12 @@ def test_reconcile_approval_treats_mixed_case_critical_high_as_blocking(
     assert _normalized_severity(out[0].severity) in {"critical", "high"}
 
 
-def test_reconcile_approval_mixed_case_medium_still_auto_approves() -> None:
+@pytest.mark.parametrize("severity", ["Medium", "LOW", "Info"])
+def test_reconcile_approval_mixed_case_non_blocking_still_auto_approves(
+    severity: str,
+) -> None:
     """Non-blocking severities remain non-blocking after case fold."""
-    approved, out = _reconcile_approval(False, [_issue("Medium", "nit")])
+    approved, out = _reconcile_approval(False, [_issue(severity, "nit")])
     assert approved is True
     assert len(out) == 1
 

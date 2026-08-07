@@ -1,10 +1,11 @@
-"""Tests for ``strategy_lab.orchestrator_api`` façade re-exports.
+"""Tests for ``strategy_lab.orchestrator_api`` (partial body home + deferred façade).
 
 Preconditions:
-    ``investment_team.api.main`` is importable (same as activity tests).
+    ``investment_team.api.main`` is importable.
 Postconditions:
-    Asserts that each listed export resolves to the callable on ``api.main``,
-    unknown names raise ``AttributeError``, and ``dir()`` includes exports.
+    Moved symbols are defined on ``orchestrator_api`` (not only via ``__getattr__``)
+    and match ``api.main`` aliases. Deferred symbols still resolve via
+    ``__getattr__`` to the same objects on ``api.main``.
 """
 
 from __future__ import annotations
@@ -14,20 +15,36 @@ import pytest
 from investment_team.api import main as api_main
 from investment_team.strategy_lab import orchestrator_api
 
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "_persist_run_state",
-        "_snapshot_prior_records",
-        "_compute_signal_brief_snapshot",
-        "_is_strategy_lab_run_externally_stopped",
-        "_strategy_lab_external_terminal_status",
-        "_finalize_strategy_lab_cycle_record",
-    ],
+_MOVED = (
+    "STRATEGY_LAB_TERMINAL_STATUSES",
+    "_persist_run_state",
+    "_reconcile_run_progress",
+    "_run_state_to_response",
+    "_build_run_state",
+    "_job_progress_percent",
+    "_delete_jobs_concurrently",
+    "_delete_paper_sessions_for_lab_record",
+    "_purge_strategy_lab_job_storage",
 )
-def test_orchestrator_api_reexports_match_api_main(name: str) -> None:
-    """Each façade export is the same object currently defined on api.main."""
+
+_DEFERRED = (
+    "_snapshot_prior_records",
+    "_compute_signal_brief_snapshot",
+    "_is_strategy_lab_run_externally_stopped",
+    "_strategy_lab_external_terminal_status",
+    "_finalize_strategy_lab_cycle_record",
+)
+
+
+@pytest.mark.parametrize("name", _MOVED)
+def test_moved_symbol_defined_on_orchestrator_api(name: str) -> None:
+    """Moved helpers must be real module attributes, not lazy ``__getattr__`` only."""
+    assert name in orchestrator_api.__dict__, f"{name} missing from orchestrator_api.__dict__"
+    assert getattr(orchestrator_api, name) is getattr(api_main, name)
+
+
+@pytest.mark.parametrize("name", _DEFERRED)
+def test_deferred_symbol_still_aliases_api_main(name: str) -> None:
     assert getattr(orchestrator_api, name) is getattr(api_main, name)
 
 
@@ -40,3 +57,9 @@ def test_orchestrator_api_dir_includes_exports() -> None:
     names = dir(orchestrator_api)
     for export in orchestrator_api.__all__:
         assert export in names
+
+
+def test_progress_fields_and_purge_constants_exported() -> None:
+    assert "completed_cycles" in orchestrator_api._STRATEGY_LAB_PROGRESS_FIELDS
+    assert orchestrator_api._PURGE_MAX_WORKERS == 16
+    assert orchestrator_api._PURGE_TIMEOUT_S == 120.0

@@ -167,12 +167,12 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
-    from investment_team.api import main as api_main
+def test_persist_run_state_activity_delegates_to_orchestrator_api(monkeypatch):
+    from investment_team.strategy_lab import orchestrator_api
 
     captured = {}
     monkeypatch.setattr(
-        api_main,
+        orchestrator_api,
         "_persist_run_state",
         lambda run_id, state, *, create=False: captured.update(
             run_id=run_id, state=state, create=create

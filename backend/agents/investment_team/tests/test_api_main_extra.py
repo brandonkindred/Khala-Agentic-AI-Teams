@@ -1013,10 +1013,11 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
 
-    api_main._run_backtest_background("job-1", strategy, config, "tester", [])
+    status = api_main._run_backtest_background("job-1", strategy, config, "tester", [])
     # Final state update is to COMPLETED.
     assert state.get("status") == "completed"
     assert state.get("backtest_id", "").startswith("bt-")
+    assert status == api_main._BT_JOB_STATUS_COMPLETED
 
 
 def test_run_backtest_background_handles_backtest_execution_error(
@@ -1045,9 +1046,10 @@ def test_run_backtest_background_handles_backtest_execution_error(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-2", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-2", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert state.get("error") == "bad strategy"
+    assert status == api_main._BT_JOB_STATUS_FAILED
 
 
 def test_run_backtest_background_handles_generic_exception(
@@ -1076,9 +1078,10 @@ def test_run_backtest_background_handles_generic_exception(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-3", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-3", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert "network down" in (state.get("error") or "")
+    assert status == api_main._BT_JOB_STATUS_FAILED
 
 
 def test_run_backtest_background_early_cancellation(
@@ -1107,9 +1110,134 @@ def test_run_backtest_background_early_cancellation(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-4", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-4", strategy, config, "tester", None)
     # No update calls — early return.
     assert state == {}
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+
+
+def test_run_backtest_background_mid_run_cancellation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, True])
+    monkeypatch.setattr(
+        api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks)
+    )
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background("job-5", strategy, config, "tester", None)
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    assert state.get("status") == "running"
+    assert "backtest_id" not in state
+
+
+def test_run_backtest_background_cancel_during_backtest_execution_error(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, True])
+    monkeypatch.setattr(
+        api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks)
+    )
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    def _raises_backtest_error(strategy, config):
+        raise api_main.BacktestExecutionError(status_code=422, detail="bad strategy")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_backtest_error)
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background("job-6", strategy, config, "tester", None)
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    assert state.get("status") == "running"
+    assert "error" not in state
+
+
+def test_run_backtest_background_cancel_during_generic_exception(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, True])
+    monkeypatch.setattr(
+        api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks)
+    )
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    def _raises_generic(strategy, config):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_generic)
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background("job-7", strategy, config, "tester", None)
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    assert state.get("status") == "running"
+    assert "error" not in state
 
 
 def test_run_backtest_background_retry_reuses_backtest_id(
@@ -1157,15 +1285,17 @@ def test_run_backtest_background_retry_reuses_backtest_id(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
 
-    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    status1 = api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
     first_backtest_id = state["backtest_id"]
 
-    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    status2 = api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
     second_backtest_id = state["backtest_id"]
 
     assert first_backtest_id == second_backtest_id
     # The second run overwrote the same record rather than adding a duplicate.
     assert len(api_main._backtests.values()) == 1
+    assert status1 == api_main._BT_JOB_STATUS_COMPLETED
+    assert status2 == api_main._BT_JOB_STATUS_COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -1356,9 +1486,9 @@ def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
     """A unit that doesn't finish within the shared deadline is reported as
     None (unknown, still in flight) rather than a misleadingly-confirmed 0."""
     import job_service_client as jsc_mod
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(api_main, "_PURGE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(orchestrator_api, "_PURGE_TIMEOUT_S", 0.2)
 
     release = threading.Event()
 
@@ -1381,7 +1511,7 @@ def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
     monkeypatch.setattr(jsc_mod, "JobServiceClient", _factory)
 
     try:
-        counts = api_main._purge_strategy_lab_job_storage()
+        counts = orchestrator_api._purge_strategy_lab_job_storage()
     finally:
         # Unblock the slow unit's background thread regardless of outcome, so
         # it doesn't keep running past the end of the test.
@@ -1884,6 +2014,7 @@ def test_persist_run_state_propagates_job_service_error(
     persist activity's retry policy) need to detect a durable-write failure
     instead of continuing as if it succeeded (issue #4150)."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     class _Broken:
         def create_job(self, *a, **k):
@@ -1892,7 +2023,7 @@ def test_persist_run_state_propagates_job_service_error(
         def update_job(self, *a, **k):
             raise RuntimeError("backend down")
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+    monkeypatch.setattr(orchestrator_api, "_get_lab_run_job_client", lambda: _Broken())
     with pytest.raises(RuntimeError, match="backend down"):
         api_main._persist_run_state("run-z", {"status": "running"}, create=True)
     with pytest.raises(RuntimeError, match="backend down"):
@@ -1908,10 +2039,11 @@ def test_persist_run_state_status_less_update_does_not_clobber_status(
     status to "running" unconditionally, clobbering a cancelled/failed/
     completed status a concurrent path had already persisted (issue #4185)."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     client = _FakeJobClient()
     client.create_job("run-cancelled", status="cancelled", completed_cycles=2)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: client)
+    monkeypatch.setattr(orchestrator_api, "_get_lab_run_job_client", lambda: client)
 
     # A progress-only delta, no "status" key -- must not touch status at all.
     api_main._persist_run_state("run-cancelled", {"completed_cycles": 3}, create=False)
@@ -2346,37 +2478,47 @@ def test_normalize_persisted_job_defaults_status_from_fallback() -> None:
 def test_reconcile_run_progress_tolerates_none_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """A persisted record with ``"data": None`` (present but null, distinct
     from the key being absent) must not raise ``TypeError`` -- regression
-    test for the same defect class as ``normalize_persisted_job`` (issue
-    #4325) but in ``_reconcile_run_progress``'s own, separate fallback.
+    test for the same defect class as ``normalize_persisted_job`` but in
+    ``_reconcile_run_progress``'s own, separate fallback.
+
+    Preconditions:
+        - ``orchestrator_api._active_runs`` / ``_get_lab_run_job_client`` are
+          the names the moved body closes over (not ``api.main`` aliases).
+    Postconditions:
+        - Call returns without ``TypeError``; in-memory ``completed_cycles``
+          stays unchanged when the None-data fallback has no progress fields.
     """
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-none-data"
-    monkeypatch.setattr(
-        api_main,
-        "_active_runs",
-        {
-            run_id: {
-                "run_id": run_id,
-                "status": "running",
-                "total_cycles": 4,
-                "completed_cycles": 1,
-            }
-        },
-    )
+    shared_runs = {
+        run_id: {
+            "run_id": run_id,
+            "status": "running",
+            "total_cycles": 4,
+            "completed_cycles": 1,
+        }
+    }
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared_runs)
 
     class _Stub:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def get_job(self, jid: str):
+            self.calls += 1
             return {"job_id": run_id, "status": "running", "data": None}
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Stub())
+    stub = _Stub()
+    monkeypatch.setattr(orchestrator_api, "_get_lab_run_job_client", lambda: stub)
 
-    api_main._reconcile_run_progress(run_id)
+    orchestrator_api._reconcile_run_progress(run_id)
 
     # No crash, and the in-memory entry's existing progress is left intact
     # since the fallback ("data" -> the persisted record itself) contains
     # none of _STRATEGY_LAB_PROGRESS_FIELDS.
-    assert api_main._active_runs[run_id]["completed_cycles"] == 1
+    assert stub.calls == 1
+    assert shared_runs[run_id]["completed_cycles"] == 1
 
 
 # ---------------------------------------------------------------------------
