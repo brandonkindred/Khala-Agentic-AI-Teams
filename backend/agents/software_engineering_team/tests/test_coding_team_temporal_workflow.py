@@ -11,14 +11,13 @@ pattern ``agent_team_studio/agentic_team_provisioning/tests/test_temporal_activi
 and ``test_coding_team_temporal_activity.py`` for that activity-side behavior
 directly). These tests fake the activity's *return value* directly so the
 signal / wait_condition / re-invoke SHAPE -- including resume_token
-validation and acknowledged_resume_token -- stays isolated from the real
-activity's orchestrator-wiring/job-store dependencies. Buffering an early
-signal (before a pause is active) and applying answers into
-``request["plan_input"]`` remain open future work (not #3988, whose scope is
-limited to an integration test proving the existing pause/resume cycle) and
-are not covered here. That integration test -- driving the cycle against a
-real ``temporalio.testing.WorkflowEnvironment`` rather than these monkeypatch
-fakes -- lives at the bottom of this file.
+validation, early-signal buffering, and acknowledged_resume_token -- stays
+isolated from the real activity's orchestrator-wiring/job-store
+dependencies. Applying answers into ``request["plan_input"]`` remains open
+future work and is not covered here. An integration test driving the full
+pause/signal/resume cycle against a real
+``temporalio.testing.WorkflowEnvironment`` rather than these monkeypatch
+fakes lives at the bottom of this file.
 """
 
 from __future__ import annotations
@@ -60,7 +59,9 @@ def test_run_returns_immediately_when_not_paused(monkeypatch: pytest.MonkeyPatch
     iteration without ever touching wait_condition -- the common case when no
     HITL gate pauses during the run."""
     workflow_obj = CodingTeamWorkflow()
-    calls, _ = _patch_execute(monkeypatch, [{"job_id": "j1", "status": "completed"}])
+    calls, _ = _patch_execute(
+        monkeypatch, [{"outcome": "completed", "job_id": "j1", "status": "completed"}]
+    )
 
     async def _no_wait(*_a, **_kw):  # pragma: no cover - must not be called
         raise AssertionError("wait_condition must not be called when not paused")
@@ -69,7 +70,7 @@ def test_run_returns_immediately_when_not_paused(monkeypatch: pytest.MonkeyPatch
 
     result = asyncio.run(workflow_obj.run({"repo_path": "/repo", "plan_input": {}}))
 
-    assert result == {"job_id": "j1", "status": "completed"}
+    assert result == {"outcome": "completed", "job_id": "j1", "status": "completed"}
     assert len(calls) == 1
 
 
@@ -106,7 +107,7 @@ def test_submit_answers_signal_wakes_wait_condition_and_reloops(
         monkeypatch,
         [
             {"outcome": "paused", "job_id": "j1", "resume_token": "j1:1"},
-            {"job_id": "j1", "status": "completed"},
+            {"outcome": "completed", "job_id": "j1", "status": "completed"},
         ],
     )
 
@@ -118,7 +119,7 @@ def test_submit_answers_signal_wakes_wait_condition_and_reloops(
 
     result = asyncio.run(workflow_obj.run(request))
 
-    assert result == {"job_id": "j1", "status": "completed"}
+    assert result == {"outcome": "completed", "job_id": "j1", "status": "completed"}
     assert len(calls) == 2
     # Same activity function, same request object, reused across both calls.
     assert calls[0][0] is calls[1][0]
@@ -161,19 +162,142 @@ def test_submit_answers_ignores_second_submission_for_same_token(
     assert workflow_obj._submitted_answers == first
 
 
-def test_submit_answers_ignores_signal_with_no_active_pause(
+def test_submit_answers_buffers_signal_with_no_active_pause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A signal arriving before any pause is active (self._active_resume_token is
-    None) is dropped rather than buffered -- buffering early signals remains
-    open future work (not #3988, which only adds an integration test for the
-    existing, intentionally non-buffering cycle)."""
+    None) with a usable string resume_token is buffered by that token, not
+    dropped and not applied to _submitted_answers -- run()'s loop is what
+    consumes a buffered entry once it arms the matching pause."""
     workflow_obj = CodingTeamWorkflow()
     assert workflow_obj._active_resume_token is None
+    answers = [{"question_id": "q1"}]
 
-    workflow_obj.submit_answers({"resume_token": "any-token", "answers": [{"question_id": "q1"}]})
+    workflow_obj.submit_answers({"resume_token": "future-token", "answers": answers})
 
     assert workflow_obj._submitted_answers is None
+    assert workflow_obj._buffered_signals == {"future-token": answers}
+
+
+def test_submit_answers_drops_early_signal_with_no_usable_resume_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signal arriving before any pause is active but with no usable (non-empty
+    string) resume_token has nothing to key a buffer entry on, so it is dropped
+    entirely rather than buffered under a bad key."""
+    workflow_obj = CodingTeamWorkflow()
+
+    workflow_obj.submit_answers({"resume_token": "", "answers": [{"question_id": "q1"}]})
+    workflow_obj.submit_answers({"resume_token": None, "answers": [{"question_id": "q1"}]})
+    workflow_obj.submit_answers({"answers": [{"question_id": "q1"}]})
+
+    assert workflow_obj._buffered_signals == {}
+    assert workflow_obj._submitted_answers is None
+
+
+def test_submit_answers_early_buffering_first_submission_per_token_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two early signals for the same not-yet-active token must not let the
+    second overwrite the first -- the same "first submission per token wins"
+    rule the active-pause path already enforces."""
+    workflow_obj = CodingTeamWorkflow()
+    first = [{"question_id": "q1", "answer": "yes"}]
+
+    workflow_obj.submit_answers({"resume_token": "future-token", "answers": first})
+    workflow_obj.submit_answers(
+        {"resume_token": "future-token", "answers": [{"question_id": "q1", "answer": "no"}]}
+    )
+
+    assert workflow_obj._buffered_signals == {"future-token": first}
+
+
+def test_submit_answers_does_not_buffer_mismatched_token_while_a_pause_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signal for a token that does not match the CURRENTLY active pause is
+    still just dropped, not buffered -- only the "no pause active yet" case
+    buffers (see submit_answers's docstring for why a mismatched-but-active
+    token can only be stale, never a legitimate future pause)."""
+    workflow_obj = CodingTeamWorkflow()
+    workflow_obj._active_resume_token = "current-token"
+
+    workflow_obj.submit_answers({"resume_token": "other-token", "answers": [{"question_id": "q1"}]})
+
+    assert workflow_obj._buffered_signals == {}
+    assert workflow_obj._submitted_answers is None
+
+
+def test_run_consumes_buffered_signal_immediately_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An early signal buffered before run()'s loop even starts is applied the
+    instant the matching pause is armed -- the predicate is already true, so
+    wait_condition resolves without a real signal round trip (proving the
+    buffered path, not the live-signal path, resolved it)."""
+    workflow_obj = CodingTeamWorkflow()
+    workflow_obj.submit_answers(
+        {"resume_token": "j1:1", "answers": [{"question_id": "q1", "answer": "yes"}]}
+    )
+    assert workflow_obj._buffered_signals == {"j1:1": [{"question_id": "q1", "answer": "yes"}]}
+
+    request = {"repo_path": "/repo", "plan_input": {"objective": "o"}}
+    calls, snapshots = _patch_execute(
+        monkeypatch,
+        [
+            {"outcome": "paused", "job_id": "j1", "resume_token": "j1:1"},
+            {"outcome": "completed", "job_id": "j1", "status": "completed"},
+        ],
+    )
+
+    async def _wait_must_not_actually_block(pred, timeout=None):
+        # A buffered entry already satisfies the predicate before this is even
+        # called -- asserting it here proves run() applied the buffer BEFORE
+        # arming the wait, not that this fake happens to resolve it.
+        assert pred()
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _wait_must_not_actually_block)
+
+    result = asyncio.run(workflow_obj.run(request))
+
+    assert result == {"outcome": "completed", "job_id": "j1", "status": "completed"}
+    assert len(calls) == 2
+    assert snapshots[1]["acknowledged_resume_token"] == "j1:1"
+    # The buffered entry is consumed (removed), not left behind for a future round.
+    assert workflow_obj._buffered_signals == {}
+
+
+def test_run_discards_non_matching_buffered_entries_when_arming_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arming a pause applies the matching buffered entry (if any) and discards
+    every other key -- HITL contract §2: stale/duplicate tokens buffered while
+    ``_active_resume_token`` was None must not accumulate across pause rounds."""
+    workflow_obj = CodingTeamWorkflow()
+    workflow_obj.submit_answers({"resume_token": "stale-token", "answers": [{"q": 1}]})
+    workflow_obj.submit_answers(
+        {"resume_token": "j1:1", "answers": [{"question_id": "q1", "answer": "yes"}]}
+    )
+
+    request = {"repo_path": "/repo", "plan_input": {"objective": "o"}}
+    _patch_execute(
+        monkeypatch,
+        [
+            {"outcome": "paused", "job_id": "j1", "resume_token": "j1:1"},
+            {"outcome": "completed", "job_id": "j1", "status": "completed"},
+        ],
+    )
+
+    async def _fake_wait(pred, timeout=None):
+        # Matching entry was applied at arm-time; wait should already be satisfied.
+        assert pred()
+        assert workflow_obj._submitted_answers == [{"question_id": "q1", "answer": "yes"}]
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _fake_wait)
+
+    asyncio.run(workflow_obj.run(request))
+
+    assert workflow_obj._buffered_signals == {}
 
 
 def test_submit_answers_sets_state_directly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -663,21 +787,20 @@ async def test_workflow_pauses_then_resumes_to_completion_via_signal() -> None:
     so this exercises exactly the loop production hits without the real,
     heavy orchestrator.
 
-    Synchronization: ``submit_answers`` deliberately drops (never buffers) a
-    signal arriving before the workflow has processed the paused activity
-    result and set ``self._active_resume_token`` (see that method's
-    docstring) -- a single, precisely-timed signal send would race that
-    window, and there is no query handler to ask "are you paused yet?" (out
-    of scope for #3988). Instead this resends the identical signal on a 50ms
-    interval until the workflow's result future resolves or an overall
-    timeout fires: every resend before the workflow reaches wait_condition is
-    silently dropped by design (harmless, retried); the first to land after
-    is accepted; every later one is a no-op (the already-submitted guard, or
-    the server rejecting a signal to a since-completed workflow, caught and
-    ignored); if nothing ever lands (a real regression), the timeout fails
-    the test with a clear diagnostic instead of hanging. This requires no
-    production change -- it works entirely within the already-merged,
-    intentionally non-buffering ``submit_answers`` semantics.
+    Synchronization: ``submit_answers`` now buffers a resume_token-keyed
+    signal that arrives before the workflow has processed the paused
+    activity result and set ``self._active_resume_token`` (see that
+    method's docstring), so a single precisely-timed signal send no longer
+    needs to race that window -- the sibling test below,
+    ``test_workflow_resumes_via_early_signal_buffered_before_pause_processed``,
+    exercises exactly that path with one signal and no resend loop. This
+    test keeps the resend loop anyway: it predates buffering, still passes
+    unchanged under it (every resend after the first successful delivery is
+    a harmless no-op -- either the already-submitted guard or the server
+    rejecting a signal to a since-completed workflow, both caught and
+    ignored), and continues to prove the pause -> signal -> resume ->
+    completion cycle survives a real Temporal worker/sandbox round-trip
+    regardless of exactly when the signal lands.
     """
     resume_token = "coding-team-workflow-test:resume-token-1"
 
@@ -823,6 +946,80 @@ async def test_workflow_survives_worker_restart_while_paused_with_buffered_signa
                 history = await handle.fetch_history()
 
     assert result == {"job_id": "test-job-restart-1", "status": "completed"}
+    await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_resumes_via_early_signal_buffered_before_pause_processed() -> None:
+    """Drive the same pause -> signal -> resume -> completion cycle as
+    ``test_workflow_pauses_then_resumes_to_completion_via_signal``, but send
+    the ``submit_answers`` signal exactly once, immediately after
+    ``start_workflow`` returns -- deliberately racing the workflow's very
+    first ``run_pipeline_activity`` call, well before ``run`` could have
+    processed a paused result and armed ``self._active_resume_token``.
+
+    This proves early-signal buffering end to end against a real Temporal
+    worker/sandbox: unlike the sibling test above (which must resend on a
+    50ms interval because a single early signal used to be silently
+    dropped), this test sends the signal exactly once and still
+    expects completion. Whichever way the race actually resolves, the
+    result is correct: if the signal lands before ``run`` arms
+    ``self._active_resume_token``, ``submit_answers`` buffers it keyed by
+    ``resume_token`` and ``run`` consumes it the instant it arms that same
+    token, with no further signal round-trip needed; if it lands after,
+    the existing token-matching live-signal path (unchanged by buffering)
+    handles it exactly as it always has.
+    """
+    resume_token = "coding-team-workflow-test:early-resume-token-1"
+
+    from temporalio import activity
+    from temporalio.worker import Replayer
+
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
+
+    @activity.defn(name="coding_team_run_pipeline")
+    def _fake_pipeline_activity(request: dict) -> dict:
+        if request.get("acknowledged_resume_token") == resume_token:
+            return {"job_id": request.get("job_id", "test-job"), "status": "completed"}
+        return {
+            "outcome": "paused",
+            "job_id": request.get("job_id", "test-job"),
+            "resume_token": resume_token,
+            "pause_kind": "entry",
+            "pause_context": None,
+            "pending_questions": [{"question_id": "q1", "prompt": "Proceed?"}],
+        }
+
+    workflow_id = "coding-team-workflow-early-signal-test"
+    request = {
+        "job_id": "test-job-2",
+        "repo_path": "/tmp/repo",
+        "plan_input": {"objective": "ship it"},
+    }
+
+    async with _workflow_environment_worker(activities=[_fake_pipeline_activity]) as env:
+        handle = await env.client.start_workflow(
+            CodingTeamWorkflow.run,
+            request,
+            id=workflow_id,
+            task_queue=TASK_QUEUE,
+        )
+
+        await handle.signal(
+            CodingTeamWorkflow.submit_answers,
+            {
+                "resume_token": resume_token,
+                "answers": [{"question_id": "q1", "answer": "yes"}],
+            },
+        )
+
+        result = await asyncio.wait_for(handle.result(), timeout=30)
+        history = await handle.fetch_history()
+
+    assert result == {"job_id": "test-job-2", "status": "completed"}
+
     await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)
 
 
