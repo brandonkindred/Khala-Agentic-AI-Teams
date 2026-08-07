@@ -909,10 +909,9 @@ def test_run_reraises_unrelated_workflow_failure(monkeypatch: pytest.MonkeyPatch
 # ---------------------------------------------------------------------------
 
 
-def test_run_uses_coordinator_when_temporal_disabled() -> None:
-    # Under pytest the gate is off, so run() must go through the coordinator.
-    assert _code_review_temporal_enabled() is False
-    out = CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+def test_run_uses_coordinator_when_force_in_process() -> None:
+    # force_in_process bypasses Temporal even when the gate would enable it.
+    out = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input())
     assert isinstance(out, CodeReviewOutput)
     assert out.approved is True
 
@@ -932,7 +931,7 @@ def test_run_rebuilds_reader_from_repo_root_when_no_live_reader(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input(repo_root=str(tmp_path)))
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input(repo_root=str(tmp_path)))
     assert isinstance(captured["repo_reader"], DiskRepoReader)
 
 
@@ -948,7 +947,7 @@ def test_run_prefers_live_reader_over_repo_root(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(
         _input(repo_root=str(tmp_path)),
         repo_reader=sentinel,  # type: ignore[arg-type]
     )
@@ -964,7 +963,7 @@ def test_run_passes_none_reader_without_repo_root(monkeypatch: pytest.MonkeyPatc
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input())
     assert captured["repo_reader"] is None
 
 
