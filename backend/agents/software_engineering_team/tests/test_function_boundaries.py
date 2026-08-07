@@ -309,3 +309,23 @@ def test_iter_constructs_qualifies_methods_and_lists_all() -> None:
 
 def test_iter_constructs_parse_failure_returns_empty() -> None:
     assert iter_constructs("def broken(\n") == []
+
+
+def test_iter_constructs_annotated_hunks_skips_unparseable_sibling() -> None:
+    """With annotated_hunks, an indented continuation hunk does not hide other defs."""
+    content = (
+        "def alpha():\n"
+        "    return 1\n"
+        "...\n"
+        "    changed()\n"
+        "...\n"
+        "def beta():\n"
+        "    return 2\n"
+    )
+    # Whole-file parse fails; hunk-aware listing still finds alpha and beta.
+    assert iter_constructs(content) == []
+    names = {c.name for c in iter_constructs(content, annotated_hunks=True)}
+    assert names == {"alpha", "beta"}
+    beta = next(c for c in iter_constructs(content, annotated_hunks=True) if c.name == "beta")
+    # beta starts after alpha (2 lines) + separator + continuation (1) + separator
+    assert beta.start_line == 6 and beta.end_line == 7

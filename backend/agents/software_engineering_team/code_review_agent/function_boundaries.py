@@ -203,19 +203,13 @@ def _enclosing_construct_ast(content: str, line_number: int) -> Optional[Enclosi
     )
 
 
-def iter_constructs(content: str) -> List[EnclosingConstruct]:
-    """Return every function/method/class construct in ``content``.
-
-    Preconditions:
-        - ``content`` is a string (may be empty).
+def _iter_constructs_ast(content: str) -> List[EnclosingConstruct]:
+    """List every function/method/class in a single contiguous Python snippet.
 
     Postconditions:
-        - Returns ``[]`` when ``content`` fails to parse as Python. Never raises.
-        - Otherwise returns one ``EnclosingConstruct`` per ``FunctionDef``,
-          ``AsyncFunctionDef``, and ``ClassDef``, with method names qualified
-          as ``ClassName.method`` when nested in a class body (same rules as
-          :func:`enclosing_construct`). Ranges use ``node_start_line`` /
-          ``node_end_line`` (decorators included on start).
+        - Returns ``[]`` when ``content`` fails to parse. Never raises.
+        - Otherwise one ``EnclosingConstruct`` per def/class with method names
+          qualified as ``ClassName.method`` when nested in a class body.
     """
     try:
         tree = ast.parse(content)
@@ -249,6 +243,49 @@ def iter_constructs(content: str) -> List[EnclosingConstruct]:
             )
         )
     return results
+
+
+def iter_constructs(content: str, *, annotated_hunks: bool = False) -> List[EnclosingConstruct]:
+    """Return every function/method/class construct in ``content``.
+
+    When ``annotated_hunks`` is True (content produced by stripping
+    ``render_annotated_hunks`` output), bare column-0 ``...`` gap markers
+    split the excerpt into independently parsed hunks — the same rule as
+    :func:`enclosing_construct`. An unparseable sibling hunk is skipped so
+    constructs in other hunks remain discoverable by name.
+
+    When ``annotated_hunks`` is False (ordinary full-file source), ``...`` is
+    left alone (valid Ellipsis) and the whole content is parsed once.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+
+    Postconditions:
+        - Returns ``[]`` when nothing parses. Never raises.
+        - Otherwise returns one ``EnclosingConstruct`` per discoverable
+          ``FunctionDef`` / ``AsyncFunctionDef`` / ``ClassDef``, with method
+          names qualified as ``ClassName.method`` when nested in a class body.
+          Ranges use ``node_start_line`` / ``node_end_line`` expressed in the
+          parent ``content``'s 1-based coordinates.
+    """
+    if annotated_hunks:
+        lines = content.splitlines()
+        if any(line == _HUNK_SEPARATOR for line in lines):
+            results: List[EnclosingConstruct] = []
+            for seg_start, _seg_end, seg_lines in _hunk_segments(lines):
+                local = _iter_constructs_ast("\n".join(seg_lines))
+                for c in local:
+                    results.append(
+                        EnclosingConstruct(
+                            start_line=c.start_line + seg_start - 1,
+                            end_line=c.end_line + seg_start - 1,
+                            name=c.name,
+                            kind=c.kind,
+                        )
+                    )
+            return results
+
+    return _iter_constructs_ast(content)
 
 
 def enclosing_construct(

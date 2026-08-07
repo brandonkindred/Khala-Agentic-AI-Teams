@@ -634,7 +634,13 @@ class CodebaseIndex:
             )
 
         stripped, _, mapper = strip_numbered_prefixes(content, 1)
-        matches = [c for c in iter_constructs(stripped) if c.name == needle]
+        # Pre-numbered hunk excerpts use annotated_hunks so a sibling
+        # unparseable continuation does not hide constructs in other hunks.
+        matches = [
+            c
+            for c in iter_constructs(stripped, annotated_hunks=mapper is not None)
+            if c.name == needle
+        ]
         if not matches:
             return f"Error: no function/class named {needle!r} in {display}."
         if len(matches) > 1:
@@ -944,12 +950,15 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     def read_function(path: str, name_or_line) -> str:
         """Read one function/method/class body by line number or exact name.
 
-        Pass a positive integer (or digit string) for line-based lookup, or a
-        name such as ``foo`` / ``Class.method`` for exact name lookup.
+        Pass a positive integer for line-based lookup, or a name such as
+        ``foo`` / ``Class.method`` for exact name lookup. A string of only
+        digits (e.g. ``"12"``) is treated as a line number, not a name —
+        prefer an int when you mean a line.
 
         Args:
             path: File path (same paths accepted by read_file).
-            name_or_line: 1-based line number or exact construct name.
+            name_or_line: 1-based line number (int or digit-only string) or
+                exact construct name (any other non-empty string).
 
         Returns:
             Header plus ``N| content`` lines, or an ``Error: ...`` message.

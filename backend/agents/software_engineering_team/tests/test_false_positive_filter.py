@@ -432,6 +432,40 @@ def test_read_function_by_name_ambiguous_pre_numbered_shows_original_lines() -> 
     assert "lines 2–" not in msg
 
 
+def test_read_function_by_name_multi_hunk_finds_construct_despite_sibling() -> None:
+    """Pre-numbered multi-hunk excerpt: name lookup survives an unparseable sibling hunk."""
+    content = (
+        "100: def alpha():\n"
+        "101:     return 1\n"
+        "...\n"
+        "150:     changed()\n"
+        "...\n"
+        "200: def beta():\n"
+        "201:     return 2\n"
+    )
+    idx = CodebaseIndex(files={"app/mod.py": content})
+    by_name = idx.read_function_by_name("app/mod.py", "beta")
+    by_line = idx.read_function("app/mod.py", 200)
+    assert by_name == by_line
+    assert by_name.startswith("app/mod.py function beta lines 200–201 (2 lines):")
+    assert "200| def beta():" in by_name
+
+
+def test_read_function_by_name_empty_name_errors() -> None:
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    assert "non-empty string" in idx.read_function_by_name("app/mod.py", "")
+    assert "non-empty string" in idx.read_function_by_name("app/mod.py", "   ")
+    assert "non-empty string" in idx.read_function_by_name("app/mod.py", None)  # type: ignore[arg-type]
+
+
+def test_read_function_by_name_non_python_errors() -> None:
+    idx = CodebaseIndex(files={"app/main.ts": "function f() { return 1; }\n"})
+    msg = idx.read_function_by_name("app/main.ts", "f")
+    assert msg.startswith("Error:")
+    assert "Python file" in msg
+    assert "app/main.ts" in msg
+
+
 def test_read_function_tool_dispatches_line_and_name() -> None:
     src = "def f():\n    return 1\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
