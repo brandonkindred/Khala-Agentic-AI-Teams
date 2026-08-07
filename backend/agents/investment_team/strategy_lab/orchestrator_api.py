@@ -22,16 +22,25 @@ Invariants:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import httpx
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
+)
+from investment_team.strategy_lab.run_state import (
     get_lab_run_job_client as _get_lab_run_job_client,
+)
+from investment_team.strategy_lab.run_state import (
     lock as _lock,
 )
+from shared.concurrency import parallel_map
 
 if TYPE_CHECKING:
     from investment_team.api.main import (
@@ -340,6 +349,211 @@ def _job_progress_percent(completed: int, total: int) -> int:
     return max(0, min(100, int((completed / total) * 100)))
 
 
+# Bounded thread-pool ceiling for the job-service fan-out helpers below. These
+# issue blocking sync HTTP calls, so threads (not asyncio) are the right tool;
+# the cap keeps a large server-side job list from spawning unbounded threads.
+# NB: _purge_strategy_lab_job_storage runs the four teams on an outer pool of 4,
+# so a full purge peaks at 4 x _PURGE_MAX_WORKERS = 64 transient threads against
+# the job service — keep both widths in mind when tuning either.
+_PURGE_MAX_WORKERS = 16
+
+# Overall wall-clock ceiling for a full purge fan-out. Each underlying HTTP call
+# is already bounded by the job-service client's per-request timeout + finite
+# retries, but a pathological straggler must never wedge the endpoint, so the
+# collection below stops waiting past this deadline and abandons any unfinished
+# unit (counting it as 0 deleted) rather than blocking a server thread.
+_PURGE_TIMEOUT_S = 120.0
+
+
+def _delete_jobs_concurrently(
+    client: Any,
+    job_ids: list[str],
+    *,
+    max_workers: int = _PURGE_MAX_WORKERS,
+) -> int:
+    """Delete the given job ids via ``client.delete_job`` concurrently.
+
+    Preconditions:
+        - ``client`` exposes a thread-safe ``delete_job(job_id: str) -> truthy``.
+        - ``job_ids`` contains the already-filtered ids to delete (no further
+          filtering happens here).
+
+    Postconditions:
+        - Returns the count of ids for which ``delete_job`` returned a truthy
+          value. The count equals the number of jobs successfully deleted and is
+          independent of completion order (each task contributes its own 0/1 and
+          the results are summed — no shared mutable counter).
+        - A per-item ``delete_job`` exception is logged and counted as not-deleted,
+          so a single failure never aborts the batch.
+        - When ``job_ids`` is empty, returns 0 without spawning any threads.
+    """
+    if not job_ids:
+        return 0
+
+    def _delete_one(jid: str) -> int:
+        # Isolate per-item failures: one job's delete raising (e.g. a transient
+        # network error) must not abort the remaining concurrent deletions.
+        try:
+            return 1 if client.delete_job(jid) else 0
+        except Exception:
+            logger.warning("delete_job failed for %s; counted as not deleted", jid, exc_info=True)
+            return 0
+
+    workers = min(max_workers, len(job_ids))
+    return sum(
+        parallel_map(
+            job_ids, _delete_one, max_workers=workers, preserve_order=False, skip_none=False
+        )
+    )
+
+
+def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
+    """Remove paper trading jobs whose payload references this lab record.
+
+    Preconditions:
+        - ``lab_record_id`` is the lab record id to match against each job's
+          ``data["lab_record_id"]``.
+        - ``JobServiceClient`` for ``investment_paper_trading_sessions`` is
+          importable and thread-safe for concurrent ``delete_job`` calls.
+
+    Postconditions:
+        - Only jobs with a truthy ``job_id`` whose ``data`` is a dict and whose
+          ``data["lab_record_id"]`` equals ``lab_record_id`` are deleted.
+        - Returns the number of those jobs for which ``delete_job`` returned a
+          truthy value. The count equals the number of jobs successfully deleted
+          and is independent of the order in which the concurrent deletes finish.
+
+    Raises:
+        - ``HTTPException`` 503: ``list_jobs`` failed with ``httpx.HTTPError``
+          (transport/HTTP) or ``RuntimeError`` (e.g. unconfigured
+          ``JOB_SERVICE_URL``). Callers must leave lab state intact so a retry
+          can re-attempt cleanup.
+    """
+    from job_service_client import JobServiceClient
+
+    try:
+        client = JobServiceClient(team="investment_paper_trading_sessions")
+        jobs = client.list_jobs() or []
+    except (httpx.HTTPError, RuntimeError):
+        # Narrow environmental failures only — same pair sibling list endpoints
+        # use. Soft-failing here would orphan paper sessions after the lab
+        # record is deleted; fail closed with 503 instead.
+        logger.warning(
+            "list_jobs failed for paper trading sessions; cleanup unavailable",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Paper-trading session cleanup is temporarily unavailable; retry later.",
+        ) from None
+
+    matching_ids: list[str] = []
+    for job in jobs:
+        jid = job.get("job_id")
+        if not jid:
+            continue
+        payload = job.get("data")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("lab_record_id") != lab_record_id:
+            continue
+        matching_ids.append(str(jid))
+
+    return _delete_jobs_concurrently(client, matching_ids)
+
+
+def _purge_strategy_lab_job_storage() -> dict[str, Optional[int]]:
+    """Delete strategy lab jobs plus all paper-trading session jobs for this team.
+
+    Preconditions:
+        - ``JobServiceClient`` is importable and each per-team client is
+          thread-safe for concurrent ``delete_job`` calls (the four teams are
+          processed in parallel, and the deletes within each team are too).
+
+    Postconditions:
+        - ``deleted_lab_records`` counts ``investment_strategy_lab_records`` jobs
+          with a truthy ``job_id`` that ``delete_job`` removed.
+        - ``deleted_lab_strategies`` counts ``investment_strategies`` jobs whose
+          id starts with ``strat-lab-`` that ``delete_job`` removed.
+        - ``deleted_lab_backtests`` counts ``investment_backtests`` jobs whose id
+          starts with ``bt-lab-`` that ``delete_job`` removed.
+        - ``deleted_paper_trading_sessions`` counts
+          ``investment_paper_trading_sessions`` jobs with a truthy ``job_id``
+          that ``delete_job`` removed.
+        - Each count equals the number of matching jobs the corresponding unit
+          *reported* deleting within the shared deadline, and is independent
+          of the order in which the concurrent units/deletes finish; the
+          returned dict always has exactly these four keys.
+        - A unit that does not finish within the shared deadline
+          (``_PURGE_TIMEOUT_S``) is reported as ``None`` — not ``0`` — even
+          though its background thread keeps running (see
+          ``pool.shutdown(wait=False, ...)`` below) and may go on to delete
+          some or all of its matching jobs asynchronously, after this
+          function (and the endpoint calling it) has already returned.
+          ``None`` means "unknown, still in flight"; only a non-``None`` int
+          is a confirmed count. Callers must not treat ``None`` as ``0``.
+    """
+    from job_service_client import JobServiceClient
+
+    def _purge_all(team: str) -> int:
+        """Delete every truthy-id job for ``team`` (no id-prefix filter)."""
+        client = JobServiceClient(team=team)
+        ids = [str(jid) for job in (client.list_jobs() or []) if (jid := job.get("job_id"))]
+        return _delete_jobs_concurrently(client, ids)
+
+    def _purge_prefixed(team: str, prefix: str) -> int:
+        """Delete jobs for ``team`` whose id starts with ``prefix``."""
+        client = JobServiceClient(team=team)
+        ids = [
+            jid
+            for job in (client.list_jobs() or [])
+            if (jid := str(job.get("job_id") or "")).startswith(prefix)
+        ]
+        return _delete_jobs_concurrently(client, ids)
+
+    units: dict[str, concurrent.futures.Future[int]] = {}
+    # NB: not a `with` block — the context manager's exit calls shutdown(wait=True),
+    # which would re-introduce the very unbounded join the deadline below avoids.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    try:
+        units["deleted_lab_records"] = pool.submit(_purge_all, "investment_strategy_lab_records")
+        units["deleted_lab_strategies"] = pool.submit(
+            _purge_prefixed, "investment_strategies", "strat-lab-"
+        )
+        units["deleted_lab_backtests"] = pool.submit(
+            _purge_prefixed, "investment_backtests", "bt-lab-"
+        )
+        units["deleted_paper_trading_sessions"] = pool.submit(
+            _purge_all, "investment_paper_trading_sessions"
+        )
+
+        # Collect against a single shared deadline so the whole fan-out is bounded
+        # (per-unit timeouts would let each unit reset the clock). A unit that
+        # overruns is reported as None (unknown, not a confirmed 0 — its worker
+        # thread is still running and may delete jobs after this call returns,
+        # see the docstring); a unit that *raises* still propagates (preserving
+        # the prior error contract).
+        deadline = time.monotonic() + _PURGE_TIMEOUT_S
+        results: dict[str, Optional[int]] = {}
+        for key, future in units.items():
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                results[key] = future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "purge unit %s did not finish within %.0fs; reported as unknown (None)",
+                    key,
+                    _PURGE_TIMEOUT_S,
+                )
+                results[key] = None
+        return results
+    finally:
+        # Never block on a straggler: in-flight HTTP deletes are themselves bounded
+        # by the client's per-request timeout, so abandoning the worker thread leaks
+        # nothing unbounded. cancel_futures drops any unit that hasn't started.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 __all__ = [
     "STRATEGY_LAB_TERMINAL_STATUSES",
     "_STRATEGY_LAB_PROGRESS_FIELDS",
@@ -348,6 +562,11 @@ __all__ = [
     "_run_state_to_response",
     "_build_run_state",
     "_job_progress_percent",
+    "_PURGE_MAX_WORKERS",
+    "_PURGE_TIMEOUT_S",
+    "_delete_jobs_concurrently",
+    "_delete_paper_sessions_for_lab_record",
+    "_purge_strategy_lab_job_storage",
     "_snapshot_prior_records",
     "_compute_signal_brief_snapshot",
     "_is_strategy_lab_run_externally_stopped",
