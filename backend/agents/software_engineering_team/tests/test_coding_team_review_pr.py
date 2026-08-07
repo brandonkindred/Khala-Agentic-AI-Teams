@@ -3303,18 +3303,13 @@ class TestWholeFileReview:
         assert captured.get("files") is None
         assert captured["pre_numbered"] is True
         assert captured["code"]  # the hunk-rendered blob
-        # Hunk mode now carries the same "tag pre-existing findings" focus note as
-        # whole-file mode (previously it passed pr.body verbatim, with no tagging
-        # instruction at all) -- see _hunk_review_focus.
+        # Hunk mode carries the same diff-first focus note as whole-file mode.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
         assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
-        # Content assertions beyond the shared prefix: both whole-file and
-        # hunk-mode notes start with REVIEW_FOCUS_NOTE_PREFIX, so that check
-        # alone wouldn't catch _hunk_review_focus regressing into an alias of
-        # _whole_file_focus. Assert on the hunk-specific wording too.
         assert "pre_existing" in captured["task_requirements"]
-        assert "diff hunks" in captured["task_requirements"]
+        assert "Architectural standards" in captured["task_requirements"]
+        assert "diff-first" in captured["task_requirements"].lower()
 
     def test_whole_file_mode_appends_focus_note(self, review_app, monkeypatch) -> None:
         gh = review_app["github"]["client"]  # default: single reviewable file a.py
@@ -3331,15 +3326,13 @@ class TestWholeFileReview:
         monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
+        # Whole-file mode steers the reviewer with the shared diff-first focus note.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
         assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
-        # Whole-file-specific wording, and NOT the hunk-mode wording -- so a
-        # regression collapsing _whole_file_focus into _hunk_review_focus (or
-        # vice versa) can't hide behind the shared prefix check above.
-        assert "complete file contents" in captured["task_requirements"]
-        assert "diff hunks" not in captured["task_requirements"]
+        assert "pre_existing" in captured["task_requirements"]
+        assert "Architectural standards" in captured["task_requirements"]
+        assert "diff-first" in captured["task_requirements"].lower()
 
     def test_partial_head_fetch_reviews_fetched_subset_whole_and_missing_subset_via_hunks(
         self, review_app, monkeypatch
@@ -3365,28 +3358,33 @@ class TestWholeFileReview:
         assert resp.status_code == 200
         # Only 1 of 2 reviewable files fetched whole -> a.py must NOT silently
         # revert to hunk mode, and b.py must NOT be silently dropped: two
-        # calls, one whole-file (a.py only), one hunk (b.py only).
+        # calls, one change-surface attempt (a.py only), one hunk (b.py only).
         assert len(calls) == 2
-        whole_call = next(c for c in calls if c.get("files"))
-        hunk_call = next(c for c in calls if c.get("code"))
-        assert whole_call["files"] == {"a.py": "whole a\n"}
-        assert whole_call["pre_numbered"] is False
+        hunk_call = next(
+            c for c in calls if "b.py" in c.get("code", "") and "a.py" not in c.get("code", "")
+        )
+        whole_call = next(c for c in calls if c is not hunk_call)
+        assert "a.py" in whole_call["code"]
+        assert whole_call["pre_numbered"] is True
+        assert not whole_call.get("files")
+        assert not hunk_call.get("files")
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
         )
 
         assert REVIEW_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
-        assert not hunk_call.get("files")
+        assert "pre_existing" in whole_call["task_requirements"]
+        assert "Architectural standards" in whole_call["task_requirements"]
+        assert "diff-first" in whole_call["task_requirements"].lower()
         assert hunk_call["pre_numbered"] is True
         assert "b.py" in hunk_call["code"]
         assert "a.py" not in hunk_call["code"]
-        # Hunk call must also carry the focus note, and with hunk-specific
-        # wording -- not just the prefix shared with the whole-file note,
-        # which alone wouldn't catch a hunk/whole-file mode mixup.
+        # Both calls share the same diff-first focus note (input shape differs).
         assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
         assert "pre_existing" in hunk_call["task_requirements"]
-        assert "diff hunks" in hunk_call["task_requirements"]
+        assert "Architectural standards" in hunk_call["task_requirements"]
+        assert "diff-first" in hunk_call["task_requirements"].lower()
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
