@@ -758,10 +758,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns four tools (``read_file``, ``list_files``, ``search_codebase``,
-          ``find_function_at_line``) that delegate to ``index``; each returns a
-          string and never raises, so a bad model-supplied argument becomes a
-          tool message rather than an error that aborts the agent loop.
+        - Returns five tools (``read_file``, ``read_lines``, ``list_files``,
+          ``search_codebase``, ``find_function_at_line``) that delegate to
+          ``index``; each returns a string and never raises, so a bad
+          model-supplied argument becomes a tool message rather than an error
+          that aborts the agent loop.
     """
 
     @tool
@@ -784,6 +785,30 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
             return index.read_file(path)
         except Exception as exc:
             return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
+
+    @tool
+    def read_lines(path: str, start: int, end: int) -> str:
+        """Read an inclusive 1-based line range from a file under review.
+
+        Prefer this over read_file when you only need a bounded slice. The
+        maximum span is 400 lines; use a narrower range or read_function for
+        larger constructs.
+
+        Args:
+            path: File path (same paths accepted by read_file).
+            start: 1-based inclusive start line.
+            end: 1-based inclusive end line.
+
+        Returns:
+            A header plus ``N| content`` lines, or an ``Error: ...`` message.
+        """
+        try:
+            return index.read_lines(path, start, end)
+        except Exception as exc:
+            return (
+                f"Error: could not read_lines {path!r} [{start}:{end}]: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     @tool
     def list_files() -> str:
@@ -870,7 +895,7 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, list_files, search_codebase, find_function_at_line]
+    return [read_file, read_lines, list_files, search_codebase, find_function_at_line]
 
 
 @dataclass
