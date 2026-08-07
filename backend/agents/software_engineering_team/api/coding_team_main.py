@@ -177,13 +177,10 @@ from software_engineering_team.github_source.review_submit import (  # noqa: F40
 from software_engineering_team.hitl import _format_questions_comment  # noqa: F401
 from software_engineering_team.job_store import (  # noqa: F401
     DEFAULT_CACHE_DIR,
-    RESUME_CLAIM_TTL_S,
-    claim_resume,
     create_job,
     get_job,
     heartbeat_job,
     list_jobs,
-    release_resume_claim,
     update_job,
 )
 from software_engineering_team.job_store import (
