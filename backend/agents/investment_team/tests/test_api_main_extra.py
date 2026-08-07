@@ -107,6 +107,110 @@ def test_run_strategy_lab_request_total_cycles_is_batch_size_times_batch_count()
         api_main.RunStrategyLabRequest(batch_count=api_main._MAX_BATCH_COUNT + 1)
 
 
+def _stub_backtest_result():
+    from investment_team.models import BacktestResult
+
+    return BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=5.0,
+        volatility_pct=12.0,
+        sharpe_ratio=0.5,
+        max_drawdown_pct=-3.0,
+        win_rate_pct=55.0,
+        profit_factor=1.2,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+
+
+def _make_backtest_record(record_id: str, *, completed_at: str = "2024-01-01T00:00:00Z"):
+    from investment_team.models import BacktestConfig, BacktestRecord, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id=f"strat-{record_id}",
+        authored_by="tester",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01")
+    return BacktestRecord(
+        backtest_id=record_id,
+        strategy_id=strategy.strategy_id,
+        strategy=strategy,
+        config=config,
+        submitted_by="tester",
+        submitted_at=completed_at,
+        completed_at=completed_at,
+        result=_stub_backtest_result(),
+    )
+
+
+def _make_strategy_lab_record(record_id: str, *, is_winning: bool = False):
+    from investment_team.models import StrategyLabRecord
+
+    now = "2024-01-01T00:00:00Z"
+    backtest = _make_backtest_record(f"bt-{record_id}", completed_at=now)
+    return StrategyLabRecord(
+        lab_record_id=record_id,
+        strategy=backtest.strategy,
+        backtest=backtest,
+        is_winning=is_winning,
+        strategy_rationale="r",
+        analysis_narrative="ok",
+        created_at=now,
+    )
+
+
+def test_list_backtests_response_derives_count_from_items() -> None:
+    """count is enforced by a model_validator, so a mismatched constructor
+    value can never survive construction."""
+    from investment_team.api.main import ListBacktestsResponse
+
+    record = _make_backtest_record("bt-1")
+    resp = ListBacktestsResponse(items=[record], count=999)
+    assert resp.count == 1
+
+    empty = ListBacktestsResponse(items=[], count=5)
+    assert empty.count == 0
+
+
+def test_strategy_lab_run_response_derives_count_from_records() -> None:
+    from investment_team.api.main import StrategyLabRunResponse
+
+    record = _make_strategy_lab_record("lab-1")
+    resp = StrategyLabRunResponse(records=[record], count=999)
+    assert resp.count == 1
+
+    empty = StrategyLabRunResponse(records=[], count=5)
+    assert empty.count == 0
+
+
+def test_strategy_lab_results_response_derives_counts_from_items() -> None:
+    """count/winning_count/losing_count are all derived from items, so a
+    mismatched constructor value can never survive construction — and a
+    filtered items list (e.g. ?winning=true) correctly reports losing_count
+    == 0 rather than an unfiltered global count."""
+    from investment_team.api.main import StrategyLabResultsResponse
+
+    winner = _make_strategy_lab_record("lab-w", is_winning=True)
+    loser = _make_strategy_lab_record("lab-l", is_winning=False)
+
+    resp = StrategyLabResultsResponse(
+        items=[winner, loser], count=999, winning_count=0, losing_count=0
+    )
+    assert resp.count == 2
+    assert resp.winning_count == 1
+    assert resp.losing_count == 1
+
+    filtered = StrategyLabResultsResponse(items=[winner])
+    assert filtered.count == 1
+    assert filtered.winning_count == 1
+    assert filtered.losing_count == 0
+
+
 class _InMemoryDict:
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
