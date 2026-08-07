@@ -16,16 +16,21 @@ Env vars:
     REDIS_PORT             Redis port (default ``6379``).
     REDIS_PASSWORD         Optional Redis password.
     REDIS_DB               Logical database index (default ``0``).
-    REDIS_CACHE_TTL_S      TTL for cached value keys (default ``86400`` = 24h).
+    REDIS_CACHE_TTL_S      TTL for cached value keys (default ``3600`` = 1h).
+                           Shorter than a day so a full Redis under
+                           ``noeviction`` recovers capacity via natural
+                           expiry instead of wedging until a 24h TTL ages out.
     REDIS_LOCK_TTL_S       TTL for single-flight leader locks (default ``3600``).
                            Sized for long code-review computes so the lock is
                            unlikely to expire mid-flight and allow duplicate
                            leaders.
     REDIS_WAITER_POLL_S    Waiter poll interval seconds (default ``0.05``).
     REDIS_WAITER_TIMEOUT_S Max seconds a waiter polls before recomputing
-                           (default equals the *effective* ``REDIS_LOCK_TTL_S``
-                           when unset, so waiters wait at least as long as a
-                           customized lock TTL).
+                           (default ``300``). Independent of ``REDIS_LOCK_TTL_S``
+                           so a crashed leader cannot stall waiters for the
+                           full lock TTL (up to 1h). Raise this when legitimate
+                           computes routinely exceed five minutes and duplicate
+                           work is worse than a longer wait.
     REDIS_RESULT_TTL_S     TTL for short-lived single-flight result/error
                            markers published for waiters (default equals the
                            *effective* ``REDIS_LOCK_TTL_S`` when unset). The
@@ -38,6 +43,9 @@ Env vars:
                            I/O after connect (default ``1.0``). Finite so a
                            stalled Redis cannot hang reviews forever; outages
                            fail open to miss/recompute.
+    REDIS_MAX_CONNECTIONS  redis-py connection-pool ``max_connections``
+                           (default ``50``). Bounds concurrent sockets under
+                           high map parallelism.
     REDIS_KEY_PREFIX       Optional prefix for all Redis keys (default
                            ``khala``). A blank value falls back to the default
                            prefix. Must not contain ``:`` (the backend appends
@@ -54,19 +62,21 @@ from shared.env import parse_float, parse_int
 
 _DEFAULT_PORT = 6379
 _DEFAULT_DB = 0
-_DEFAULT_CACHE_TTL_S = 86400
+# 1h value TTL: under compose ``noeviction``, a full Redis recovers via expiry
+# instead of waiting out a 24h TTL while every SET fails open.
+_DEFAULT_CACHE_TTL_S = 3600
 _DEFAULT_KEY_PREFIX = "khala"
-# Lock TTL sized for long code-review computes. Waiter timeout defaults to the
-# same value so a waiter outlives the lock and does not race into a duplicate
-# compute while the original leader is still running.
+# Lock TTL sized for long code-review computes. Waiter timeout is intentionally
+# shorter and independent so a hard-killed leader cannot stall waiters for the
+# full lock lifetime; waiters may recompute while a still-running leader holds
+# the lock if the compute exceeds the waiter bound.
 _DEFAULT_LOCK_TTL_S = 3600
+_DEFAULT_WAITER_TIMEOUT_S = 300.0
 _DEFAULT_WAITER_POLL_S = 0.05
 _DEFAULT_SOCKET_CONNECT_TIMEOUT_S = 1.0
 _DEFAULT_SOCKET_TIMEOUT_S = 1.0
-_PORT_IN_HOST_ERROR = (
-    "REDIS_HOST must not include a port; set REDIS_PORT separately "
-    "or use REDIS_URL (got {host!r})"
-)
+_DEFAULT_MAX_CONNECTIONS = 50
+_PORT_IN_HOST_ERROR = "REDIS_HOST must not include a port; set REDIS_PORT separately or use REDIS_URL (got {host!r})"
 
 
 def is_redis_configured() -> bool:
@@ -131,23 +141,15 @@ def redis_url() -> str | None:
         if ":" in host[closing + 1 :]:
             raise ValueError(_PORT_IN_HOST_ERROR.format(host=host))
         if "%" in host:
-            raise ValueError(
-                "REDIS_HOST must not include a zone ID; use REDIS_URL "
-                f"(got {host!r})"
-            )
+            raise ValueError(f"REDIS_HOST must not include a zone ID; use REDIS_URL (got {host!r})")
         inner = host[1:closing]
         try:
             ipaddress.IPv6Address(inner)
         except ValueError as exc:
-            raise ValueError(
-                f"REDIS_HOST bracketed value is not a valid IPv6 address: {host!r}"
-            ) from exc
+            raise ValueError(f"REDIS_HOST bracketed value is not a valid IPv6 address: {host!r}") from exc
     else:
         if "%" in host:
-            raise ValueError(
-                "REDIS_HOST must not include a zone ID; use REDIS_URL "
-                f"(got {host!r})"
-            )
+            raise ValueError(f"REDIS_HOST must not include a zone ID; use REDIS_URL (got {host!r})")
         try:
             ipaddress.IPv6Address(host)
         except ValueError:
@@ -180,19 +182,34 @@ def waiter_poll_s() -> float:
 def waiter_timeout_s() -> float:
     """Max seconds a waiter polls before giving up and recomputing. Floor 1.
 
-    When ``REDIS_WAITER_TIMEOUT_S`` is unset/blank, defaults to the *current*
-    ``lock_ttl_s()`` so waiters wait at least as long as a customized lock TTL.
-
-    The default tracking lock TTL (typically 3600s for long code-review
-    computes) is intentional: capping the waiter below the lock TTL would make
-    waiters recompute while the leader still holds the lock, defeating
-    single-flight. Operators who need a shorter waiter bound must also shrink
-    ``REDIS_LOCK_TTL_S`` (or set both knobs explicitly).
+    Default ``300`` is independent of ``lock_ttl_s()`` so a crashed leader
+    (lock held until ``REDIS_LOCK_TTL_S`` expires, often 3600s) cannot stall
+    waiters for the full lock lifetime. Trade-off: a still-running leader
+    whose compute exceeds this bound may see waiters recompute in parallel.
+    Set ``REDIS_WAITER_TIMEOUT_S`` explicitly (up to the lock TTL) when
+    duplicate work is worse than a longer wait.
     """
-    raw = os.getenv("REDIS_WAITER_TIMEOUT_S")
-    if raw is None or not str(raw).strip():
-        return float(lock_ttl_s())
-    return parse_float("REDIS_WAITER_TIMEOUT_S", float(lock_ttl_s()), minimum=1.0)
+    return parse_float(
+        "REDIS_WAITER_TIMEOUT_S",
+        _DEFAULT_WAITER_TIMEOUT_S,
+        minimum=1.0,
+    )
+
+
+def redis_max_connections() -> int:
+    """redis-py connection-pool ``max_connections``. Floor 1.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns a positive int so high map parallelism cannot open an
+          unbounded number of Redis sockets from one process.
+    """
+    return parse_int(
+        "REDIS_MAX_CONNECTIONS",
+        _DEFAULT_MAX_CONNECTIONS,
+        minimum=1,
+    )
 
 
 def result_ttl_s() -> int:

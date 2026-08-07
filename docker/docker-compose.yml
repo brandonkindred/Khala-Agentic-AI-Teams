@@ -76,12 +76,14 @@ x-se-redis-env: &se-redis-env
   # Unset/blank REDIS_URL → build from HOST/PORT/PASSWORD (URL-encoded).
   # Explicit REDIS_URL= still wins when non-blank (operator override).
   REDIS_URL: ${REDIS_URL-}
-  REDIS_CACHE_TTL_S: ${REDIS_CACHE_TTL_S:-86400}
+  REDIS_CACHE_TTL_S: ${REDIS_CACHE_TTL_S:-3600}
   REDIS_LOCK_TTL_S: ${REDIS_LOCK_TTL_S:-3600}
-  REDIS_WAITER_TIMEOUT_S: ${REDIS_WAITER_TIMEOUT_S:-}
+  # Independent of lock TTL — crashed leaders unblock waiters after 5m, not 1h.
+  REDIS_WAITER_TIMEOUT_S: ${REDIS_WAITER_TIMEOUT_S:-300}
   REDIS_RESULT_TTL_S: ${REDIS_RESULT_TTL_S:-}
   REDIS_SOCKET_CONNECT_TIMEOUT_S: ${REDIS_SOCKET_CONNECT_TIMEOUT_S:-1.0}
   REDIS_SOCKET_TIMEOUT_S: ${REDIS_SOCKET_TIMEOUT_S:-1.0}
+  REDIS_MAX_CONNECTIONS: ${REDIS_MAX_CONNECTIONS:-50}
 
 # Opt-in OTLP → Tempo. Merge only into services you are actively debugging.
 x-team-otel-export: &team-otel-export
@@ -175,10 +177,11 @@ services:
     # Cache-only: bound memory; disable RDB/AOF persistence. Use noeviction so
     # idle single-flight lock keys (SET NX EX, not touched during a long
     # compute) are not LRU-evicted under memory pressure — capacity is enforced
-    # by shared.cache ZSET trim + key TTLs; a full Redis fails open on write.
-    # Intentionally no named volume — Redis is an ephemeral shared cache here;
-    # durability lives in Postgres / job state, not Redis. A restart is a cold
-    # cache, which shared.cache treats as misses (recompute).
+    # by shared.cache ZSET trim (with one write-retry after trim on OOM) +
+    # key TTLs (default value TTL 1h). A full Redis still fails open on write
+    # after the retry. Intentionally no named volume — Redis is an ephemeral
+    # shared cache here; durability lives in Postgres / job state, not Redis.
+    # A restart is a cold cache, which shared.cache treats as misses (recompute).
     # requirepass lives in a generated conf file so the redis-server argv does
     # not include the password (process listings). Healthcheck still uses
     # REDISCLI_AUTH from the service env. Password bytes are escaped for a
@@ -204,7 +207,7 @@ services:
         cat > "$$conf" <<EOF
         bind 0.0.0.0
         requirepass "$$esc"
-        maxmemory 256mb
+        maxmemory 512mb
         maxmemory-policy noeviction
         save ""
         appendonly no
@@ -367,7 +370,10 @@ services:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
-      redis: { condition: service_healthy }
+      # service_started (not healthy): shared.cache fail-opens when Redis is
+      # down, and REDIS_HOST= (empty) opts into in-process memory — SE must
+      # still boot if the Redis container is unhealthy or unused.
+      redis: { condition: service_started }
     # SE is opted into Tempo export (see *team-otel-export) and shared.cache
     # Redis (*se-redis-env). Other team services inherit *team-env-base only
     # (no Redis credentials) and keep spans in-process.

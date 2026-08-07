@@ -102,6 +102,7 @@ def _build_redis_client() -> Any | None:
             decode_responses=False,
             socket_connect_timeout=config.redis_socket_connect_timeout_s(),
             socket_timeout=config.redis_socket_timeout_s(),
+            max_connections=config.redis_max_connections(),
         )
     except Exception:
         logger.error(
@@ -168,8 +169,7 @@ def get_shared_cache(namespace: str) -> SharedCache:
                     # Misconfigured prefix/TTL must not abort reviews on first
                     # get_shared_cache call (fail open like a missing redis client).
                     logger.error(
-                        "shared.cache: RedisBackend init failed for namespace %r (%s); "
-                        "using memory backend",
+                        "shared.cache: RedisBackend init failed for namespace %r (%s); using memory backend",
                         namespace,
                         exc,
                     )

@@ -128,13 +128,20 @@ def test_key_prefix_rejects_colon(monkeypatch):
         cache_config.key_prefix()
 
 
-def test_default_waiter_timeout_matches_lock_ttl(monkeypatch):
-    """Unset/invalid waiter timeout tracks the effective lock TTL."""
+def test_default_waiter_timeout_is_independent_of_lock_ttl(monkeypatch):
+    """Unset waiter timeout uses a fixed default, not the lock TTL."""
     monkeypatch.delenv("REDIS_WAITER_TIMEOUT_S", raising=False)
     monkeypatch.setenv("REDIS_LOCK_TTL_S", "120")
-    assert cache_config.waiter_timeout_s() == 120.0
+    assert cache_config.waiter_timeout_s() == 300.0
+    monkeypatch.setenv("REDIS_WAITER_TIMEOUT_S", "45")
+    assert cache_config.waiter_timeout_s() == 45.0
     monkeypatch.setenv("REDIS_WAITER_TIMEOUT_S", "not-a-float")
-    assert cache_config.waiter_timeout_s() == 120.0
+    assert cache_config.waiter_timeout_s() == 300.0
+
+
+def test_default_cache_ttl_is_one_hour(monkeypatch):
+    monkeypatch.delenv("REDIS_CACHE_TTL_S", raising=False)
+    assert cache_config.cache_ttl_s() == 3600
 
 
 def test_result_ttl_defaults_to_lock_ttl(monkeypatch):
@@ -168,6 +175,7 @@ def test_build_redis_client_passes_socket_timeouts(monkeypatch):
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("REDIS_SOCKET_CONNECT_TIMEOUT_S", "2.0")
     monkeypatch.setenv("REDIS_SOCKET_TIMEOUT_S", "4.0")
+    monkeypatch.setenv("REDIS_MAX_CONNECTIONS", "17")
     captured: dict = {}
 
     class _FakeRedisMod:
@@ -184,6 +192,7 @@ def test_build_redis_client_passes_socket_timeouts(monkeypatch):
     assert client is not None
     assert captured["socket_connect_timeout"] == 2.0
     assert captured["socket_timeout"] == 4.0
+    assert captured["max_connections"] == 17
 
 
 def test_redis_fail_open_on_timeout_error():
@@ -317,6 +326,33 @@ def test_redis_trim_evicts_oldest():
     assert cache.get("a") is None
     assert cache.get("b") == b"2"
     assert cache.get("c") == b"3"
+
+
+def test_redis_set_retries_once_after_write_failure():
+    """OOM/transient SET failure trims then retries once before fail-open."""
+    client = FakeRedis()
+    cache = RedisBackend(client, "ns")
+    cache.set("keep", b"1", max_entries=8)
+    attempts = {"n": 0}
+    real_pipeline = client.pipeline
+
+    def flaky_pipeline():
+        pipe = real_pipeline()
+        real_execute = pipe.execute
+
+        def execute():
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise ConnectionError("OOM command not allowed when used memory")
+            return real_execute()
+
+        pipe.execute = execute  # type: ignore[method-assign]
+        return pipe
+
+    client.pipeline = flaky_pipeline  # type: ignore[method-assign]
+    cache.set("retry", b"2", max_entries=8)
+    assert attempts["n"] >= 2
+    assert cache.get("retry") == b"2"
 
 
 def test_redis_backend_rejects_non_positive_ttls():
@@ -868,9 +904,7 @@ def test_redact_redis_url_password_and_user_only():
 
 def test_redact_redis_url_preserves_ipv6_brackets():
     """Rebuilt netloc keeps RFC 3986 brackets around IPv6 hosts."""
-    assert factory_mod._redact_redis_url("redis://alice:s3cret@[::1]:6379/0") == (
-        "redis://alice:***@[::1]:6379/0"
-    )
+    assert factory_mod._redact_redis_url("redis://alice:s3cret@[::1]:6379/0") == ("redis://alice:***@[::1]:6379/0")
 
 
 def test_redis_rejects_colon_in_logical_key():
@@ -1019,9 +1053,7 @@ def test_raise_published_error_typeerror_falls_back(monkeypatch):
 
     fake_mod = types.SimpleNamespace(Strict=Strict)
     monkeypatch.setattr(rb.importlib, "import_module", lambda _name: fake_mod)
-    marker = (
-        b'\x00ERR\x00{"module":"shared.x","name":"Strict","args":["a"],"message":"fallback-msg"}'
-    )
+    marker = b'\x00ERR\x00{"module":"shared.x","name":"Strict","args":["a"],"message":"fallback-msg"}'
     with pytest.raises(_LeaderComputeError, match="fallback-msg"):
         RedisBackend._raise_published_error(marker)
 
@@ -1085,9 +1117,9 @@ def test_raise_published_error_rejects_poisoned_base_exceptions():
     from shared.cache.redis_backend import _ERROR_PREFIX, RedisBackend, _LeaderComputeError
 
     for name in ("SystemExit", "KeyboardInterrupt", "GeneratorExit"):
-        marker = _ERROR_PREFIX + json.dumps(
-            {"module": "builtins", "name": name, "args": [0], "message": name}
-        ).encode("utf-8")
+        marker = _ERROR_PREFIX + json.dumps({"module": "builtins", "name": name, "args": [0], "message": name}).encode(
+            "utf-8"
+        )
         with pytest.raises(_LeaderComputeError):
             RedisBackend._raise_published_error(marker)
 

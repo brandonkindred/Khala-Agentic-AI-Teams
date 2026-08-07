@@ -1443,6 +1443,8 @@ client/healthcheck failures); there is no separate metric today. Optional
 (default `1.0`) tune redis-py's connect and per-command socket timeouts. Command
 timeout must stay finite so a Redis that accepts TCP but stalls on GET/SET/EVAL
 fails open to miss/recompute instead of hanging the review thread forever.
+`REDIS_MAX_CONNECTIONS` (default `50`) caps the redis-py connection pool so high
+map parallelism cannot open unbounded sockets from one process.
 
 **Local compose vs production auth.** The in-repo `docker-compose.yml` Redis service enables
 `requirepass` from `REDIS_PASSWORD` (default `please-change-me`), written into a generated
@@ -1455,18 +1457,26 @@ IPv4 loopback only (`127.0.0.1:6379`) — from the host use `127.0.0.1:6379`, no
 `localhost` / `::1`. Production deployments must use a strong secret, ACL/`requirepass`,
 and keep Redis off public interfaces. Compose Redis is intentionally ephemeral (no volume) —
 a restart is a cold cache; durable state lives elsewhere. Memory policy is `noeviction`
-(app ZSET trim + TTLs bound capacity; avoids LRU-evicting idle single-flight lock keys
-mid-compute).
+with `maxmemory 512mb` (app ZSET trim + 1h value TTLs bound capacity; avoids LRU-evicting
+idle single-flight lock keys mid-compute). `se-service` depends on Redis with
+`condition: service_started` (not `service_healthy`) so SE still boots when Redis is
+unhealthy or when `REDIS_HOST=` opts into in-process memory — per-op fail-open covers
+mid-run outages.
 
 ### REDIS_CACHE_TTL_S / REDIS_LOCK_TTL_S / REDIS_WAITER_POLL_S / REDIS_WAITER_TIMEOUT_S / REDIS_RESULT_TTL_S
-Redis backend tuning for `shared.cache`: value-key TTL (default `86400` s), single-flight lock TTL
-(default `3600` s — sized for long code-review computes so the lock is unlikely to expire mid-flight),
-waiter poll interval (default `0.05` s), waiter timeout before recomputing (defaults to the
-*effective* `REDIS_LOCK_TTL_S` when unset, so waiters wait at least as long as a customized lock TTL), and
-short-lived single-flight result/error-marker TTL (`REDIS_RESULT_TTL_S`, defaults to the effective
-lock TTL when unset; the Redis backend still hard-caps markers at 60 s so abandoned publishes cannot
-linger past leadership). All parse defensively with floors: TTL / lock / waiter-timeout / result-TTL
-floored at `1` s; poll-interval floored at `0.01` s.
+Redis backend tuning for `shared.cache`: value-key TTL (default `3600` s — short enough that a
+full `noeviction` Redis recovers via natural expiry instead of wedging for a day), single-flight
+lock TTL (default `3600` s — sized for long code-review computes so the lock is unlikely to
+expire mid-flight), waiter poll interval (default `0.05` s), waiter timeout before recomputing
+(default `300` s, **independent** of lock TTL so a crashed leader cannot stall waiters for up to
+an hour; raise explicitly when long computes must not duplicate), and short-lived single-flight
+result/error-marker TTL (`REDIS_RESULT_TTL_S`, defaults to the effective lock TTL when unset;
+the Redis backend still hard-caps markers at 60 s so abandoned publishes cannot linger past
+leadership). Successful `get` touches the LRU ZSET (write-on-read) so eviction order stays
+accurate under multi-worker load. Published error markers reconstruct allow-listed `Exception`
+subclasses with best-effort stringified `args` — match on type/message, not arg identity.
+All parse defensively with floors: TTL / lock / waiter-timeout / result-TTL floored at `1` s;
+poll-interval floored at `0.01` s.
 
 ### REDIS_KEY_PREFIX
 Optional prefix for all `shared.cache` Redis keys (default `khala`). Blank falls back to the

@@ -140,12 +140,8 @@ class RedisBackend:
         # inputs truncate toward zero). Waiter timings use ``float()``.
         self._cache_ttl_s = int(cache_ttl_s if cache_ttl_s is not None else cache_config.cache_ttl_s())
         self._lock_ttl_s = int(lock_ttl_s if lock_ttl_s is not None else cache_config.lock_ttl_s())
-        self._result_ttl_cfg_s = int(
-            result_ttl_s if result_ttl_s is not None else cache_config.result_ttl_s()
-        )
-        self._waiter_poll_s = float(
-            waiter_poll_s if waiter_poll_s is not None else cache_config.waiter_poll_s()
-        )
+        self._result_ttl_cfg_s = int(result_ttl_s if result_ttl_s is not None else cache_config.result_ttl_s())
+        self._waiter_poll_s = float(waiter_poll_s if waiter_poll_s is not None else cache_config.waiter_poll_s())
         self._waiter_timeout_s = float(
             waiter_timeout_s if waiter_timeout_s is not None else cache_config.waiter_timeout_s()
         )
@@ -326,18 +322,37 @@ class RedisBackend:
         value_bytes = bytes(value)
         set_idx = 0
         zadd_idx = 1
-        try:
-            pipe = self._client.pipeline()
-            pipe.set(self._value_key(key), value_bytes, ex=self._cache_ttl_s)
-            pipe.zadd(self._lru_key(), {key: time.time()})
-            results = pipe.execute()
-        except _REDIS_OP_ERRORS:
-            logger.warning("shared.cache redis set failed for %s", key, exc_info=True)
+        last_write_error: BaseException | None = None
+
+        def _pipeline_write() -> list[Any] | None:
+            nonlocal last_write_error
             try:
-                self._client.zrem(self._lru_key(), key)
-            except _REDIS_OP_ERRORS:  # pragma: no cover - best-effort cleanup
-                pass
-            return
+                pipe = self._client.pipeline()
+                pipe.set(self._value_key(key), value_bytes, ex=self._cache_ttl_s)
+                pipe.zadd(self._lru_key(), {key: time.time()})
+                return list(pipe.execute())
+            except _REDIS_OP_ERRORS as exc:
+                last_write_error = exc
+                return None
+
+        results = _pipeline_write()
+        if results is None:
+            # OOM / transient write failure: reclaim via app-side ZSET trim, then
+            # retry once so a full ``noeviction`` Redis can recover without
+            # waiting for value TTLs to age out.
+            self._trim(max_entries)
+            results = _pipeline_write()
+            if results is None:
+                logger.warning(
+                    "shared.cache redis set failed for %s",
+                    key,
+                    exc_info=last_write_error,
+                )
+                try:
+                    self._client.zrem(self._lru_key(), key)
+                except _REDIS_OP_ERRORS:  # pragma: no cover - best-effort cleanup
+                    pass
+                return
 
         value_ok = bool(results) and results[set_idx] is not False
         if not value_ok:
@@ -396,8 +411,7 @@ class RedisBackend:
                 oldest = self._client.zrange(lru, 0, batch_size - 1)
                 if not oldest:
                     logger.warning(
-                        "shared.cache redis trim made no progress for %s "
-                        "(zcard overflow=%s but zrange empty)",
+                        "shared.cache redis trim made no progress for %s (zcard overflow=%s but zrange empty)",
                         self._namespace,
                         overflow,
                     )
@@ -448,24 +462,40 @@ class RedisBackend:
         result_key = self._result_key(key)
         got_lock = False
         lock_token = uuid.uuid4().hex.encode("ascii")
-        try:
-            got_lock = bool(
-                self._client.eval(
-                    _ACQUIRE_LOCK_LUA,
-                    2,
-                    lock_key,
-                    result_key,
-                    lock_token,
-                    int(self._lock_ttl_s),
+
+        def _try_acquire() -> bool | None:
+            """Return True/False on success, ``None`` when Redis ops fail."""
+            try:
+                return bool(
+                    self._client.eval(
+                        _ACQUIRE_LOCK_LUA,
+                        2,
+                        lock_key,
+                        result_key,
+                        lock_token,
+                        int(self._lock_ttl_s),
+                    )
                 )
-            )
-        except _REDIS_OP_ERRORS:
-            logger.debug("shared.cache redis lock failed for %s", key, exc_info=True)
-            # Fail-open: compute locally without coordinating.
-            payload, cacheable = compute()
-            if cacheable:
-                self.set(key, payload, max_entries=max_entries)
-            return payload
+            except _REDIS_OP_ERRORS:
+                return None
+
+        acquired = _try_acquire()
+        if acquired is None:
+            # OOM / Redis down: trim values then retry once so ``noeviction``
+            # pressure does not permanently disable cross-worker single-flight.
+            self._trim(max_entries)
+            acquired = _try_acquire()
+            if acquired is None:
+                logger.debug(
+                    "shared.cache redis lock failed for %s; computing locally",
+                    key,
+                )
+                # Fail-open: compute locally without coordinating.
+                payload, cacheable = compute()
+                if cacheable:
+                    self.set(key, payload, max_entries=max_entries)
+                return payload
+        got_lock = acquired
 
         if not got_lock:
             waited = self._wait_for_result(key, result_key)
@@ -587,8 +617,7 @@ class RedisBackend:
                 self._raise_published_error(raw)
             except _LeaderComputeError as err:
                 logger.warning(
-                    "shared.cache redis leader error marker not reconstructable; "
-                    "waiter will recompute (%s)",
+                    "shared.cache redis leader error marker not reconstructable; waiter will recompute (%s)",
                     err,
                 )
                 return None
