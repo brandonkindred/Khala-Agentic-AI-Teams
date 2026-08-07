@@ -105,6 +105,65 @@ def test_structured_output_model_routes_by_class_despite_misleading_prompt() -> 
     TaglineOutput.model_validate(j)
 
 
+def test_phase45_structured_output_model_wins_over_channel_guide_prompt() -> None:
+    """Model-class routing must ignore Phase 4 channel-guide prompt anchors.
+
+    A system prompt that would text-route to ChannelGuidelineOutput must still
+    yield the OwnershipOutput stub when that class is passed as
+    structured_output_model.
+    """
+    from branding_team.models import OwnershipOutput
+
+    c = DummyLLMClient()
+    misleading_system_prompt = (
+        "Define content_types and frequency_guidance for channel: 'website'."
+    )
+    j = c.complete_json(
+        "go",
+        system_prompt=misleading_system_prompt,
+        temperature=0.0,
+        structured_output_model=OwnershipOutput,
+    )
+    assert "ownership_model" in j
+    assert "decision_authority" in j
+    assert "channel" not in j
+    assert "content_types" not in j
+    OwnershipOutput.model_validate(j)
+
+
+def test_channel_guideline_model_extracts_channel_from_system_prompt() -> None:
+    """ChannelGuidelineOutput model routing fills channel from the prompt."""
+    from branding_team.models import ChannelGuidelineOutput
+
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt=(
+            "You are a Website Channel Specialist. channel: 'website'\n"
+            "Define content_types and frequency_guidance."
+        ),
+        temperature=0.0,
+        structured_output_model=ChannelGuidelineOutput,
+    )
+    assert j["channel"] == "website"
+    ChannelGuidelineOutput.model_validate(j)
+
+
+def test_channel_guideline_model_defaults_channel_when_absent() -> None:
+    """ChannelGuidelineOutput model routing defaults channel when prompt has none."""
+    from branding_team.models import ChannelGuidelineOutput
+
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt="Return channel guidelines without a quoted channel id.",
+        temperature=0.0,
+        structured_output_model=ChannelGuidelineOutput,
+    )
+    assert j["channel"] == "channel"
+    ChannelGuidelineOutput.model_validate(j)
+
+
 def test_phase2_system_prompt_without_model_does_not_route_by_text_anchors() -> None:
     """Phase 2 stubs must not be selected from system-prompt substrings alone.
 
