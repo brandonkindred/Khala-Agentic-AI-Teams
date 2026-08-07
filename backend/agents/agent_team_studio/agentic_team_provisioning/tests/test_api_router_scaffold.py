@@ -9,6 +9,8 @@ from fastapi.routing import APIRoute
 from agent_team_studio.agentic_team_provisioning.models import (
     CreateConversationRequest,
     CreateTeamRequest,
+    SetTeamModeRequest,
+    TeamMode,
 )
 
 # Representative extracted paths — enough to catch a dropped include_router while
@@ -24,6 +26,11 @@ _EXTRACTED_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/conversations/{conversation_id}/messages"),
         ("PUT", "/conversations/{conversation_id}/process"),
         ("GET", "/teams/{team_id}/conversations"),
+        ("PUT", "/teams/{team_id}/mode"),
+        ("POST", "/teams/{team_id}/test-chat/sessions"),
+        ("GET", "/teams/{team_id}/test-chat/sessions"),
+        ("POST", "/teams/{team_id}/test-pipeline/runs"),
+        ("POST", "/teams/{team_id}/test-pipeline/runs/{run_id}/cancel"),
     }
 )
 
@@ -69,10 +76,11 @@ def test_main_exposes_testing_router_marker() -> None:
 def test_main_exposes_mounted_router_markers() -> None:
     """main keeps explicit references so we can assert include_router ran."""
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod
-    from agent_team_studio.agentic_team_provisioning.api.routes import conversations, teams
+    from agent_team_studio.agentic_team_provisioning.api.routes import conversations, teams, testing
 
     assert main_mod._teams_router is teams.router
     assert main_mod._conversations_router is conversations.router
+    assert main_mod._testing_router is testing.router
     paths = {getattr(r, "path", None) for r in main_mod.app.routes if isinstance(r, APIRoute)}
     assert "/health" in paths
 
@@ -116,3 +124,21 @@ def test_conversations_service_reads_store_from_main(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(main_mod, "_store", _BoomStore())
     with pytest.raises(RuntimeError, match="hub-store-hit"):
         conv_svc.create_conversation(CreateConversationRequest(team_id="any"))
+
+
+def test_testing_service_reads_test_store_from_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hub dereference: patching ``main._test_store`` must be visible to testing."""
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import testing as testing_svc
+
+    class _Team:
+        pass
+
+    class _Boom:
+        def set_team_mode(self, *_a, **_k):
+            raise RuntimeError("hub-test-store-hit")
+
+    monkeypatch.setattr(main_mod, "_store", type("Store", (), {"get_team": lambda self, tid: _Team()})())
+    monkeypatch.setattr(main_mod, "_test_store", _Boom())
+    with pytest.raises(RuntimeError, match="hub-test-store-hit"):
+        testing_svc.set_team_mode(team_id="t1", req=SetTeamModeRequest(mode=TeamMode.TESTING))
