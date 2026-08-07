@@ -53,3 +53,52 @@ def test_assert_temporal_ready_succeeds_when_connect_ok(monkeypatch):
     )
 
     asyncio.run(lifecycle._assert_temporal_ready())
+
+
+def test_se_startup_awaits_assert_before_workers(monkeypatch):
+    """Fail-fast assert must run before either Temporal worker start."""
+    calls: list[str] = []
+
+    async def _assert() -> None:
+        calls.append("assert")
+
+    monkeypatch.setattr(lifecycle, "_assert_temporal_ready", _assert)
+
+    def _se_worker() -> bool:
+        calls.append("se_worker")
+        return True
+
+    def _ct_worker() -> bool:
+        calls.append("ct_worker")
+        return True
+
+    monkeypatch.setattr(
+        "software_engineering_team.temporal.worker.start_se_temporal_worker_thread",
+        _se_worker,
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.temporal.coding_team_worker.start_coding_team_temporal_worker_thread",
+        _ct_worker,
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.shared.cost_tracker.register_cost_observer",
+        lambda: calls.append("telemetry"),
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.shared.trace_flusher.register_trace_flusher",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.coding_engine_provider.SECodeEngineProvider",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.engine_provider.set_engine_provider",
+        lambda _p: calls.append("engine"),
+    )
+
+    asyncio.run(lifecycle._se_startup())
+
+    assert calls[0] == "assert"
+    assert "se_worker" in calls
+    assert "ct_worker" in calls
