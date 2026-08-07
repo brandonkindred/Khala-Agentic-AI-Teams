@@ -189,6 +189,64 @@ def render_patch_hunks(patch: str) -> str:
     return render_annotated_hunks(patch or "")
 
 
+def _merge_line_ranges(ranges: Sequence[LineRange]) -> tuple[LineRange, ...]:
+    """Merge overlapping or adjacent inclusive line ranges.
+
+    Preconditions:
+        - ``ranges`` is a sequence of valid ``LineRange`` values (may be empty).
+
+    Postconditions:
+        - Returns sorted unique merged ranges where each next range starts at
+          ``prev.end_line + 2`` or later (overlap or ``start <= end + 1`` merges).
+        - Empty input → ``()``.
+        - Never raises for valid ``LineRange`` inputs.
+    """
+    if not ranges:
+        return ()
+    ordered = sorted(ranges, key=lambda r: (r.start_line, r.end_line))
+    merged: list[LineRange] = [ordered[0]]
+    for r in ordered[1:]:
+        cur = merged[-1]
+        if r.start_line <= cur.end_line + 1:
+            merged[-1] = LineRange(
+                start_line=cur.start_line,
+                end_line=max(cur.end_line, r.end_line),
+            )
+        else:
+            merged.append(r)
+    return tuple(merged)
+
+
+def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
+    """Render merged-or-raw ranges as pre-numbered body text with gap markers.
+
+    Preconditions:
+        - ``content`` is the full new-file text (may be empty).
+        - ``ranges`` is a sequence of inclusive 1-based ``LineRange`` values
+          (caller should merge first when desired).
+
+    Postconditions:
+        - Emits ``f\"{n}: {line}\"`` for each line in each range, clamped to the
+          file's last line when ``end_line`` exceeds length.
+        - Between successive ranges, inserts a bare ``...`` line.
+        - Empty ``ranges`` or empty file with no emitable lines → ``\"\"``.
+        - Never raises.
+    """
+    lines = content.splitlines()
+    if not ranges or not lines:
+        return ""
+    total = len(lines)
+    chunks: list[str] = []
+    for idx, r in enumerate(ranges):
+        if idx > 0:
+            chunks.append("...")
+        start = min(max(1, r.start_line), total)
+        end = min(max(start, r.end_line), total)
+        for n in range(start, end + 1):
+            chunks.append(f"{n}: {lines[n - 1]}")
+    return "\n".join(chunks)
+
+
 def build_change_surface_from_patches(
     patches: Mapping[str, str],
     *,
