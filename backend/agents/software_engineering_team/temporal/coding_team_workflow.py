@@ -15,14 +15,57 @@ from software_engineering_team.temporal.coding_team_github_activities import (
     github_publish_activity,
 )
 
-# Bounded retry for short GitHub-hook activities (prep/publish/notice). Pipeline
-# keeps its own long start_to_close timeout without a shared retry policy here.
+# Bounded retry for short GitHub-hook activities (prep/publish/notice/mark-failed).
+# Pipeline keeps its own long start_to_close timeout without a shared retry policy here.
 _GITHUB_ACTIVITY_RETRY = RetryPolicy(
     maximum_attempts=3,
     initial_interval=timedelta(seconds=5),
     maximum_interval=timedelta(seconds=30),
     backoff_coefficient=2.0,
 )
+
+
+def _log_github_side_effect_failure(message: str) -> None:
+    """Best-effort log from workflow code that may run outside Temporal's runtime."""
+    try:
+        workflow.logger.exception(message)
+    except Exception:
+        logging.getLogger(__name__).exception(message)
+
+
+@activity.defn(name="coding_team_mark_job_failed")
+def mark_coding_team_job_failed_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Mark a coding-team job failed without any GitHub side effects.
+
+    Preconditions:
+        - ``request["job_id"]`` is a non-empty str naming an existing job row
+          (or a row the caller is willing to create via a no-op miss).
+        - ``request["error"]`` is optional; missing/empty becomes ``"failed"``.
+    Postconditions:
+        - Persists ``status=failed`` with a scrubbed error and clears
+          ``status_text``/``current_activity``.
+        - Returns the resulting job snapshot, or a synthetic failed dict when
+          the store has no row.
+        - Never talks to GitHub — this is the fallback when
+          ``github_failure_notice_activity`` cannot run (missing token, etc.).
+    """
+    from software_engineering_team.api.coding_team_main import get_job, update_job
+    from software_engineering_team.github_source import scrub_token_from_text
+    from software_engineering_team.models import JobStatus
+
+    job_id = request.get("job_id")
+    assert isinstance(job_id, str) and job_id, (
+        "mark_coding_team_job_failed_activity requires a non-empty job_id"
+    )
+    error = scrub_token_from_text(str(request.get("error") or "failed"))
+    update_job(
+        job_id,
+        status=JobStatus.FAILED.value,
+        error=error,
+        status_text=None,
+        current_activity=None,
+    )
+    return get_job(job_id) or {"job_id": job_id, "status": JobStatus.FAILED.value, "error": error}
 
 
 @activity.defn(name="coding_team_run_pipeline")
@@ -41,6 +84,9 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
           already created for the client to poll) — this is read directly via
           ``request.get("job_id")``, not a ``RunRequest`` field, so it passes
           through Pydantic's default ignore-extra-keys behavior unvalidated.
+        - When ``request["github"]`` is a non-empty dict, this activity defers
+          terminal success writes via ``_defer_terminal_success`` so publish
+          still sees a non-terminal job (matching thread-mode GitHub hooks).
     Postconditions:
         - Runs the orchestrator wired to the job store against the request's
           ``job_id`` when supplied (the API created the row; do not create it
@@ -66,7 +112,9 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
           against state the first attempt already changed. ``outcome`` is
           ``"completed"`` for every terminal SUCCESS status
           (``hitl.TERMINAL_SUCCESS_STATUSES``: completed, completed with
-          failures, already-complete) and ``"failed"`` otherwise (failed,
+          failures, already-complete) and for GitHub runs whose terminal
+          success was deferred to ``running``/``publishing`` via
+          ``_defer_terminal_success``; ``"failed"`` otherwise (failed,
           cancelled). ``error``/``summary`` are included only when the job
           record actually carries a value for them. Returns
           ``{"outcome": "unknown", "job_id": ..., "status": "unknown"}`` when
@@ -76,6 +124,10 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
           state. Raises with an actionable message when the worker is
           mis-wired (no provider) or the request carries no plan — instead of
           failing later, mid-run, with a generic error.
+        - For GitHub runs, orchestrator ``completed``/``already_complete``/
+          ``completed_with_failures`` writes are remapped to
+          ``running``/``publishing`` until ``github_publish_activity`` writes
+          the real terminal status.
         - Safe for POST ``/run/{job_id}/answers`` (see that route) to signal a
           resume without this activity ever having blocked: the route reads
           the job's persisted ``resume_token`` and signals
@@ -92,7 +144,9 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
         plan_from_input,
         run_orchestrator_wired,
     )
+    from software_engineering_team.api.orchestration import _defer_terminal_success
     from software_engineering_team.engine_provider import get_engine_provider
+    from software_engineering_team.models import JobStatus
 
     if get_engine_provider() is None:
         raise RuntimeError(
@@ -117,12 +171,17 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     if not supplied_job_id:
         create_job(job_id=job_id, repo_path=req.repo_path, plan_input=req.plan_input)
     plan = plan_from_input(req.plan_input, req.repo_path)
+    github = request.get("github")
+    update_job_fn = (
+        _defer_terminal_success(job_id) if isinstance(github, dict) and github else None
+    )
     paused = run_orchestrator_wired(
         job_id,
         req.repo_path,
         plan,
         pause_strategy="return",
         acknowledged_resume_token=req.acknowledged_resume_token,
+        update_job_fn=update_job_fn,
     )
     if paused is not None:
         return paused
@@ -130,8 +189,18 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     if job is None:
         return {"outcome": "unknown", "job_id": job_id, "status": "unknown"}
     status = job.get("status")
+    # GitHub Temporal runs remap terminal success to running/publishing until
+    # publish finishes; that deferred window is still a success outcome for the
+    # workflow's publish gate (which keys off status, not outcome).
+    deferred_github_success = (
+        status == JobStatus.RUNNING.value and job.get("phase") == "publishing"
+    )
     result: dict[str, Any] = {
-        "outcome": "completed" if status in hitl.TERMINAL_SUCCESS_STATUSES else "failed",
+        "outcome": (
+            "completed"
+            if status in hitl.TERMINAL_SUCCESS_STATUSES or deferred_github_success
+            else "failed"
+        ),
         "job_id": job_id,
         "status": status,
     }
@@ -244,6 +313,85 @@ class CodingTeamWorkflow:
             return
         self._submitted_answers = answers
 
+    async def _best_effort_github_failure_notice(
+        self,
+        *,
+        job_id: str,
+        github: dict[str, Any],
+        message: str,
+        github_timeout: timedelta,
+    ) -> dict[str, Any]:
+        """Post a failure notice; if that fails, mark the job failed locally.
+
+        Preconditions:
+            - Called from ``run`` while this workflow is executing.
+            - ``github`` carries owner/repo/issue_number; ``message`` is non-empty.
+        Postconditions:
+            - Attempts ``github_failure_notice_activity`` (bounded retries).
+            - On notice failure, runs ``mark_coding_team_job_failed_activity`` so
+              the Khala job is not left ``pending`` when the local write succeeds.
+            - Returns the resulting job snapshot from whichever activity succeeded.
+            - Propagates only when both notice and local mark-failed fail (callers
+              that must preserve an earlier exception wrap this in try/except).
+        """
+        try:
+            return await workflow.execute_activity(
+                github_failure_notice_activity,
+                {
+                    "job_id": job_id,
+                    "owner": github["owner"],
+                    "repo": github["repo"],
+                    "number": github["issue_number"],
+                    "message": message,
+                    "kind": "failure",
+                },
+                start_to_close_timeout=github_timeout,
+                retry_policy=_GITHUB_ACTIVITY_RETRY,
+            )
+        except Exception:
+            _log_github_side_effect_failure(
+                "github_failure_notice_activity failed; marking job failed locally"
+            )
+            return await workflow.execute_activity(
+                mark_coding_team_job_failed_activity,
+                {"job_id": job_id, "error": message},
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=_GITHUB_ACTIVITY_RETRY,
+            )
+
+    async def _best_effort_terminalize_then_reraise(
+        self,
+        *,
+        job_id: str,
+        github: dict[str, Any],
+        message: str,
+        github_timeout: timedelta,
+        original: BaseException,
+    ) -> None:
+        """Best-effort notice/mark-failed, then re-raise *original*.
+
+        Preconditions:
+            - ``original`` is the exception the caller must surface (prep /
+              pipeline / publish failure).
+            - ``github`` / ``message`` match ``_best_effort_github_failure_notice``.
+        Postconditions:
+            - Attempts terminalization via ``_best_effort_github_failure_notice``.
+            - Notice/mark-failed failures are logged only; always re-raises
+              ``original`` (never a notice/mark-failed error).
+        """
+        try:
+            await self._best_effort_github_failure_notice(
+                job_id=job_id,
+                github=github,
+                message=message,
+                github_timeout=github_timeout,
+            )
+        except Exception:
+            _log_github_side_effect_failure(
+                "best-effort GitHub failure terminalize failed; re-raising original"
+            )
+        raise original
+
     @workflow.run
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:
         """Run the coding-team pipeline, looping while the activity reports a pause.
@@ -265,12 +413,14 @@ class CodingTeamWorkflow:
         Postconditions:
             - Without GitHub metadata, returns the activity's result dict.
               With GitHub metadata, prepares the integration branch before
-              running the pipeline, skips the pipeline and posts a failure
-              notice when branch prep reports ``ok=False``, posts a failure
-              notice and re-raises when the pipeline activity raises, returns
-              failed/cancelled/waiting-for-user pipeline results unchanged,
-              and publishes the integration branch after successful terminal
-              pipeline results.
+              running the pipeline, posts a failure notice (and marks the job
+              failed) when branch prep reports ``ok=False`` or raises, best-
+              effort notices/mark-failed then re-raises the original error when
+              prep, the pipeline activity, or publish raises, returns
+              failed/cancelled/waiting-for-user pipeline results unchanged, and
+              publishes the integration branch after successful terminal
+              pipeline results (including deferred ``running``/``publishing``
+              success).
             - ``run_pipeline_activity`` now always requests
               ``pause_strategy="return"`` and emits
               ``{"outcome": "paused", ...}`` whenever a HITL gate pauses, or
@@ -326,32 +476,37 @@ class CodingTeamWorkflow:
         github_timeout = timedelta(minutes=30)
 
         if isinstance(github, dict) and github:
-            prep = await workflow.execute_activity(
-                github_branch_prep_activity,
-                {
-                    "job_id": request["job_id"],
-                    "repo_path": request["repo_path"],
-                    "remote": github.get("remote") or "origin",
-                    "default_branch": github["base"],
-                    "integration_branch": github["integration_branch"],
-                    "issue_number": github.get("issue_number"),
-                },
-                start_to_close_timeout=github_timeout,
-                retry_policy=_GITHUB_ACTIVITY_RETRY,
-            )
-            if not prep.get("ok"):
-                return await workflow.execute_activity(
-                    github_failure_notice_activity,
+            try:
+                prep = await workflow.execute_activity(
+                    github_branch_prep_activity,
                     {
                         "job_id": request["job_id"],
-                        "owner": github["owner"],
-                        "repo": github["repo"],
-                        "number": github["issue_number"],
-                        "message": f"branch prep failed: {prep.get('error')}",
-                        "kind": "failure",
+                        "repo_path": request["repo_path"],
+                        "remote": github.get("remote") or "origin",
+                        "default_branch": github["base"],
+                        "integration_branch": github["integration_branch"],
+                        "issue_number": github.get("issue_number"),
                     },
                     start_to_close_timeout=github_timeout,
                     retry_policy=_GITHUB_ACTIVITY_RETRY,
+                )
+            except Exception as prep_exc:
+                prep_message = (
+                    f"branch prep failed: {prep_exc}" if str(prep_exc) else "branch prep failed"
+                )
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=prep_message,
+                    github_timeout=github_timeout,
+                    original=prep_exc,
+                )
+            if not prep.get("ok"):
+                return await self._best_effort_github_failure_notice(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=f"branch prep failed: {prep.get('error')}",
+                    github_timeout=github_timeout,
                 )
 
         try:
@@ -396,58 +551,50 @@ class CodingTeamWorkflow:
                 raise
             if isinstance(github, dict) and github:
                 notice_message = f"pipeline failed: {exc}" if str(exc) else "pipeline failed"
-                try:
-                    await workflow.execute_activity(
-                        github_failure_notice_activity,
-                        {
-                            "job_id": request["job_id"],
-                            "owner": github["owner"],
-                            "repo": github["repo"],
-                            "number": github["issue_number"],
-                            "message": notice_message,
-                            "kind": "failure",
-                        },
-                        start_to_close_timeout=github_timeout,
-                        retry_policy=_GITHUB_ACTIVITY_RETRY,
-                    )
-                except Exception:
-                    # Never let a notice failure mask the original pipeline exception
-                    # or hang the workflow via unbounded activity retries. Log best-effort:
-                    # workflow.logger requires the Temporal runtime (unit tests call
-                    # ``run()`` directly), so fall back to stdlib logging.
-                    try:
-                        workflow.logger.exception(
-                            "github_failure_notice_activity failed after pipeline error; "
-                            "re-raising original"
-                        )
-                    except Exception:
-                        logging.getLogger(__name__).exception(
-                            "github_failure_notice_activity failed after pipeline error; "
-                            "re-raising original"
-                        )
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=notice_message,
+                    github_timeout=github_timeout,
+                    original=exc,
+                )
             raise
 
         if isinstance(github, dict) and github:
             status = result.get("status")
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
-            return await workflow.execute_activity(
-                github_publish_activity,
-                {
-                    "job_id": request["job_id"],
-                    "owner": github["owner"],
-                    "repo": github["repo"],
-                    "repo_path": request["repo_path"],
-                    "issue_number": github["issue_number"],
-                    "issue_title": github["issue_title"],
-                    "base": github["base"],
-                    "integration_branch": github["integration_branch"],
-                    "remote": github.get("remote") or "origin",
-                    "cleanup_checkout_on_success": bool(github.get("cleanup_checkout_on_success")),
-                },
-                start_to_close_timeout=github_timeout,
-                retry_policy=_GITHUB_ACTIVITY_RETRY,
-            )
+            try:
+                return await workflow.execute_activity(
+                    github_publish_activity,
+                    {
+                        "job_id": request["job_id"],
+                        "owner": github["owner"],
+                        "repo": github["repo"],
+                        "repo_path": request["repo_path"],
+                        "issue_number": github["issue_number"],
+                        "issue_title": github["issue_title"],
+                        "base": github["base"],
+                        "integration_branch": github["integration_branch"],
+                        "remote": github.get("remote") or "origin",
+                        "cleanup_checkout_on_success": bool(
+                            github.get("cleanup_checkout_on_success")
+                        ),
+                    },
+                    start_to_close_timeout=github_timeout,
+                    retry_policy=_GITHUB_ACTIVITY_RETRY,
+                )
+            except Exception as publish_exc:
+                publish_message = (
+                    f"publish failed: {publish_exc}" if str(publish_exc) else "publish failed"
+                )
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=publish_message,
+                    github_timeout=github_timeout,
+                    original=publish_exc,
+                )
         return result
 
 
@@ -457,6 +604,7 @@ ACTIVITIES = [
     github_branch_prep_activity,
     github_publish_activity,
     github_failure_notice_activity,
+    mark_coding_team_job_failed_activity,
 ]
 
 # NB: no worker self-boot at import time. This module DEFINES CodingTeamWorkflow,

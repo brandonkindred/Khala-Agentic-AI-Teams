@@ -345,3 +345,113 @@ def test_activity_forwards_acknowledged_resume_token_and_return_strategy(monkeyp
 
     assert captured["kwargs"]["pause_strategy"] == "return"
     assert captured["kwargs"]["acknowledged_resume_token"] == "job-ack:tok-1"
+
+
+def test_mark_coding_team_job_failed_activity_updates_store(monkeypatch) -> None:
+    """Local mark-failed fallback must persist failed status without GitHub calls."""
+    import software_engineering_team.api.coding_team_main as main
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+    )
+
+    updates: list[dict] = []
+    monkeypatch.setattr(
+        main,
+        "update_job",
+        lambda jid, **kw: updates.append({"job_id": jid, **kw}),
+    )
+    monkeypatch.setattr(
+        main,
+        "get_job",
+        lambda jid: {"job_id": jid, "status": "failed", "error": "branch prep failed"},
+    )
+
+    out = mark_coding_team_job_failed_activity(
+        {"job_id": "job-x", "error": "branch prep failed"}
+    )
+
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["error"] == "branch prep failed"
+    assert out["status"] == "failed"
+
+
+def test_github_pipeline_activity_defers_terminal_success(monkeypatch) -> None:
+    """GitHub Temporal runs must keep the job non-terminal until publish.
+
+    Thread-mode uses ``_defer_terminal_success`` so orchestrator ``completed``
+    is remapped to ``running``/``publishing``. The Temporal activity must do
+    the same when ``request`` carries a non-empty ``github`` block.
+    """
+    import software_engineering_team.api.coding_team_main as main
+    import software_engineering_team.engine_provider as ep
+
+    monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
+    monkeypatch.setattr(main, "create_job", lambda **kw: None)
+    updates: list[dict] = []
+    monkeypatch.setattr(
+        main,
+        "update_job",
+        lambda jid, **kw: updates.append({"job_id": jid, **kw}),
+    )
+    monkeypatch.setattr(
+        main,
+        "get_job",
+        lambda jid: {"job_id": jid, "status": "running", "phase": "publishing"},
+    )
+
+    def _fake_orch(job_id, repo_path, plan, **kwargs):
+        kwargs["update_job_fn"](status="completed", phase="completed")
+        return None
+
+    monkeypatch.setattr(main, "run_coding_team_orchestrator", _fake_orch)
+
+    out = run_pipeline_activity(
+        {
+            "job_id": "job-gh-1",
+            "repo_path": "/repo",
+            "plan_input": {"objective": "ship it"},
+            "github": {
+                "owner": "acme",
+                "repo": "widgets",
+                "issue_number": 9,
+                "issue_title": "Fix",
+                "base": "main",
+                "integration_branch": "khala/issue-9",
+            },
+        }
+    )
+
+    assert updates, "orchestrator must have written through update_job_fn"
+    assert updates[-1]["status"] == "running"
+    assert updates[-1]["phase"] == "publishing"
+    assert out["status"] == "running"
+    assert out["outcome"] == "completed"
+
+
+def test_non_github_pipeline_activity_still_writes_completed(monkeypatch) -> None:
+    """Without GitHub metadata, terminal success must remain ``completed``."""
+    import software_engineering_team.api.coding_team_main as main
+    import software_engineering_team.engine_provider as ep
+
+    monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
+    monkeypatch.setattr(main, "create_job", lambda **kw: None)
+    updates: list[dict] = []
+    monkeypatch.setattr(
+        main,
+        "update_job",
+        lambda jid, **kw: updates.append({"job_id": jid, **kw}),
+    )
+    monkeypatch.setattr(main, "get_job", lambda jid: {"job_id": jid, "status": "completed"})
+
+    def _fake_orch(job_id, repo_path, plan, **kwargs):
+        kwargs["update_job_fn"](status="completed", phase="completed")
+        return None
+
+    monkeypatch.setattr(main, "run_coding_team_orchestrator", _fake_orch)
+
+    out = run_pipeline_activity(
+        {"job_id": "job-plain", "repo_path": "/repo", "plan_input": {"objective": "ship it"}}
+    )
+
+    assert updates[-1]["status"] == "completed"
+    assert out["status"] == "completed"
