@@ -1844,6 +1844,9 @@ def test_answers_thread_mode_unaffected_when_no_resume_token(monkeypatch):
     def _no_signal(*_a, **_k):  # pragma: no cover
         raise AssertionError("must not signal the workflow for a block-mode pause")
 
+    monkeypatch.setattr(hitl_route, "signal_workflow_sync", _no_signal)
+    monkeypatch.setattr(api, "store_append_submitted_answers", _no_signal)
+
     r = client.post(
         "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
     )
