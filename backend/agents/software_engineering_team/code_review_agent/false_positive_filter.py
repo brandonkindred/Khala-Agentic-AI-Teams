@@ -538,6 +538,8 @@ class CodebaseIndex:
         n_lines = len(lines)
         if start > n_lines:
             display = self.resolve_path(path) or path
+            if display == self.EXISTING_CODEBASE_PATH:
+                display = path
             return (
                 f"Error: start line {start} is beyond the end of {display} "
                 f"(file has {n_lines} lines)."
