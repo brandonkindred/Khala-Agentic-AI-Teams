@@ -904,14 +904,19 @@ jobs:
               --data-file=".coverage.${{ matrix.source }}" \
               --include="*/${{ matrix.source }}/*" \
               --fail-under=90
-            # Code-review Temporal WorkflowEnvironment tests are marked
-            # ``integration`` so they stay out of the xdist unit suite above
-            # (embedded Temporal test-server startup is heavier than a pure
-            # unit case). They do not need Postgres/job-service — only the
-            # ephemeral temporalio test binary — so run them here rather than
-            # the Postgres integration job. Individual tests skip themselves
-            # if that binary cannot be fetched.
+            # Temporal WorkflowEnvironment tests (code-review + coding-team
+            # GitHub-hook e2e) are marked ``integration`` so they stay out of
+            # the xdist unit suite above (embedded Temporal test-server
+            # startup is heavier than a pure unit case). They do not need
+            # Postgres/job-service — only the ephemeral temporalio test
+            # binary — so run them here rather than the Postgres integration
+            # job. Individual tests skip themselves if that binary cannot be
+            # fetched. Coding-team is limited to the GitHub-hook happy-path
+            # node (not the whole file) so a pre-existing pause/resume
+            # sibling failure does not fail this slice. Do not add
+            # claim/Postgres coding-team integration files here.
             pytest software_engineering_team/tests/test_code_review_temporal.py \
+              software_engineering_team/tests/test_coding_team_temporal_workflow.py::test_workflow_github_path_prep_pipeline_publish \
               -v --tb=short -m integration
           else
             COV_CONFIG_ARG=""

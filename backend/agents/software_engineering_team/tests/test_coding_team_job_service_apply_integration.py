@@ -1,4 +1,4 @@
-"""Integration tests for the cross-worker resume claim against the REAL job service.
+"""Integration tests for atomic job-service apply against the REAL job service.
 
 These exercise the atomic read-after-write the unit tests can only model with the fake client:
 ``/jobs/{team}/{job_id}/apply`` must return the value written inside its own row-locked transaction,
@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from job_service_client import JobServiceClient
-from software_engineering_team import job_store
 
 
 @pytest.mark.integration
@@ -26,18 +25,3 @@ def test_apply_returns_callers_own_incremented_value(
 
     r2 = client.apply_and_get("j-atomic", increment={"resume_claim_seq": 1})
     assert r2 is not None and r2["resume_claim_seq"] == 2
-
-
-@pytest.mark.integration
-def test_claim_resume_single_winner_against_real_service(
-    integration_job_service: str, truncate_jobs_table: None
-) -> None:
-    client = JobServiceClient(team="coding_team")
-    client.create_job("j-claim", status="waiting_for_user")
-
-    assert job_store.claim_resume("j-claim") is True  # acquires the free lease
-    assert job_store.claim_resume("j-claim") is False  # the fresh lease now blocks
-
-    # Releasing the stamp makes it immediately re-claimable (seq stays monotonic).
-    job_store.release_resume_claim("j-claim")
-    assert job_store.claim_resume("j-claim") is True

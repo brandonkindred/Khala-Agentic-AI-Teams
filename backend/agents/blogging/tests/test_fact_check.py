@@ -98,21 +98,43 @@ def test_fact_check_exhausted_json_fallback(monkeypatch, tmp_path) -> None:
 
 
 def test_fact_check_unexpected_error_raises_fact_check_error(monkeypatch) -> None:
-    """A non-transient, non-JSON error is wrapped as FactCheckError."""
+    """A non-transient, non-JSON error is wrapped as FactCheckError with cause=."""
     from agents.blogging.blog_fact_check_agent import agent as fc_mod
-    from agents.blogging.shared.errors import FactCheckError
+    from agents.blogging.shared.errors import BloggingError, FactCheckError
+
+    root = ValueError("unexpected LLM failure")
 
     class _Agent:
         def __init__(self, *a, **kw):
             pass
 
         def __call__(self, prompt):
-            raise ValueError("unexpected LLM failure")
+            raise root
 
     monkeypatch.setattr(fc_mod, "Agent", _Agent)
     agent = BlogFactCheckAgent(llm_client=object())
-    with pytest.raises(FactCheckError):
+    with pytest.raises(FactCheckError) as exc_info:
         agent.run("draft")
+    err = exc_info.value
+    assert isinstance(err, BloggingError)
+    assert err.cause is root
+    assert "unexpected LLM failure" in str(err)
+
+
+def test_agent_fact_check_error_accepts_cause_kwarg() -> None:
+    """FactCheckError bound in the agent module must accept cause= (and BloggingError).
+
+    Guards against a defensive ImportError fallback that only subclasses Exception
+    and rejects the cause= keyword used at the wrap site.
+    """
+    from agents.blogging.blog_fact_check_agent.agent import FactCheckError
+    from agents.blogging.shared.errors import BloggingError
+
+    cause = RuntimeError("root failure")
+    err = FactCheckError("Fact-check failed: boom", cause=cause)
+    assert isinstance(err, BloggingError)
+    assert err.cause is cause
+    assert err.phase == "fact_check"
 
 
 def test_fact_check_normalizes_invalid_status_fail_closed(monkeypatch) -> None:

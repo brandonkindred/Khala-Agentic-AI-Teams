@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.artifacts import read_artifact, read_latest_draft, write_artifact
+from agents.blogging.shared.errors import FactCheckError
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
@@ -23,14 +24,6 @@ from llm_service import LLMRateLimitError, LLMTemporaryError
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
-
-try:
-    from agents.blogging.shared.errors import FactCheckError
-except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared.errors; not exercised because conftest guarantees the import path resolves.
-
-    class FactCheckError(Exception):
-        pass
-
 
 logger = logging.getLogger(__name__)
 

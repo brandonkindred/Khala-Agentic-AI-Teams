@@ -139,7 +139,8 @@ def _is_real_value(value: Optional[str]) -> bool:
         Returns True iff the stripped value is non-empty and not one of the
         known placeholder sentinels (``MISSION_PLACEHOLDERS``).
     """
-    return (value or "").strip() not in MISSION_PLACEHOLDERS
+    stripped = (value or "").strip()
+    return bool(stripped) and stripped not in MISSION_PLACEHOLDERS
 
 
 def _mission_has_brand_name(mission: BrandingMission) -> bool:

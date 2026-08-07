@@ -11,8 +11,9 @@ This module locks types, signatures, and empty/no-op builder contracts.
 otherwise a heuristic start or capped context window. ``extract_touched_lines``
 wraps GitHub unified-patch helpers for added-only touched lines.
 ``render_patch_hunks`` wraps annotated hunk rendering for the same patch text.
-Surface assembly from unified patches is implemented; the old/new pairs
-path remains follow-on work.
+Surface assembly from unified patches is implemented; ``unified_diffs_from_pairs``
+derives per-path diffs from SE old/new maps. Full pairs surface assembly
+remains follow-on work.
 
 Pure helpers: no I/O, no LLM clients, no package-level side effects.
 """
@@ -20,6 +21,7 @@ Pure helpers: no I/O, no LLM clients, no package-level side effects.
 from __future__ import annotations
 
 import ast
+import difflib
 import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -45,6 +47,7 @@ __all__ = [
     "extract_touched_lines",
     "format_change_surface_code",
     "render_patch_hunks",
+    "unified_diffs_from_pairs",
 ]
 
 # Max inclusive line span for heuristic / centered fallback ranges. AST hits
@@ -191,6 +194,51 @@ def render_patch_hunks(patch: str) -> str:
     return render_annotated_hunks(patch or "")
 
 
+def unified_diffs_from_pairs(
+    new_contents: Mapping[str, str],
+    old_contents: Optional[Mapping[str, str]] = None,
+) -> dict[str, str]:
+    """Build per-path unified diffs from SE-style old/new content maps.
+
+    Preconditions:
+        - ``new_contents`` maps path → new-file text (may be empty).
+        - ``old_contents``, when omitted/`None`, means empty old for every
+          path. When provided, missing keys are treated as empty old for
+          that path.
+
+    Postconditions:
+        - ``new_contents == {}`` → ``{}``.
+        - Result contains exactly the keys of ``new_contents`` (insertion
+          order preserved).
+        - For each path: if resolved old text equals new text → ``""``;
+          otherwise a non-empty ``difflib.unified_diff`` string with
+          ``fromfile=f"a/{path}"``, ``tofile=f"b/{path}"``, using
+          ``splitlines(keepends=True)``.
+        - Paths present only in ``old_contents`` are ignored.
+        - Never raises for well-typed string mappings.
+    """
+    if not new_contents:
+        return {}
+    old_map = old_contents  # None means empty old for every path
+    out: dict[str, str] = {}
+    for path, new_text in new_contents.items():
+        if old_map is None:
+            old_text = ""
+        else:
+            old_text = old_map[path] if path in old_map else ""
+        if old_text == new_text:
+            out[path] = ""
+            continue
+        diff = difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+        out[path] = "".join(diff)
+    return out
+
+
 def _merge_line_ranges(ranges: Sequence[LineRange]) -> tuple[LineRange, ...]:
     """Merge overlapping or adjacent inclusive line ranges.
 
@@ -324,25 +372,27 @@ def build_change_surface_from_pairs(
 
     Preconditions:
         - ``new_contents`` maps path → new-file content. May be empty.
-        - ``old_contents``, when omitted/`None`, means no base for every path
-          (new-file semantics in follow-on assembly). When provided, missing
-          keys are treated as absent old content for that path.
+        - ``old_contents``, when omitted/`None`, means empty old for every
+          path. When provided, missing keys are treated as empty old for
+          that path (same as ``unified_diffs_from_pairs``).
 
     Postconditions:
         - ``new_contents == {}`` → empty ``ChangeSurface`` regardless of
           ``old_contents``.
-        - Otherwise raises ``NotImplementedError`` until pair assembly (#5391)
-          is implemented. Future non-stub behavior: derive unified diffs
-          (difflib or equivalent), then the same pre-numbered expanded surface
-          as the patch path; identical old/new yields an empty/no-op for that
-          path; new files (no old) are included.
+        - Otherwise equivalent to
+          ``build_change_surface_from_patches(
+              unified_diffs_from_pairs(new_contents, old_contents),
+              new_contents=new_contents,
+          )``: identical old/new → blank patch → path omitted; all-identical
+          / no assemblable bodies → empty surface; new and modified files
+          with assemblable bodies match the patch-path surface for those
+          diffs.
+        - Never raises for well-typed string mappings.
     """
     if not new_contents:
         return _empty_surface()
-    raise NotImplementedError(
-        "build_change_surface_from_pairs assembly is not implemented yet "
-        "(change-surface old/new path)"
-    )
+    patches = unified_diffs_from_pairs(new_contents, old_contents)
+    return build_change_surface_from_patches(patches, new_contents=new_contents)
 
 
 _PYTHON_EXTS = frozenset({".py", ".pyi"})
