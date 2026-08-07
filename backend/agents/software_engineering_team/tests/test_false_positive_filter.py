@@ -26,6 +26,7 @@ from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
+    _READ_LINES_MAX_SPAN,
     CodebaseIndex,
     _build_group_prompt,
     _build_tools,
@@ -269,6 +270,63 @@ def test_read_file_or_none_returns_none_on_failure() -> None:
     assert idx.read_file_or_none("does/not/exist.py") is None
     assert idx.read_file_or_none("main.py") is None  # ambiguous suffix
     assert idx.read_file_or_none(CodebaseIndex.EXISTING_CODEBASE_PATH) is None  # no excerpt
+
+
+def test_read_lines_returns_inclusive_numbered_slice() -> None:
+    """Valid range returns header + numbered body for only the requested lines."""
+    idx = CodebaseIndex(files={"app/main.py": "a\nb\nc\nd\ne\n"})
+    result = idx.read_lines("app/main.py", 2, 4)
+    assert result.startswith("app/main.py lines 2–4 (3 lines):")
+    assert "2| b" in result
+    assert "3| c" in result
+    assert "4| d" in result
+    assert "1| a" not in result
+    assert "5| e" not in result
+
+
+def test_read_lines_inverted_range_errors() -> None:
+    """start > end returns an explicit inverted-range error."""
+    idx = CodebaseIndex(files={"app/main.py": "a\nb\nc\n"})
+    msg = idx.read_lines("app/main.py", 3, 1)
+    assert msg.startswith("Error:")
+    assert "invalid range" in msg
+    assert "start (3) > end (1)" in msg
+
+
+def test_read_lines_oversize_span_errors() -> None:
+    """Span larger than _READ_LINES_MAX_SPAN returns an explicit oversize error."""
+    body = "\n".join(f"line-{i}" for i in range(1, 500)) + "\n"
+    idx = CodebaseIndex(files={"big.py": body})
+    span = _READ_LINES_MAX_SPAN + 1
+    msg = idx.read_lines("big.py", 1, span)
+    assert msg.startswith("Error:")
+    assert f"range spans {span} lines" in msg
+    assert f"maximum is {_READ_LINES_MAX_SPAN}" in msg
+
+
+def test_read_lines_clamps_end_past_eof() -> None:
+    """end past EOF clamps to the last line when start is in range."""
+    idx = CodebaseIndex(files={"app/main.py": "a\nb\nc\n"})
+    result = idx.read_lines("app/main.py", 2, 99)
+    assert result.startswith("app/main.py lines 2–3 (2 lines):")
+    assert "2| b" in result
+    assert "3| c" in result
+
+
+def test_read_lines_start_past_eof_errors() -> None:
+    """start beyond file length returns an explicit beyond-EOF error."""
+    idx = CodebaseIndex(files={"app/main.py": "a\nb\n"})
+    msg = idx.read_lines("app/main.py", 5, 6)
+    assert msg.startswith("Error:")
+    assert "beyond the end" in msg
+    assert "file has 2 lines" in msg
+
+
+def test_read_lines_rejects_non_positive_bounds() -> None:
+    """Non-positive or non-int start/end return Error strings (never raise)."""
+    idx = CodebaseIndex(files={"app/main.py": "a\n"})
+    assert "positive integer" in idx.read_lines("app/main.py", 0, 1)
+    assert "positive integer" in idx.read_lines("app/main.py", 1, True)  # type: ignore[arg-type]
 
 
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
