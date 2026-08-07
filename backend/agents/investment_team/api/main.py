@@ -104,6 +104,9 @@ from investment_team.strategy_lab.config import (
     MAX_BATCH_COUNT as _MAX_BATCH_COUNT,
 )
 from investment_team.strategy_lab.config import (
+    MAX_PAPER_TRADING_LOOKBACK_DAYS as _MAX_PAPER_TRADING_LOOKBACK_DAYS,
+)
+from investment_team.strategy_lab.config import (
     MAX_PARALLEL as _MAX_PARALLEL,
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
@@ -703,12 +706,25 @@ class StrategyLabConfigResponse(BaseModel):
 
 
 class CreateProfileRequest(BaseModel):
+    """Inputs to create an Investment Policy Statement (IPS) for a user.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str = Field(..., description="Unique user identifier")
-    risk_tolerance: str = Field(..., description="low, medium, high, or very_high")
+    risk_tolerance: RiskTolerance = Field(
+        ..., description="One of: " + ", ".join(m.value for m in RiskTolerance)
+    )
     max_drawdown_tolerance_pct: float = Field(..., ge=0, le=100)
     time_horizon_years: int = Field(..., ge=1)
     annual_gross_income: float = Field(..., ge=0)
-    income_stability: str = Field(default="stable")
+    income_stability: Literal["stable", "variable", "seasonal", "commission"] = Field(
+        default="stable"
+    )
     total_net_worth: float = Field(..., ge=0)
     investable_assets: float = Field(..., ge=0)
     monthly_savings: float = Field(default=0.0)
@@ -719,22 +735,29 @@ class CreateProfileRequest(BaseModel):
     emergency_fund_months: int = Field(default=6)
     excluded_asset_classes: List[str] = Field(default_factory=list)
     excluded_industries: List[str] = Field(default_factory=list)
-    esg_preference: str = Field(default="none")
+    esg_preference: Literal["none", "light", "moderate", "strict"] = Field(default="none")
     crypto_allowed: bool = Field(default=True)
     options_allowed: bool = Field(default=True)
     leverage_allowed: bool = Field(default=False)
     goals: List[Dict[str, Any]] = Field(default_factory=list)
-    max_single_position_pct: float = Field(default=10.0)
+    max_single_position_pct: float = Field(default=10.0, ge=0, le=100)
     max_asset_class_pct: Dict[str, float] = Field(default_factory=dict)
     live_trading_enabled: bool = Field(default=False)
     human_approval_required_for_live: bool = Field(default=True)
-    speculative_sleeve_cap_pct: float = Field(default=10.0)
-    rebalance_frequency: str = Field(default="quarterly")
-    default_mode: str = Field(default="monitor_only")
+    speculative_sleeve_cap_pct: float = Field(default=10.0, ge=0, le=100)
+    rebalance_frequency: Literal["monthly", "quarterly", "semi-annual", "annual"] = Field(
+        default="quarterly"
+    )
+    default_mode: WorkflowMode = Field(
+        default=WorkflowMode.MONITOR_ONLY,
+        description="One of: " + ", ".join(m.value for m in WorkflowMode),
+    )
     notes: List[str] = Field(default_factory=list)
 
 
 class CreateProfileResponse(BaseModel):
+    """Returned by ``POST /profiles`` — the newly created IPS for the user."""
+
     user_id: str
     ips: IPS
     message: str = "Investment Policy Statement created successfully."
@@ -747,6 +770,15 @@ class GetProfileResponse(BaseModel):
 
 
 class CreateProposalRequest(BaseModel):
+    """Inputs to create a portfolio proposal for a user with an existing IPS.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     prepared_by: str = Field(..., description="Agent or user ID who prepared this proposal")
     user_id: str = Field(..., description="User ID whose IPS this is for")
     objective: str = Field(..., description="Investment objective")
@@ -758,22 +790,41 @@ class CreateProposalRequest(BaseModel):
 
 
 class CreateProposalResponse(BaseModel):
+    """Returned by ``POST /proposals/create`` — the newly created proposal."""
+
     proposal_id: str
     proposal: PortfolioProposal
     message: str = "Portfolio proposal created successfully."
 
 
 class GetProposalResponse(BaseModel):
+    """Returned by ``GET /proposals/{proposal_id}``.
+
+    ``found=False``/``proposal=None`` when no proposal exists for the given
+    id — a normal, expected outcome, not an error.
+    """
+
     proposal_id: str
     proposal: Optional[PortfolioProposal] = None
     found: bool = True
 
 
 class ValidateProposalRequest(BaseModel):
+    """Inputs to validate an existing proposal against a user's IPS.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str = Field(..., description="User ID to get IPS for validation")
 
 
 class ValidateProposalResponse(BaseModel):
+    """Returned by ``POST /proposals/{proposal_id}/validate``."""
+
     proposal_id: str
     valid: bool
     violations: List[str] = Field(default_factory=list)
@@ -799,18 +850,24 @@ class CreateStrategyRequest(BaseModel):
 
 
 class CreateStrategyResponse(BaseModel):
+    """Returned by ``POST /strategies`` — the newly created strategy."""
+
     strategy_id: str
     strategy: StrategySpec
     message: str = "Strategy created successfully."
 
 
 class ValidateStrategyRequest(BaseModel):
+    """Inputs to run validation checks against an existing strategy."""
+
     backtest_period: str = Field(default="2020-01-01 to 2024-12-31")
     scenario_set: List[str] = Field(default_factory=lambda: ["baseline", "stress", "monte_carlo"])
     checks: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ValidateStrategyResponse(BaseModel):
+    """Returned by ``POST /strategies/{strategy_id}/validate``."""
+
     strategy_id: str
     validation: ValidationReport
     passed: bool
@@ -818,6 +875,15 @@ class ValidateStrategyResponse(BaseModel):
 
 
 class RunBacktestRequest(BaseModel):
+    """Inputs to submit a backtest job for an existing strategy.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     strategy_id: str = Field(..., description="Strategy ID to back test")
     submitted_by: str = Field(..., description="Agent or user ID submitting the back test")
     start_date: str = Field(..., description="Backtest start date, ISO format")
@@ -831,16 +897,43 @@ class RunBacktestRequest(BaseModel):
 
 
 class RunBacktestResponse(BaseModel):
+    """Full backtest result, returned once a backtest job completes."""
+
     backtest: BacktestRecord
     message: str = "Backtest completed and recorded successfully."
 
 
 class ListBacktestsResponse(BaseModel):
+    """Response body for ``GET /backtests``.
+
+    ``count`` is always ``len(items)`` — enforced by a model_validator so a
+    caller can never construct a payload whose count disagrees with its list.
+    """
+
     items: List[BacktestRecord] = Field(default_factory=list)
     count: int = 0
 
+    @model_validator(mode="after")
+    def _derive_count_from_items(self) -> "ListBacktestsResponse":
+        """Recompute ``count`` from ``items`` so it can never drift apart.
+
+        Postconditions: ``count == len(items)`` regardless of what was passed
+        in for ``count``.
+        """
+        self.count = len(self.items)
+        return self
+
 
 class PromotionDecisionRequest(BaseModel):
+    """Inputs to run the promotion-gate decision for a validated strategy.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     strategy_id: str = Field(..., description="Strategy ID to promote")
     user_id: str = Field(..., description="User ID for IPS lookup")
     proposer_agent_id: str = Field(..., description="ID of agent who proposed the strategy")
@@ -852,6 +945,8 @@ class PromotionDecisionRequest(BaseModel):
 
 
 class PromotionDecisionResponse(BaseModel):
+    """Returned by ``POST /promotions/decide`` — the computed promotion decision."""
+
     strategy_id: str
     decision: PromotionDecision
 
@@ -872,16 +967,29 @@ class WorkflowStatusResponse(BaseModel):
 
 
 class QueueItemResponse(BaseModel):
+    """A single queued item, as returned by ``GET /workflow/queues``."""
+
     queue: str
     payload_id: str
     priority: str = "normal"
 
 
 class QueuesResponse(BaseModel):
+    """Returned by ``GET /workflow/queues`` — all queues, keyed by queue name."""
+
     queues: Dict[str, List[QueueItemResponse]] = Field(default_factory=dict)
 
 
 class CreateMemoRequest(BaseModel):
+    """Inputs to create an Investment Committee memo recording a recommendation.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str
     recommendation: str
     rationale: str
@@ -889,6 +997,8 @@ class CreateMemoRequest(BaseModel):
 
 
 class CreateMemoResponse(BaseModel):
+    """Returned by ``POST /memos`` — the newly created committee memo."""
+
     memo: InvestmentCommitteeMemo
 
 
@@ -903,38 +1013,23 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
     Preconditions:
-        - ``request.risk_tolerance`` must be a valid ``RiskTolerance`` value.
-        - ``request.default_mode`` must be a valid ``WorkflowMode`` value.
+        - ``request.risk_tolerance``/``request.default_mode`` are already
+          guaranteed to be valid ``RiskTolerance``/``WorkflowMode`` members —
+          FastAPI/Pydantic rejects any other value with a 422 before this
+          handler runs, since both fields are typed as the enum itself.
         - No profile may already exist for ``request.user_id`` — this endpoint
           creates; it does not upsert.
 
     Postconditions:
         - On success: a new IPS is persisted under ``_profiles[request.user_id]``
           and returned; no prior profile is overwritten.
-        - Raises ``HTTPException`` 400 if ``risk_tolerance`` or ``default_mode``
-          is invalid (message lists the current enum values).
         - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
           ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
         - Raises ``HTTPException`` 409 if a profile already exists for
           ``request.user_id``.
     """
-    try:
-        risk_tol = RiskTolerance(request.risk_tolerance)
-    except ValueError:
-        allowed = ", ".join(m.value for m in RiskTolerance)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: {allowed}",
-        )
-
-    try:
-        workflow_mode = WorkflowMode(request.default_mode)
-    except ValueError:
-        allowed = ", ".join(m.value for m in WorkflowMode)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: {allowed}",
-        )
+    risk_tol = request.risk_tolerance
+    workflow_mode = request.default_mode
 
     try:
         goals = [
@@ -1490,7 +1585,7 @@ def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
         items = [item for item in items if item.strategy_id == strategy_id]
 
     items.sort(key=lambda item: item.completed_at, reverse=True)
-    return ListBacktestsResponse(items=items, count=len(items))
+    return ListBacktestsResponse(items=items)
 
 
 @app.post("/promotions/decide", response_model=PromotionDecisionResponse)
@@ -1929,9 +2024,19 @@ class RunStrategyLabRequest(BaseModel):
         ),
     )
     paper_trading_lookback_days: int = Field(
-        default=365,
+        # Cap the default at the configured ceiling: Pydantic v2 doesn't validate
+        # field defaults, so a bare `default=365` would slip past
+        # `le=_MAX_PAPER_TRADING_LOOKBACK_DAYS` for an omitted request when an
+        # operator lowers STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS below 365,
+        # bypassing the advertised cap (the UI omits this field).
+        default=min(365, _MAX_PAPER_TRADING_LOOKBACK_DAYS),
         ge=30,
-        description="Days of recent market data to fetch for paper trading.",
+        le=_MAX_PAPER_TRADING_LOOKBACK_DAYS,
+        description=(
+            "Days of recent market data to fetch for paper trading. Upper "
+            "bound is configurable via STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS "
+            "(default 3650)."
+        ),
     )
     allowed_asset_classes: Optional[List[str]] = Field(
         default=None,
@@ -1963,7 +2068,7 @@ class RunStrategyLabRequest(BaseModel):
         if not normalized:
             raise ValueError(
                 "allowed_asset_classes must contain at least one of: "
-                "stocks, crypto, forex, futures, commodities"
+                + ", ".join(PROMPT_ASSET_CLASSES)
             )
         return normalized
 
@@ -1972,29 +2077,54 @@ class StrategyLabRunResponse(BaseModel):
     """Summary of a single completed ideation + backtest + analysis cycle.
 
     ``count`` is the number of records in ``records`` (0 or 1 for a single
-    cycle). Not currently used as a FastAPI ``response_model``.
+    cycle) — enforced by a model_validator. Not currently used as a FastAPI
+    ``response_model``.
     """
 
     records: List[StrategyLabRecord] = Field(default_factory=list)
     count: int = 0
     message: str = "Strategy ideated, backtested, and analysed successfully."
 
+    @model_validator(mode="after")
+    def _derive_count_from_records(self) -> "StrategyLabRunResponse":
+        """Recompute ``count`` from ``records`` so it can never drift apart.
+
+        Postconditions: ``count == len(records)`` regardless of what was
+        passed in for ``count``.
+        """
+        self.count = len(self.records)
+        return self
+
 
 class StrategyLabResultsResponse(BaseModel):
     """Response body for ``GET /strategy-lab/results``.
 
-    ``items``/``count`` reflect the records after the optional
-    ``?winning=`` filter is applied. ``winning_count``/``losing_count``
-    are computed from the full, unfiltered set of records and represent
-    how many strategies met (``is_winning=True``) or missed
-    (``is_winning=False``) the annualized-return winning threshold —
-    they do not change based on the ``winning`` query filter.
+    ``items``/``count``/``winning_count``/``losing_count`` are all derived
+    from the same (already-filtered, when ``?winning=`` is given) ``items``
+    list, so ``winning_count + losing_count == count`` always holds — a
+    ``?winning=true`` request reports ``losing_count == 0`` rather than the
+    unfiltered global losing count. (The UI's winning/losing tab chips call
+    the endpoint unfiltered, so they always see the full-set counts.)
     """
 
     items: List[StrategyLabRecord] = Field(default_factory=list)
     count: int = 0
     winning_count: int = 0
     losing_count: int = 0
+
+    @model_validator(mode="after")
+    def _derive_counts_from_items(self) -> "StrategyLabResultsResponse":
+        """Recompute all three count fields from ``items`` so they can never drift apart.
+
+        Postconditions: ``count == len(items)``; ``winning_count``/
+        ``losing_count`` equal the number of ``items`` with
+        ``is_winning`` True/False, regardless of what was passed in for
+        those fields.
+        """
+        self.count = len(self.items)
+        self.winning_count = sum(1 for r in self.items if r.is_winning)
+        self.losing_count = self.count - self.winning_count
+        return self
 
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
@@ -2863,22 +2993,16 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
           (already-filtered, when ``winning`` is given) list as ``items``/
           ``count``, so ``winning_count + losing_count == count`` always
           holds -- a ``?winning=true`` request reports ``losing_count == 0``
-          rather than the unfiltered global losing count.
+          rather than the unfiltered global losing count. (The UI's
+          winning/losing tab chips call this endpoint unfiltered, so they
+          always see the full-set counts regardless.)
     """
     items = _snapshot_prior_records(reverse=True)
 
     if winning is not None:
         items = [r for r in items if r.is_winning == winning]
 
-    winning_count = sum(1 for r in items if r.is_winning)
-    losing_count = len(items) - winning_count
-
-    return StrategyLabResultsResponse(
-        items=items,
-        count=len(items),
-        winning_count=winning_count,
-        losing_count=losing_count,
-    )
+    return StrategyLabResultsResponse(items=items)
 
 
 # ---------------------------------------------------------------------------
@@ -4107,6 +4231,14 @@ class ClearStrategyLabStorageResponse(BaseModel):
 
 
 class DeleteStrategyLabRecordResponse(BaseModel):
+    """Returned by ``DELETE /strategy-lab/records/{lab_record_id}``.
+
+    ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless the
+    corresponding linked entity actually existed (and was deleted) — not a
+    placeholder for "unknown." ``deleted_paper_trading_sessions`` is a count
+    of linked paper-trading sessions removed, not an id.
+    """
+
     lab_record_id: str
     deleted_strategy_id: Optional[str] = None
     deleted_backtest_id: Optional[str] = None
