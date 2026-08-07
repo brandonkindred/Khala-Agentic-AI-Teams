@@ -1396,7 +1396,7 @@ class TestReviewEndpoint:
     def test_far_future_heartbeat_treated_as_stale_not_live(self, review_app, monkeypatch) -> None:
         """A stamp beyond the clock-skew tolerance in the future is implausible (bad
         clock or corrupt data) — it must NOT count as live, or a dead job would block
-        reviews until that future time passes. Mirrors _answer_wait_heartbeat_fresh."""
+        reviews until that future time passes."""
         from datetime import datetime, timedelta, timezone
 
         api = review_app["api"]
@@ -3374,15 +3374,16 @@ class TestWholeFileReview:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # a.py covered by change surface; b.py falls back to hunks only.
+        # Both attempts are pre-numbered code= (no files=).
         assert len(calls) == 2
+        assert all("files" not in c for c in calls)
+        assert all(c["pre_numbered"] is True for c in calls)
         surface_call = next(
             c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
         )
         hunk_call = next(
             c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
         )
-        assert not surface_call.get("files")
-        assert surface_call["pre_numbered"] is True
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
@@ -3420,7 +3421,7 @@ class TestWholeFileReview:
         class _SplitProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
                 code = kw.get("code") or ""
-                if code and "a.py" in code and "b.py" not in code:
+                if "### a.py ###" in code:
                     return _FakeOutput(
                         issues=[
                             _FakeReviewIssue(
