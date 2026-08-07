@@ -7,6 +7,11 @@ duplicates of already-answered questions and organizational/process questions,
 consolidates semantically-equivalent questions, checks question/option coherence,
 and attaches a recommended option. The LLM-backed steps take an explicit Strands
 ``model`` and fall back to the unmodified list on any failure; the rest are pure.
+
+Question and option text is logged in full (no character truncation of those
+fields). ``MAX_ISSUES``, ``MAX_GAPS``, and ``MAX_OPEN_QUESTIONS`` are intentional
+item-count UX caps so a single spec review stays digestible; they are not
+character limits on text fields.
 """
 
 from __future__ import annotations
@@ -32,8 +37,9 @@ from .qa_history import content_words
 
 logger = logging.getLogger(__name__)
 
-# Caps chosen to keep a single spec review digestible in one sitting rather than
-# tuned against measured user drop-off; revisit with product input if that changes.
+# Item-count UX caps (not character limits on text fields). Chosen to keep a
+# single spec review digestible in one sitting rather than tuned against
+# measured user drop-off; revisit with product input if that changes.
 MAX_ISSUES = 10
 MAX_GAPS = 10
 MAX_OPEN_QUESTIONS = 10
