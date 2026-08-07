@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 # A reviewer-rendered original-line-number prefix ("123: code"); raw source has none.
 _LINE_NUM_PREFIX = re.compile(r"^\d+: ", re.MULTILINE)
 
@@ -40,12 +42,22 @@ def _execution_result(files):
     return ExecutionResult(files=files)
 
 
-class _StubAgent:
-    def __init__(self, response):
-        self.response = response
+def _stub_coordinator(monkeypatch, *, approved: bool = True, issues=None) -> None:
+    """Patch ``review_mod.run_coordinator`` to return a canned ``CodeReviewOutput``.
 
-    def __call__(self, prompt):
-        return self.response
+    Mirrors the old "## PASSED ## true" stub-``Agent`` pattern: a clean pass
+    with no issues by default, for tests exercising QA/security/build/
+    tool-agent orchestration rather than code-review content itself.
+    """
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
+
+    def _stub(llm, input_data, *args, **kwargs):
+        return CodeReviewOutput(
+            approved=approved, issues=issues or [], summary="stub", spec_compliance_notes=""
+        )
+
+    monkeypatch.setattr(review_mod, "run_coordinator", _stub)
 
 
 # ---------------------------------------------------------------------------
@@ -53,22 +65,74 @@ class _StubAgent:
 # ---------------------------------------------------------------------------
 
 
-def test_run_llm_review_parses_issues(monkeypatch):
+def test_run_llm_review_calls_coordinator_with_skip_tail_passes(monkeypatch):
+    """The fallback calls the shared coordinator directly, in lightweight mode
+    (no tail passes), threading task/files through to CodeReviewInput."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
 
-    resp = (
-        "## PASSED ##\nfalse\n## END PASSED ##\n"
-        "## ISSUES ##\n"
-        "description: bad code\nseverity: high\nfile_path: x.py\nsource: code_review\n"
-        "## END ISSUES ##\n"
-        "## SUMMARY ##\nbad\n## END SUMMARY ##\n"
-    )
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    captured: dict = {}
 
-    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
-    assert len(out.issues) == 1
+    def _spy(llm, input_data, *args, **kwargs):
+        captured["input_data"] = input_data
+        return CodeReviewOutput(approved=True, issues=[])
+
+    monkeypatch.setattr(review_mod, "run_coordinator", _spy)
+
+    task = _task(requirements="reqs", acceptance_criteria=["AC1", "AC2"])
+    _run_llm_review(llm=MagicMock(), task=task, files={"x.py": "code"})
+
+    input_data = captured["input_data"]
+    assert input_data.skip_tail_passes is True
+    assert input_data.files == {"x.py": "code"}
+    assert input_data.task_description == task.description
+    assert input_data.task_requirements == "reqs"
+    assert input_data.acceptance_criteria == ["AC1", "AC2"]
+
+
+def test_run_llm_review_defaults_language_to_profile_default(monkeypatch):
+    """With no ``language`` argument, the fallback must still set
+    ``CodeReviewInput.language`` to this team's own default ("python") rather
+    than leaving it unset and falling back to ``CodeReviewInput``'s own
+    "typescript" default -- backend code reviewed under the wrong language
+    label would misdirect the LLM's language-specific checks."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
+
+    captured: dict = {}
+
+    def _spy(llm, input_data, *args, **kwargs):
+        captured["input_data"] = input_data
+        return CodeReviewOutput(approved=True, issues=[])
+
+    monkeypatch.setattr(review_mod, "run_coordinator", _spy)
+
+    _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
+
+    assert captured["input_data"].language == "python"
+
+
+def test_run_llm_review_forwards_explicit_language(monkeypatch):
+    """An explicit ``language`` argument reaches ``CodeReviewInput`` verbatim,
+    matching the external ``code_review_agent`` path's handling in
+    ``shared.v2_review._code_review_step``."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
+
+    captured: dict = {}
+
+    def _spy(llm, input_data, *args, **kwargs):
+        captured["input_data"] = input_data
+        return CodeReviewOutput(approved=True, issues=[])
+
+    monkeypatch.setattr(review_mod, "run_coordinator", _spy)
+
+    _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"}, language="go")
+
+    assert captured["input_data"].language == "go"
 
 
 def test_run_llm_review_forwards_review_context(monkeypatch):
@@ -76,23 +140,18 @@ def test_run_llm_review_forwards_review_context(monkeypatch):
     configured, or it fails) also sees architecture/spec_content -- previously
     only the external agent path received this context, so a deployment
     relying on the fallback never saw it despite callers passing review_context."""
-    from llm_service.clients.dummy import DummyLLMClient
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
     from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 
-    prompts: list[str] = []
+    captured: dict = {}
 
-    class _RecordingAgent:
-        def __init__(self, *a, **kw):
-            pass
+    def _spy(llm, input_data, *args, **kwargs):
+        captured["input_data"] = input_data
+        return CodeReviewOutput(approved=True, issues=[])
 
-        def __call__(self, prompt):
-            prompts.append(prompt)
-            return "## PASSED ##\ntrue\n## END PASSED ##\n## ISSUES ##\n## END ISSUES ##\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
-
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _RecordingAgent())
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "run_coordinator", _spy)
 
     architecture = SystemArchitecture(overview="Layered service architecture.")
     review_context = ReviewContext(
@@ -100,94 +159,93 @@ def test_run_llm_review_forwards_review_context(monkeypatch):
     )
 
     _run_llm_review(
-        llm=DummyLLMClient(),
+        llm=MagicMock(),
         task=_task(),
         files={"x.py": "code"},
         review_context=review_context,
     )
-    assert "Layered service architecture." in prompts[0]
-    assert "All endpoints require auth." in prompts[0]
+    input_data = captured["input_data"]
+    assert input_data.architecture is architecture
+    assert input_data.spec_content == "All endpoints require auth."
 
 
-def test_run_llm_review_chunks_large_file_without_dropping_tail(monkeypatch):
-    """A file larger than one prompt budget is reviewed in function-aware
-    chunks, so its tail is seen by the reviewer instead of being truncated."""
+def test_run_llm_review_translates_issues_to_review_issue(monkeypatch):
+    """CodeReviewIssue fields translate to ReviewIssue: suggestion -> recommendation,
+    source is set to "code_review", and raw_issue_count is always None (the
+    lightweight coordinator has no grounding pass to report a pre-filter count
+    for; reporting a fabricated int would make review_cycle.py's grounding
+    circuit breaker see a false "0% rejected" instead of "no data")."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.backend_code_v2_team.phases.review import (
-        MAX_REVIEW_CODE_CHARS,
-        _run_llm_review,
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import (
+        CodeReviewIssue,
+        CodeReviewOutput,
     )
 
-    prompts: list[str] = []
-    clean = (
-        "## PASSED ##\ntrue\n## END PASSED ##\n"
-        "## ISSUES ##\n## END ISSUES ##\n"
-        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    monkeypatch.setattr(
+        review_mod,
+        "run_coordinator",
+        lambda llm, input_data, *a, **kw: CodeReviewOutput(
+            approved=False,
+            issues=[
+                CodeReviewIssue(
+                    severity="high",
+                    category="logic",
+                    file_path="x.py",
+                    description="bad code",
+                    suggestion="fix it",
+                )
+            ],
+        ),
     )
 
-    class _RecordingAgent:
-        def __init__(self, *a, **kw):
-            pass
+    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
 
-        def __call__(self, prompt):
-            prompts.append(prompt)
-            return clean
-
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _RecordingAgent())
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
-
-    big = "\n".join(f"def fn_{i:04d}():\n    return {i}" for i in range(2500))
-    assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
-
-    _run_llm_review(llm=MagicMock(), task=_task(), files={"big.py": big})
-
-    assert len(prompts) > 1  # chunked, not a single truncated call
-    joined = "\n".join(prompts)
-    assert "fn_0000" in joined  # head reviewed
-    assert "fn_2499" in joined  # tail reviewed — old truncation dropped this
+    assert out.raw_issue_count is None
+    assert len(out.issues) == 1
+    issue = out.issues[0]
+    assert issue.source == "code_review"
+    assert issue.severity == "high"
+    assert issue.description == "bad code"
+    assert issue.file_path == "x.py"
+    assert issue.recommendation == "fix it"
 
 
-def test_run_llm_review_skips_failing_chunk_keeps_others(monkeypatch):
-    """A chunk whose LLM call raises is logged and skipped; issues from the
-    other chunks survive instead of the whole review aborting."""
+def test_run_llm_review_raw_issue_count_is_none_on_clean_pass(monkeypatch):
+    """raw_issue_count stays None even when the coordinator finds nothing --
+    it must never default back to 0, which grounding_rejection_ratio would
+    also treat as "no ratio available" today but could stop doing so."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.backend_code_v2_team.phases.review import (
-        MAX_REVIEW_CODE_CHARS,
-        _run_llm_review,
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewOutput
+
+    monkeypatch.setattr(
+        review_mod,
+        "run_coordinator",
+        lambda llm, input_data, *a, **kw: CodeReviewOutput(approved=True, issues=[]),
     )
 
-    good = (
-        "## PASSED ##\nfalse\n## END PASSED ##\n"
-        "## ISSUES ##\n"
-        "description: real issue\nseverity: high\nfile_path: big.py\nsource: code_review\n"
-        "## END ISSUES ##\n"
-        "## SUMMARY ##\nbad\n## END SUMMARY ##\n"
-    )
-    calls = {"n": 0}
+    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
 
-    class _FlakyAgent:
-        def __init__(self, *a, **kw):
-            pass
+    assert out.issues == []
+    assert out.raw_issue_count is None
 
-        def __call__(self, prompt):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("model unavailable")
-            return good
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _FlakyAgent())
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
-    # Force the "many chunks" warning path too, so a large review logs visibly.
-    monkeypatch.setattr(review_mod, "MANY_CHUNKS_WARN_THRESHOLD", 0)
+def test_run_llm_review_propagates_coordinator_unavailable(monkeypatch):
+    """A total coordinator failure (no chunk reviewable) is not swallowed here --
+    it propagates so the caller's containment produces the fail-closed synthetic
+    issue instead of a silent clean pass."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.code_review_agent.models import CodeReviewUnavailableError
 
-    big = "\n".join(f"def fn_{i:04d}():\n    return {i}" for i in range(2500))
-    assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
+    def _raise(llm, input_data, *a, **kw):
+        raise CodeReviewUnavailableError("no chunk could be reviewed", unreviewed=[])
 
-    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"big.py": big})
+    monkeypatch.setattr(review_mod, "run_coordinator", _raise)
 
-    assert calls["n"] > 1  # every chunk was attempted
-    assert len(out.issues) >= 1  # the failed first chunk did not abort the review
-    assert all(i.description == "real issue" for i in out.issues)
+    with pytest.raises(CodeReviewUnavailableError):
+        _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
 
 
 def test_run_build_verification_no_verifier():
@@ -237,12 +295,9 @@ def test_run_build_verification_uses_profile_label():
 
 def test_run_review_clean(monkeypatch, tmp_path: Path):
     """No issues path: build passes, LLM review returns clean."""
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    resp = "## PASSED ##\ntrue\n## END PASSED ##\n## ISSUES ##\n## END ISSUES ##\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     result = run_review(
         llm=MagicMock(),
@@ -256,13 +311,9 @@ def test_run_review_clean(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_build_fails(monkeypatch, tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     result = run_review(
         llm=MagicMock(),
@@ -277,13 +328,9 @@ def test_run_review_build_fails(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_with_external_qa_agent(monkeypatch, tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     qa_agent = MagicMock()
 
@@ -306,13 +353,9 @@ def test_run_review_with_external_qa_agent(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_qa_agent_raises(monkeypatch, tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     qa_agent = MagicMock()
     qa_agent.run.side_effect = RuntimeError("qa crashed")
@@ -329,13 +372,9 @@ def test_run_review_qa_agent_raises(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_with_security_agent(monkeypatch, tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     sec_agent = MagicMock()
 
@@ -499,42 +538,6 @@ def test_run_qa_agent_defaults_file_path_to_sent_file():
     assert issues and all(i.file_path == "app/svc.py" for i in issues)
 
 
-def test_run_llm_review_hard_splits_oversized_single_line(monkeypatch):
-    """The LLM fallback also hard-splits an oversized single line so the file is
-    not sent in one prompt that may overflow the context and be skipped — and
-    every piece keeps the ### path ### header so tail findings stay attributable."""
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
-
-    codes: list[str] = []
-    clean = (
-        "## PASSED ##\ntrue\n## END PASSED ##\n"
-        "## ISSUES ##\n## END ISSUES ##\n"
-        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
-    )
-
-    class _RecordingAgent:
-        def __init__(self, *a, **kw):
-            pass
-
-        def __call__(self, prompt):
-            codes.append(prompt)
-            return clean
-
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _RecordingAgent())
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
-
-    full = _oversized_single_line()
-    _run_llm_review(llm=MagicMock(), task=_task(), files={"bundle.py": full})
-
-    assert len(codes) > 1  # the oversized line was hard-split across prompts
-    # The whole oversized line never fits in any single prompt — it was split.
-    assert not any(full in prompt for prompt in codes)
-    # Every piece keeps the file header, so a finding in any tail piece is
-    # still attributable to the file (the gap Codex flagged).
-    assert all("### bundle.py ###" in prompt for prompt in codes)
-
-
 def test_run_qa_agent_chunks_large_input_without_dropping_tail():
     """The QA agent is run once per raw piece of a large file, so its tail is
     reviewed instead of being truncated at MAX_REVIEW_CODE_CHARS — and the code
@@ -679,13 +682,9 @@ def test_run_security_agent_skips_failing_chunk_keeps_others(monkeypatch):
 
 
 def test_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     cr_agent = MagicMock()
 
@@ -710,13 +709,9 @@ def test_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
 def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
     """The code review agent receives ``files=`` verbatim — no 60K slice, no
     ``--- path ---`` concatenation."""
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     captured: dict = {}
 
@@ -744,14 +739,10 @@ def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
 def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path: Path):
     """``run_review``'s ``architecture``/``spec_content`` reach the code-review
     agent's input, and default to ``None``/``""`` when omitted."""
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
     from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     captured: dict = {}
 
@@ -792,19 +783,14 @@ def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path
 
 def test_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_path: Path):
     """If code_review_agent fails, we still call LLM fallback."""
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
+    from software_engineering_team.code_review_agent.models import CodeReviewIssue
 
-    monkeypatch.setattr(
-        review_mod,
-        "Agent",
-        lambda *a, **kw: _StubAgent(
-            "## PASSED ##\nfalse\n## END PASSED ##\n"
-            "## ISSUES ##\ndescription: bad\nsource: code_review\n## END ISSUES ##\n"
-            "## SUMMARY ##\nbad\n## END SUMMARY ##\n"
-        ),
+    _stub_coordinator(
+        monkeypatch,
+        approved=False,
+        issues=[CodeReviewIssue(severity="high", description="bad", suggestion="")],
     )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     cr_agent = MagicMock()
     cr_agent.run.side_effect = RuntimeError("crash")
@@ -821,13 +807,10 @@ def test_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_
 
 
 def test_run_review_with_linting_agent_pass(monkeypatch, tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    """A linting agent reporting success/passed=True yields lint_ok=True."""
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     lint_agent = MagicMock()
     lint_agent.run.return_value = MagicMock(
@@ -847,13 +830,10 @@ def test_run_review_with_linting_agent_pass(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_with_linting_agent_failures(monkeypatch, tmp_path: Path):
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    """A linting agent reporting failure yields lint_ok=False and a "lint"-sourced issue."""
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     class _LintIssue:
         severity = "error"
@@ -879,6 +859,7 @@ def test_run_review_with_linting_agent_failures(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
+    """A tool agent's issues and recommendations both surface in the result."""
     from software_engineering_team.backend_code_v2_team.models import (
         ToolAgentKind,
         ToolAgentPhaseOutput,
@@ -886,19 +867,9 @@ def test_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     tool_agent = MagicMock()
-
-    class _Issue:
-        source = "custom"
-        severity = "low"
-        description = "x"
-        file_path = ""
-        recommendation = ""
 
     tool_agent.review.return_value = ToolAgentPhaseOutput(
         issues=[
@@ -925,14 +896,11 @@ def test_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_tool_agent_raises(monkeypatch, tmp_path: Path):
+    """A tool agent whose .review() raises is contained -- run_review still returns."""
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     tool_agent = MagicMock()
     tool_agent.review.side_effect = RuntimeError("err")
@@ -949,14 +917,11 @@ def test_run_review_tool_agent_raises(monkeypatch, tmp_path: Path):
 
 
 def test_run_review_tool_agent_without_review_method(monkeypatch, tmp_path: Path):
+    """A tool agent lacking a .review() method entirely is skipped, not a crash."""
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     bare = object()  # no .review method
     result = run_review(
@@ -975,6 +940,8 @@ def test_run_review_tool_agent_without_review_method(monkeypatch, tmp_path: Path
 
 
 def test_review_steps_run_sequentially_for_dummy_llm():
+    """A DummyLLMClient (scripted, not thread-safe) forces sequential review steps;
+    any other client allows the concurrent fan-out."""
     from llm_service.clients.dummy import DummyLLMClient
     from software_engineering_team.backend_code_v2_team.phases.review import (
         _review_steps_run_sequentially,
@@ -1006,13 +973,9 @@ def test_run_review_steps_run_concurrently(monkeypatch, tmp_path: Path):
     run in parallel worker threads; a sequential loop would deadlock and time out."""
     import threading
 
-    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     barrier = threading.Barrier(3, timeout=30)
 
@@ -1063,10 +1026,7 @@ def test_run_review_qa_failure_does_not_drop_other_steps_issues(monkeypatch, tmp
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     def _boom(**_kw):
         raise RuntimeError("qa exploded outright")
@@ -1102,10 +1062,7 @@ def test_run_review_security_failure_does_not_drop_other_steps_issues(monkeypatc
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(
-        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
-    )
-    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    _stub_coordinator(monkeypatch)
 
     def _boom(**_kw):
         raise RuntimeError("security exploded outright")

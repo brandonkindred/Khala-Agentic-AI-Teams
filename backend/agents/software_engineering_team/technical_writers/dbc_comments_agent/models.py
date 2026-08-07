@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.models import SystemArchitecture
 
+# Single source of truth for the default commit message, referenced by both
+# schema field defaults below and by agent.run()'s cross-chunk fallback --
+# avoids agent.py reaching into DbcCommentsLLMResponse.model_fields (Pydantic's
+# internal FieldInfo API) to recover the same string.
+DEFAULT_SUGGESTED_COMMIT_MESSAGE = "docs(dbc): add Design by Contract comments"
+
 
 class DbcCommentsStatus(str, Enum):
     """Progress tracking status for the DbC Comments agent workflow.
@@ -111,7 +117,7 @@ class DbcCommentsLLMResponse(BaseModel):
         "praising compliance",
     )
     suggested_commit_message: str = Field(
-        default="docs(dbc): add Design by Contract comments",
+        default=DEFAULT_SUGGESTED_COMMIT_MESSAGE,
         description="Conventional Commits format commit message",
     )
     comments_added: int = Field(
@@ -171,6 +177,6 @@ class DbcCommentsOutput(BaseModel):
         description="Summary message for the coding agent describing what was changed or praising compliance",
     )
     suggested_commit_message: str = Field(
-        default="docs(dbc): add Design by Contract comments",
+        default=DEFAULT_SUGGESTED_COMMIT_MESSAGE,
         description="Conventional Commits format commit message",
     )

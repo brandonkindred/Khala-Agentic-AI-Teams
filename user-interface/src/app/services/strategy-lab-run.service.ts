@@ -2,6 +2,7 @@ import { Injectable, OnDestroy, inject, signal } from '@angular/core';
 import { Observable, Subject, Subscription, switchMap, takeWhile, timer } from 'rxjs';
 import { InvestmentApiService } from './investment-api.service';
 import { reduce as reduceStrategyLabRun } from './strategy-lab-run.reducer';
+import { isPaperTradingStatusTerminal } from '../models';
 import type { PaperTradingSession, StrategyLabRunStatus, StrategyLabStreamEvent } from '../models';
 
 /**
@@ -251,12 +252,15 @@ export class StrategyLabRunService implements OnDestroy {
    * caller-initiated action a button spinner should reflect.
    *
    * Postconditions: `paperTradingSessions()` equals `sessions`; polling is
-   *   (re)started for every entry whose `status` is `'running'`.
+   *   (re)started for every entry whose `status` is not yet terminal (see
+   *   `isPaperTradingStatusTerminal` — covers the legacy `'running'` value
+   *   as well as the PR-2 live-mode `'opening'` | `'warming_up'` | `'live'`
+   *   states).
    */
   hydratePaperTradingSessions(sessions: Record<string, PaperTradingSession>): void {
     this._paperTradingSessions.set(sessions);
     for (const [labRecordId, session] of Object.entries(sessions)) {
-      if (session.status === 'running') {
+      if (!isPaperTradingStatusTerminal(session.status)) {
         this.pollPaperTradingSession(labRecordId, session.session_id);
       }
     }
@@ -267,7 +271,9 @@ export class StrategyLabRunService implements OnDestroy {
    * polling for it.
    *
    * Preconditions: `session` is a just-started session — the backend
-   *   returns one with `status: 'running'` immediately on POST.
+   *   returns one with a non-terminal `status` immediately on POST
+   *   (`'opening'` when live paper trading is enabled, `'running'` on the
+   *   legacy path).
    * Postconditions: `paperTradingSessions()[labRecordId]` is `session`;
    *   `paperTradingLabRecordId()` is `labRecordId`; polling starts.
    */
@@ -283,12 +289,12 @@ export class StrategyLabRunService implements OnDestroy {
     const sub = timer(3000, 3000)
       .pipe(
         switchMap(() => this.api.getPaperTradingSession(sessionId)),
-        takeWhile((res) => res.session.status === 'running', true),
+        takeWhile((res) => !isPaperTradingStatusTerminal(res.session.status), true),
       )
       .subscribe({
         next: (res) => {
           this._paperTradingSessions.update((s) => ({ ...s, [labRecordId]: res.session }));
-          if (res.session.status !== 'running') {
+          if (isPaperTradingStatusTerminal(res.session.status)) {
             this._paperTradingLabRecordId.set(null);
             this.paperTradingPollSubs.delete(labRecordId);
           }

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Optional
+from urllib.parse import quote
 
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -57,6 +59,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     RosterValidationResult,
     SendMessageRequest,
     SendTestChatMessageRequest,
+    SetConversationProcessRequest,
     SetTeamModeRequest,
     StartPipelineRunRequest,
     SubmitPipelineInputRequest,
@@ -86,6 +89,7 @@ from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
 from agent_team_studio.agentic_team_provisioning.testing.store import get_test_store
 from shared.app import create_team_app
+from shared.env_config import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -310,12 +314,24 @@ def create_team(req: CreateTeamRequest):
 
 @app.get("/teams", response_model=list[TeamSummary])
 def list_teams():
+    """List all agentic teams.
+
+    Preconditions: none.
+    Postconditions: ``200`` with a ``TeamSummary`` for every persisted team, in the
+        store's default order; an empty list if no teams exist.
+    """
     rows = _store.list_teams()
     return [TeamSummary(**r) for r in rows]
 
 
 @app.get("/teams/{team_id}", response_model=TeamDetailResponse)
 def get_team(team_id: str):
+    """Retrieve a single agentic team by id.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the full ``TeamDetailResponse`` when the team
+        exists; ``404`` if no team with the given id is found.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -329,7 +345,14 @@ def get_team(team_id: str):
 
 @app.get("/teams/{team_id}/agents", response_model=list[AgenticTeamAgent])
 def list_team_agents(team_id: str):
-    """Named agents pool (roster) for this team."""
+    """Named agents pool (roster) for this team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the team's roster as a list of
+        ``AgenticTeamAgent`` (empty if no agents have been added yet); ``404``
+        if the team is not found.
+    Invariants: none.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -380,7 +403,19 @@ def list_team_agent_manifests(team_id: str):
 
 @app.get("/teams/{team_id}/roster/validation", response_model=RosterValidationResult)
 def validate_team_roster(team_id: str):
-    """Validate whether the roster fully covers the team's process needs."""
+    """Validate whether the roster fully covers the team's process needs.
+
+    Runs every process's step/agent requirements against the roster (each
+    referenced agent must exist and be assigned), flags roster agents unused by
+    any process, and flags agents whose profile is too sparse (missing most of
+    skills/capabilities/tools/expertise) — see ``roster_validation.validate_roster``.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``RosterValidationResult`` summarizing
+        coverage gaps (empty ``gaps`` and ``is_fully_staffed=True`` when the
+        roster fully covers every process); ``404`` if the team is not found.
+    Invariants: none — a read-only check, no roster or process state changes.
+    """
     from agent_team_studio.agentic_team_provisioning.roster_validation import validate_roster
 
     team = _store.get_team(team_id)
@@ -537,14 +572,20 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
         if the manifest is a *generated* roster agent (any team's — see below; roster
         unchanged); ``422`` if the resolved manifest is too malformed to project (e.g.
         blank name/id), so a bad registry entry surfaces as a client error rather than
-        an unhandled 500.
+        an unhandled 500; ``503`` if the registry lookup itself fails (e.g. the
+        registry is unavailable), so an outage surfaces as a clear service-unavailable
+        response rather than an opaque 500.
     """
     from agent_registry import get_registry
 
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    manifest = get_registry().get(req.manifest_id)
+    try:
+        manifest = get_registry().get(req.manifest_id)
+    except Exception as e:
+        logger.warning("Registry lookup failed for manifest %s: %s", req.manifest_id, e)
+        raise HTTPException(status_code=503, detail="Agent registry unavailable")
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
     # Reject adding a *generated* roster manifest via the registry. Generated agents
@@ -570,7 +611,7 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
         )
     try:
         agent = _roster_agent_from_manifest(manifest)
-    except ValueError as e:
+    except (ValueError, ValidationError) as e:
         logger.warning(
             "Malformed registered manifest %s for team %s: %s", req.manifest_id, team_id, e
         )
@@ -673,6 +714,13 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
 
 @app.get("/teams/{team_id}/processes", response_model=list[ProcessDefinition])
 def list_processes(team_id: str):
+    """List all processes defined for a team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the team's processes as a list of
+        ``ProcessDefinition`` (empty if none have been created yet); ``404``
+        if the team is not found.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -681,6 +729,16 @@ def list_processes(team_id: str):
 
 @app.get("/processes/{process_id}", response_model=ProcessDefinition)
 def get_process(process_id: str):
+    """Retrieve a single process definition by id.
+
+    Note: unlike the team-scoped routes, this one is looked up globally by
+    ``process_id`` alone (no ``team_id`` in the path) — the visual editor and
+    conversation flows address a process directly once they know its id.
+
+    Preconditions: ``process_id`` is a non-empty string.
+    Postconditions: ``200`` with the ``ProcessDefinition``; ``404`` if no
+        process with that id exists.
+    """
     process = _store.get_process(process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -689,7 +747,15 @@ def get_process(process_id: str):
 
 @app.post("/teams/{team_id}/processes", response_model=ProcessDefinition, status_code=201)
 def create_process(team_id: str):
-    """Create a new blank process for the team."""
+    """Create a new blank process for the team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``201`` with a fresh ``ProcessDefinition`` (a new UUID
+        ``process_id``, name "New Process", no steps, ``status=DRAFT``)
+        persisted under the team; ``404`` if the team is not found (no process
+        created). Side effect: inserts a new process row via
+        ``_store.save_process``.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -708,7 +774,19 @@ def create_process(team_id: str):
 
 @app.put("/processes/{process_id}", response_model=ProcessDefinition)
 def update_process(process_id: str, process: ProcessDefinition):
-    """Update a process definition (visual editor saves)."""
+    """Update a process definition (visual editor saves).
+
+    Preconditions: ``process_id`` is a non-empty string identifying an
+        existing process; ``process.process_id`` must equal ``process_id``.
+    Postconditions: ``200`` with the saved ``ProcessDefinition`` (the full
+        body replaces the stored definition — this is a whole-document save,
+        not a partial patch); ``404`` if the process (or its owning team) is
+        not found; ``400`` if ``process.process_id`` doesn't match the URL
+        (process unchanged in both error cases). Side effect: calls
+        ``_after_process_saved``, which schedules background provisioning of
+        per-step agent environments (``schedule_provision_step_agents``) for
+        the updated process — this runs even for a no-op-looking save.
+    """
     existing = _store.get_process(process_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -728,7 +806,21 @@ def update_process(process_id: str, process: ProcessDefinition):
     response_model=RecommendAgentsResponse,
 )
 def recommend_agents_for_step(process_id: str, step_id: str):
-    """Recommend agents for a specific process step based on its description."""
+    """Recommend roster agents for a specific process step based on its description.
+
+    Scoring is a simple token-overlap heuristic, not semantic matching:
+    lowercased words (length > 2) from the step's ``name``/``description`` are
+    intersected against each roster agent's combined
+    skills/capabilities/tools/expertise; the overlap *count* is the
+    ``match_score``. Agents with zero overlap are omitted entirely, and the
+    remaining ones are sorted by descending score and capped to the top 10.
+
+    Preconditions: ``process_id`` and ``step_id`` are non-empty strings.
+    Postconditions: ``200`` with a ``RecommendAgentsResponse`` (``recommended_agents``
+        is empty when the process's team has no matching agents, or is
+        unresolvable); ``404`` if the process is unknown, or the process has
+        no step with ``step_id``.
+    """
     process = _store.get_process(process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -797,6 +889,19 @@ def _build_state_response(
 
 @app.post("/conversations", response_model=ConversationStateResponse)
 def create_conversation(req: CreateConversationRequest):
+    """Start a new conversation for a team, optionally seeded with an initial message.
+
+    Preconditions: ``req.team_id`` refers to an existing team.
+    Postconditions: ``200`` with the conversation's state; ``404`` if the team is
+        unknown (nothing persisted). When ``req.initial_message`` is given, the
+        user/assistant chat turn is appended to the store *before* the LLM's
+        roster is saved via ``_save_agents_from_llm``; if that save fails because
+        the agent registry is unavailable, this raises ``503`` instead of an
+        opaque ``500`` — but the conversation is left with the chat turn already
+        persisted and the roster/registry write rolled back (partial state). A
+        client retrying the same message re-processes it against a conversation
+        that already contains the prior turn.
+    """
     # Validate team exists
     team = _store.get_team(req.team_id)
     if not team:
@@ -820,7 +925,16 @@ def create_conversation(req: CreateConversationRequest):
         )
 
         _store.append_message(conversation_id, "assistant", reply)
-        _save_agents_from_llm(req.team_id, agents_data)
+        try:
+            _save_agents_from_llm(req.team_id, agents_data)
+        except Exception as e:
+            logger.warning(
+                "Roster save failed for team %s after conversation %s turn: %s",
+                req.team_id,
+                conversation_id,
+                e,
+            )
+            raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
         if process:
             _store.save_process(req.team_id, process)
             _store.set_conversation_process(conversation_id, process.process_id)
@@ -835,6 +949,19 @@ def create_conversation(req: CreateConversationRequest):
 
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
 def send_message(conversation_id: str, req: SendMessageRequest):
+    """Send a user message on an existing conversation and get the assistant's reply.
+
+    Preconditions: ``conversation_id`` refers to an existing conversation.
+    Postconditions: ``200`` with the conversation's updated state; ``404`` if the
+        conversation is unknown (nothing persisted). The user/assistant chat turn
+        is appended to the store *before* the LLM's roster is saved via
+        ``_save_agents_from_llm``; if that save fails because the agent registry
+        is unavailable, this raises ``503`` instead of an opaque ``500`` — but the
+        conversation is left with the chat turn already persisted and the
+        roster/registry write rolled back (partial state). A client retrying the
+        same message re-processes it against a conversation that already contains
+        the prior turn.
+    """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -859,7 +986,16 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     )
 
     _store.append_message(conversation_id, "assistant", reply)
-    _save_agents_from_llm(team_id, agents_data)
+    try:
+        _save_agents_from_llm(team_id, agents_data)
+    except Exception as e:
+        logger.warning(
+            "Roster save failed for team %s after conversation %s turn: %s",
+            team_id,
+            conversation_id,
+            e,
+        )
+        raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
 
     effective_process = current_process
     if updated_process:
@@ -872,19 +1008,28 @@ def send_message(conversation_id: str, req: SendMessageRequest):
 
 
 @app.put("/conversations/{conversation_id}/process")
-def set_conversation_process(conversation_id: str, body: dict):
-    """Link a process to the active conversation so chat stays in sync with the visual editor."""
+def set_conversation_process(conversation_id: str, req: SetConversationProcessRequest):
+    """Link a process to the active conversation so chat stays in sync with the visual editor.
+
+    Preconditions: ``req.process_id`` is non-empty (enforced by the request model;
+        a missing/blank value is a ``422`` before this handler runs).
+    Postconditions: ``200`` with the linked ``conversation_id``/``process_id`` pair;
+        ``404`` if the conversation or the process is unknown (link unchanged); ``403``
+        if the process belongs to a different team than the conversation (link
+        unchanged) — a conversation may only be linked to its own team's processes.
+    """
     team_id = _store.get_conversation_team_id(conversation_id)
     if not team_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    process_id = body.get("process_id")
-    if not process_id:
-        raise HTTPException(status_code=400, detail="process_id is required")
-    process = _store.get_process(process_id)
+    process = _store.get_process(req.process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
-    _store.set_conversation_process(conversation_id, process_id)
-    return {"conversation_id": conversation_id, "process_id": process_id}
+    if _store.get_process_team_id(req.process_id) != team_id:
+        raise HTTPException(
+            status_code=403, detail="Process does not belong to this conversation's team"
+        )
+    _store.set_conversation_process(conversation_id, req.process_id)
+    return {"conversation_id": conversation_id, "process_id": req.process_id}
 
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
@@ -1015,6 +1160,19 @@ def submit_team_answers(team_id: str, job_id: str, req: SubmitTeamAnswersRequest
 # Assets (File System)
 # ---------------------------------------------------------------------------
 
+_DEFAULT_MAX_ASSET_BYTES = 10 * 1024 * 1024  # 10 MiB
+_ASSET_UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB, read granularity while enforcing the limit
+
+
+def _max_asset_upload_bytes() -> int:
+    """Configured per-asset upload ceiling (``AGENTIC_TEAM_MAX_ASSET_BYTES``).
+
+    Postconditions: returns a positive int — the parsed env var when set and
+    valid, else ``_DEFAULT_MAX_ASSET_BYTES`` (per ``shared.env_config.env_int``:
+    garbage or unset falls back to the default, never raises).
+    """
+    return env_int("AGENTIC_TEAM_MAX_ASSET_BYTES", _DEFAULT_MAX_ASSET_BYTES, floor=1)
+
 
 def _safe_asset_name(name: str) -> str:
     """Sanitize asset name to prevent path traversal."""
@@ -1047,24 +1205,65 @@ def list_team_assets(team_id: str):
 
 @app.get("/teams/{team_id}/assets/{name}")
 def download_team_asset(team_id: str, name: str):
-    """Download a specific asset file."""
+    """Download a specific asset file.
+
+    Preconditions: none beyond ``team_id``/``name`` being valid path segments.
+    Postconditions: ``200`` streaming the file's bytes with an RFC 5987-encoded
+        ``Content-Disposition`` header (safe for names containing quotes or
+        non-ASCII characters, which would otherwise malform a raw ``filename=``
+        header); ``404`` if ``name`` sanitizes to an invalid asset name, the
+        resolved path escapes ``assets_dir`` (e.g. a symlink inside the
+        directory pointing elsewhere on the host), or no such file exists.
+    """
     infra = _get_infra_or_404(team_id)
     safe_name = _safe_asset_name(name)
-    path = infra.assets_dir / safe_name
-    if not path.is_file():
+    assets_root = infra.assets_dir.resolve()
+    path = (infra.assets_dir / safe_name).resolve()
+    if not path.is_relative_to(assets_root) or not path.is_file():
         raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(str(path), filename=safe_name)
+    encoded_name = quote(safe_name)
+    return FileResponse(
+        str(path),
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
 
 
 @app.post("/teams/{team_id}/assets", response_model=AssetInfo)
 async def upload_team_asset(team_id: str, file: UploadFile):
-    """Upload a file to the team's asset directory."""
+    """Upload a file to the team's asset directory.
+
+    Preconditions: none beyond a valid multipart upload.
+    Postconditions: ``200`` with the stored asset's metadata; ``400`` if the
+        filename sanitizes to nothing usable; ``409`` if an asset with the same
+        sanitized name already exists (uploads never silently overwrite one
+        another); ``413`` if the upload exceeds
+        ``AGENTIC_TEAM_MAX_ASSET_BYTES`` (default 10 MiB) — enforced by reading
+        in bounded chunks, so an oversized upload is rejected without ever
+        buffering the full payload into memory. The filesystem write and stat
+        run off the event loop (``asyncio.to_thread``) so a large upload can't
+        stall concurrent requests.
+    """
     infra = _get_infra_or_404(team_id)
     safe_name = _safe_asset_name(file.filename or "upload")
     dest = infra.assets_dir / safe_name
-    content = await file.read()
-    dest.write_bytes(content)
-    stat = dest.stat()
+    if dest.exists():
+        raise HTTPException(status_code=409, detail=f"Asset already exists: {safe_name}")
+
+    max_bytes = _max_asset_upload_bytes()
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_ASSET_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="Asset exceeds maximum upload size")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+
+    await asyncio.to_thread(dest.write_bytes, content)
+    stat = await asyncio.to_thread(dest.stat)
     return AssetInfo(
         name=safe_name,
         size_bytes=stat.st_size,
@@ -1106,7 +1305,7 @@ def update_team_form_record(
 ):
     """Update an existing form record."""
     infra = _get_infra_or_404(team_id)
-    if not infra.form_store.update_record(record_id, req.data):
+    if not infra.form_store.update_record(form_key, record_id, req.data):
         raise HTTPException(status_code=404, detail="Record not found")
     record = infra.form_store.get_record(record_id)
     if not record:
@@ -1118,7 +1317,7 @@ def update_team_form_record(
 def delete_team_form_record(team_id: str, form_key: str, record_id: str):
     """Delete a form record."""
     infra = _get_infra_or_404(team_id)
-    if not infra.form_store.delete_record(record_id):
+    if not infra.form_store.delete_record(form_key, record_id):
         raise HTTPException(status_code=404, detail="Record not found")
 
 
@@ -1165,7 +1364,13 @@ def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
 
 @app.get("/teams/{team_id}/test-chat/sessions", response_model=List[TestChatSession])
 def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
-    """List chat test sessions for a team, optionally filtered by agent."""
+    """List chat test sessions for a team, optionally filtered by agent.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``TestChatSession`` for each session belonging
+        to ``team_id`` (filtered to ``agent_name`` when given); ``404`` if
+        ``team_id`` is unknown, consistent with the sibling test-chat endpoints.
+    """
     _get_team_or_404(team_id)
     rows = _test_store.list_chat_sessions(team_id, agent_name=agent_name)
     return [TestChatSession(**r) for r in rows]
@@ -1173,7 +1378,17 @@ def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
 
 @app.get("/teams/{team_id}/test-chat/sessions/{session_id}", response_model=TestChatSessionDetail)
 def get_test_chat_session(team_id: str, session_id: str):
-    """Get a chat session with full message history and suggested prompts."""
+    """Get a chat session with full message history and suggested prompts.
+
+    Preconditions: ``team_id`` and ``session_id`` are non-empty strings.
+    Postconditions: ``200`` with the session, its messages, and starter prompts
+        (only generated when the session has no messages yet); ``404`` if the
+        session doesn't exist or belongs to a different team. If starter-prompt
+        generation raises a 404 because the session's agent isn't on the
+        roster, the prompts list is empty rather than failing the request; any
+        other failure (e.g. a registry outage) propagates instead of being
+        swallowed.
+    """
     session_row = _test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1189,8 +1404,18 @@ def get_test_chat_session(team_id: str, session_id: str):
             prompts = generate_starter_prompts(
                 agent_def.agent_name, agent_def.role, agent_def.skills, agent_def.expertise
             )
-        except HTTPException:
-            pass
+        except HTTPException as exc:
+            # Only the genuine "agent not on roster" case falls back to an empty
+            # prompt list. Anything else (e.g. a registry 500) is a real failure
+            # worth surfacing to the caller, not silently swallowing.
+            if exc.status_code != 404:
+                raise
+            logger.warning(
+                "Could not generate starter prompts for session %s (agent=%s): %s",
+                session_id,
+                session.agent_name,
+                exc.detail,
+            )
 
     return TestChatSessionDetail(
         session=session,
@@ -1223,9 +1448,16 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     """Send a message to an agent and get a synchronous response.
 
     The full conversation history is sent to the agent for multi-turn context.
-    The user and assistant messages are persisted together as a single turn
-    only after the agent call succeeds — a failed invocation raises 502 and
-    leaves no orphaned user message for a retry to duplicate.
+
+    Preconditions: ``team_id``/``session_id`` refer to an existing session;
+        ``req.content`` is non-empty (enforced by the request model).
+    Postconditions: ``200`` with the session and its full message list,
+        including the new user/assistant turn; ``404`` if the session is
+        unknown or belongs to a different team; ``502`` if the agent
+        invocation fails. The user and assistant messages are persisted
+        together as a single turn only after the agent call succeeds, so a
+        failed invocation leaves no orphaned user message for a retry to
+        duplicate.
     """
     session_row = _test_store.get_chat_session(session_id)
     if not session_row or session_row["team_id"] != team_id:
@@ -1309,7 +1541,7 @@ def export_test_chat_session(team_id: str, session_id: str):
 @app.put("/teams/{team_id}/test-chat/messages/{message_id}/rating")
 def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageRequest):
     """Rate an assistant message (thumbs up/thumbs down)."""
-    if not _test_store.update_message_rating(message_id, req.rating.value):
+    if not _test_store.update_message_rating(team_id, message_id, req.rating.value):
         raise HTTPException(status_code=404, detail="Message not found")
     return {"message_id": message_id, "rating": req.rating.value}
 

@@ -27,15 +27,40 @@ fixtures. Targets:
 * ``complete_advisor_session`` happy path.
 * ``RunStrategyLabRequest`` batch_size/batch_count bounds.
 * ``acquire_run_transition_lock`` per-run_id serialization primitive.
+* ``run_state.get_run_generation_strict`` and ``_build_run_state``'s
+  ``generation`` field, plus ``_legacy_generation_bootstrap_increment``
+  (generation-fencing coverage).
 """
 
 from __future__ import annotations
 
 import threading
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, List
+from collections.abc import MutableMapping
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List
 
+import httpx
 import pytest
+from fastapi import HTTPException
+
+
+@pytest.fixture(autouse=True)
+def _clear_job_client_cache():
+    """Isolate _PersistentDict.__init__'s get_job_service_client delegation.
+
+    _PersistentDict.__init__ now resolves its client through the process-wide
+    ``job_service_client`` cache (one client per team, for the life of the
+    process) rather than constructing a fresh JobServiceClient per instance.
+    Clearing the cache before and after each test keeps every
+    ``_PersistentDict(...)`` construction in this file deterministic,
+    regardless of team-string reuse or test execution order.
+    """
+    import job_service_client as jsc
+
+    jsc._clear_job_client_cache_for_testing()
+    yield
+    jsc._clear_job_client_cache_for_testing()
+
 
 if TYPE_CHECKING:
     from investment_team.models import StrategyLabRecord
@@ -90,7 +115,118 @@ def test_run_strategy_lab_request_total_cycles_is_batch_size_times_batch_count()
         api_main.RunStrategyLabRequest(batch_count=api_main._MAX_BATCH_COUNT + 1)
 
 
-class _InMemoryDict:
+def _stub_backtest_result():
+    from investment_team.models import BacktestResult
+
+    return BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=5.0,
+        volatility_pct=12.0,
+        sharpe_ratio=0.5,
+        max_drawdown_pct=-3.0,
+        win_rate_pct=55.0,
+        profit_factor=1.2,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+
+
+def _make_backtest_record(record_id: str, *, completed_at: str = "2024-01-01T00:00:00Z"):
+    from investment_team.models import BacktestConfig, BacktestRecord, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id=f"strat-{record_id}",
+        authored_by="tester",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(start_date="2024-01-01", end_date="2024-06-01")
+    return BacktestRecord(
+        backtest_id=record_id,
+        strategy_id=strategy.strategy_id,
+        strategy=strategy,
+        config=config,
+        submitted_by="tester",
+        submitted_at=completed_at,
+        completed_at=completed_at,
+        result=_stub_backtest_result(),
+    )
+
+
+def _make_strategy_lab_record(record_id: str, *, is_winning: bool = False):
+    from investment_team.models import StrategyLabRecord
+
+    now = "2024-01-01T00:00:00Z"
+    backtest = _make_backtest_record(f"bt-{record_id}", completed_at=now)
+    return StrategyLabRecord(
+        lab_record_id=record_id,
+        strategy=backtest.strategy,
+        backtest=backtest,
+        is_winning=is_winning,
+        strategy_rationale="r",
+        analysis_narrative="ok",
+        created_at=now,
+    )
+
+
+def test_list_backtests_response_derives_count_from_items() -> None:
+    """count is enforced by a model_validator, so a mismatched constructor
+    value can never survive construction."""
+    from investment_team.api.main import ListBacktestsResponse
+
+    record = _make_backtest_record("bt-1")
+    resp = ListBacktestsResponse(items=[record], count=999)
+    assert resp.count == 1
+
+    empty = ListBacktestsResponse(items=[], count=5)
+    assert empty.count == 0
+
+
+def test_strategy_lab_run_response_derives_count_from_records() -> None:
+    from investment_team.api.main import StrategyLabRunResponse
+
+    record = _make_strategy_lab_record("lab-1")
+    resp = StrategyLabRunResponse(records=[record], count=999)
+    assert resp.count == 1
+
+    empty = StrategyLabRunResponse(records=[], count=5)
+    assert empty.count == 0
+
+
+def test_strategy_lab_results_response_derives_counts_from_items() -> None:
+    """count/winning_count/losing_count are all derived from items, so a
+    mismatched constructor value can never survive construction — and a
+    filtered items list (e.g. ?winning=true) correctly reports losing_count
+    == 0 rather than an unfiltered global count."""
+    from investment_team.api.main import StrategyLabResultsResponse
+
+    winner = _make_strategy_lab_record("lab-w", is_winning=True)
+    loser = _make_strategy_lab_record("lab-l", is_winning=False)
+
+    resp = StrategyLabResultsResponse(
+        items=[winner, loser], count=999, winning_count=0, losing_count=0
+    )
+    assert resp.count == 2
+    assert resp.winning_count == 1
+    assert resp.losing_count == 1
+
+    filtered = StrategyLabResultsResponse(items=[winner])
+    assert filtered.count == 1
+    assert filtered.winning_count == 1
+    assert filtered.losing_count == 0
+
+
+class _InMemoryDict(MutableMapping):
+    """Plain-dict stand-in for monkeypatching api.main's module-level record
+    stores. Subclasses MutableMapping (rather than hand-rolling the dict
+    protocol) so it gets correct semantics -- including __iter__/__len__/
+    keys/items/update/setdefault and a real KeyError on deleting a missing
+    key -- for free, matching what production code calling these stores
+    would see from an actual dict."""
+
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
 
@@ -100,22 +236,33 @@ class _InMemoryDict:
     def __getitem__(self, k):
         return self._d[k]
 
-    def get(self, k, default=None):
-        return self._d.get(k, default)
-
-    def __contains__(self, k):
-        return k in self._d
-
     def __delitem__(self, k):
-        self._d.pop(k, None)
+        del self._d[k]
 
-    def pop(self, k, *args):
-        if args:
-            return self._d.pop(k, args[0])
-        return self._d.pop(k)
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._d)
 
-    def values(self):
-        return list(self._d.values())
+    def __len__(self) -> int:
+        return len(self._d)
+
+
+def test_in_memory_dict_matches_real_dict_protocol() -> None:
+    """Regression: the hand-rolled predecessor of this MutableMapping-based
+    test double was missing __iter__/__len__/keys/items/update/setdefault,
+    and its __delitem__ silently no-op'd on a missing key instead of
+    raising KeyError like a real dict -- gaps that could mask a bug in
+    production code exercising the full mapping protocol against these
+    monkeypatched stores."""
+    d = _InMemoryDict()
+    d["a"] = 1
+    d.setdefault("b", 2)
+    d.update({"c": 3})
+    assert len(d) == 3
+    assert set(iter(d)) == {"a", "b", "c"}
+    assert dict(d.items()) == {"a": 1, "b": 2, "c": 3}
+    assert set(d.keys()) == {"a", "b", "c"}
+    with pytest.raises(KeyError):
+        del d["missing"]
 
 
 @pytest.fixture
@@ -348,6 +495,99 @@ def test_resolve_fee_overrides_defaults_when_none() -> None:
     assert slip == 2.0  # _DEFAULT_SLIPPAGE_BPS
 
 
+def test_resolve_fee_overrides_defaults_are_operator_tunable_via_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback defaults are business parameters operators may need to
+    retune without a redeploy — read from env vars, not hardcoded."""
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    monkeypatch.setenv("INVESTMENT_DEFAULT_TX_COST_BPS", "12.5")
+    monkeypatch.setenv("INVESTMENT_DEFAULT_SLIPPAGE_BPS", "7.5")
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=None,
+        slippage_bps=None,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 12.5
+    assert slip == 7.5
+
+
+def test_resolve_fee_overrides_defaults_fall_back_on_invalid_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A garbage env value falls back to the documented default rather than
+    raising or silently propagating an unparseable value."""
+    from investment_team.api.main import RunPaperTradingRequest, _resolve_fee_overrides
+
+    monkeypatch.setenv("INVESTMENT_DEFAULT_TX_COST_BPS", "not-a-number")
+    monkeypatch.setenv("INVESTMENT_DEFAULT_SLIPPAGE_BPS", "-5")
+
+    req = RunPaperTradingRequest(
+        lab_record_id="lab-1",
+        transaction_cost_bps=None,
+        slippage_bps=None,
+    )
+    tx, slip = _resolve_fee_overrides(req)
+    assert tx == 5.0  # unparseable -> falls back to the documented default
+    assert slip == 0.0  # -5 is out of [0, 1000] -> clamped to the floor
+
+
+# ---------------------------------------------------------------------------
+# _parse_iso_timestamp_for_sort
+# ---------------------------------------------------------------------------
+
+
+def test_parse_iso_timestamp_for_sort_empty_string_sorts_last() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("") == datetime.min.replace(tzinfo=timezone.utc)
+
+
+def test_parse_iso_timestamp_for_sort_unparseable_falls_back_like_empty() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("not-a-timestamp") == datetime.min.replace(
+        tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_accepts_z_suffix() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("2024-01-01T12:00:00Z") == datetime(
+        2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_naive_string_assumed_utc() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    assert _parse_iso_timestamp_for_sort("2024-01-01T12:00:00") == datetime(
+        2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc
+    )
+
+
+def test_parse_iso_timestamp_for_sort_respects_non_utc_offset() -> None:
+    from datetime import datetime, timezone
+
+    from investment_team.api.main import _parse_iso_timestamp_for_sort
+
+    # 2024-01-02T00:30:00+02:00 is 2024-01-01T22:30:00 UTC.
+    parsed = _parse_iso_timestamp_for_sort("2024-01-02T00:30:00+02:00")
+    assert parsed == datetime(2024, 1, 1, 22, 30, 0, tzinfo=timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # _normalize_strategy_lab_asset_class + _build_strategy_from_ideation
 # ---------------------------------------------------------------------------
@@ -415,6 +655,34 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
     assert len(strategy.exit_rules) == 1
 
 
+def test_build_strategy_from_ideation_recovers_single_dict_rule() -> None:
+    """A single dict emitted in place of a one-element list must be
+    recovered, not silently discarded. ``strategy_data.get("entry_rules") or
+    []`` previously evaluated a truthy dict to itself, and iterating a dict
+    yields its string keys (none of which are dicts) -- filtering those out
+    left an empty rule set with no warning, a silent data-loss path for
+    otherwise-recoverable LLM output.
+    """
+    from investment_team.api.main import _build_strategy_from_ideation
+    from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate
+
+    entry_rule = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
+    ).model_dump()
+    data = {
+        "asset_class": "stocks",
+        "timeframe": "1d",
+        "entry_rules": entry_rule,  # a bare dict, not wrapped in a list
+        "exit_rules": {"kind": "stop_loss", "pct": 0.1},  # likewise
+    }
+    strategy, _ = _build_strategy_from_ideation(data)
+    assert len(strategy.entry_rules) == 1
+    assert strategy.entry_rules[0].side == "long"
+    assert len(strategy.exit_rules) == 1
+    assert strategy.exit_rules[0].pct == 0.1
+
+
 def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
     from investment_team.api.main import _build_strategy_from_ideation
 
@@ -422,6 +690,85 @@ def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
         _build_strategy_from_ideation(None)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         _build_strategy_from_ideation(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# _legacy_generation_bootstrap_increment
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() -> None:
+    """A run with no persisted "generation" field (pre-fencing, or a missing
+    job record passed as ``{}``) must bootstrap by +2, not +1 -- +1 would mint
+    generation 1, which is also what a stale legacy activity that omits
+    "generation" entirely is treated as presenting, defeating fencing.
+    Transport failures on the bootstrap read fail closed at the route instead
+    of being rewritten as ``{}`` here."""
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert _legacy_generation_bootstrap_increment({}) == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    assert (
+        _legacy_generation_bootstrap_increment({"status": "completed"})
+        == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    )
+
+
+@pytest.mark.parametrize(
+    "uninitialized_generation",
+    [None, "", 0, -1, "0", "-3", "not-an-int", [], {}],
+)
+def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_uninitialized(
+    uninitialized_generation,
+) -> None:
+    """A present but uninitialized/unparseable generation must use the same +2
+    bootstrap as a missing key -- get_run_generation_strict already treats
+    None/empty/<=0 as DEFAULT_FENCING_GENERATION, and job-service increment
+    coerces unparseable non-ints to 0, so +2 lands safely above the legacy
+    activity default of 1."""
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert (
+        _legacy_generation_bootstrap_increment({"generation": uninitialized_generation})
+        == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    )
+
+
+@pytest.mark.parametrize("unsafe_generation", ["5", "1", "42", True, False, 1.5, 2.0])
+def test_legacy_generation_bootstrap_increment_fails_closed_on_non_native_positive_token(
+    unsafe_generation,
+) -> None:
+    """A durable generation that parses as a positive fencing token but is not
+    a native int (numeric string) — or is a bool/float get_run_generation_strict
+    rejects — must raise rather than return +2: job-service increment would
+    zero a string first and mint 2, regressing e.g. conceptual generation 5
+    and letting in-flight activities that present 5 pass check_fencing_token."""
+    from investment_team.api.main import (
+        UnsafeDurableGenerationError,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    with pytest.raises(UnsafeDurableGenerationError):
+        _legacy_generation_bootstrap_increment({"generation": unsafe_generation})
+
+
+def test_legacy_generation_bootstrap_increment_normal_when_field_present() -> None:
+    """A run that already has a persisted positive integer "generation" field
+    (created after fencing shipped, or a legacy run past its first
+    post-upgrade restart) increments by the ordinary amount rather than
+    re-bootstrapping."""
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_NORMAL,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert _legacy_generation_bootstrap_increment({"generation": 1}) == GENERATION_INCREMENT_NORMAL
+    assert _legacy_generation_bootstrap_increment({"generation": 7}) == GENERATION_INCREMENT_NORMAL
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +939,102 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
 
 
+def test_persistent_dict_pop_rejects_extra_positional_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pop() must reject a second default argument with TypeError, matching
+    dict.pop's contract, instead of silently returning the first one."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("pop_arity_test")
+
+    with pytest.raises(TypeError):
+        pd.pop("missing", "a", "b")
+
+
+def test_persistent_dict_pop_accepts_explicit_none_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit default=None must be distinguishable from "no default
+    passed" -- pop() should return None, not raise KeyError."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("pop_none_default_test")
+
+    assert pd.pop("missing", None) is None
+
+
+class _HasNonCallableModelDumpAttr:
+    """A lookalike object exposing a non-Pydantic, non-callable ``model_dump``
+    attribute -- the old ``hasattr(value, "model_dump")`` check would try to
+    call this and raise ``TypeError``; ``isinstance(value, BaseModel)`` must
+    not."""
+
+    model_dump = "not a method"
+
+
+def test_persistent_dict_setitem_treats_non_basemodel_model_dump_attr_as_plain_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd = _PersistentDict("model_dump_lookalike_test")
+    client: _FakeJobClient = pd._client  # type: ignore[assignment]
+
+    obj = _HasNonCallableModelDumpAttr()
+    pd["k"] = obj  # must not raise TypeError trying to call the attribute
+
+    assert client._jobs["k"]["data"] == {"value": obj}
+
+
+def test_persistent_dict_init_delegates_to_get_job_service_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """__init__ must resolve its client via the shared get_job_service_client
+    factory rather than constructing a JobServiceClient directly."""
+    import job_service_client as jsc_mod
+    from investment_team.api.main import _PersistentDict
+
+    calls: List[str] = []
+    sentinel_client = _FakeJobClient(team="spy")
+
+    def _spy_get_job_service_client(team: str):
+        calls.append(team)
+        return sentinel_client
+
+    monkeypatch.setattr(jsc_mod, "get_job_service_client", _spy_get_job_service_client)
+
+    pd = _PersistentDict("spy_test")
+
+    assert calls == ["investment_spy_test"]
+    assert pd._client is sentinel_client
+
+
+def test_persistent_dict_init_shares_cached_client_across_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two _PersistentDict instances for the same entity_type must share one
+    process-wide cached JobServiceClient instead of each opening their own."""
+    import job_service_client as jsc_mod
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _FakeJobClient)
+    from investment_team.api.main import _PersistentDict
+
+    pd_a = _PersistentDict("shared_test")
+    pd_b = _PersistentDict("shared_test")
+
+    assert pd_a._client is pd_b._client
+
+
 class _LostDeleteRaceClient:
     """Stub JobServiceClient simulating a lost pop() race: get_job still
     finds the job (read before the race is settled), but delete_job reports
@@ -703,6 +1146,33 @@ def test_persistent_dict_values_return_annotation() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Lazy agent singleton factories (_get_advisor_agent / _get_policy_guardian /
+# _get_orchestrator / _get_committee_agent)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "factory_name",
+    ["_get_advisor_agent", "_get_policy_guardian", "_get_orchestrator", "_get_committee_agent"],
+)
+def test_agent_factory_returns_cached_singleton_until_cleared(factory_name: str) -> None:
+    """Each lazy factory must return the same cached instance across repeated
+    calls, and a genuinely new instance after cache_clear() -- proving it's a
+    real lazy/rebuildable singleton, not a disguised eager one."""
+    from investment_team.api import main as api_main
+
+    factory = getattr(api_main, factory_name)
+
+    first = factory()
+    second = factory()
+    assert first is second
+
+    factory.cache_clear()
+    third = factory()
+    assert third is not first
+
+
+# ---------------------------------------------------------------------------
 # _run_backtest_background — direct invocation with stubbed dependencies
 # ---------------------------------------------------------------------------
 
@@ -754,10 +1224,11 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
 
-    api_main._run_backtest_background("job-1", strategy, config, "tester", [])
+    status = api_main._run_backtest_background("job-1", strategy, config, "tester", [])
     # Final state update is to COMPLETED.
     assert state.get("status") == "completed"
     assert state.get("backtest_id", "").startswith("bt-")
+    assert status == api_main._BT_JOB_STATUS_COMPLETED
 
 
 def test_run_backtest_background_handles_investment_backtest_error(
@@ -787,9 +1258,10 @@ def test_run_backtest_background_handles_investment_backtest_error(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-2", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-2", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert state.get("error") == "bad strategy"
+    assert status == api_main._BT_JOB_STATUS_FAILED
 
 
 def test_run_backtest_background_handles_generic_exception(
@@ -818,9 +1290,10 @@ def test_run_backtest_background_handles_generic_exception(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-3", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-3", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert "network down" in (state.get("error") or "")
+    assert status == api_main._BT_JOB_STATUS_FAILED
 
 
 def test_run_backtest_background_early_cancellation(
@@ -849,9 +1322,128 @@ def test_run_backtest_background_early_cancellation(
     config = BacktestConfig(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
-    api_main._run_backtest_background("job-4", strategy, config, "tester", None)
+    status = api_main._run_backtest_background("job-4", strategy, config, "tester", None)
     # No update calls — early return.
     assert state == {}
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+
+
+def test_run_backtest_background_mid_run_cancellation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, True])
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background("job-5", strategy, config, "tester", None)
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    assert state.get("status") == "running"
+    assert "backtest_id" not in state
+
+
+def test_run_backtest_background_cancel_during_backtest_execution_error(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, True])
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    def _raises_backtest_error(strategy, config):
+        raise api_main.BacktestExecutionError(status_code=422, detail="bad strategy")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_backtest_error)
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background("job-6", strategy, config, "tester", None)
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    assert state.get("status") == "running"
+    assert "error" not in state
+
+
+def test_run_backtest_background_cancel_during_generic_exception(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, True])
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    def _raises_generic(strategy, config):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_generic)
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background("job-7", strategy, config, "tester", None)
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    assert state.get("status") == "running"
+    assert "error" not in state
 
 
 def test_run_backtest_background_retry_reuses_backtest_id(
@@ -899,15 +1491,17 @@ def test_run_backtest_background_retry_reuses_backtest_id(
         start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
     )
 
-    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    status1 = api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
     first_backtest_id = state["backtest_id"]
 
-    api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
+    status2 = api_main._run_backtest_background("job-retry", strategy, config, "tester", [])
     second_backtest_id = state["backtest_id"]
 
     assert first_backtest_id == second_backtest_id
     # The second run overwrote the same record rather than adding a duplicate.
     assert len(api_main._backtests.values()) == 1
+    assert status1 == api_main._BT_JOB_STATUS_COMPLETED
+    assert status2 == api_main._BT_JOB_STATUS_COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -997,6 +1591,52 @@ def test_delete_paper_sessions_for_lab_record_many_jobs_concurrent(
     assert remaining == {f"pt-other-{i}" for i in range(20)}
 
 
+def test_delete_paper_sessions_list_jobs_http_error_raises_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Job-service transport failure while listing sessions must surface as 503
+    (fail closed) — not a bare exception and not a silent skip."""
+    import job_service_client as jsc_mod
+
+    class _BrokenListClient(_FakeJobClient):
+        def list_jobs(self, *, statuses=None):
+            raise httpx.ConnectError("job service unreachable")
+
+        def delete_job(self, job_id: str) -> bool:
+            raise AssertionError("delete_job must not run when list_jobs fails")
+
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda team=None: _BrokenListClient(team=team or "x")
+    )
+
+    from investment_team.api.main import _delete_paper_sessions_for_lab_record
+
+    with pytest.raises(HTTPException) as ei:
+        _delete_paper_sessions_for_lab_record("lab-1")
+    assert ei.value.status_code == 503
+    assert "temporarily unavailable" in str(ei.value.detail).lower()
+
+
+def test_delete_paper_sessions_list_jobs_runtime_error_raises_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unconfigured JOB_SERVICE_URL (RuntimeError from JobServiceClient.__init__)
+    must also surface as 503 so delete_strategy_lab_record can leave state intact."""
+    import job_service_client as jsc_mod
+
+    def _unconfigured_factory(team=None):
+        raise RuntimeError("JOB_SERVICE_URL is not configured")
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _unconfigured_factory)
+
+    from investment_team.api.main import _delete_paper_sessions_for_lab_record
+
+    with pytest.raises(HTTPException) as ei:
+        _delete_paper_sessions_for_lab_record("lab-1")
+    assert ei.value.status_code == 503
+    assert "temporarily unavailable" in str(ei.value.detail).lower()
+
+
 def test_purge_strategy_lab_job_storage_many_jobs_concurrent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1052,9 +1692,9 @@ def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
     """A unit that doesn't finish within the shared deadline is reported as
     None (unknown, still in flight) rather than a misleadingly-confirmed 0."""
     import job_service_client as jsc_mod
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(api_main, "_PURGE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(orchestrator_api, "_PURGE_TIMEOUT_S", 0.2)
 
     release = threading.Event()
 
@@ -1077,7 +1717,7 @@ def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
     monkeypatch.setattr(jsc_mod, "JobServiceClient", _factory)
 
     try:
-        counts = api_main._purge_strategy_lab_job_storage()
+        counts = orchestrator_api._purge_strategy_lab_job_storage()
     finally:
         # Unblock the slow unit's background thread regardless of outcome, so
         # it doesn't keep running past the end of the test.
@@ -1377,6 +2017,85 @@ def test_delete_strategy_lab_record_preserves_record_when_paper_cleanup_fails(
     assert api_main._backtests.get("bt-lab-Z") is not None
 
 
+def test_delete_strategy_lab_record_preserves_record_when_list_jobs_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    api_client,
+) -> None:
+    """list_jobs transport failure must yield 503 and leave lab state intact
+    so a retry can re-attempt paper-session cleanup."""
+    import job_service_client as jsc_mod
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Y",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Y",
+        strategy_id="strat-lab-Y",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Y",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Y"] = record
+    api_main._strategies["strat-lab-Y"] = strat
+    api_main._backtests["bt-lab-Y"] = bt
+
+    class _BrokenListClient(_FakeJobClient):
+        def list_jobs(self, *, statuses=None):
+            raise httpx.ConnectError("job service unreachable")
+
+    # Patch only after seeding so PersistentDict writes during setup succeed.
+    monkeypatch.setattr(
+        jsc_mod, "JobServiceClient", lambda team=None: _BrokenListClient(team=team or "x")
+    )
+
+    with pytest.raises(HTTPException) as ei:
+        api_main.delete_strategy_lab_record("lab-Y")
+    assert ei.value.status_code == 503
+
+    assert api_main._strategy_lab_records.get("lab-Y") is not None
+    assert api_main._strategies.get("strat-lab-Y") is not None
+    assert api_main._backtests.get("bt-lab-Y") is not None
+
+
 # ---------------------------------------------------------------------------
 # _recover_orphaned_paper_trading_sessions startup hook
 # ---------------------------------------------------------------------------
@@ -1493,6 +2212,314 @@ def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch)
     assert out["status"] == "completed"
 
 
+def test_get_run_state_strict_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: unlike the lenient get_run_state (whose durable fallback
+    swallows ANY job-service read failure via load_run_from_job_service),
+    get_run_state_strict must propagate a transport failure rather than
+    returning None -- a caller relying on this to distinguish "no prior
+    state" from "the read failed" needs the raise."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_run_state_strict("run-strict-fail")
+
+
+def test_get_run_state_strict_prefers_active_runs_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setitem(run_state.active_runs, "run-cached", {"status": "running"})
+    try:
+        assert run_state.get_run_state_strict("run-cached") == {"status": "running"}
+    finally:
+        del run_state.active_runs["run-cached"]
+
+
+def test_get_run_state_strict_returns_none_for_genuinely_unknown_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NotFound:
+        def get_job(self, jid):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NotFound())
+    assert run_state.get_run_state_strict("run-nonexistent") is None
+
+
+def test_rehydrate_active_run_offset_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a transient job-service outage during dispatch must raise
+    (letting _dispatch_strategy_lab_run's exception boundary turn it into a
+    503 + failed run), not silently return offset 0 -- which would be
+    indistinguishable from "fresh run" and cause a resumed run to replay
+    already-completed cycles with no error for Temporal to retry on."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.rehydrate_active_run_offset("run-offset-fail")
+
+
+def test_rehydrate_active_run_offset_raises_on_corrupt_contiguous_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a durable-read succeeds but the persisted contiguous_cycles
+    field itself is corrupt (unparseable as an int). Silently defaulting to
+    offset 0 here would be indistinguishable from a genuinely fresh run and
+    cause a resumed run to replay already-completed cycles -- the same
+    replay risk this function's docstring already argues against for a
+    durable-read failure, so a corrupt field must raise too, not default."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "contiguous_cycles": "not-a-number"}
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted contiguous_cycles"):
+        run_state.rehydrate_active_run_offset("run-corrupt-offset")
+
+
+def test_get_resume_seed_counters_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression as rehydrate_active_run_offset's: a transient
+    job-service outage must raise rather than silently reset these counters
+    to zero."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_resume_seed_counters("run-counters-fail")
+
+
+# ---------------------------------------------------------------------------
+# get_run_generation_strict + _build_run_state's generation field (#4029)
+#
+# get_run_generation_strict is the sole read path for a run's fencing
+# generation (there is no lenient sibling -- every other caller already has
+# its own known/just-minted value in hand and passes it through explicitly
+# rather than re-deriving it via a read; see _dispatch_strategy_lab_run's
+# precondition).
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_generation_strict_ignores_active_runs_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: unlike get_run_state's other callers, get_run_generation_strict
+    must NOT prefer (or even consult) the process-local active_runs cache. It's
+    called from inside a Temporal worker, which may be a different process than
+    the API server that handled a restart -- if a stale in-memory generation
+    were trusted here, a restart handled elsewhere would never be observed and
+    fencing would be silently defeated."""
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setitem(run_state.active_runs, "run-live", {"generation": 1})  # stale local cache
+
+    class _Ok:
+        def get_job(self, jid):
+            return {
+                "job_id": jid,
+                "status": "running",
+                "generation": 5,
+            }  # authoritative durable value
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    try:
+        assert run_state.get_run_generation_strict("run-live") == 5
+    finally:
+        del run_state.active_runs["run-live"]
+
+
+def test_get_run_generation_strict_null_data_field_defaults_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a job record with "data": None (key present but null --
+    the same shape normalize_persisted_job explicitly guards against) must
+    not crash with AttributeError from None.get(...). Falls back to the
+    top-level job dict, matching normalize_persisted_job's coercion."""
+    from investment_team.strategy_lab import run_state
+
+    class _NullData:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "data": None}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NullData())
+    assert run_state.get_run_generation_strict("run-nulldata") == 1
+
+
+@pytest.mark.parametrize("empty_value", [None, ""])
+def test_get_run_generation_strict_missing_or_empty_value_defaults_to_one(
+    monkeypatch: pytest.MonkeyPatch, empty_value
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": empty_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-bad") == 1
+
+
+@pytest.mark.parametrize("nonpositive_value", [0, -1])
+def test_get_run_generation_strict_nonpositive_value_clamps_to_one(
+    monkeypatch: pytest.MonkeyPatch, nonpositive_value
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": nonpositive_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-bad") == 1
+
+
+@pytest.mark.parametrize("unparseable_value", ["not-a-number", [], {}, object()])
+def test_get_run_generation_strict_raises_on_unparseable_value(
+    monkeypatch: pytest.MonkeyPatch, unparseable_value
+) -> None:
+    """Regression: an unparseable persisted `generation` (durable-record
+    corruption, not a legitimate missing-field case) must raise rather than
+    silently defaulting to the permissive generation 1 -- returning 1 here
+    would let a stale pre-restart activity (carrying token 1) pass
+    check_fencing_token (which accepts provided_token >= current_token),
+    reopening the exact race generation fencing exists to close."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": unparseable_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted generation"):
+        run_state.get_run_generation_strict("run-bad")
+
+
+@pytest.mark.parametrize("non_int_value", [2.9, True, False])
+def test_get_run_generation_strict_raises_on_float_or_bool(
+    monkeypatch: pytest.MonkeyPatch, non_int_value
+) -> None:
+    """A persisted `generation` that's a float or bool (an int subclass in
+    Python, so `isinstance(True, int)` is True) must be rejected as
+    corruption rather than silently coerced via int(...) -- a truncated
+    float or a bool-derived 0/1 could produce a generation lower than the
+    actual persisted value, letting a stale activity pass fencing."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": non_int_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted generation"):
+        run_state.get_run_generation_strict("run-bad")
+
+
+def test_get_run_generation_strict_returns_one_for_unknown_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NotFound:
+        def get_job(self, jid):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NotFound())
+    assert run_state.get_run_generation_strict("run-unknown") == 1
+
+
+def test_get_run_generation_strict_reads_persisted_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": 4}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-g4") == 4
+
+
+def test_get_run_generation_strict_defaults_to_one_when_field_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NoGenerationField:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running"}  # no "generation" key at all
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NoGenerationField())
+    assert run_state.get_run_generation_strict("run-legacy") == 1
+
+
+def test_get_run_generation_strict_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a transient durable-read failure must NOT silently default to
+    generation 1 -- that would let a stale write past the fencing check during
+    exactly the kind of outage fencing needs to guard against. The failure must
+    propagate so the caller (the fencing check) rejects the write."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, jid):
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(ConnectionError):
+        run_state.get_run_generation_strict("run-x")
+
+
+def test_build_run_state_generation_defaults_to_one() -> None:
+    from investment_team.api import main as api_main
+
+    state = api_main._build_run_state(
+        "run-fresh",
+        started_at="2024-01-01T00:00:00Z",
+        total_cycles=1,
+        batch_size=1,
+        batch_count=1,
+        request_payload={},
+    )
+    assert state["generation"] == 1
+
+
+def test_build_run_state_generation_override_is_carried_through() -> None:
+    from investment_team.api import main as api_main
+
+    state = api_main._build_run_state(
+        "run-restarted",
+        started_at="2024-01-01T00:00:00Z",
+        total_cycles=1,
+        batch_size=1,
+        batch_count=1,
+        request_payload={},
+        generation=7,
+    )
+    assert state["generation"] == 7
+
+
 def test_persist_run_state_propagates_job_service_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1501,6 +2528,7 @@ def test_persist_run_state_propagates_job_service_error(
     persist activity's retry policy) need to detect a durable-write failure
     instead of continuing as if it succeeded."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     class _Broken:
         def create_job(self, *a, **k):
@@ -1509,7 +2537,7 @@ def test_persist_run_state_propagates_job_service_error(
         def update_job(self, *a, **k):
             raise RuntimeError("backend down")
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+    monkeypatch.setattr(orchestrator_api, "_get_lab_run_job_client", lambda: _Broken())
     with pytest.raises(RuntimeError, match="backend down"):
         api_main._persist_run_state("run-z", {"status": "running"}, create=True)
     with pytest.raises(RuntimeError, match="backend down"):
@@ -1525,10 +2553,11 @@ def test_persist_run_state_status_less_update_does_not_clobber_status(
     status to "running" unconditionally, clobbering a cancelled/failed/
     completed status a concurrent path had already persisted (issue #4185)."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     client = _FakeJobClient()
     client.create_job("run-cancelled", status="cancelled", completed_cycles=2)
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: client)
+    monkeypatch.setattr(orchestrator_api, "_get_lab_run_job_client", lambda: client)
 
     # A progress-only delta, no "status" key -- must not touch status at all.
     api_main._persist_run_state("run-cancelled", {"completed_cycles": 3}, create=False)
@@ -1786,8 +2815,14 @@ def test_shutdown_hook_marks_running_backtest_jobs_failed(monkeypatch: pytest.Mo
     assert calls == ["server shutdown"]
 
 
-def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A raising failure-sweep must NOT abort shutdown teardown."""
+def test_shutdown_hook_swallows_job_store_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising failure-sweep must NOT abort shutdown teardown, and the
+    swallowed failure must be logged at WARNING (not DEBUG) so it's visible
+    at standard operational log levels."""
+    import logging
+
     from investment_team.api import main as api_main
 
     def _boom(reason: str) -> None:
@@ -1796,7 +2831,37 @@ def test_shutdown_hook_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", _boom)
     monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", lambda: None, raising=False)
 
-    api_main._run_investment_service_shutdown()  # must not raise
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        api_main._run_investment_service_shutdown()  # must not raise
+
+    assert any(
+        r.levelno == logging.WARNING and "backtest job failure sweep skipped" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_shutdown_hook_logs_event_bus_teardown_failure_at_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising event-bus reaper teardown must also be swallowed and logged
+    at WARNING, not DEBUG."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    def _boom() -> None:
+        raise RuntimeError("event bus unavailable")
+
+    monkeypatch.setattr("investment_team.api.job_event_bus.shutdown", _boom, raising=False)
+    monkeypatch.setattr(api_main, "_bt_mark_all_running_jobs_failed", lambda reason: None)
+
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        api_main._run_investment_service_shutdown()  # must not raise
+
+    assert any(
+        r.levelno == logging.WARNING and "event-bus reaper shutdown skipped" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1952,3 +3017,103 @@ def test_normalize_persisted_job_defaults_status_from_fallback() -> None:
     result = normalize_persisted_job(job, fallback_status="completed", run_id="job-1")
 
     assert result["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_run_progress: None "data" tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_run_progress_tolerates_none_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A persisted record with ``"data": None`` (present but null, distinct
+    from the key being absent) must not raise ``TypeError`` -- regression
+    test for the same defect class as ``normalize_persisted_job`` but in
+    ``_reconcile_run_progress``'s own, separate fallback.
+
+    Preconditions:
+        - ``orchestrator_api._active_runs`` / ``_get_lab_run_job_client`` are
+          the names the moved body closes over (not ``api.main`` aliases).
+    Postconditions:
+        - Call returns without ``TypeError``; in-memory ``completed_cycles``
+          stays unchanged when the None-data fallback has no progress fields.
+    """
+    from investment_team.strategy_lab import orchestrator_api
+
+    run_id = "run-none-data"
+    shared_runs = {
+        run_id: {
+            "run_id": run_id,
+            "status": "running",
+            "total_cycles": 4,
+            "completed_cycles": 1,
+        }
+    }
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared_runs)
+
+    class _Stub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_job(self, jid: str):
+            self.calls += 1
+            return {"job_id": run_id, "status": "running", "data": None}
+
+    stub = _Stub()
+    monkeypatch.setattr(orchestrator_api, "_get_lab_run_job_client", lambda: stub)
+
+    orchestrator_api._reconcile_run_progress(run_id)
+
+    # No crash, and the in-memory entry's existing progress is left intact
+    # since the fallback ("data" -> the persisted record itself) contains
+    # none of _STRATEGY_LAB_PROGRESS_FIELDS.
+    assert stub.calls == 1
+    assert shared_runs[run_id]["completed_cycles"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _run_state_to_response: missing run_id tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_run_state_to_response_tolerates_missing_run_id() -> None:
+    """A state dict without a ``run_id`` key must not raise ``KeyError`` --
+    every other field in this function already degrades to a default, and
+    ``run_id`` (guaranteed by construction today, but not schema-validated)
+    should be defended the same way instead of assuming the invariant can
+    never be violated."""
+    from investment_team.api.main import _run_state_to_response
+
+    resp = _run_state_to_response({"status": "running"})
+
+    assert resp.run_id == ""
+    assert resp.status == "running"
+
+
+@pytest.mark.parametrize("bad_generation", [None, "", 0, -3, True, 2.5, "x", [], {}])
+def test_run_state_to_response_coerces_uninitialized_generation(bad_generation) -> None:
+    """An explicit null/empty/non-positive/unparseable generation must degrade
+    to DEFAULT_FENCING_GENERATION rather than raising ValidationError --
+    status/list routes feed job-service-shaped state through this helper and
+    must keep their always-200 contract when a persisted record carries a
+    null generation field."""
+    from investment_team.api.main import _run_state_to_response
+    from investment_team.strategy_lab.run_state import DEFAULT_FENCING_GENERATION
+
+    resp = _run_state_to_response(
+        {
+            "run_id": "run-null-gen",
+            "status": "running",
+            "generation": bad_generation,
+        }
+    )
+
+    assert resp.generation == DEFAULT_FENCING_GENERATION
+
+
+def test_run_state_to_response_preserves_positive_generation() -> None:
+    """A positive integer generation must pass through unchanged."""
+    from investment_team.api.main import _run_state_to_response
+
+    resp = _run_state_to_response({"run_id": "run-g", "status": "running", "generation": 4})
+
+    assert resp.generation == 4

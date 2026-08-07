@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from llm_service import LLMClient, complete_validated, get_client
+from software_engineering_team.shared.chunking import parse_code_into_file_blocks
+from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
+from .chunking import DbcChunk, build_dbc_chunks
 from .merge import apply_dbc_insertions
 from .models import (
+    DEFAULT_SUGGESTED_COMMIT_MESSAGE,
+    DbcCommentInsertion,
     DbcCommentsInput,
     DbcCommentsLLMResponse,
     DbcCommentsOutput,
@@ -18,13 +23,18 @@ from .prompts import DBC_COMMENTS_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# Total LLM-call budget for one run(): 1 initial attempt + 1 automatic retry.
+# Per-chunk LLM-call budget: 1 initial attempt + 1 automatic retry.
 # complete_validated's own correction_attempts only retries a JSON-parse/
 # schema-validation failure -- everything else that can escape it untouched
 # (LLMNotConfiguredError, rate limits, semantic exhaustion, truncation, a
 # bare network error) gets zero retries from complete_validated itself, so
 # this outer loop is what actually guarantees at least one automatic retry
-# across the full class of failures the old fail-open handler covered.
+# across the full class of failures the old fail-open handler covered. A
+# large ``code`` input is bounded into one or more chunks (see
+# _build_prompt_for_chunk/run below); each chunk gets its own independent
+# _MAX_LLM_ATTEMPTS budget, and any one chunk exhausting its budget fails
+# the WHOLE run (see run()'s docstring) rather than silently dropping that
+# chunk's review.
 _MAX_LLM_ATTEMPTS = 2
 
 
@@ -54,6 +64,66 @@ class DbcCommentsAgent:
         """
         self.llm = llm_client if llm_client is not None else get_client("dbc_comments")
 
+    @staticmethod
+    def _build_prompt_for_chunk(
+        input_data: DbcCommentsInput, chunk: DbcChunk, chunk_index: int, chunk_count: int
+    ) -> str:
+        """Build one chunk's review prompt.
+
+        Preconditions:
+            - chunk_index is 1-based and <= chunk_count.
+
+        Postconditions:
+            - Returns a prompt whose code section is chunk.content (a bounded
+              slice of the full input), never the full, unbounded code.
+            - When chunk_count > 1, the prompt notes this is a partial view
+              (chunk_index/chunk_count) so the model does not treat missing
+              files/symbols as omissions to flag, and separately notes any
+              segment that is itself a partial (line-range) slice of its
+              file, so the model knows to report the embedded original
+              line-number prefixes rather than snippet-relative ones.
+        """
+        context_parts = [f"**Language:** {input_data.language}"]
+
+        if input_data.task_description:
+            context_parts.append(f"**Task description:** {input_data.task_description}")
+
+        if input_data.architecture:
+            context_parts.extend(
+                ["", "**Architecture overview:**", input_data.architecture.overview]
+            )
+
+        if chunk_count > 1:
+            context_parts.extend(
+                [
+                    "",
+                    f"**Note:** This is chunk {chunk_index} of {chunk_count} of a larger "
+                    "codebase being reviewed in multiple passes -- only add insertions for "
+                    "symbols actually shown below; other files are reviewed separately.",
+                ]
+            )
+            partial_notes = [
+                f"{seg.path or 'this code'} is shown only from original line {seg.start_line} "
+                f"to {seg.end_line} (of {seg.total_lines} total); every line carries its "
+                "original line-number prefix (e.g. `123: code`) -- set `line` to those exact "
+                "prefixed numbers."
+                for seg in chunk.segments
+                if seg.is_partial
+            ]
+            context_parts.extend(partial_notes)
+
+        context_parts.extend(
+            [
+                "",
+                "**Code to review and annotate with DbC comments:**",
+                "```",
+                chunk.content,
+                "```",
+            ]
+        )
+
+        return "\n".join(context_parts)
+
     def run(
         self,
         input_data: DbcCommentsInput,
@@ -66,24 +136,37 @@ class DbcCommentsAgent:
             - input_data.code is a string; if empty or whitespace-only, the
               method returns an already_compliant response without calling
               the LLM
-            - input_data.language is one of: python, typescript, java
+            - input_data.language is typically one of: python, typescript,
+              java (the values the prompt gives worked examples for) -- this
+              is a supported-languages note, not an enforced precondition:
+              any string is accepted, logged, and forwarded into the prompt
+              as-is
 
         Postconditions:
-            - The LLM call is retried up to _MAX_LLM_ATTEMPTS times, validated
-              against DbcCommentsLLMResponse on each attempt via
+            - code is split into one or more bounded chunks (see
+              .chunking.build_dbc_chunks, sized via
+              compute_code_review_map_chunk_chars) so no unbounded prompt is
+              ever sent regardless of input size; a small input yields exactly
+              one chunk covering the whole input, and this method's observable
+              behavior is then identical to a single, unchunked call
+            - Each chunk's LLM call is retried up to _MAX_LLM_ATTEMPTS times,
+              validated against DbcCommentsLLMResponse on each attempt via
               complete_validated; a malformed reply (including one malformed
               insertion entry, since insertions is a required, non-permissive
               schema field) fails the whole attempt and drives a retry, not a
               silent partial acceptance
-            - If every attempt fails: already_compliant=False and summary
-              describes the failure -- a persistent LLM failure can never
-              silently and permanently mark the code compliant
-            - Otherwise, insertions is the validated list of
-              DbcCommentInsertion objects from the successful reply, kept
-              unmerged (for observability) regardless of already_compliant
-            - already_compliant reflects the model's assessment, overridden
-              to True only when the model reported False but returned no
-              insertions
+            - If any chunk exhausts its attempts: already_compliant=False and
+              summary describes the failure, and the whole run returns
+              immediately -- a persistent LLM failure on any chunk can never
+              silently and permanently mark the code compliant, even when
+              other chunks already succeeded
+            - Otherwise, insertions is the concatenation of every chunk's
+              validated DbcCommentInsertion objects, kept unmerged (for
+              observability) regardless of already_compliant
+            - already_compliant is True only when every chunk's response
+              reported True (a logical AND across chunks), overridden to True
+              only when the combined result reported False but returned no
+              insertions at all
             - files holds the deterministic, LLM-free merge of the subset of
               insertions that could be safely anchored (see
               merge.apply_dbc_insertions); a file is only present when at
@@ -93,15 +176,31 @@ class DbcCommentsAgent:
             - rejected_insertions holds one reason per insertion that could
               not be safely anchored/merged; comments_added/comments_updated
               count only insertions the merge actually applied, never the
-              model's self-reported counts
-            - summary contains a message when already_compliant=True
-              (defaulted when the model didn't provide one); otherwise it is
-              the model-provided summary as-is, which may be empty
+              model's self-reported counts; a non-empty rejected_insertions
+              also forces already_compliant=False (a fix the model identified
+              -- including one that only surfaced as a conflict between two
+              chunks' insertions -- could not actually be applied, so the
+              code is not yet fully compliant regardless of what any chunk
+              itself reported)
+            - summary is every chunk's non-empty summary, deduplicated in
+              first-seen order (so multiple chunks reporting the identical
+              text, e.g. "No changes needed.", contribute it only once) and
+              space-joined; contains a default praise message when
+              already_compliant=True and the joined result is still empty
+            - suggested_commit_message is the first non-empty value returned
+              by any chunk, in chunk order; a later chunk's differing
+              suggestion is ignored, and the schema's own default is used
+              when no chunk provided one
 
         Raises:
-            Nothing -- run() never raises. Each failed-but-retryable LLM
-            attempt is surfaced via on_status(NEEDS_RETRY, ...); final
-            exhaustion via on_status(FAILED, ...) and
+            Nothing -- run() never raises. Preparing chunks
+            (parse_code_into_file_blocks/compute_code_review_map_chunk_chars/
+            build_dbc_chunks) is itself guarded: a failure there (e.g.
+            self.llm.get_max_context_tokens() hitting the network) surfaces
+            via on_status(FAILED, ...) and already_compliant=False the same
+            way an exhausted LLM call does. Each failed-but-retryable LLM
+            attempt (on any chunk) is surfaced via on_status(NEEDS_RETRY,
+            ...); a chunk's final exhaustion via on_status(FAILED, ...) and
             already_compliant=False, never a silent fail-open. A merge-step
             exception (apply_dbc_insertions) is a separate, still fail-open
             path -- see that block's own comment.
@@ -139,80 +238,105 @@ class DbcCommentsAgent:
 
         _update(DbcCommentsStatus.ANALYZING_CODE)
 
-        # Build context for the LLM
-        context_parts = [
-            f"**Language:** {input_data.language}",
-        ]
-
-        if input_data.task_description:
-            context_parts.append(f"**Task description:** {input_data.task_description}")
-
-        if input_data.architecture:
-            context_parts.extend(
-                [
-                    "",
-                    "**Architecture overview:**",
-                    input_data.architecture.overview,
-                ]
-            )
-
-        context_parts.extend(
-            [
-                "",
-                "**Code to review and annotate with DbC comments:**",
-                "```",
-                code,
-                "```",
-            ]
-        )
-
-        prompt = "\n".join(context_parts)
-
-        validated: Optional[DbcCommentsLLMResponse] = None
-        last_error: Optional[Exception] = None
-        for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):
-            try:
-                validated = complete_validated(
-                    self.llm,
-                    prompt,
-                    schema=DbcCommentsLLMResponse,
-                    objective="review code for Design by Contract compliance",
-                    system_prompt=DBC_COMMENTS_PROMPT,
-                    temperature=0.0,
-                )
-                break
-            except Exception as e:
-                last_error = e
-                if attempt < _MAX_LLM_ATTEMPTS:
-                    logger.warning(
-                        "DbcComments: LLM call attempt %d/%d failed (%s), retrying",
-                        attempt,
-                        _MAX_LLM_ATTEMPTS,
-                        e,
-                    )
-                    _update(DbcCommentsStatus.NEEDS_RETRY, str(e))
-                else:
-                    logger.warning(
-                        "DbcComments: LLM call failed after %d attempt(s) (%s), "
-                        "surfacing failure -- never marking compliant",
-                        _MAX_LLM_ATTEMPTS,
-                        e,
-                    )
-
-        if validated is None:
-            _update(DbcCommentsStatus.FAILED, str(last_error))
+        # Bound the LLM prompt regardless of input size: split the (possibly
+        # very large) concatenated code into one or more chunks whose rendered
+        # size fits the model's context budget. A small input yields exactly
+        # one chunk covering the whole input verbatim (see
+        # .chunking.build_dbc_chunks's contract), so this is a no-op for the
+        # common case. compute_code_review_map_chunk_chars calls
+        # self.llm.get_max_context_tokens(), which for a real (e.g.
+        # Ollama-backed) client can hit the network and fail -- unlike
+        # parse_code_into_file_blocks/build_dbc_chunks, which are pure -- so
+        # this whole setup step is guarded the same way the per-chunk LLM
+        # call below is, to hold run()'s "never raises" contract.
+        try:
+            blocks = parse_code_into_file_blocks(code)
+            max_chunk_chars = compute_code_review_map_chunk_chars(self.llm)
+            chunks = build_dbc_chunks(blocks, max_chunk_chars)
+        except Exception as e:
+            logger.warning("DbcComments: failed to prepare chunks (%s), surfacing failure", e)
+            _update(DbcCommentsStatus.FAILED, str(e))
             return DbcCommentsOutput(
                 already_compliant=False,
-                summary=f"DbC review failed after {_MAX_LLM_ATTEMPTS} attempt(s) and could "
-                f"not determine compliance: {last_error}",
+                summary=f"DbC review failed while preparing chunks and could not determine "
+                f"compliance: {e}",
             )
+        chunk_count = len(chunks)
+
+        all_insertions: List[DbcCommentInsertion] = []
+        all_compliant = True
+        summaries: List[str] = []
+        suggested_commit_message: Optional[str] = None
+
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            prompt = self._build_prompt_for_chunk(input_data, chunk, chunk_index, chunk_count)
+
+            validated: Optional[DbcCommentsLLMResponse] = None
+            last_error: Optional[Exception] = None
+            for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):
+                try:
+                    validated = complete_validated(
+                        self.llm,
+                        prompt,
+                        schema=DbcCommentsLLMResponse,
+                        objective="review code for Design by Contract compliance",
+                        system_prompt=DBC_COMMENTS_PROMPT,
+                        temperature=0.0,
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < _MAX_LLM_ATTEMPTS:
+                        logger.warning(
+                            "DbcComments: chunk %d/%d LLM call attempt %d/%d failed (%s), retrying",
+                            chunk_index,
+                            chunk_count,
+                            attempt,
+                            _MAX_LLM_ATTEMPTS,
+                            e,
+                        )
+                        _update(
+                            DbcCommentsStatus.NEEDS_RETRY,
+                            f"chunk {chunk_index}/{chunk_count}: {e}",
+                        )
+                    else:
+                        logger.warning(
+                            "DbcComments: chunk %d/%d LLM call failed after %d attempt(s) (%s), "
+                            "surfacing failure -- never marking compliant",
+                            chunk_index,
+                            chunk_count,
+                            _MAX_LLM_ATTEMPTS,
+                            e,
+                        )
+
+            if validated is None:
+                _update(
+                    DbcCommentsStatus.FAILED, f"chunk {chunk_index}/{chunk_count}: {last_error}"
+                )
+                return DbcCommentsOutput(
+                    already_compliant=False,
+                    summary=f"DbC review failed on chunk {chunk_index}/{chunk_count} after "
+                    f"{_MAX_LLM_ATTEMPTS} attempt(s) and could not determine compliance: "
+                    f"{last_error}",
+                )
+
+            all_insertions.extend(validated.insertions)
+            all_compliant = all_compliant and validated.already_compliant
+            if validated.summary:
+                summaries.append(validated.summary)
+            if suggested_commit_message is None and validated.suggested_commit_message:
+                suggested_commit_message = validated.suggested_commit_message
 
         _update(DbcCommentsStatus.ADDING_COMMENTS)
 
-        insertions = validated.insertions
-        already_compliant = validated.already_compliant
-        summary = validated.summary
-        suggested_commit_message = validated.suggested_commit_message
+        insertions = all_insertions
+        already_compliant = all_compliant
+        # Distinct chunks reporting the identical summary text (e.g. every
+        # already-compliant chunk saying "No changes needed.") collapse to one
+        # occurrence, in first-seen order, before joining -- dict.fromkeys is
+        # the standard order-preserving dedupe idiom.
+        summary = " ".join(dict.fromkeys(summaries))
+        suggested_commit_message = suggested_commit_message or DEFAULT_SUGGESTED_COMMIT_MESSAGE
 
         # Safety: if LLM says not compliant but returned no insertions, treat as compliant
         if not already_compliant and not insertions:
@@ -254,6 +378,12 @@ class DbcCommentsAgent:
                     len(rejected_insertions),
                     rejected_insertions,
                 )
+                # A rejected insertion is a fix the model identified that
+                # could not actually be applied (unknown file, ambiguous
+                # symbol, or a conflict between two chunks' insertions) --
+                # the code is not yet fully compliant, regardless of what any
+                # chunk itself reported.
+                already_compliant = False
 
         # If compliant and no summary, provide a default praise message
         if already_compliant and not summary:

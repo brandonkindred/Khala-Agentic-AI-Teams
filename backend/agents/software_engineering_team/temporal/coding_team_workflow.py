@@ -2,15 +2,70 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from software_engineering_team.temporal.coding_team_github_activities import (
     github_branch_prep_activity,
+    github_failure_notice_activity,
     github_publish_activity,
 )
+
+# Bounded retry for short GitHub-hook activities (prep/publish/notice/mark-failed).
+# Pipeline keeps its own long start_to_close timeout without a shared retry policy here.
+_GITHUB_ACTIVITY_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(seconds=30),
+    backoff_coefficient=2.0,
+)
+
+
+def _log_github_side_effect_failure(message: str) -> None:
+    """Best-effort log from workflow code that may run outside Temporal's runtime."""
+    try:
+        workflow.logger.exception(message)
+    except Exception:
+        logging.getLogger(__name__).exception(message)
+
+
+@activity.defn(name="coding_team_mark_job_failed")
+def mark_coding_team_job_failed_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Mark a coding-team job failed without any GitHub side effects.
+
+    Preconditions:
+        - ``request["job_id"]`` is a non-empty str naming an existing job row
+          (or a row the caller is willing to create via a no-op miss).
+        - ``request["error"]`` is optional; missing/empty becomes ``"failed"``.
+    Postconditions:
+        - Persists ``status=failed`` with a scrubbed error and clears
+          ``status_text``/``current_activity``.
+        - Returns the resulting job snapshot, or a synthetic failed dict when
+          the store has no row.
+        - Never talks to GitHub — this is the fallback when
+          ``github_failure_notice_activity`` cannot run (missing token, etc.).
+    """
+    from software_engineering_team.api.coding_team_main import get_job, update_job
+    from software_engineering_team.github_source import scrub_token_from_text
+    from software_engineering_team.models import JobStatus
+
+    job_id = request.get("job_id")
+    assert isinstance(job_id, str) and job_id, (
+        "mark_coding_team_job_failed_activity requires a non-empty job_id"
+    )
+    error = scrub_token_from_text(str(request.get("error") or "failed"))
+    update_job(
+        job_id,
+        status=JobStatus.FAILED.value,
+        error=error,
+        status_text=None,
+        current_activity=None,
+    )
+    return get_job(job_id) or {"job_id": job_id, "status": JobStatus.FAILED.value, "error": error}
 
 
 @activity.defn(name="coding_team_run_pipeline")
@@ -29,6 +84,9 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
           already created for the client to poll) — this is read directly via
           ``request.get("job_id")``, not a ``RunRequest`` field, so it passes
           through Pydantic's default ignore-extra-keys behavior unvalidated.
+        - When ``request["github"]`` is a non-empty dict, this activity defers
+          terminal success writes via ``_defer_terminal_success`` so publish
+          still sees a non-terminal job (matching thread-mode GitHub hooks).
     Postconditions:
         - Runs the orchestrator wired to the job store against the request's
           ``job_id`` when supplied (the API created the row; do not create it
@@ -43,13 +101,33 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
           promptly — no further job-store read, no blocking call past the
           point of pause.
         - Otherwise (the orchestrator returned ``None``, i.e. the pipeline
-          reached a terminal state) returns the final job snapshot as a dict,
-          or a minimal synthetic ``{"job_id": ..., "status": "unknown"}`` dict
-          when the job row is missing or unreadable after the orchestrator
-          run — unchanged from before ``pause_strategy`` existed. Raises with
-          an actionable message when the worker is mis-wired (no provider) or
-          the request carries no plan — instead of failing later, mid-run,
-          with a generic error.
+          reached a terminal state) returns a small fixed-shape summary --
+          ``{"outcome": "completed" | "failed", "job_id": ..., "status": ...,
+          "error": <optional>, "summary": <optional>}`` -- rather than the
+          full job record: this activity's result becomes
+          ``CodingTeamWorkflow.run``'s own return value, so an unbounded
+          job-record payload (e.g. a large ``task_graph_snapshot``) risks
+          exceeding Temporal's activity-result payload limit, and a retry
+          triggered by an oversized payload would re-run completion logic
+          against state the first attempt already changed. ``outcome`` is
+          ``"completed"`` for every terminal SUCCESS status
+          (``hitl.TERMINAL_SUCCESS_STATUSES``: completed, completed with
+          failures, already-complete) and for GitHub runs whose terminal
+          success was deferred to ``running``/``publishing`` via
+          ``_defer_terminal_success``; ``"failed"`` otherwise (failed,
+          cancelled). ``error``/``summary`` are included only when the job
+          record actually carries a value for them. Returns
+          ``{"outcome": "unknown", "job_id": ..., "status": "unknown"}`` when
+          the job row is missing or unreadable after the orchestrator run --
+          the full job record remains the source of truth in the job store,
+          and callers already poll ``GET /status/{job_id}`` for complete
+          state. Raises with an actionable message when the worker is
+          mis-wired (no provider) or the request carries no plan — instead of
+          failing later, mid-run, with a generic error.
+        - For GitHub runs, orchestrator ``completed``/``already_complete``/
+          ``completed_with_failures`` writes are remapped to
+          ``running``/``publishing`` until ``github_publish_activity`` writes
+          the real terminal status.
         - Safe for POST ``/run/{job_id}/answers`` (see that route) to signal a
           resume without this activity ever having blocked: the route reads
           the job's persisted ``resume_token`` and signals
@@ -58,6 +136,7 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     """
     import uuid
 
+    from software_engineering_team import hitl
     from software_engineering_team.api.coding_team_main import (
         RunRequest,
         create_job,
@@ -65,7 +144,9 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
         plan_from_input,
         run_orchestrator_wired,
     )
+    from software_engineering_team.api.orchestration import _defer_terminal_success
     from software_engineering_team.engine_provider import get_engine_provider
+    from software_engineering_team.models import JobStatus
 
     if get_engine_provider() is None:
         raise RuntimeError(
@@ -90,16 +171,46 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     if not supplied_job_id:
         create_job(job_id=job_id, repo_path=req.repo_path, plan_input=req.plan_input)
     plan = plan_from_input(req.plan_input, req.repo_path)
+    github = request.get("github")
+    update_job_fn = (
+        _defer_terminal_success(job_id) if isinstance(github, dict) and github else None
+    )
     paused = run_orchestrator_wired(
         job_id,
         req.repo_path,
         plan,
         pause_strategy="return",
         acknowledged_resume_token=req.acknowledged_resume_token,
+        update_job_fn=update_job_fn,
     )
     if paused is not None:
         return paused
-    return get_job(job_id) or {"job_id": job_id, "status": "unknown"}
+    job = get_job(job_id)
+    if job is None:
+        return {"outcome": "unknown", "job_id": job_id, "status": "unknown"}
+    status = job.get("status")
+    # GitHub Temporal runs remap terminal success to running/publishing until
+    # publish finishes; that deferred window is still a success outcome for the
+    # workflow's publish gate (which keys off status, not outcome).
+    deferred_github_success = (
+        status == JobStatus.RUNNING.value and job.get("phase") == "publishing"
+    )
+    result: dict[str, Any] = {
+        "outcome": (
+            "completed"
+            if status in hitl.TERMINAL_SUCCESS_STATUSES or deferred_github_success
+            else "failed"
+        ),
+        "job_id": job_id,
+        "status": status,
+    }
+    error = job.get("error")
+    if error:
+        result["error"] = error
+    summary = job.get("status_text")
+    if summary:
+        result["summary"] = summary
+    return result
 
 
 @workflow.defn(name="CodingTeamWorkflow")
@@ -119,15 +230,24 @@ class CodingTeamWorkflow:
           ``None`` before re-arming ``wait_condition`` — so a stale answer
           batch from one pause round can never be mistaken for a fresh one
           in the next.
+        - ``self._buffered_signals`` holds at most one early-arrived answer
+          batch per not-yet-activated ``resume_token`` — an entry is
+          inserted only when no pause is active yet (``submit_answers``
+          received a signal ahead of ``run``'s loop arming that token). The
+          moment ``run`` arms a pause token it applies the matching entry
+          (if any) and clears the entire dict (HITL contract §2), so stale
+          keys buffered during the no-active-pause window cannot accumulate
+          across pause rounds in durable workflow state.
     """
 
     def __init__(self) -> None:
         self._active_resume_token: str | None = None
         self._submitted_answers: list[dict[str, Any]] | None = None
+        self._buffered_signals: dict[str, list[dict[str, Any]]] = {}
 
     @workflow.signal(name="submit_answers")
     def submit_answers(self, payload: dict[str, Any]) -> None:
-        """Deliver a human answer batch for the current pause (wakes ``wait_condition``).
+        """Deliver a human answer batch for the current (or next) pause.
 
         Preconditions:
             - None enforced — ``payload`` arrives from outside the workflow
@@ -144,45 +264,133 @@ class CodingTeamWorkflow:
         Postconditions:
             - Any payload that is not a dict, or a dict without a list
               ``"answers"`` value, is ignored (returns without side effects).
-            - Validates ``payload.get("resume_token")`` against
+            - When no pause is currently active
+              (``self._active_resume_token is None``), a well-formed payload
+              is treated as an early arrival for a pause ``run``'s loop has
+              not armed yet (contract §2 rule 1) — the exact race
+              ``run_pipeline_activity`` opened by returning
+              ``{"outcome": "paused", ...}`` promptly instead of blocking: a
+              client can read the persisted ``resume_token`` from the job
+              record and signal before this workflow has processed the
+              paused activity result. A non-empty string ``resume_token`` is
+              buffered in ``self._buffered_signals``, keyed by that token, so
+              ``run`` can apply it the instant it arms the matching pause;
+              first submission per token wins (an already-buffered token is
+              left alone, not overwritten). A payload with no usable
+              ``resume_token`` while no pause is active has nothing to key a
+              buffer entry on and is dropped. A mismatched-but-active token
+              is never buffered (only the "no pause active yet" case is) —
+              since each pause round mints a fresh unique token and the
+              workflow only ever awaits one pause at a time, a token that
+              does not match the currently active one can only belong to an
+              already-resolved earlier round, not a legitimate future one.
+            - Otherwise, validates ``payload.get("resume_token")`` against
               ``self._active_resume_token`` per the contract's §2 match rules
-              2 and 3: a mismatch — including no pause being active yet
-              (``self._active_resume_token is None``) — is ignored, not
-              applied; and once a batch is accepted for the current token, a
-              second matching-token signal (a double-submit, or two clients
-              racing to answer the same pause) is ignored too — first
-              submission per token wins, an unconditional overwrite would
-              make which human answer "wins" depend on delivery order. Only
-              a token-matching first submission with a list ``"answers"``
-              sets ``self._submitted_answers`` to that list, satisfying a
+              2 and 3: a mismatch is ignored, not applied; and once a batch
+              is accepted for the current token, a second matching-token
+              signal (a double-submit, or two clients racing to answer the
+              same pause) is ignored too — first submission per token wins,
+              an unconditional overwrite would make which human answer
+              "wins" depend on delivery order. Only a token-matching first
+              submission with a list ``"answers"`` sets
+              ``self._submitted_answers`` to that list, satisfying a
               ``wait_condition`` predicate of
               ``self._submitted_answers is not None``.
-            - Deliberately NOT implemented here: buffering a signal that
-              arrives before ``self._active_resume_token`` is set (the
-              contract's §2 rule 1, ``self._buffered_signals``) — such a
-              signal is simply dropped by this skeleton. Since
-              ``run_pipeline_activity`` now returns
-              ``{"outcome": "paused", ...}`` under ``pause_strategy="return"``,
-              this gap IS reachable in production (a client that reads the
-              persisted ``resume_token`` from the job record and signals
-              before this workflow has processed the paused activity result
-              and set ``self._active_resume_token`` loses that signal). It
-              remains open future work (not yet filed — #3988's scope is
-              limited to an integration test proving the existing pause/
-              resume cycle; buffering itself is separate, unimplemented work).
         """
         if not isinstance(payload, dict):
-            return
-        if self._active_resume_token is None:
-            return
-        if payload.get("resume_token") != self._active_resume_token:
-            return
-        if self._submitted_answers is not None:
             return
         answers = payload.get("answers")
         if not isinstance(answers, list):
             return
+        resume_token = payload.get("resume_token")
+        if self._active_resume_token is None:
+            if isinstance(resume_token, str) and resume_token:
+                self._buffered_signals.setdefault(resume_token, answers)
+            return
+        if resume_token != self._active_resume_token:
+            return
+        if self._submitted_answers is not None:
+            return
         self._submitted_answers = answers
+
+    async def _best_effort_github_failure_notice(
+        self,
+        *,
+        job_id: str,
+        github: dict[str, Any],
+        message: str,
+        github_timeout: timedelta,
+    ) -> dict[str, Any]:
+        """Post a failure notice; if that fails, mark the job failed locally.
+
+        Preconditions:
+            - Called from ``run`` while this workflow is executing.
+            - ``github`` carries owner/repo/issue_number; ``message`` is non-empty.
+        Postconditions:
+            - Attempts ``github_failure_notice_activity`` (bounded retries).
+            - On notice failure, runs ``mark_coding_team_job_failed_activity`` so
+              the Khala job is not left ``pending`` when the local write succeeds.
+            - Returns the resulting job snapshot from whichever activity succeeded.
+            - Propagates only when both notice and local mark-failed fail (callers
+              that must preserve an earlier exception wrap this in try/except).
+        """
+        try:
+            return await workflow.execute_activity(
+                github_failure_notice_activity,
+                {
+                    "job_id": job_id,
+                    "owner": github["owner"],
+                    "repo": github["repo"],
+                    "number": github["issue_number"],
+                    "message": message,
+                    "kind": "failure",
+                },
+                start_to_close_timeout=github_timeout,
+                retry_policy=_GITHUB_ACTIVITY_RETRY,
+            )
+        except Exception:
+            _log_github_side_effect_failure(
+                "github_failure_notice_activity failed; marking job failed locally"
+            )
+            return await workflow.execute_activity(
+                mark_coding_team_job_failed_activity,
+                {"job_id": job_id, "error": message},
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=_GITHUB_ACTIVITY_RETRY,
+            )
+
+    async def _best_effort_terminalize_then_reraise(
+        self,
+        *,
+        job_id: str,
+        github: dict[str, Any],
+        message: str,
+        github_timeout: timedelta,
+        original: BaseException,
+    ) -> None:
+        """Best-effort notice/mark-failed, then re-raise *original*.
+
+        Preconditions:
+            - ``original`` is the exception the caller must surface (prep /
+              pipeline / publish failure).
+            - ``github`` / ``message`` match ``_best_effort_github_failure_notice``.
+        Postconditions:
+            - Attempts terminalization via ``_best_effort_github_failure_notice``.
+            - Notice/mark-failed failures are logged only; always re-raises
+              ``original`` (never a notice/mark-failed error).
+        """
+        try:
+            await self._best_effort_github_failure_notice(
+                job_id=job_id,
+                github=github,
+                message=message,
+                github_timeout=github_timeout,
+            )
+        except Exception:
+            _log_github_side_effect_failure(
+                "best-effort GitHub failure terminalize failed; re-raising original"
+            )
+        raise original
 
     @workflow.run
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -192,14 +400,33 @@ class CodingTeamWorkflow:
             - ``request`` is a dict whose ``repo_path``/``plan_input`` keys
               form a serialized ``RunRequest`` (see
               ``run_pipeline_activity``'s contract).
+            - When supplied, ``request["github"]`` is a dict carrying the
+              GitHub branch/PR coordinates needed by the GitHub activities:
+              ``owner``, ``repo``, ``issue_number``, ``issue_title``,
+              ``base``, and ``integration_branch``. ``remote`` defaults to
+              ``"origin"`` when blank or absent.
+            - Any GitHub token or credential stays outside workflow activity
+              arguments. This workflow passes only repository coordinates and
+              issue metadata to GitHub activities; a ``"token"`` key must
+              never appear in activity args.
 
         Postconditions:
-            - Returns the activity's result dict. ``run_pipeline_activity``
-              now always requests ``pause_strategy="return"`` and emits
+            - Without GitHub metadata, returns the activity's result dict.
+              With GitHub metadata, prepares the integration branch before
+              running the pipeline, posts a failure notice (and marks the job
+              failed) when branch prep reports ``ok=False`` or raises, best-
+              effort notices/mark-failed then re-raises the original error when
+              prep, the pipeline activity, or publish raises, returns
+              failed/cancelled/waiting-for-user pipeline results unchanged, and
+              publishes the integration branch after successful terminal
+              pipeline results (including deferred ``running``/``publishing``
+              success).
+            - ``run_pipeline_activity`` now always requests
+              ``pause_strategy="return"`` and emits
               ``{"outcome": "paused", ...}`` whenever a HITL gate pauses, or
               a pre-work activity retry re-emits an already-persisted pause,
               so this method loops (executing the activity more than once)
-              until a non-``"paused"`` outcome is returned — production
+              until a non-``"paused"`` outcome is returned; production
               behavior is no longer "call the activity once."
             - When an activity result's ``"outcome"`` key IS
               ``"paused"``, this validates ``result["resume_token"]`` is a
@@ -210,11 +437,17 @@ class CodingTeamWorkflow:
               would instead make ``submit_answers``'s guard silently drop
               every future signal, stranding this workflow in
               ``wait_condition`` forever with no diagnostic. Otherwise
-              records it as ``self._active_resume_token``, resets
-              ``self._submitted_answers`` to ``None``, and waits on
-              ``workflow.wait_condition`` for a token-matching
-              ``submit_answers`` signal to set it (see ``submit_answers``'s
-              contract). Once resolved, it sets
+              records it as ``self._active_resume_token``, then immediately
+              applies any early signal already buffered for that exact token
+              and discards every other buffered key (HITL contract §2 —
+              ``self._submitted_answers = self._buffered_signals.pop(
+              resume_token, None)`` then ``self._buffered_signals.clear()``;
+              ``None`` when nothing matched, otherwise the buffered
+              ``answers`` list) before arming ``workflow.wait_condition`` for
+              a token-matching ``submit_answers`` signal to set it (see
+              ``submit_answers``'s contract) — a buffered entry already
+              satisfies that predicate, so the wait resolves immediately
+              without an extra signal round trip. Once resolved, it sets
               ``request["acknowledged_resume_token"]`` to that same token —
               telling ``run_coding_team_orchestrator``'s re-entry check
               (``_check_pending_pause_reentry``) which persisted pause this
@@ -224,12 +457,9 @@ class CodingTeamWorkflow:
               ``request["acknowledged_resume_token"]`` once that call
               returns (its job is done whether or not that call consumed
               it). Repeats until a non-``"paused"`` outcome.
-            - Deliberately NOT implemented here (tracked as future work, not
-              #3988 — that issue's scope is limited to an integration test
-              proving the existing pause/resume cycle): although the
-              activity-side pause payload (``pending_questions``,
-              ``pause_kind``, ``pause_context``) now exists on every paused
-              result, this
+            - Deliberately NOT implemented here: although the activity-side
+              pause payload (``pending_questions``, ``pause_kind``,
+              ``pause_context``) now exists on every paused result, this
               method does not yet APPLY resolved answers into
               ``request["plan_input"]["resolved_questions"]`` /
               ``task_decision_overrides`` — resume for the entry/tech-lead
@@ -241,38 +471,141 @@ class CodingTeamWorkflow:
               paused doesn't strand this workflow in ``wait_condition``
               forever).
         """
-        result = await workflow.execute_activity(
-            run_pipeline_activity,
-            request,
-            start_to_close_timeout=timedelta(hours=4),
-        )
-        while result.get("outcome") == "paused":
-            resume_token = result.get("resume_token")
-            if not isinstance(resume_token, str) or not resume_token:
-                # The contract guarantees a paused result always carries a resume_token; a
-                # missing/malformed one means the activity-side contract broke. Fail fast and
-                # deterministically here rather than assign None and let wait_condition's
-                # predicate become permanently unsatisfiable (submit_answers drops every signal
-                # while self._active_resume_token is None) -- an unresolvable hang is a much
-                # worse failure mode than an immediate, diagnosable workflow-task error.
-                raise ValueError(f"Paused activity result missing a valid resume_token: {result!r}")
-            self._active_resume_token = resume_token
-            self._submitted_answers = None
-            await workflow.wait_condition(lambda: self._submitted_answers is not None)
-            request["acknowledged_resume_token"] = self._active_resume_token
-            self._submitted_answers = None
-            self._active_resume_token = None
+        github = request.get("github")
+        activity_timeout = timedelta(hours=4)
+        github_timeout = timedelta(minutes=30)
+
+        if isinstance(github, dict) and github:
+            try:
+                prep = await workflow.execute_activity(
+                    github_branch_prep_activity,
+                    {
+                        "job_id": request["job_id"],
+                        "repo_path": request["repo_path"],
+                        "remote": github.get("remote") or "origin",
+                        "default_branch": github["base"],
+                        "integration_branch": github["integration_branch"],
+                        "issue_number": github.get("issue_number"),
+                    },
+                    start_to_close_timeout=github_timeout,
+                    retry_policy=_GITHUB_ACTIVITY_RETRY,
+                )
+            except Exception as prep_exc:
+                prep_message = (
+                    f"branch prep failed: {prep_exc}" if str(prep_exc) else "branch prep failed"
+                )
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=prep_message,
+                    github_timeout=github_timeout,
+                    original=prep_exc,
+                )
+            if not prep.get("ok"):
+                return await self._best_effort_github_failure_notice(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=f"branch prep failed: {prep.get('error')}",
+                    github_timeout=github_timeout,
+                )
+
+        try:
             result = await workflow.execute_activity(
                 run_pipeline_activity,
                 request,
-                start_to_close_timeout=timedelta(hours=4),
+                start_to_close_timeout=activity_timeout,
             )
-            request.pop("acknowledged_resume_token", None)
+            while result.get("outcome") == "paused":
+                resume_token = result.get("resume_token")
+                if not isinstance(resume_token, str) or not resume_token:
+                    # The contract guarantees a paused result always carries a resume_token; a
+                    # missing/malformed one means the activity-side contract broke. Fail fast and
+                    # deterministically here rather than assign None and let wait_condition's
+                    # predicate become permanently unsatisfiable (submit_answers drops every signal
+                    # while self._active_resume_token is None) -- an unresolvable hang is a much
+                    # worse failure mode than an immediate, diagnosable workflow-task error.
+                    raise ValueError(
+                        f"Paused activity result missing a valid resume_token: {result!r}"
+                    )
+                self._active_resume_token = resume_token
+                self._submitted_answers = self._buffered_signals.pop(resume_token, None)
+                # Contract §2: once a pause token activates, every other buffered
+                # key is stale (tokens are never reused) — drop them so retries
+                # across many pause rounds cannot grow durable workflow state.
+                self._buffered_signals.clear()
+                await workflow.wait_condition(lambda: self._submitted_answers is not None)
+                request["acknowledged_resume_token"] = self._active_resume_token
+                self._submitted_answers = None
+                self._active_resume_token = None
+                result = await workflow.execute_activity(
+                    run_pipeline_activity,
+                    request,
+                    start_to_close_timeout=activity_timeout,
+                )
+                request.pop("acknowledged_resume_token", None)
+        except Exception as exc:
+            # Contract-violation ValueError for a missing resume_token must fail the
+            # workflow task without a GitHub failure notice — that path is not an
+            # orchestrator/activity failure worth posting to the issue.
+            if isinstance(exc, ValueError) and "missing a valid resume_token" in str(exc):
+                raise
+            if isinstance(github, dict) and github:
+                notice_message = f"pipeline failed: {exc}" if str(exc) else "pipeline failed"
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=notice_message,
+                    github_timeout=github_timeout,
+                    original=exc,
+                )
+            raise
+
+        if isinstance(github, dict) and github:
+            status = result.get("status")
+            if status in ("failed", "cancelled", "waiting_for_user"):
+                return result
+            try:
+                return await workflow.execute_activity(
+                    github_publish_activity,
+                    {
+                        "job_id": request["job_id"],
+                        "owner": github["owner"],
+                        "repo": github["repo"],
+                        "repo_path": request["repo_path"],
+                        "issue_number": github["issue_number"],
+                        "issue_title": github["issue_title"],
+                        "base": github["base"],
+                        "integration_branch": github["integration_branch"],
+                        "remote": github.get("remote") or "origin",
+                        "cleanup_checkout_on_success": bool(
+                            github.get("cleanup_checkout_on_success")
+                        ),
+                    },
+                    start_to_close_timeout=github_timeout,
+                    retry_policy=_GITHUB_ACTIVITY_RETRY,
+                )
+            except Exception as publish_exc:
+                publish_message = (
+                    f"publish failed: {publish_exc}" if str(publish_exc) else "publish failed"
+                )
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=publish_message,
+                    github_timeout=github_timeout,
+                    original=publish_exc,
+                )
         return result
 
 
 WORKFLOWS = [CodingTeamWorkflow]
-ACTIVITIES = [run_pipeline_activity, github_branch_prep_activity, github_publish_activity]
+ACTIVITIES = [
+    run_pipeline_activity,
+    github_branch_prep_activity,
+    github_publish_activity,
+    github_failure_notice_activity,
+    mark_coding_team_job_failed_activity,
+]
 
 # NB: no worker self-boot at import time. This module DEFINES CodingTeamWorkflow,
 # so the temporalio sandbox re-imports it during workflow registration; a top-level

@@ -30,6 +30,13 @@ from ._coverage_probe_test_helpers import (
 
 _ITERATIONS = 200
 _RUNTIME_RATIO_BOUND = 1.12
+# A single 200-sample P25 measurement still occasionally lands on a shared,
+# noisy CI runner (a scheduler stall mid-loop biases the probed arm more than
+# the baseline arm, since the probed arm does strictly more work per sample).
+# Retrying re-measures from scratch rather than reusing samples, so a retry
+# only passes if a *subsequent* clean pass is genuinely within bound — a
+# consistent regression still fails every attempt.
+_MAX_ATTEMPTS = 3
 # Sized so the baseline workload (~ms scale) dominates the helper's fixed
 # success-path cost (one ``should_run_probes`` call + a branch, ~tens of µs).
 # A small workload made that fixed overhead a double-digit fraction of the
@@ -135,7 +142,8 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
     Postconditions:
         Asserts that ``probed_p25 <= _RUNTIME_RATIO_BOUND *
         max(baseline_p25, 1e-6)`` and that ``metrics.coverage_report
-        is None``.
+        is None``, re-measuring up to ``_MAX_ATTEMPTS`` times so a single
+        noisy CI pass doesn't fail the build.
     """
 
     def _must_not_run(**_kwargs: Any) -> None:
@@ -146,31 +154,37 @@ def test_success_path_runtime_within_ten_percent_of_unprobed(
     kwargs = _success_kwargs()
     metrics = _fresh_metrics()
 
-    baseline_samples: list[float] = []
-    probed_samples: list[float] = []
-    for _ in range(_ITERATIONS):
-        t0 = time.perf_counter()
-        _synthetic_backtest_workload()
-        baseline_samples.append(time.perf_counter() - t0)
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        baseline_samples: list[float] = []
+        probed_samples: list[float] = []
+        for _ in range(_ITERATIONS):
+            t0 = time.perf_counter()
+            _synthetic_backtest_workload()
+            baseline_samples.append(time.perf_counter() - t0)
 
-        t0 = time.perf_counter()
-        _synthetic_backtest_workload()
-        _maybe_attach_coverage_report(metrics=metrics, **kwargs)
-        probed_samples.append(time.perf_counter() - t0)
+            t0 = time.perf_counter()
+            _synthetic_backtest_workload()
+            _maybe_attach_coverage_report(metrics=metrics, **kwargs)
+            probed_samples.append(time.perf_counter() - t0)
 
-    # Lower quartile (P25) via sorted-index access — no numpy.
-    quartile_index = _ITERATIONS // 4
-    baseline_p25 = sorted(baseline_samples)[quartile_index]
-    probed_p25 = sorted(probed_samples)[quartile_index]
-    # Floor the denominator at 1µs to defang the unlikely zero-baseline
-    # corner case; real samples sit in the low-millisecond band given
-    # _WORKLOAD_OPS=20000, well above the helper's fixed success-path cost.
-    baseline_floor = max(baseline_p25, 1e-6)
+        # Lower quartile (P25) via sorted-index access — no numpy.
+        quartile_index = _ITERATIONS // 4
+        baseline_p25 = sorted(baseline_samples)[quartile_index]
+        probed_p25 = sorted(probed_samples)[quartile_index]
+        # Floor the denominator at 1µs to defang the unlikely zero-baseline
+        # corner case; real samples sit in the low-millisecond band given
+        # _WORKLOAD_OPS=20000, well above the helper's fixed success-path cost.
+        baseline_floor = max(baseline_p25, 1e-6)
 
-    assert probed_p25 <= _RUNTIME_RATIO_BOUND * baseline_floor, (
-        "coverage-probe gate added > "
-        f"{(_RUNTIME_RATIO_BOUND - 1) * 100:.0f}% on successful backtest: "
-        f"baseline_p25={baseline_p25 * 1e6:.2f}µs, "
-        f"probed_p25={probed_p25 * 1e6:.2f}µs"
-    )
+        if probed_p25 <= _RUNTIME_RATIO_BOUND * baseline_floor:
+            break
+        if attempt == _MAX_ATTEMPTS:
+            raise AssertionError(
+                "coverage-probe gate added > "
+                f"{(_RUNTIME_RATIO_BOUND - 1) * 100:.0f}% on successful backtest "
+                f"across {_MAX_ATTEMPTS} attempts: "
+                f"baseline_p25={baseline_p25 * 1e6:.2f}µs, "
+                f"probed_p25={probed_p25 * 1e6:.2f}µs"
+            )
+
     assert metrics.coverage_report is None

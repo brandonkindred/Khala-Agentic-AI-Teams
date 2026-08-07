@@ -47,6 +47,22 @@ def test_require_temporal_ok_when_enabled(monkeypatch) -> None:
     api_main._require_temporal()  # must not raise
 
 
+def test_require_temporal_maps_enablement_check_error_to_503(monkeypatch) -> None:
+    """``is_temporal_enabled()`` raising (e.g. a misconfigured Temporal
+    client) must map to the same documented 503, not propagate as an
+    unhandled 500."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    def _boom() -> bool:
+        raise RuntimeError("Temporal client misconfigured")
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", _boom)
+    with pytest.raises(HTTPException) as ei:
+        api_main._require_temporal()
+    assert ei.value.status_code == 503
+
+
 def test_execute_advisory_503_when_disabled(monkeypatch) -> None:
     import shared.temporal
 
@@ -451,6 +467,25 @@ def test_execute_advisory_maps_import_error_to_503(monkeypatch) -> None:
     with pytest.raises(HTTPException) as ei:
         REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
     assert ei.value.status_code == 503
+
+
+def test_execute_advisory_translates_unrelated_runtime_error_instead_of_503(monkeypatch) -> None:
+    """A ``RuntimeError`` from workflow/activity code that is NOT the
+    client-not-ready condition must not be misreported as 503 — it should be
+    routed through ``_translate_advisory_failure`` like every other
+    exception type, landing on its 502 default for an unrecognized error."""
+    import shared.temporal
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    def _raise(*a, **kw):
+        raise RuntimeError("business logic exploded unexpectedly")
+
+    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+
+    with pytest.raises(HTTPException) as ei:
+        REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
+    assert ei.value.status_code == 502
 
 
 def test_execute_advisory_passes_through_503_when_disabled_without_translation(

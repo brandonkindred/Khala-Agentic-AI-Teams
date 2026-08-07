@@ -248,7 +248,9 @@ def _dispatch() -> DispatchTable:
         cur.rowcount = 1
 
     def match_insert_team_agent(norm: str) -> bool:
-        return norm.startswith("insert into agentic_team_agents")
+        # Exclude ON CONFLICT upserts so this stays mutually exclusive with
+        # match_upsert_team_agent even if dispatch order changes.
+        return norm.startswith("insert into agentic_team_agents") and "on conflict" not in norm
 
     def handle_insert_team_agent(cur: FakeCursor, params: tuple) -> None:
         team_id, agent_name, data_json, created_at, updated_at = params
@@ -534,10 +536,10 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("update agentic_form_data set data_json")
 
     def handle_update_form_data(cur: FakeCursor, params: tuple) -> None:
-        data_json, ts, team_id, record_id = params
+        data_json, ts, team_id, record_id, form_key = params
         data = unwrap_json(data_json)
         row = cur.db["form_data"].get(record_id)
-        if row and row["team_id"] == team_id:
+        if row and row["team_id"] == team_id and row["form_key"] == form_key:
             row["data_json"] = data
             row["updated_at"] = ts
             cur.rowcount = 1
@@ -548,9 +550,9 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("delete from agentic_form_data where team_id = %s and record_id")
 
     def handle_delete_form_data(cur: FakeCursor, params: tuple) -> None:
-        team_id, record_id = params
+        team_id, record_id, form_key = params
         row = cur.db["form_data"].get(record_id)
-        if row and row["team_id"] == team_id:
+        if row and row["team_id"] == team_id and row["form_key"] == form_key:
             del cur.db["form_data"][record_id]
             cur.rowcount = 1
         else:

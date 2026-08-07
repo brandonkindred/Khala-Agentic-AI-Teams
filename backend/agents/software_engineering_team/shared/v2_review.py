@@ -10,11 +10,17 @@ fork into one parameterised implementation driven by :class:`ReviewConfig`.
 
 The chunking/prompt/parse orchestration (``_run_llm_review``) and the external
 QA / security / build-verify runners stay **per-team** (in each team's
-``phases/review.py``) because they are the test patch surface for ``Agent`` /
-``resolve_text_mode_strands_model`` and inject the team's own prompt/parser and
-``ReviewIssue`` factory. The shared bodies here call back into those runners via
-injected callables, so the per-team patch surface is preserved and existing
-tests stay green without rewriting their patch targets.
+``phases/review.py``) so each team can inject its own prompt/parser and
+``ReviewIssue`` factory. For frontend, ``_run_llm_review`` is also the test
+patch surface for ``Agent`` / ``resolve_text_mode_strands_model``, since it
+builds the Strands invocation itself; backend's ``_run_llm_review`` is a
+documented exception (see ``backend_code_v2_team.phases.review``'s own
+module docstring) that calls ``code_review_agent.coordinator.run_coordinator``
+directly instead, so ``Agent`` / ``resolve_text_mode_strands_model`` are not
+part of its patch surface. The shared bodies here call back into these
+runners via injected callables either way, so each team's patch surface is
+preserved and existing tests stay green without rewriting their patch
+targets.
 
 The code-review / QA / security checks are independent — none reads another's
 output, they only contribute to the shared ``issues`` list — so the shared body
@@ -54,7 +60,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import AgentReviewCache
@@ -201,19 +207,17 @@ def _review_steps_run_sequentially(llm: LLMClient) -> bool:
 
     Production coding-team callers often pass a Strands ``LLMClientModel`` wrapper
     (reasoning-stream capture via ``_make_reasoning_llm_getter``), which survives the
-    ``worker_factory._v2_text_mode_llm`` clone path. A bare ``isinstance(llm,
-    DummyLLMClient)`` misses a dummy reached through that wrapper, so unwrap via
-    ``LLMClientModel.client`` before checking.
+    ``worker_factory._v2_text_mode_llm`` clone path; the shared
+    ``is_dummy_llm_client_wrapped`` helper (also used by
+    ``code_review_agent.coordinator._tail_passes_run_sequentially``) unwraps it
+    before checking.
 
     Preconditions: ``llm`` is the LLM client that will be handed to the step thunks.
     Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
     """
-    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.clients.dummy import is_dummy_llm_client_wrapped
 
-    if isinstance(llm, DummyLLMClient):
-        return True
-    # Unwrap Strands LLMClientModel wrapper to reach the real client for isinstance check.
-    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+    return is_dummy_llm_client_wrapped(llm)
 
 
 def _unwrap_llm_review_result(result: Any) -> _ReviewStepResult:
@@ -258,11 +262,18 @@ def _code_review_step(
         - ``files`` maps file paths to their full source text. ``task_description`` is the
           description surfaced to the external agent (the caller scopes this to the task or a
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
-        - ``llm_review_fn(llm=, task=, files=, review_context=, enable_llm_review_grounding=)``
-          is the per-team chunking/prompt/parse reviewer (the test patch surface for
-          ``Agent`` / ``resolve_text_mode_strands_model``); it must accept
-          ``review_context`` so the fallback reviewer sees the same context the
-          external agent path does. It returns an :class:`LlmReviewOutput` in
+        - ``llm_review_fn(llm=, task=, files=, language=, review_context=,
+          enable_llm_review_grounding=)`` is the per-team chunking/prompt/parse
+          reviewer. For frontend, this is also the test patch surface for
+          ``Agent`` / ``resolve_text_mode_strands_model``; backend's version
+          calls ``code_review_agent.coordinator.run_coordinator`` directly
+          instead (see this module's own docstring), so it has no ``Agent``
+          patch surface. Either way it must accept ``review_context`` so the
+          fallback reviewer sees the same context the external agent path
+          does, and ``language`` so a fallback that forwards it to
+          ``CodeReviewInput`` (e.g. backend's coordinator-backed fallback) reviews
+          the code under its actual language instead of ``CodeReviewInput``'s
+          ``typescript`` default. It returns an :class:`LlmReviewOutput` in
           production; a bare issue list is also accepted (see
           ``_unwrap_llm_review_result``) so a stub runner without a raw count is
           unaffected.
@@ -292,6 +303,7 @@ def _code_review_step(
                     llm=llm,
                     task=task,
                     files=files,
+                    language=language,
                     review_context=review_context,
                     enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
@@ -347,6 +359,7 @@ def _code_review_step(
                     llm=llm,
                     task=task,
                     files=files,
+                    language=language,
                     review_context=review_context,
                     enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
@@ -678,7 +691,7 @@ def run_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[Any, Any]] = None,
     language: str,
-    llm_review_fn: Callable[..., List[ReviewIssue]],
+    llm_review_fn: Callable[..., Union[LlmReviewOutput[ReviewIssue], List[ReviewIssue]]],
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
@@ -836,7 +849,7 @@ def run_microtask_review(
     tool_agents: Optional[Dict[Any, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str,
-    llm_review_fn: Callable[..., List[ReviewIssue]],
+    llm_review_fn: Callable[..., Union[LlmReviewOutput[ReviewIssue], List[ReviewIssue]]],
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],

@@ -14,6 +14,9 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
+from temporalio.exceptions import ActivityError, CancelledError
+
 from sales_team.temporal import activities as acts
 from sales_team.temporal import workflows as wf
 
@@ -237,13 +240,55 @@ def test_pipeline_error_marks_failed_and_reraises(monkeypatch):
     """A fatal error (here: prepare raising) is recorded via sales_mark_failed by
     the workflow's catch-all, then re-raised so the Temporal workflow fails."""
     rec = _Recorder(prospects=[], dossier_map={}, prepare_exc=RuntimeError("prepare boom"))
-    import pytest
 
     with pytest.raises(RuntimeError, match="prepare boom"):
         _run(monkeypatch, rec)
     assert rec.count(acts.mark_failed_activity) == 1
     ((_job, err),) = rec.args_for(acts.mark_failed_activity)
     assert "prepare boom" in err
+
+
+def test_native_cancellation_propagates_without_mark_failed(monkeypatch):
+    """Temporal CancelledError must re-raise without scheduling sales_mark_failed.
+
+    Unlike asyncio.CancelledError (a BaseException), temporalio's CancelledError
+    subclasses Exception and would otherwise be caught by the catch-all and
+    incorrectly mark a cancelled job FAILED.
+    """
+    rec = _Recorder(
+        prospects=[],
+        dossier_map={},
+        prepare_exc=CancelledError("workflow cancelled"),
+    )
+
+    with pytest.raises(CancelledError):
+        _run(monkeypatch, rec)
+
+    assert rec.count(acts.mark_failed_activity) == 0
+
+
+def test_activity_error_wrapping_cancellation_propagates_without_mark_failed(monkeypatch):
+    """Cancelled activities surface as ActivityError with a CancelledError cause.
+
+    A plain ``except CancelledError`` misses that shape; only
+    ``is_cancelled_exception`` prevents the catch-all from marking FAILED.
+    """
+    err = ActivityError(
+        "activity cancelled",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="test",
+        activity_type="sales_prepare",
+        activity_id="1",
+        retry_state=None,
+    )
+    err.__cause__ = CancelledError("cancelled")
+    rec = _Recorder(prospects=[], dossier_map={}, prepare_exc=err)
+
+    with pytest.raises(ActivityError):
+        _run(monkeypatch, rec)
+
+    assert rec.count(acts.mark_failed_activity) == 0
 
 
 def test_coaching_failure_is_absorbed(monkeypatch):
@@ -279,7 +324,6 @@ def test_mark_failed_failure_is_swallowed(monkeypatch):
         return await orig(fn, *args, **kwargs)
 
     monkeypatch.setattr(wf.workflow, "execute_activity", _wrapped)
-    import pytest
 
     with pytest.raises(RuntimeError, match="prepare boom"):
         asyncio.run(wf.SalesWorkflow().run("job-wf", _REQUEST))

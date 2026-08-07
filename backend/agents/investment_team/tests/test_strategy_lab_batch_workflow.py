@@ -796,6 +796,63 @@ def test_resume_progress_never_moves_backward():
 
 
 # ---------------------------------------------------------------------------
+# Generation fencing threading (#4029)
+# ---------------------------------------------------------------------------
+
+
+def test_generation_threaded_into_finalize_and_persist_activities():
+    """batch_input's generation reaches every finalize_cycle_record_activity params
+    dict and every persist_run_state_activity call's args (all 4 _persist_state
+    call sites, exercised by one realistic run: current_batch, wave-progress,
+    completed_batches, and final status)."""
+    captured_finalize_params: List[Dict[str, Any]] = []
+    captured_persist_args: List[Any] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            finalize_cycle_record_activity=lambda a: (
+                captured_finalize_params.append(a[0]),
+                {"record": {"lab_record_id": f"rec-{a[0]['record']['lab_record_id']}"}},
+            )[1],
+            persist_run_state_activity=lambda a: captured_persist_args.append(a),
+        ),
+    )
+    _run(_batch_input(generation=5), harness)
+
+    assert captured_finalize_params, "finalize_cycle_record_activity was never called"
+    for params in captured_finalize_params:
+        assert params["run_id"] == "run-1"
+        assert params["generation"] == 5
+
+    # 4 _persist_state call sites: current_batch, wave-progress, completed_batches, status.
+    assert len(captured_persist_args) == 4
+    for args in captured_persist_args:
+        run_id, _state, create, generation = args
+        assert run_id == "run-1"
+        assert create is False
+        assert generation == 5
+
+
+def test_generation_defaults_to_one_when_absent_from_batch_input():
+    """Backward compat: a batch_input predating this field (e.g. a workflow-history
+    replay) defaults to generation 1 rather than raising."""
+    captured_persist_args: List[Any] = []
+    harness = _Harness(
+        child_results={"run-1-c0": _child_record("0"), "run-1-c1": _child_record("1")},
+        activity_handlers=_default_activity_handlers(
+            persist_run_state_activity=lambda a: captured_persist_args.append(a),
+        ),
+    )
+    bi = _batch_input()
+    assert "generation" not in bi
+    _run(bi, harness)
+
+    assert captured_persist_args
+    for args in captured_persist_args:
+        assert args[3] == 1
+
+
+# ---------------------------------------------------------------------------
 # Module exports
 # ---------------------------------------------------------------------------
 
