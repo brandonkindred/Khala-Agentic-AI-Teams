@@ -9,6 +9,7 @@ import { DateOnlyPipe } from '../../../shared/date-only.pipe';
 import { formatPct, formatRatio } from '../../../shared/number-format';
 import { publishabilitySkipLabel } from '../../../shared/publishability';
 import { verdictLabel } from '../strategy-lab.formatters';
+import { isPaperTradingStatusTerminal } from '../../../models';
 import type { PaperTradingSession, PaperTradingComparison, StrategyLabRecord } from '../../../models';
 
 /** Precomputed comparison-table row — see `comparisonMetrics`. */
@@ -57,6 +58,7 @@ export class PaperTradingPanelComponent {
 
   readonly verdictLabel = verdictLabel;
   readonly publishabilitySkipLabel = publishabilitySkipLabel;
+  readonly isPaperTradingStatusTerminal = isPaperTradingStatusTerminal;
 
   /** Paper-trade / re-run button click handler. Postconditions: `paperTradeRequested` emits exactly once; no local state changes (the host owns paper-trading-in-flight tracking). */
   onRunPaperTrading(): void {

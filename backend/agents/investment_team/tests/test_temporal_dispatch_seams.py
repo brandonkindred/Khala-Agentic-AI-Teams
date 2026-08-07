@@ -47,6 +47,22 @@ def test_require_temporal_ok_when_enabled(monkeypatch) -> None:
     api_main._require_temporal()  # must not raise
 
 
+def test_require_temporal_maps_enablement_check_error_to_503(monkeypatch) -> None:
+    """``is_temporal_enabled()`` raising (e.g. a misconfigured Temporal
+    client) must map to the same documented 503, not propagate as an
+    unhandled 500."""
+    import shared.temporal
+    from investment_team.api import main as api_main
+
+    def _boom() -> bool:
+        raise RuntimeError("Temporal client misconfigured")
+
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", _boom)
+    with pytest.raises(HTTPException) as ei:
+        api_main._require_temporal()
+    assert ei.value.status_code == 503
+
+
 def test_execute_advisory_503_when_disabled(monkeypatch) -> None:
     import shared.temporal
 

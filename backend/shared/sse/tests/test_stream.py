@@ -229,6 +229,34 @@ def test_async_snapshot_then_terminal_done() -> None:
     assert calls["unsubscribed"] == [("run", sub)]
 
 
+def test_async_awaitable_snapshot_then_terminal_done() -> None:
+    """Async snapshot suppliers must be awaited (sync SnapshotFn still works)."""
+    sub = _FakeSub()
+    sub.events.append({"type": "complete"})
+    subscribe, unsubscribe, calls = _bus(sub)
+
+    async def _async_snapshot():
+        return {"type": "snapshot", "via": "awaitable"}
+
+    async def _collect():
+        out = []
+        async for line in sse_job_stream_async(
+            subscribe=subscribe,
+            unsubscribe=unsubscribe,
+            job_id="run",
+            snapshot=_async_snapshot,
+            terminal_types=("complete", "error"),
+            poll_interval=0.0,
+        ):
+            out.append(line)
+        return out
+
+    out = asyncio.run(_collect())
+    assert out[0] == sse_line({"type": "snapshot", "via": "awaitable"})
+    assert out[-1] == sse_line({"type": "done"})
+    assert calls["unsubscribed"] == [("run", sub)]
+
+
 def test_async_keepalive_then_terminal_across_passes() -> None:
     sub = _FakeSub()
     subscribe, unsubscribe, _ = _bus(sub)

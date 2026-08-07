@@ -237,13 +237,348 @@ def test_run_request_declares_acknowledged_resume_token() -> None:
     assert parsed.acknowledged_resume_token == "j1:1"
 
 
-# --------------------------------------------------------------------------- WorkflowEnvironment (#3988)
+_GITHUB = {
+    "owner": "acme",
+    "repo": "widgets",
+    "issue_number": 9,
+    "issue_title": "Fix the widget",
+    "remote": "origin",
+    "base": "main",
+    "integration_branch": "khala/issue-9",
+    "cleanup_checkout_on_success": False,
+}
+
+
+def _github_request(**overrides):
+    req = {
+        "job_id": "job-1",
+        "repo_path": "/repo",
+        "plan_input": {"objective": "ship"},
+        "github": dict(_GITHUB),
+    }
+    req.update(overrides)
+    return req
+
+
+def test_github_run_calls_prep_then_pipeline_then_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": True, "error": None, "notes": []},
+        {"job_id": "job-1", "status": "completed"},
+        {"job_id": "job-1", "status": "completed", "github_pr_url": "https://example/pull/1"},
+    ]
+    calls, snapshots = _patch_execute(monkeypatch, results)
+
+    async def _no_wait(*_a, **_kw):
+        raise AssertionError("wait_condition must not be called")
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
+
+    result = asyncio.run(workflow_obj.run(_github_request()))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_publish_activity,
+    ]
+    assert snapshots[0]["job_id"] == "job-1"
+    assert snapshots[0]["default_branch"] == "main"
+    assert snapshots[0]["integration_branch"] == "khala/issue-9"
+    assert "token" not in snapshots[0]
+    assert snapshots[2]["issue_title"] == "Fix the widget"
+    assert "token" not in snapshots[2]
+    assert result["github_pr_url"] == "https://example/pull/1"
+
+
+def test_github_prep_failure_calls_failure_notice_skips_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": False, "error": "unsafe ref", "notes": []},
+        {"job_id": "job-1", "status": "failed"},
+    ]
+    calls, snapshots = _patch_execute(monkeypatch, results)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    result = asyncio.run(workflow_obj.run(_github_request()))
+
+    assert [c[0] for c in calls] == [
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    ]
+    assert snapshots[1]["kind"] == "failure"
+    assert "unsafe" in snapshots[1]["message"]
+    assert snapshots[1]["number"] == 9
+    assert "token" not in snapshots[1]
+    assert result["status"] == "failed"
+
+
+def test_github_pipeline_exception_calls_failure_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+    notice_requests: list[dict] = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            raise RuntimeError("orchestrator boom")
+        if fn is github_failure_notice_activity:
+            notice_requests.append(dict(request))
+            return {"job_id": "job-1", "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="orchestrator boom"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_failure_notice_activity,
+    ]
+    assert notice_requests[0]["message"] == "pipeline failed: orchestrator boom"
+    assert notice_requests[0]["kind"] == "failure"
+
+
+def test_github_failure_notice_failure_still_reraises_pipeline_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If failure-notice itself raises, the original pipeline exception must still propagate."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            raise RuntimeError("orchestrator boom")
+        if fn is github_failure_notice_activity:
+            raise RuntimeError("notice boom")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="orchestrator boom"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_failure_notice_activity,
+    ]
+
+
+def test_github_empty_pipeline_exception_message_still_posts_nonempty_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exceptions with empty str() must still produce a non-empty failure-notice message."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    class _EmptyStrError(RuntimeError):
+        def __str__(self) -> str:
+            return ""
+
+    workflow_obj = CodingTeamWorkflow()
+    notice_requests: list[dict] = []
+
+    async def _fake_exec(fn, request, **_kw):
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            raise _EmptyStrError()
+        if fn is github_failure_notice_activity:
+            notice_requests.append(dict(request))
+            return {"job_id": "job-1", "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(_EmptyStrError):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert notice_requests[0]["message"] == "pipeline failed"
+
+
+def test_github_missing_resume_token_skips_failure_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contract-violation missing resume_token must not post a GitHub failure notice."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            return {"outcome": "paused", "job_id": "job-1"}
+        if fn is github_failure_notice_activity:
+            raise AssertionError("failure notice must not run for resume_token contract break")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(ValueError, match="missing a valid resume_token"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [github_branch_prep_activity, run_pipeline_activity]
+
+
+def test_github_failed_pipeline_status_skips_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    results = [
+        {"ok": True, "error": None, "notes": []},
+        {"job_id": "job-1", "status": "failed", "error": "timed out"},
+    ]
+    calls, _ = _patch_execute(monkeypatch, results)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    result = asyncio.run(workflow_obj.run(_github_request()))
+
+    assert [c[0] for c in calls] == [github_branch_prep_activity, run_pipeline_activity]
+    assert result["status"] == "failed"
+
+
+# --------------------------------------------------------------------------- WorkflowEnvironment
+
+
+@contextlib.asynccontextmanager
+async def _workflow_environment():
+    """Start a time-skipping ``WorkflowEnvironment`` with no worker attached.
+
+    Preconditions:
+        - Caller is an async test (or other async context) that will drive the
+          yielded ``env`` and any workers itself.
+    Postconditions:
+        - Yields a started ``WorkflowEnvironment``. Skips the test (rather than
+          failing) when the ephemeral Temporal test-server binary cannot be
+          downloaded — same egress caveat as
+          ``test_code_review_temporal.py``'s helper. The environment is shut
+          down on exit.
+    """
+    from temporalio.testing import WorkflowEnvironment
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        yield env
+
+
+@contextlib.asynccontextmanager
+async def _coding_team_worker(env, activities=None):
+    """Run a ``CodingTeamWorkflow`` worker against an already-started ``env``.
+
+    Preconditions:
+        - ``env`` is a live ``WorkflowEnvironment`` (typically from
+          ``_workflow_environment``).
+        - ``activities`` is ``None`` (use production ``ACTIVITIES``) or a list of
+          activity callables registered under the same names production uses.
+    Postconditions:
+        - Yields after a ``Worker`` is listening on the coding-team task queue.
+          Exiting the context stops that worker without shutting down ``env``,
+          so a later ``_coding_team_worker`` call can restart against the same
+          environment (worker-restart-while-paused coverage).
+    """
+    import concurrent.futures
+
+    from temporalio.worker import Worker
+
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_workflow import (
+        ACTIVITIES,
+        CodingTeamWorkflow,
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+        worker = Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[CodingTeamWorkflow],
+            activities=activities if activities is not None else ACTIVITIES,
+            activity_executor=activity_executor,
+            # Sticky execution pins workflow tasks to the worker that last ran
+            # them. A worker-restart-while-paused test must let Worker B pick up
+            # a task scheduled after Worker A stopped; disabling the sticky
+            # cache makes that immediate instead of waiting on sticky
+            # schedule-to-start timeout.
+            max_cached_workflows=0,
+        )
+        async with worker:
+            yield worker
 
 
 @contextlib.asynccontextmanager
 async def _workflow_environment_worker(activities=None):
     """Shared ``WorkflowEnvironment`` + ``Worker`` startup/teardown for the
-    ``CodingTeamWorkflow`` integration test below. Mirrors
+    ``CodingTeamWorkflow`` integration tests below. Mirrors
     ``test_code_review_temporal.py``'s helper of the same name (the only other
     place in this repo that drives ``temporalio.testing.WorkflowEnvironment``)
     -- see that helper's docstring for why this skips (rather than fails) when
@@ -253,34 +588,60 @@ async def _workflow_environment_worker(activities=None):
     a substitute (e.g. a fake registered under the same
     ``"coding_team_run_pipeline"`` name) to drive the workflow without
     invoking the real orchestrator/job-store/``CodeEngineProvider`` machinery.
+
+    For tests that must stop and restart the worker while keeping the
+    environment alive, compose ``_workflow_environment`` +
+    ``_coding_team_worker`` directly instead of this combined helper.
     """
-    import concurrent.futures
+    async with _workflow_environment() as env:
+        async with _coding_team_worker(env, activities=activities):
+            yield env
 
-    from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Worker
 
-    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
-    from software_engineering_team.temporal.coding_team_workflow import (
-        ACTIVITIES,
-        CodingTeamWorkflow,
-    )
+async def _wait_until_pause_parked(handle, *, timeout_s: float = 10.0) -> None:
+    """Block until history shows the workflow has parked after a paused activity.
 
-    try:
-        test_env = await WorkflowEnvironment.start_time_skipping()
-    except RuntimeError as exc:
-        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+    Preconditions:
+        - ``handle`` is a live workflow handle whose first pipeline activity is
+          expected to complete with a paused outcome and then enter
+          ``wait_condition``.
+        - ``timeout_s`` is positive.
+    Postconditions:
+        - Returns only after history contains an
+          ``ACTIVITY_TASK_COMPLETED`` event followed by a later
+          ``WORKFLOW_TASK_COMPLETED`` (the workflow task that processed the
+          paused result and armed ``wait_condition``). Raises ``TimeoutError``
+          with a diagnostic if that sequence does not appear within
+          ``timeout_s``.
+    """
+    assert timeout_s > 0, "timeout_s must be positive"
 
-    async with test_env as env:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
-            worker = Worker(
-                env.client,
-                task_queue=TASK_QUEUE,
-                workflows=[CodingTeamWorkflow],
-                activities=activities if activities is not None else ACTIVITIES,
-                activity_executor=activity_executor,
+    from temporalio.api.enums.v1 import EventType
+
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        history = await handle.fetch_history()
+        events = list(history.events)
+        activity_completed_ids = [
+            event.event_id
+            for event in events
+            if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED
+        ]
+        if activity_completed_ids:
+            first_activity_completed_id = activity_completed_ids[0]
+            if any(
+                event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
+                and event.event_id > first_activity_completed_id
+                for event in events
+            ):
+                return
+        if asyncio.get_running_loop().time() >= deadline:
+            event_types = [int(event.event_type) for event in events]
+            raise TimeoutError(
+                "timed out waiting for pause to park on wait_condition; "
+                f"history event_type ints={event_types}"
             )
-            async with worker:
-                yield env
+        await asyncio.sleep(0.05)
 
 
 @pytest.mark.integration
@@ -368,7 +729,11 @@ async def test_workflow_pauses_then_resumes_to_completion_via_signal() -> None:
         }
         resender = asyncio.create_task(_resend_signal_until_cancelled(handle, resend_payload))
         try:
-            result = await asyncio.wait_for(handle.result(), timeout=30)
+            # Auto time-skipping would advance past an unbounded wait_condition
+            # (to the workflow run timeout) before the resend loop can land a
+            # signal. Disable it for the wall-clock wait.
+            with env.auto_time_skipping_disabled():
+                result = await asyncio.wait_for(handle.result(), timeout=30)
         finally:
             resender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -382,4 +747,154 @@ async def test_workflow_pauses_then_resumes_to_completion_via_signal() -> None:
     # CodingTeamWorkflow is more determinism-sensitive than that simple one-shot
     # workflow (it mutates/reuses `request` across a signal-driven loop), so this
     # replay check is worth keeping.
+    await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_survives_worker_restart_while_paused_with_buffered_signal() -> None:
+    """Worker restart while paused: one buffered ``submit_answers`` still resumes.
+
+    Drives pause → stop worker → single signal (no worker running) → start new
+    worker → completion against a real time-skipping ``WorkflowEnvironment``.
+    History-poll sync waits until the paused activity result has been processed
+    and ``wait_condition`` is armed before killing the worker — otherwise
+    ``submit_answers`` would drop the signal (``_active_resume_token`` still
+    ``None``) and the test would fail for the wrong reason.
+
+    Uses the same fake ``coding_team_run_pipeline`` contract as
+    ``test_workflow_pauses_then_resumes_to_completion_via_signal``: first call
+    returns paused; the call after ``acknowledged_resume_token`` matches returns
+    completed. Unlike that test, this sends exactly one signal while the worker
+    is down (Temporal buffers it) rather than resending until completion.
+    """
+    resume_token = "coding-team-workflow-test:resume-token-restart"
+
+    from temporalio import activity
+    from temporalio.worker import Replayer
+
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
+
+    @activity.defn(name="coding_team_run_pipeline")
+    def _fake_pipeline_activity(request: dict) -> dict:
+        if request.get("acknowledged_resume_token") == resume_token:
+            return {"job_id": request.get("job_id", "test-job"), "status": "completed"}
+        return {
+            "outcome": "paused",
+            "job_id": request.get("job_id", "test-job"),
+            "resume_token": resume_token,
+            "pause_kind": "entry",
+            "pause_context": None,
+            "pending_questions": [{"question_id": "q1", "prompt": "Proceed?"}],
+        }
+
+    activities = [_fake_pipeline_activity]
+    workflow_id = "coding-team-workflow-worker-restart-while-paused"
+    request = {
+        "job_id": "test-job-restart-1",
+        "repo_path": "/tmp/repo",
+        "plan_input": {"objective": "ship it"},
+    }
+    signal_payload = {
+        "resume_token": resume_token,
+        "answers": [{"question_id": "q1", "answer": "yes"}],
+    }
+
+    async with _workflow_environment() as env:
+        # Disable auto time-skipping for the whole pause/signal/restart window:
+        # awaiting a workflow parked on unbounded wait_condition would otherwise
+        # skip to the run timeout before the buffered signal is delivered.
+        with env.auto_time_skipping_disabled():
+            async with _coding_team_worker(env, activities=activities):
+                handle = await env.client.start_workflow(
+                    CodingTeamWorkflow.run,
+                    request,
+                    id=workflow_id,
+                    task_queue=TASK_QUEUE,
+                )
+                await _wait_until_pause_parked(handle)
+
+            # Worker A is down: signal must be server-buffered until Worker B starts.
+            await handle.signal(CodingTeamWorkflow.submit_answers, signal_payload)
+
+            async with _coding_team_worker(env, activities=activities):
+                result = await asyncio.wait_for(handle.result(), timeout=30)
+                history = await handle.fetch_history()
+
+    assert result == {"job_id": "test-job-restart-1", "status": "completed"}
+    await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_github_path_prep_pipeline_publish() -> None:
+    """Acceptance: GitHub-issue job runs branch prep → pipeline → publish via Temporal."""
+    from temporalio import activity
+    from temporalio.worker import Replayer
+
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
+
+    calls: list[str] = []
+
+    @activity.defn(name="coding_team_github_branch_prep")
+    def _fake_prep(request: dict) -> dict:
+        calls.append("prep")
+        assert request["job_id"] == "gh-job-1"
+        assert "token" not in request
+        return {"ok": True, "error": None, "notes": []}
+
+    @activity.defn(name="coding_team_run_pipeline")
+    def _fake_pipeline(request: dict) -> dict:
+        calls.append("pipeline")
+        assert request.get("github")
+        return {"job_id": "gh-job-1", "status": "completed"}
+
+    @activity.defn(name="coding_team_github_publish")
+    def _fake_publish(request: dict) -> dict:
+        calls.append("publish")
+        assert "token" not in request
+        assert request["integration_branch"] == "khala/issue-9"
+        return {
+            "job_id": "gh-job-1",
+            "status": "completed",
+            "github_pr_url": "https://example/pull/9",
+        }
+
+    @activity.defn(name="coding_team_github_failure_notice")
+    def _fake_failure(request: dict) -> dict:  # pragma: no cover - must not run
+        calls.append("failure")
+        raise AssertionError("failure notice must not run on happy path")
+
+    request = {
+        "job_id": "gh-job-1",
+        "repo_path": "/tmp/repo",
+        "plan_input": {"objective": "ship it"},
+        "github": {
+            "owner": "acme",
+            "repo": "widgets",
+            "issue_number": 9,
+            "issue_title": "Fix the widget",
+            "remote": "origin",
+            "base": "main",
+            "integration_branch": "khala/issue-9",
+            "cleanup_checkout_on_success": False,
+        },
+    }
+
+    async with _workflow_environment_worker(
+        activities=[_fake_prep, _fake_pipeline, _fake_publish, _fake_failure]
+    ) as env:
+        handle = await env.client.start_workflow(
+            CodingTeamWorkflow.run,
+            request,
+            id="coding-team-workflow-github-happy-path",
+            task_queue=TASK_QUEUE,
+        )
+        result = await asyncio.wait_for(handle.result(), timeout=30)
+        history = await handle.fetch_history()
+
+    assert calls == ["prep", "pipeline", "publish"]
+    assert result["github_pr_url"] == "https://example/pull/9"
     await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)

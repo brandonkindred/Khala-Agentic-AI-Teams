@@ -1136,22 +1136,56 @@ or changes the rest of the review.
 Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
 for moving spec/acceptance-criteria compliance checking out of every chunk's
 prompt and into one dedicated post-merge pass. Design decision recorded in
-`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`; not
-yet implemented.
+`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`
+(see that ADR's Amendment section for how the implementation below deviates
+from its original Decision).
 
 When unset or any value other than `true`/`1`/`yes`/`on`, behavior is
 unchanged from today: `acceptance_criteria` and `spec_excerpt` are rendered
 into every chunk's review prompt, and per-chunk `spec_compliance_notes` are
-synthesized into the final narrative exactly as they are now. When enabled,
-the per-chunk prompt omits the acceptance-criteria/spec-excerpt blocks
-(architecture overview and sibling-surface context are unaffected — out of
-scope for this toggle), and a new once-per-submission tail pass evaluates
-spec/acceptance-criteria compliance against the full changed-code content
-instead, feeding a single consolidated note into the existing narrative
-synthesis step in place of the per-chunk notes. Restricted to the
-`CODE_REVIEW` profile. Any setup or LLM failure is fail-safe: it is logged
-and yields an empty compliance note, never blocking or changing the rest of
-the review.
+synthesized into the final narrative exactly as they are now. When enabled
+**and** the review profile is `CODE_REVIEW`, the per-chunk prompt omits the
+acceptance-criteria/spec-excerpt blocks (architecture overview and
+sibling-surface context are unaffected — out of scope for this toggle), and
+`synthesize_spec_compliance` (`code_review_agent/synthesis.py`) runs once,
+after the final issue list is deduped, over the full spec/acceptance-criteria
+text plus the deduped findings list — **no source code is inlined into this
+pass**, unlike the sibling architecture/side-effect tail pass. It runs in the
+reduce phase (alongside `synthesize_review_findings`), not inside the
+concurrent tail-pass set with the false-positive filter/architecture pass,
+since it needs the final, post-dedupe issue list. Its note feeds into the
+existing narrative synthesis step in place of the per-chunk notes. Any setup
+or LLM failure is fail-safe: it is logged and yields an empty compliance
+note, never blocking or changing the rest of the review.
+
+**Measured token/cost delta.** Measured directly against the production
+prompt-construction code (`ChunkReviewAgent.run` for the per-chunk prompts,
+`synthesis._build_spec_compliance_framing`/`build_findings_digest` for the
+single dedicated pass) on a representative fixture: a ~15,880-character spec
+excerpt, 6 acceptance criteria, and an 8-issue post-dedupe finding list —
+close to ADR-010's own "~14K chars, 15 chunks" illustrative example. Prompt
+character counts (a ~4-chars/token rule of thumb converts these to an
+approximate token figure; the *relative* delta between modes is what
+matters, not the exact tokenizer):
+
+| Chunks | Per-chunk mode (chars) | Single-pass mode (chars) | Delta |
+|---|---|---|---|
+| 1  | 18,143  | 19,279 | single-pass sends **6.3% more** |
+| 2  | 36,286  | 20,968 | single-pass sends 42.2% less |
+| 5  | 90,715  | 26,035 | single-pass sends 71.3% less |
+| 15 | 272,160 | 42,940 | single-pass sends 84.2% less |
+| 30 | 544,350 | 68,320 | single-pass sends 87.4% less |
+
+The dedicated single-pass prompt has a fixed overhead (~17,590 chars in this
+fixture, independent of chunk count) from carrying the full spec/AC text plus
+the findings digest in one call. Below that fixed cost, single-pass mode
+*loses* — this refines ADR-010's Risks section, which estimated savings as
+merely "close to zero" on 1-2 chunk submissions; measured, a single-chunk
+submission is a small net loss, and the crossover to a real win happens
+between 1 and 2 chunks. Every submission with 2+ chunks measured here shows a
+net reduction, growing toward the fixed-overhead floor as chunk count rises.
+This is descriptive data for a future decision on the default, not a
+recommendation to flip it (deliberately out of scope here).
 
 ---
 

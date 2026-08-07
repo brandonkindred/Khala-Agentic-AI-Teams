@@ -505,17 +505,40 @@ class TestExecutionPhase:
 # ---------------------------------------------------------------------------
 
 
+class _CriticalCodeReviewStubClient(DummyLLMClient):
+    """Returns one critical finding for every chunk-review call; ``run_coordinator``
+    calls ``complete_json`` directly (JSON, schema-validated), unlike the old
+    template/``Agent``-based fallback ``_TextStubClient`` targets. No QA/security/
+    build agent is configured in the tests using this stub, so the code-review
+    chunk call is the only ``complete_json`` call this client ever receives."""
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        return {
+            "approved": False,
+            "issues": [
+                {
+                    "severity": "critical",
+                    "category": "security",
+                    "file_path": "app.py",
+                    "description": "SQL injection",
+                    "suggestion": "Use parameterized queries.",
+                }
+            ],
+            "summary": "critical issue",
+            "spec_compliance_notes": "",
+        }
+
+
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
         from backend_code_v2_team.phases.review import run_review
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = _TextStubClient(
-            "## PASSED ##\ntrue\n## END PASSED ##\n"
-            "## ISSUES ##\n## END ISSUES ##\n"
-            "## SUMMARY ##\nall good\n## END SUMMARY ##"
-        )
+        # A bare DummyLLMClient's built-in "senior code reviewer" branch already
+        # returns {"approved": True, "issues": []} for the coordinator's chunk-review
+        # call -- a clean pass with no custom stub needed.
+        mock_llm = DummyLLMClient()
         task = Task(
             id="t1",
             type=TaskType.BACKEND,
@@ -535,11 +558,7 @@ class TestReviewPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = _TextStubClient(
-            "## PASSED ##\nfalse\n## END PASSED ##\n"
-            "## ISSUES ##\n---\nsource: code_review\nseverity: critical\ndescription: SQL injection\nfile_path: \nrecommendation: \n---\n## END ISSUES ##\n"
-            "## SUMMARY ##\ncritical issue\n## END SUMMARY ##"
-        )
+        mock_llm = _CriticalCodeReviewStubClient()
         task = Task(
             id="t1",
             type=TaskType.BACKEND,

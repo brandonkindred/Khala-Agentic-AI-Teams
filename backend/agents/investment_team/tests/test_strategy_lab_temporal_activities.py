@@ -167,12 +167,12 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
-    from investment_team.api import main as api_main
+def test_persist_run_state_activity_delegates_to_orchestrator_api(monkeypatch):
+    from investment_team.strategy_lab import orchestrator_api
 
     captured = {}
     monkeypatch.setattr(
-        api_main,
+        orchestrator_api,
         "_persist_run_state",
         lambda run_id, state, *, create=False: captured.update(
             run_id=run_id, state=state, create=create
@@ -529,7 +529,7 @@ def test_is_run_cancelled_activity_delegates(monkeypatch):
         seen["run_id"] = run_id
         return True
 
-    monkeypatch.setattr(api_main, "_is_strategy_lab_run_cancelled", _fake)
+    monkeypatch.setattr(api_main, "_is_strategy_lab_run_externally_stopped", _fake)
     assert act.is_run_cancelled_activity("run-42") is True
     assert seen["run_id"] == "run-42"
 
@@ -682,7 +682,137 @@ def test_compute_signal_brief_snapshot_disabled_returns_skip(monkeypatch):
     assert storage == {"skipped": True, "skipped_reason": "signal_expert_disabled"}
 
 
-def test_is_strategy_lab_run_cancelled_reads_job_status(monkeypatch):
+def test_compute_signal_brief_snapshot_fails_open_on_provider_init_failure(monkeypatch):
+    """Fail-open must cover FreeTierMarketDataProvider() construction itself,
+    not just the body of expert.produce_signal_brief -- a provider that
+    can't even be constructed (e.g. bad config) must not raise out of this
+    function."""
+    from investment_team.api import main as api_main
+
+    def _boom_provider():
+        raise RuntimeError("provider config invalid")
+
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _boom_provider)
+
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert brief is None
+    assert storage["skipped"] is True
+    assert storage["skipped_reason"] == "provider_init_failed"
+    assert "provider config invalid" in storage["error"]
+
+
+def test_compute_signal_brief_snapshot_fails_open_on_expert_init_failure(monkeypatch):
+    """Fail-open must cover SignalIntelligenceExpert() construction, which sits
+    inside the outer try but was previously outside the inner try/except that
+    only guarded produce_signal_brief's body."""
+    from investment_team.api import main as api_main
+
+    closed = []
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            closed.append(True)
+
+    def _boom_expert():
+        raise RuntimeError("expert init failed")
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
+
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert brief is None
+    assert storage["skipped"] is True
+    assert storage["skipped_reason"] == "expert_failed"
+    assert "expert init failed" in storage["error"]
+    # provider.close() still runs even though expert init failed.
+    assert closed == [True]
+
+
+def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypatch):
+    """A provider.close() failure in the finally block must not replace the
+    tuple the try block already decided to return."""
+    from investment_team.api import main as api_main
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            raise RuntimeError("close boom")
+
+    def _boom_expert():
+        raise RuntimeError("expert failed too")
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _boom_expert)
+
+    # Must not raise despite close() also failing.
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert brief is None
+    assert storage["skipped"] is True
+    assert storage["skipped_reason"] == "expert_failed"
+
+
+def test_is_strategy_lab_run_externally_stopped_reads_job_status(monkeypatch):
+    """The broad check fires for any external stop signal -- cancelled,
+    failed, or interrupted alike -- not just a genuine cancellation."""
+    from investment_team.api import main as api_main
+
+    class _FakeClient:
+        def __init__(self, status):
+            self._status = status
+
+        def get_job(self, run_id):
+            return {"status": self._status} if self._status is not None else None
+
+    def _use(status):
+        monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _FakeClient(status))
+
+    _use("cancelled")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is True
+    _use("failed")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is True
+    _use("interrupted")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is True
+    _use("running")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+    _use(None)  # no persisted job
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+    # completed is a terminal *success*, not an external stop.
+    _use("completed")
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+
+
+def test_is_strategy_lab_run_externally_stopped_swallows_errors(monkeypatch):
+    from investment_team.api import main as api_main
+
+    def _boom():
+        raise RuntimeError("job service down")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", _boom)
+    assert api_main._is_strategy_lab_run_externally_stopped("r") is False
+
+
+def test_is_strategy_lab_run_cancelled_is_precise(monkeypatch):
+    """Unlike _is_strategy_lab_run_externally_stopped, this must return True
+    ONLY for an exact "cancelled" status -- a failed or interrupted run is
+    NOT a cancellation and must return False."""
     from investment_team.api import main as api_main
 
     class _FakeClient:
@@ -698,13 +828,12 @@ def test_is_strategy_lab_run_cancelled_reads_job_status(monkeypatch):
     _use("cancelled")
     assert api_main._is_strategy_lab_run_cancelled("r") is True
     _use("failed")
-    assert api_main._is_strategy_lab_run_cancelled("r") is True
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
+    _use("interrupted")
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
     _use("running")
     assert api_main._is_strategy_lab_run_cancelled("r") is False
-    _use(None)  # no persisted job
-    assert api_main._is_strategy_lab_run_cancelled("r") is False
-    # completed is a terminal *success*, not a cancellation.
-    _use("completed")
+    _use(None)
     assert api_main._is_strategy_lab_run_cancelled("r") is False
 
 

@@ -10,9 +10,9 @@ single-activity workflow dispatched **execute-and-wait** from its FastAPI route.
 They run on their own ``investment-advisory-queue`` so a multi-hour backtest
 activity can never head-of-line-block an interactive call.
 
-Each activity reuses the existing agent / orchestrator logic verbatim (the
-module-level singletons in ``investment_team.api.main``) and re-reads the
-persistent stores by identifier — the same pattern as
+Each activity reuses the existing agent / orchestrator logic verbatim (via the
+lazy ``_get_*`` singleton factories in ``investment_team.api.main``) and
+re-reads the persistent stores by identifier — the same pattern as
 ``investment_team.temporal.workflows.run_backtest_activity`` — so no business
 logic is duplicated here. Sandbox-safety: this module is re-imported by the
 temporalio workflow sandbox to register the workflow classes, so every heavy
@@ -143,7 +143,7 @@ def validate_proposal_activity(payload: dict[str, Any]) -> dict[str, Any]:
         Returns ``{"valid": bool, "violations": list[str]}``. Raises
         ``ApplicationError`` when the proposal or IPS is missing.
     """
-    from investment_team.api.main import _lock, _policy_guardian, _profiles, _proposals
+    from investment_team.api.main import _get_policy_guardian, _lock, _profiles, _proposals
     from investment_team.models import IPS, PortfolioProposal
 
     proposal_id = payload["proposal_id"]
@@ -162,7 +162,7 @@ def validate_proposal_activity(payload: dict[str, Any]) -> dict[str, Any]:
 
     proposal = _as_model(PortfolioProposal, raw_proposal)
     ips = _as_model(IPS, raw_ips)
-    violations = _policy_guardian.check_portfolio(ips, proposal)
+    violations = _get_policy_guardian().check_portfolio(ips, proposal)
     return {"valid": len(violations) == 0, "violations": violations}
 
 
@@ -293,7 +293,13 @@ def promotion_decision_activity(payload: dict[str, Any]) -> dict[str, Any]:
         that delta to the real ``_workflow_state`` exactly once.
     """
     from investment_team.agents import AgentIdentity
-    from investment_team.api.main import _lock, _orchestrator, _profiles, _strategies, _validations
+    from investment_team.api.main import (
+        _get_orchestrator,
+        _lock,
+        _profiles,
+        _strategies,
+        _validations,
+    )
     from investment_team.models import IPS, StrategySpec, ValidationReport
     from investment_team.orchestrator import WorkflowState
 
@@ -326,7 +332,7 @@ def promotion_decision_activity(payload: dict[str, Any]) -> dict[str, Any]:
         version=payload.get("approver_version", "1.0"),
     )
     scratch_state = WorkflowState()
-    decision = _orchestrator.promotion_decision(
+    decision = _get_orchestrator().promotion_decision(
         state=scratch_state,
         strategy=strategy,
         validation=validation,
@@ -362,9 +368,9 @@ def committee_memo_activity(payload: dict[str, Any]) -> dict[str, Any]:
     Postconditions:
         Returns ``{"memo": <InvestmentCommitteeMemo JSON>}``.
     """
-    from investment_team.api.main import _committee_agent
+    from investment_team.api.main import _get_committee_agent
 
-    memo = _committee_agent.draft_memo(
+    memo = _get_committee_agent().draft_memo(
         user_id=payload["user_id"],
         recommendation=payload["recommendation"],
         rationale=payload["rationale"],
@@ -388,10 +394,10 @@ def advisor_start_activity(payload: dict[str, Any]) -> dict[str, Any]:
         Stores the session and returns
         ``{"advisor_message": str, "session": <AdvisorSession JSON>}``.
     """
-    from investment_team.api.main import _advisor_agent, _advisor_sessions, _lock
+    from investment_team.api.main import _advisor_sessions, _get_advisor_agent, _lock
 
     session_id = payload["session_id"]
-    session = _advisor_agent.start_session(session_id=session_id, user_id=payload["user_id"])
+    session = _get_advisor_agent().start_session(session_id=session_id, user_id=payload["user_id"])
     with _lock:
         _advisor_sessions[session_id] = session
     return {
@@ -411,7 +417,7 @@ def advisor_message_activity(payload: dict[str, Any]) -> dict[str, Any]:
         session status / current topic, and remaining ``missing_fields``. Raises
         ``ApplicationError`` when the session is missing.
     """
-    from investment_team.api.main import _advisor_agent, _advisor_sessions, _lock
+    from investment_team.api.main import _advisor_sessions, _get_advisor_agent, _lock
     from investment_team.models import AdvisorSession
 
     session_id = payload["session_id"]
@@ -423,8 +429,8 @@ def advisor_message_activity(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     session = _as_model(AdvisorSession, raw)
-    reply = _advisor_agent.handle_message(session, payload["message"])
-    missing = _advisor_agent.missing_fields(session.collected)
+    reply = _get_advisor_agent().handle_message(session, payload["message"])
+    missing = _get_advisor_agent().missing_fields(session.collected)
     with _lock:
         _advisor_sessions[session_id] = session
     return {
@@ -447,7 +453,7 @@ def advisor_complete_activity(payload: dict[str, Any]) -> dict[str, Any]:
         completed, and returns ``{"user_id": str, "ips": <IPS JSON>}``. Raises
         ``ApplicationError`` when the session is missing or still incomplete.
     """
-    from investment_team.api.main import _advisor_agent, _advisor_sessions, _lock, _profiles
+    from investment_team.api.main import _advisor_sessions, _get_advisor_agent, _lock, _profiles
     from investment_team.models import AdvisorSession, AdvisorSessionStatus
 
     session_id = payload["session_id"]
@@ -459,7 +465,7 @@ def advisor_complete_activity(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     session = _as_model(AdvisorSession, raw)
-    missing = _advisor_agent.missing_fields(session.collected)
+    missing = _get_advisor_agent().missing_fields(session.collected)
     if missing:
         raise ApplicationError(
             f"Cannot finalize — missing required fields: {', '.join(missing)}",
@@ -467,7 +473,7 @@ def advisor_complete_activity(payload: dict[str, Any]) -> dict[str, Any]:
             non_retryable=True,
         )
     try:
-        ips = _advisor_agent.build_ips(session)
+        ips = _get_advisor_agent().build_ips(session)
     except ValueError as exc:
         # missing_fields already guards the common case; build_ips can still
         # raise for other reasons (e.g. an invalid enum coercion on corrupted

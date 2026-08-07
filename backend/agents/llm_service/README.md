@@ -54,6 +54,11 @@ completion, retry, and error lines of a single call together.
 - **`objective`** is a **required** keyword on `complete_json` / `complete` /
   `complete_text` / `chat` (and `generate_text` / `generate_structured` /
   `complete_validated`). Pass a short phrase describing the purpose.
+  `DummyLLMClient` is the sole documented exception: it defaults `objective`
+  to `"dummy"` on `complete` / `complete_json` / `chat` because it makes no
+  real LLM call and performs no attribution, so test-only call sites are not
+  required to pass one. Real providers (`OllamaLLMClient`, `ClaudeLLMClient`)
+  enforce the non-empty requirement.
 - **`request_id`** is generated per call and printed as `rid=` on the request,
   completion, retry, and error log lines.
 - **`team`** is auto-derived from the calling code's source path (the

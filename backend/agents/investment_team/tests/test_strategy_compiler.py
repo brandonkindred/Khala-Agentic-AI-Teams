@@ -840,6 +840,51 @@ def test_no_indicators_import_in_emitted_code() -> None:
     assert "def sma(self, history" not in code  # rsi-only spec — no sma helper
 
 
+def test_emitted_indicator_helpers_have_type_hints() -> None:
+    """Inline helper signatures expose typed params/returns for the sandbox API.
+
+    Preconditions: ``compile_strategy`` accepts a minimal SMA/bollinger spec.
+    Postconditions: emitted ``_src``, ``sma``, and ``bollinger_bands`` def
+    lines carry parameter and return annotations matching the synthesis
+    compiler's typing convention for this API surface.
+    """
+    sma_spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="sma", params={"period": 20}),
+                    op=">",
+                    rhs=100.0,
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    sma_code = compile_strategy(sma_spec)
+    assert 'def sma(self, history: list, period: int, source: str = "close") -> float | None:' in sma_code
+    assert "def _src(self, bar: object, source: str) -> float:" in sma_code
+
+    bb_spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close",
+                    op="<",
+                    rhs=IndicatorRef(name="bollinger", params={"band": "lower", "period": 20}),
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+    )
+    bb_code = compile_strategy(bb_spec)
+    assert (
+        'def bollinger_bands(self, history: list, period: int = 20, num_std: float = 2.0, '
+        'source: str = "close", select: str = "middle") -> float | None:'
+    ) in bb_code
+
+
 # ---------------------------------------------------------------------------
 # Edge cases: ADX window, MACD fast/slow guard, multi-entry guard,
 # spec-hash field scope.

@@ -28,11 +28,13 @@ FALSE_POSITIVE_VERIFY_PROMPT = (
 
 **You have tools to read the real code:**
 - `read_file(path)` — read the full contents of any file in the submission (or "<existing codebase>" for pre-existing code).
+- `read_lines(path, start, end)` — read an inclusive 1-based line slice (numbered) when you only need a window.
+- `read_function(path, name_or_line)` — read one Python function/method/class body by 1-based line number (int or digit string) or by exact name (`foo` / `Class.method`; property setters/deleters are `Class.x.setter` / `Class.x.deleter`). Prefer this over scanning a whole file when you already know the construct.
 - `list_files()` — list every file you can read.
 - `search_codebase(query)` — find every place a substring (e.g. a function, class, or variable name) appears across all files.
 - `find_function_at_line(path, line_number)` — identify which function, method, or class contains a specific 1-based line number. Use this for an instant lookup instead of scanning the file manually.
 
-**Finding the enclosing construct for a line number:** When a finding cites a line number and you need to know which function or method contains it, call `find_function_at_line(path, line_number)` first — it returns the precise function/class name and line range for Python files. For non-Python files it returns a best-guess start line based on column-0 heuristics; in that case always confirm the actual construct name with `read_file`. If you inspect the file yourself instead, call `read_file(path)` to retrieve the **entire** file in a single call, then scan *all* of the returned content to find the nearest enclosing definition. Do **not** examine the file in a series of partial ranges or incrementally expand your search window — `read_file` always returns the complete file, so one call gives you everything you need.
+**Finding the enclosing construct for a line number:** When a finding cites a line number and you need to know which function or method contains it, call `find_function_at_line(path, line_number)` first — it returns the precise function/class name and line range for Python files. Then call `read_function(path, name_or_line)` with that name or line to load the full construct body. For non-Python files `find_function_at_line` returns a best-guess start line based on column-0 heuristics; in that case always confirm the actual construct with `read_file`. If you inspect the file yourself instead, call `read_file(path)` to retrieve the **entire** file in a single call, then scan *all* of the returned content to find the nearest enclosing definition. Do **not** examine the file in a series of partial ranges or incrementally expand your search window — `read_file` always returns the complete file, so one call gives you everything you need.
 
 Before judging a finding, USE THE TOOLS to inspect the code it refers to AND any related code (where a symbol is defined, imported, registered, exported, used, or tested). Findings that are commonly false positives once you look at the whole codebase:
 - "X is undefined / never defined / not imported / not registered" — when X is in fact defined, imported, registered, or exported elsewhere in this file or another file. Search for X before believing it.
@@ -86,7 +88,7 @@ _ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running 
 **You are given:**
 - An architecture document / structured architecture context for this system when one was provided (module/service boundaries, established patterns, architecture decisions). When none is provided, you are told so explicitly — in that case you MUST derive architecture expectations from the repository's established structure and patterns via tools, not invent a phantom document.
 - The complete set of changed files in this submission.
-- Tools to inspect the rest of the repository: `list_files()` (lists every file, including ones outside this submission) and `read_file(path)` (reads any of them). `search_codebase(query)` and `find_function_at_line(path, line_number)` only search/inspect the current submission (plus any existing-codebase excerpt provided) — they do NOT reach files outside this submission, so use `list_files()`/`read_file()` to check whether a capability already exists elsewhere in the repository.
+- Tools to inspect the rest of the repository: `list_files()` (lists every file, including ones outside this submission) and `read_file(path)` (reads any of them). `search_codebase(query)`, `find_function_at_line(path, line_number)`, and `read_function(path, name_or_line)` only search/inspect the current submission (plus any existing-codebase excerpt provided) — they do NOT reach files outside this submission, so use `list_files()`/`read_file()` to check whether a capability already exists elsewhere in the repository.
 
 **Your one job:** identify NEW findings the per-file review could not have found, in exactly two categories:
 
@@ -131,7 +133,7 @@ _SIDE_EFFECT_IMPACT_BODY = """You are a Senior Software Engineer running a whole
 
 **You are given:**
 - The complete set of changed files in this submission (current content).
-- Tools to inspect the rest of the codebase: `read_file(path)`, `list_files()`, `search_codebase(query)` (searches only the files shown in this prompt), `find_function_at_line(path, line_number)` (identifies the enclosing function/class for a cited line), and `search_repository(query)` (searches the REST of the repository, beyond this submission, for a substring — use this to find callers that live outside the diff; it is the only tool that reaches beyond the submission's own files besides `read_file`/`list_files`).
+- Tools to inspect the rest of the codebase: `read_file(path)`, `list_files()`, `search_codebase(query)` (searches only the files shown in this prompt), `find_function_at_line(path, line_number)` (identifies the enclosing function/class for a cited line), `read_function(path, name_or_line)` (loads that construct body by line or exact name), and `search_repository(query)` (searches the REST of the repository, beyond this submission, for a substring — use this to find callers that live outside the diff; it is the only tool that reaches beyond the submission's own files besides `read_file`/`list_files`).
 
 **Your job:** identify NEW findings the per-file review could not have found, in two categories:
 

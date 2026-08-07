@@ -5,6 +5,7 @@ from __future__ import annotations
 from code_review_agent.function_boundaries import (
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
 )
@@ -284,3 +285,73 @@ def test_strip_numbered_prefixes_empty_content() -> None:
     assert stripped == ""
     assert physical == 1
     assert mapper is None
+
+
+# --------------------------------------------------------------------------- iter_constructs
+
+
+def test_iter_constructs_qualifies_methods_and_lists_all() -> None:
+    src = (
+        "class C:\n"
+        "    def m(self):\n"
+        "        return 1\n"
+        "\n"
+        "def top():\n"
+        "    return 2\n"
+    )
+    constructs = iter_constructs(src)
+    names = {c.name for c in constructs}
+    assert names == {"C", "C.m", "top"}
+    method = next(c for c in constructs if c.name == "C.m")
+    assert method.kind == "function"
+    assert method.start_line == 2 and method.end_line == 3
+
+
+def test_iter_constructs_disambiguates_property_setter_deleter() -> None:
+    """Property getter keeps Class.x; setter/deleter append role suffixes."""
+    src = (
+        "class C:\n"
+        "    @property\n"
+        "    def x(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @x.setter\n"
+        "    def x(self, value):\n"
+        "        pass\n"
+        "\n"
+        "    @x.deleter\n"
+        "    def x(self):\n"
+        "        pass\n"
+    )
+    names = {c.name for c in iter_constructs(src)}
+    assert names == {"C", "C.x", "C.x.setter", "C.x.deleter"}
+    setter = enclosing_construct(src, 8)  # body of setter
+    assert setter is not None
+    assert setter.name == "C.x.setter"
+    getter = enclosing_construct(src, 4)
+    assert getter is not None
+    assert getter.name == "C.x"
+
+
+def test_iter_constructs_parse_failure_returns_empty() -> None:
+    assert iter_constructs("def broken(\n") == []
+
+
+def test_iter_constructs_annotated_hunks_skips_unparseable_sibling() -> None:
+    """With annotated_hunks, an indented continuation hunk does not hide other defs."""
+    content = (
+        "def alpha():\n"
+        "    return 1\n"
+        "...\n"
+        "    changed()\n"
+        "...\n"
+        "def beta():\n"
+        "    return 2\n"
+    )
+    # Whole-file parse fails; hunk-aware listing still finds alpha and beta.
+    assert iter_constructs(content) == []
+    names = {c.name for c in iter_constructs(content, annotated_hunks=True)}
+    assert names == {"alpha", "beta"}
+    beta = next(c for c in iter_constructs(content, annotated_hunks=True) if c.name == "beta")
+    # beta starts after alpha (2 lines) + separator + continuation (1) + separator
+    assert beta.start_line == 6 and beta.end_line == 7
