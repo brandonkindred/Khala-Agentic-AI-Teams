@@ -25,6 +25,10 @@ from software_engineering_team.api.coding_team_models import (
 from software_engineering_team.api.coding_team_state import (
     _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
 )
+from software_engineering_team.code_review_agent.change_surface import (
+    ChangeSurface,
+    build_change_surface_from_patches,
+)
 from software_engineering_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
@@ -413,6 +417,36 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
     return ReviewCode("\n\n".join(blocks), reviewed)
 
 
+def _build_change_surface_for_reviewable(
+    files: List[Any],
+    head_files: Dict[str, str],
+) -> ChangeSurface:
+    """Build a change surface for head-backed reviewable patched files.
+
+    Preconditions:
+        - ``files`` is the PR changed-file list (may be empty). Each entry
+          exposes ``.filename``, ``.status``, and ``.patch``.
+        - ``head_files`` maps path → non-blank head text for successfully
+          fetched files.
+
+    Postconditions:
+        - Considers only files that pass ``_is_whole_file_reviewable`` and
+          whose ``filename`` is present in ``head_files``.
+        - Returns ``build_change_surface_from_patches`` for those patches with
+          ``new_contents=head_files`` (empty ``ChangeSurface`` when no
+          candidates or the builder omits all paths).
+        - Never raises for well-typed inputs.
+    """
+    patches = {
+        f.filename: f.patch
+        for f in files
+        if _is_whole_file_reviewable(f) and f.filename in head_files
+    }
+    if not patches:
+        return ChangeSurface(blocks={})
+    return build_change_surface_from_patches(patches, new_contents=head_files)
+
+
 # Optional dependency: author tagging for persisted review history. Imported once
 # at module load behind a try/except so a missing/broken ``agent_console`` (or its
 # transitive deps) can never break importing this API; ``_review_author`` falls
@@ -765,9 +799,11 @@ def _run_reviewer(
     code: str,
     head_files: Optional[Dict[str, str]] = None,
     repo_reader: Any = None,
+    change_surface: Optional[ChangeSurface] = None,
 ) -> Optional[Any]:
-    """Run the injected review engine over ``head_files`` and/or ``code``,
-    merging their outputs; records a failure and returns ``None`` on error.
+    """Run the injected review engine over ``change_surface``, ``head_files``,
+    and/or ``code``, merging their outputs; records a failure and returns
+    ``None`` on error.
 
     The PR reviewer is an injected engine (software_engineering_team owns it);
     coding_team calls it through the CodeEngineProvider so this package imports
@@ -775,34 +811,37 @@ def _run_reviewer(
     (shared schema, swallow-on-failure) across every attempt, cleared once on
     the way out so it never outlives the review.
 
-    One reviewer call per non-empty source: a truthy ``head_files`` drives a
-    whole-file attempt (``pre_numbered=False``, steered via
-    ``_whole_file_focus`` to focus on the change since it now also sees
-    unchanged code); a truthy ``code`` drives a diff-hunk attempt
-    (``pre_numbered=True``, since ``_build_review_code``'s rendering already
-    carries its own ``"N: "`` line-number prefixes, steered via
-    ``_hunk_review_focus`` for the same reason — a hunk's surrounding context
-    lines are unchanged code too). The two sources can never be mixed into a
-    single call (the underlying engine's ``files``/``code`` are mutually
-    exclusive), which is why a partial fetch needs two calls instead of one.
+    One reviewer call per non-empty source. A non-empty ``change_surface``
+    drives the primary pre-numbered attempt (``pre_numbered=True``,
+    ``_hunk_review_focus``) and replaces a whole-file ``head_files`` attempt;
+    when the surface is empty or absent, a truthy ``head_files`` drives
+    whole-file review (``pre_numbered=False``, ``_whole_file_focus``). A
+    truthy ``code`` always drives an additional diff-hunk attempt
+    (``pre_numbered=True``, ``_hunk_review_focus``). The sources can never be
+    mixed into a single call (the underlying engine's ``files``/``code`` are
+    mutually exclusive), which is why partial-fetch PRs may need two calls
+    instead of one.
 
     Preconditions:
         - ``provider`` was resolved before the first GitHub call.
-        - ``head_files`` and ``code`` are not BOTH empty/falsy — the caller
-          (``_run_pr_review_body``) never reaches this function otherwise (its
-          own "nothing reviewable" guard returns first). A PR whose whole-file
-          fetch fully succeeds supplies only ``head_files`` (``code=""``); one
-          whose fetch fully failed supplies only ``code`` (``head_files``
-          falsy); one whose fetch PARTIALLY failed supplies BOTH —
-          ``head_files`` for the fetched subset, ``code`` built ONLY from the
-          files that failed to fetch — so both attempts run and are merged.
+        - At least one of ``change_surface`` (non-empty), ``head_files``, or
+          ``code`` is truthy — the caller (``_run_pr_review_body``) never
+          reaches this function otherwise (its own "nothing reviewable" guard
+          returns first). A PR whose whole-file fetch fully succeeds supplies
+          only ``head_files`` (``code=""``); one whose fetch fully failed
+          supplies only ``code`` (``head_files`` falsy); one whose fetch
+          PARTIALLY failed supplies BOTH — ``head_files`` for the fetched
+          subset, ``code`` built ONLY from the files that failed to fetch — so
+          both attempts run and are merged. When admission attaches a non-empty
+          ``change_surface``, it replaces the whole-file attempt while hunk
+          ``code`` still merges when present.
         - ``repo_reader`` is None or a ``RepoReader`` handed to the false-positive
           verifier so it can confirm existing repository files outside the diff.
     Postconditions:
         - On success, returns the single attempt's output unchanged when only
           one ran (identical behavior/kwargs to a single-mode dispatch for
-          both the all-whole-file and all-hunk cases). When two ran, returns a
-          merged duck-typed output — see ``_MergedReviewerOutput``.
+          the all-whole-file, all-surface, and all-hunk cases). When two ran,
+          returns a merged duck-typed output — see ``_MergedReviewerOutput``.
         - On ANY attempt's failure — an exception, OR a reviewer that returns
           ``None`` without raising — records the failure on the PR/job via
           ``_record_review_outage`` and returns ``None`` immediately, without
@@ -824,12 +863,18 @@ def _run_reviewer(
         language=_infer_review_language(files),
         progress_callback=pr_bridge,
     )
-    # One reviewer call per non-empty source; see the docstring above. A PR
-    # whose whole-file fetch fully succeeds supplies only head_files (code is
-    # ""); one that fully fails supplies only code; a partial fetch supplies
-    # both and both attempts run, merged below.
+    # One reviewer call per non-empty source; see the docstring above.
     attempts: List[Dict[str, Any]] = []
-    if head_files:
+    surface = change_surface
+    if surface is not None and not surface.is_empty:
+        attempts.append(
+            dict(
+                code=surface.code,
+                pre_numbered=True,
+                task_requirements=_hunk_review_focus(pr.body or ""),
+            )
+        )
+    elif head_files:
         # Whole-file review: the reviewer sees complete files (no hunk-end
         # "truncation"), and the false-positive filter (via repo_reader) can
         # confirm existing files a finding claims are missing. Because it now
@@ -857,7 +902,9 @@ def _run_reviewer(
                 task_requirements=_hunk_review_focus(pr.body or ""),
             )
         )
-    assert attempts, "caller must supply a non-empty head_files and/or non-empty code"
+    assert attempts, (
+        "caller must supply a non-empty change_surface, head_files, and/or non-empty code"
+    )
 
     outputs: List[Any] = []
     try:
@@ -1096,6 +1143,7 @@ class ReviewModeDecision(NamedTuple):
     valid_by_path: Dict[str, List[int]]
     changed_by_path: Dict[str, List[int]]
     head_files: Dict[str, str]
+    change_surface: ChangeSurface
     code: str
     files_reviewed: int
     repo_reader: Any
@@ -1143,8 +1191,10 @@ def _decide_review_mode(
           ``code`` is built (via :func:`_build_review_code`) ONLY from the
           files that failed to fetch, and ``files_reviewed`` sums both; when
           none fetched, ``code`` is built from all ``files`` and
-          ``files_reviewed`` is the hunk count. ``repo_reader`` is always
-          constructed for ``pr.head_sha``, whole-file success or not.
+          ``files_reviewed`` is the hunk count. ``change_surface`` is the
+          head-backed builder result (empty when no head-backed reviewable
+          files). ``repo_reader`` is always constructed for ``pr.head_sha``,
+          whole-file success or not.
         - Never raises for GitHub-fetch failures (:func:`_fetch_head_files`
           degrades internally); any other exception propagates to the
           caller's outer handler.
@@ -1253,10 +1303,12 @@ def _decide_review_mode(
             len(reviewable),
         )
     repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
+    change_surface = _build_change_surface_for_reviewable(files, head_files)
     return ReviewModeDecision(
         valid_by_path=valid_by_path,
         changed_by_path=changed_by_path,
         head_files=head_files,
+        change_surface=change_surface,
         code=code,
         files_reviewed=files_reviewed,
         repo_reader=repo_reader,
@@ -1746,6 +1798,7 @@ def _run_pr_review_body(
                 files,
                 mode.code,
                 head_files=mode.head_files or None,
+                change_surface=mode.change_surface,
                 repo_reader=mode.repo_reader,
             )
             if output is None:

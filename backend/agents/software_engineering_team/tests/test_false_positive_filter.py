@@ -24,9 +24,9 @@ from typing import Any, Dict, List, Optional
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
+    _READ_LINES_MAX_SPAN,
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
-    _READ_LINES_MAX_SPAN,
     CodebaseIndex,
     _build_group_prompt,
     _build_tools,
@@ -327,6 +327,51 @@ def test_read_lines_rejects_non_positive_bounds() -> None:
     idx = CodebaseIndex(files={"app/main.py": "a\n"})
     assert "positive integer" in idx.read_lines("app/main.py", 0, 1)
     assert "positive integer" in idx.read_lines("app/main.py", 1, True)  # type: ignore[arg-type]
+
+
+def test_read_function_returns_method_in_class_body() -> None:
+    """Line inside a method returns only that method's construct body."""
+    src = (
+        "class C:\n"
+        "    def m(self):\n"
+        "        return 1\n"
+        "\n"
+        "def other():\n"
+        "    return 2\n"
+    )
+    idx = CodebaseIndex(files={"app/mod.py": src})
+    # Line 3 is inside C.m
+    result = idx.read_function("app/mod.py", 3)
+    assert result.startswith("app/mod.py function C.m lines 2–3 (2 lines):")
+    assert "2|     def m(self):" in result
+    assert "3|         return 1" in result
+    assert "class C" not in result.split("\n", 1)[1]  # body excludes class header
+    assert "def other" not in result
+
+
+def test_read_function_unresolved_module_level_errors() -> None:
+    """Module-level line with no enclosing construct returns a clear error."""
+    idx = CodebaseIndex(files={"app/mod.py": "x = 1\n\ndef f():\n    return x\n"})
+    msg = idx.read_function("app/mod.py", 1)
+    assert msg.startswith("Error:")
+    assert "no enclosing function/class" in msg
+    assert "line 1" in msg
+
+
+def test_read_function_non_python_errors() -> None:
+    """Non-Python paths return a clear Python-only error."""
+    idx = CodebaseIndex(files={"app/main.ts": "function f() { return 1; }\n"})
+    msg = idx.read_function("app/main.ts", 1)
+    assert msg.startswith("Error:")
+    assert "Python file" in msg
+    assert "app/main.ts" in msg
+
+
+def test_read_function_rejects_non_positive_line() -> None:
+    """Non-positive or non-int line returns Error (never raises)."""
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    assert "positive integer" in idx.read_function("app/mod.py", 0)
+    assert "positive integer" in idx.read_function("app/mod.py", True)  # type: ignore[arg-type]
 
 
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
