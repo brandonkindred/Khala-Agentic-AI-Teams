@@ -14,6 +14,13 @@ from agent_team_studio.agentic_team_provisioning.manifest_generation import (
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
 
 
+def _thin(team_id: str, agent_name: str) -> AgenticTeamAgent:
+    return AgenticTeamAgent(
+        agent_name=agent_name,
+        manifest_id=manifest_agent_id(team_id, agent_name),
+    )
+
+
 def test_default_cognition_block_is_batteries_included():
     block = default_cognition_block()
     assert isinstance(block, CognitionSpec)
@@ -122,17 +129,37 @@ def test_register_team_manifests_installs_into_registry(monkeypatch: pytest.Monk
     reg = AgentRegistry([], {})
     monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
 
-    agents = [
-        AgenticTeamAgent(agent_name="A", role="r1"),
-        AgenticTeamAgent(agent_name="B", role="r2"),
-    ]
-    result = register_team_manifests("team-1", agents)
+    team_id = "team-1"
+    agents = [_thin(team_id, "A"), _thin(team_id, "B")]
+    result = register_team_manifests(
+        team_id,
+        agents,
+        summaries={"A": "r1", "B": "r2"},
+    )
 
     assert result.registered is True
     assert len(result.manifests) == 2
+    summaries = {m.name: m.summary for m in result.manifests}
+    assert summaries == {"A": "r1", "B": "r2"}
     for m in result.manifests:
         assert reg.get(m.id) is m
         assert reg.get(m.id).cognition.rule_packs == ["default_guardrails"]
+
+
+def test_register_team_manifests_uses_existing_registry_summary(monkeypatch: pytest.MonkeyPatch):
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    team_id = "team-1"
+    prior = build_agent_manifest(team_id, "A", summary="kept summary")
+    reg.register(prior)
+
+    result = register_team_manifests(team_id, [_thin(team_id, "A")])
+
+    assert result.manifests[0].summary == "kept summary"
 
 
 def test_register_team_manifests_replaces_stale_roster(monkeypatch: pytest.MonkeyPatch):
@@ -142,16 +169,19 @@ def test_register_team_manifests_replaces_stale_roster(monkeypatch: pytest.Monke
     reg = AgentRegistry([], {})
     monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
 
+    team_id = "team-1"
     first = register_team_manifests(
-        "team-1",
-        [AgenticTeamAgent(agent_name="A", role="r"), AgenticTeamAgent(agent_name="B", role="r")],
+        team_id,
+        [_thin(team_id, "A"), _thin(team_id, "B")],
+        summaries={"A": "r", "B": "r"},
     )
     stale_id = next(m.id for m in first.manifests if m.name == "B")
 
     # New roster drops B and renames to C → B's manifest must be unregistered.
     register_team_manifests(
-        "team-1",
-        [AgenticTeamAgent(agent_name="A", role="r"), AgenticTeamAgent(agent_name="C", role="r")],
+        team_id,
+        [_thin(team_id, "A"), _thin(team_id, "C")],
+        summaries={"A": "r", "C": "r"},
     )
     assert reg.get(stale_id) is None
     names = {m.name for m in reg.all()}
@@ -178,8 +208,9 @@ def test_register_team_manifests_scopes_removal_to_team_and_generated(
     )
     reg.register(other)
 
-    register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
-    register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
+    team_id = "team-1"
+    register_team_manifests(team_id, [_thin(team_id, "A")], summaries={"A": "r"})
+    register_team_manifests(team_id, [_thin(team_id, "A")], summaries={"A": "r"})
     assert reg.get("blogging.planner") is other
 
 
@@ -202,9 +233,9 @@ def test_register_team_manifests_isolates_teams_with_shared_slug(monkeypatch: py
 
     team_a = "team-aaaaaaaaaa-1"
     team_b = "team-aaaaaaaaaa-2"
-    a_result = register_team_manifests(team_a, [AgenticTeamAgent(agent_name="A", role="r")])
+    a_result = register_team_manifests(team_a, [_thin(team_a, "A")], summaries={"A": "r"})
     # Registering team B (same 12-char slug) must not unregister team A's manifest.
-    register_team_manifests(team_b, [AgenticTeamAgent(agent_name="B", role="r")])
+    register_team_manifests(team_b, [_thin(team_b, "B")], summaries={"B": "r"})
     assert reg.get(a_result.manifests[0].id) is not None
 
 
@@ -220,7 +251,7 @@ def test_register_team_manifests_propagates_registry_failure(
 
     # Registry failures propagate so chat-save can roll back the roster write.
     with pytest.raises(RuntimeError, match="registry unavailable"):
-        register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
+        register_team_manifests("team-1", [_thin("team-1", "A")])
 
 
 def test_register_team_manifests_propagates_atomic_replace_failure(
@@ -233,9 +264,11 @@ def test_register_team_manifests_propagates_atomic_replace_failure(
     reg = AgentRegistry([], {})
     monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
 
+    team_id = "team-1"
     first = register_team_manifests(
-        "team-1",
-        [AgenticTeamAgent(agent_name="A", role="prior-A")],
+        team_id,
+        [_thin(team_id, "A")],
+        summaries={"A": "prior-A"},
     )
     prior_a_id = first.manifests[0].id
 
@@ -246,11 +279,9 @@ def test_register_team_manifests_propagates_atomic_replace_failure(
 
     with pytest.raises(RuntimeError, match="replace boom"):
         register_team_manifests(
-            "team-1",
-            [
-                AgenticTeamAgent(agent_name="B", role="renamed"),
-                AgenticTeamAgent(agent_name="C", role="new"),
-            ],
+            team_id,
+            [_thin(team_id, "B"), _thin(team_id, "C")],
+            summaries={"B": "renamed", "C": "new"},
         )
 
     assert reg.get(prior_a_id) is not None

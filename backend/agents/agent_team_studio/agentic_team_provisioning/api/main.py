@@ -397,7 +397,11 @@ def list_team_agent_manifests(team_id: str):
             if original is not None:
                 manifests.append(original)
             continue
-        manifests.append(build_agent_manifest(team_id, a.agent_name, summary=a.role or None))
+        existing = registry.get(a.manifest_id) if a.manifest_id else None
+        if existing is not None:
+            manifests.append(existing)
+        else:
+            manifests.append(build_agent_manifest(team_id, a.agent_name))
     return GeneratedManifestsResponse(team_id=team_id, manifests=manifests)
 
 
@@ -495,7 +499,7 @@ def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
         # ``list_team_agent_manifests``).
         from agent_registry import get_registry
 
-        get_registry().unregister(build_agent_manifest(team_id, agent.agent_name, summary=agent.role or None).id)
+        get_registry().unregister(agent.manifest_id)
     except Exception:
         logger.warning(
             "Failed to unregister stale generated manifest for agent %s in team %s",
@@ -528,7 +532,12 @@ def _reregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
     try:
         from agent_registry import get_registry
 
-        get_registry().register(build_agent_manifest(team_id, agent.agent_name, summary=agent.role or None))
+        registry = get_registry()
+        existing = registry.get(agent.manifest_id)
+        if existing is not None:
+            registry.register(existing)
+        else:
+            registry.register(build_agent_manifest(team_id, agent.agent_name))
     except Exception:
         logger.warning(
             "Failed to re-register edited generated manifest for agent %s in team %s",

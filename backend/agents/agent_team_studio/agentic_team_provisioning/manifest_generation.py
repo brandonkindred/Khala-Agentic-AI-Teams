@@ -145,13 +145,13 @@ def build_agent_manifest(team_id: str, agent_name: str, *, summary: str | None =
         raise ValueError("build_agent_manifest: agent_name must be non-empty")
 
     manifest_id = manifest_agent_id(team_id, agent_name)
-    summary_text = summary or f"Generated agent {agent_name}"
+    resolved_summary = (summary or "").strip() or f"Generated agent {agent_name}"
 
     manifest = AgentManifest(
         id=manifest_id,
         team=_TEAM_KEY,
         name=agent_name,
-        summary=summary_text,
+        summary=resolved_summary,
         tags=["generated", _TEAM_KEY],
         inputs=IOSchema(
             schema_ref=_INPUT_SCHEMA_REF,
@@ -206,6 +206,7 @@ def register_team_manifests(
     team_id: str,
     agents: list[AgenticTeamAgent],
     *,
+    summaries: dict[str, str] | None = None,
     conn: object | None = None,
 ) -> ManifestRegistrationResult:
     """Build and install the live registry entries for a team's roster.
@@ -243,7 +244,10 @@ def register_team_manifests(
           raise roll back the roster write; import-time retroactive registration
           wraps this call. The prefix scan that computes the stale set uses
           ``require_store=True`` so a failed cross-worker scan cannot silently
-          omit another worker's stale ids.
+          omit another worker's stale ids. Per-agent ``summary`` is taken from
+          ``summaries[agent_name]`` when provided, else the existing registry
+          manifest's summary when present, else the default from
+          :func:`build_agent_manifest`.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
@@ -257,11 +261,19 @@ def register_team_manifests(
     # recovery path, which passes the whole roster. The stale-cleanup below then also
     # drops any such wrapper left behind by an older build.
     agents = [a for a in agents if a.source == SOURCE_GENERATED]
-    manifests = [build_agent_manifest(team_id, a.agent_name, summary=a.role or None) for a in agents]
-    new_ids = {m.id for m in manifests}
     from agent_registry import get_registry
 
     registry = get_registry()
+    summary_map = summaries or {}
+    manifests: list[AgentManifest] = []
+    for a in agents:
+        summary = summary_map.get(a.agent_name)
+        if summary is None:
+            existing = registry.get(a.manifest_id) if a.manifest_id else None
+            if existing is not None:
+                summary = existing.summary
+        manifests.append(build_agent_manifest(team_id, a.agent_name, summary=summary))
+    new_ids = {m.id for m in manifests}
     # Snapshot prior team-generated manifests before mutating. Scope strictly to
     # this team's generated ids (prefix + the "generated" tag) so a hand-authored
     # disk manifest is never touched. ``require_store=True`` so a dynamic-store

@@ -97,6 +97,16 @@ def _new_team() -> str:
     return AgenticTeamStore().create_team(name="Growth Pod", description="").team_id
 
 
+def _thin_gen(team_id: str, agent_name: str) -> AgenticTeamAgent:
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    return AgenticTeamAgent(
+        agent_name=agent_name,
+        source="generated",
+        manifest_id=manifest_agent_id(team_id, agent_name),
+    )
+
+
 def test_from_registry_projects_and_persists(client: TestClient) -> None:
     """201 with the projected fields, and the agent is persisted on the roster."""
     team_id = _new_team()
@@ -330,11 +340,9 @@ def test_delete_generated_agent_unregisters_its_manifest(
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(
-        agent_name="Writer Agent", role="Writes", skills=["seo"], source="generated"
-    )
+    gen = _thin_gen(team_id, "Writer Agent")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    manifest = build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None)
+    manifest = build_agent_manifest(team_id, gen.agent_name, summary="Writes")
     registry.register(manifest)  # simulate the LLM save path's install
     assert registry.get(manifest.id) is not None
 
@@ -353,11 +361,9 @@ def test_from_registry_replacing_generated_unregisters_old_manifest(
     team_id = _new_team()
     # A generated agent already on the roster + installed in the registry, named to
     # collide with the registry manifest we'll add (_PLANNER.name).
-    gen = AgenticTeamAgent(
-        agent_name="blogging.planner", role="old", skills=["x"], source="generated"
-    )
+    gen = _thin_gen(team_id, "blogging.planner")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    old_manifest = build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None)
+    old_manifest = build_agent_manifest(team_id, gen.agent_name, summary="old")
     registry.register(old_manifest)
     assert registry.get(old_manifest.id) is not None
 
@@ -385,11 +391,9 @@ def test_from_registry_rejects_own_generated_manifest_409(
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(
-        agent_name="Planner", role="Plans things", skills=["x"], source="generated"
-    )
+    gen = _thin_gen(team_id, "Planner")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    gen_manifest = build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None)
+    gen_manifest = build_agent_manifest(team_id, gen.agent_name, summary="Plans things")
     registry.register(gen_manifest)
 
     resp = client.post(
@@ -402,7 +406,7 @@ def test_from_registry_rejects_own_generated_manifest_409(
     assert len(roster) == 1
     assert roster[0]["agent_name"] == "Planner"
     assert roster[0]["source"] == "generated"
-    assert roster[0]["manifest_id"] is None
+    assert roster[0]["manifest_id"] == gen_manifest.id
     assert registry.get(gen_manifest.id) is not None
 
 
@@ -420,10 +424,8 @@ def test_from_registry_rejects_another_teams_generated_manifest_409(
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     other_team_id = _new_team()
-    other_gen = AgenticTeamAgent(
-        agent_name="Scout", role="Researches", skills=["x"], source="generated"
-    )
-    other_manifest = build_agent_manifest(other_team_id, other_gen.agent_name, summary=other_gen.role or None)
+    other_gen = _thin_gen(other_team_id, "Scout")
+    other_manifest = build_agent_manifest(other_team_id, other_gen.agent_name, summary="Researches")
     registry.register(other_manifest)
 
     team_id = _new_team()  # a distinct team with a different id prefix
@@ -483,16 +485,14 @@ def test_register_team_manifests_skips_registry_agents(
     registry.register(stale)
     assert registry.get(stale.id) is not None
 
-    gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
+    gen = _thin_gen(team_id, "Writer")
     reg = AgenticTeamAgent(
         agent_name="blogging.planner",
-        role="p",
-        skills=["seo"],
         source="registry",
         manifest_id="blogging.planner",
     )
 
-    result = register_team_manifests(team_id, [gen, reg])
+    result = register_team_manifests(team_id, [gen, reg], summaries={"Writer": "w"})
     assert result.registered is True
     assert len(result.manifests) == 1  # only the generated agent is wrapped
     # The generated wrapper is actually installed (path exercised, not swallowed).
@@ -540,9 +540,9 @@ def test_delete_unregister_failure_still_returns_204(
     from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team_id = _new_team()
-    gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
+    gen = _thin_gen(team_id, "Writer")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    registry.register(build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None))
+    registry.register(build_agent_manifest(team_id, gen.agent_name, summary="w"))
     registry.unregister = _raise  # cleanup blows up
 
     resp = client.delete(f"/teams/{team_id}/agents/Writer")
@@ -555,9 +555,7 @@ def test_from_registry_replace_unregister_failure_still_returns_201(
 ) -> None:
     """Same best-effort guarantee on the from-registry replace-unregister path."""
     team_id = _new_team()
-    gen = AgenticTeamAgent(
-        agent_name="blogging.planner", role="old", skills=["x"], source="generated"
-    )
+    gen = _thin_gen(team_id, "blogging.planner")
     AgenticTeamStore().save_team_agents(team_id, [gen])
     registry.unregister = _raise  # cleanup blows up
 
