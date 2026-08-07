@@ -1,14 +1,18 @@
-"""Tests for ``strategy_lab.orchestrator_api`` (partial body home + deferred façade).
+"""Tests for ``strategy_lab.orchestrator_api`` ownership and façade identity.
 
 Preconditions:
     ``investment_team.api.main`` is importable.
 Postconditions:
     Moved symbols are defined on ``orchestrator_api`` (not only via ``__getattr__``)
-    and match ``api.main`` aliases. Deferred symbols still resolve via
-    ``__getattr__`` to the same objects on ``api.main``.
+    and match ``api.main`` aliases. ``api.main`` has no top-level function bodies for
+    moved callables (assignment aliases only). Deferred Temporal-hot symbols still
+    resolve via ``__getattr__`` to ``api.main`` until a later extract moves them.
 """
 
 from __future__ import annotations
+
+import ast
+import inspect
 
 import pytest
 
@@ -31,6 +35,8 @@ _MOVED = (
     "_ensure_no_active_run",
     "_require_run_transition_lock",
 )
+
+_MOVED_CALLABLES = tuple(name for name in _MOVED if name != "STRATEGY_LAB_TERMINAL_STATUSES")
 
 _DEFERRED = (
     "_snapshot_prior_records",
@@ -68,3 +74,24 @@ def test_progress_fields_and_purge_constants_exported() -> None:
     assert "completed_cycles" in orchestrator_api._STRATEGY_LAB_PROGRESS_FIELDS
     assert orchestrator_api._PURGE_MAX_WORKERS == 16
     assert orchestrator_api._PURGE_TIMEOUT_S == 120.0
+
+
+def test_api_main_has_no_moved_helper_function_bodies() -> None:
+    """Moved orchestrator callables must not regain ``def`` bodies in ``api.main``.
+
+    Preconditions:
+        ``api_main`` is the loaded ``investment_team.api.main`` module.
+    Postconditions:
+        No top-level ``FunctionDef`` / ``AsyncFunctionDef`` in ``api.main``'s
+        source is named in ``_MOVED_CALLABLES``. Assignment aliases remain allowed.
+    """
+    source = inspect.getsource(api_main)
+    tree = ast.parse(source)
+    defined = {
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    leaked = sorted(defined & set(_MOVED_CALLABLES))
+    assert leaked == [], (
+        "Moved Strategy Lab orchestrator helpers must not have function bodies "
+        f"in api.main; found def(s): {leaked}"
+    )

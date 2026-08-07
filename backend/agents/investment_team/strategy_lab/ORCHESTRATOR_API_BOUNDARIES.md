@@ -221,6 +221,10 @@ those on the module where the real body lives, not only on `api.main`.
 4. `_strategy_lab_external_terminal_status`
 5. `_finalize_strategy_lab_cycle_record`
 
+**Ownership regression:** `tests/test_orchestrator_api.py` asserts moved callables
+have no top-level function bodies in `api.main` (aliases only). Extend `_MOVED` /
+`_MOVED_CALLABLES` when a later extract lands more bodies.
+
 Lazy resolution avoids eagerly loading `api.main` when activities import the
 façade at worker startup; monkeypatches on `api.main` still apply for
 deferred names.
