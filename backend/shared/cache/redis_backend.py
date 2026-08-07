@@ -391,8 +391,29 @@ class RedisBackend:
         except _REDIS_OP_ERRORS:
             logger.warning("shared.cache redis delete failed for %s", key, exc_info=True)
 
+    def _value_exists(self, key: str) -> bool:
+        """Return whether the durable value key for ``key`` still exists.
+
+        Postconditions:
+            - ``True`` when Redis reports the value key present.
+            - ``False`` when the value is missing (including after TTL expiry).
+            - On Redis/client errors, returns ``True`` so trim fail-opens toward
+              *not* deleting a key whose existence we could not confirm.
+        """
+        try:
+            return bool(self._client.exists(self._value_key(key)))
+        except _REDIS_OP_ERRORS:  # pragma: no cover - fail-open toward keep
+            return True
+
     def _trim(self, max_entries: int) -> None:
-        """Evict oldest value keys past ``max_entries`` using the LRU ZSET.
+        """Evict past ``max_entries`` using the LRU ZSET, dropping TTL ghosts first.
+
+        Value keys use ``EX`` TTLs while LRU ZSET members do not. After silent
+        expiry, a high-score ghost can remain and inflate ``zcard`` so trim
+        would otherwise delete colder *live* keys first. This method sweeps
+        missing-value ZSET members across the namespace before counting
+        capacity, then evicts the oldest live keys only while still over
+        ``max_entries``.
 
         Evicts in bounded batches and re-checks ``zcard`` after each batch so a
         concurrent writer cannot leave the namespace far above capacity, and so a
@@ -404,23 +425,73 @@ class RedisBackend:
         try:
             lru = self._lru_key()
             while True:
-                overflow = int(self._client.zcard(lru)) - max_entries
-                if overflow <= 0:
+                card = int(self._client.zcard(lru))
+                if card <= max_entries:
                     return
+
+                # Phase 1: purge TTL ghosts anywhere in the ZSET so capacity is
+                # measured against live value keys only.
+                start = 0
+                ghosts_removed = 0
+                while True:
+                    batch = self._client.zrange(lru, start, start + _TRIM_BATCH - 1)
+                    if not batch:
+                        break
+                    keys = [k.decode("utf-8") if isinstance(k, bytes) else k for k in batch]
+                    ghosts = [k for k in keys if not self._value_exists(k)]
+                    if ghosts:
+                        self._client.zrem(lru, *ghosts)
+                        ghosts_removed += len(ghosts)
+                        # Members after ``start`` shift left; re-read this window.
+                    else:
+                        start += len(keys)
+                    card = int(self._client.zcard(lru))
+                    if card <= max_entries:
+                        return
+                    if not ghosts and len(keys) < _TRIM_BATCH:
+                        break
+
+                card = int(self._client.zcard(lru))
+                if card <= max_entries:
+                    return
+
+                # Phase 2: oldest members are live (ghosts swept); evict overflow.
+                overflow = card - max_entries
                 batch_size = min(overflow, _TRIM_BATCH)
                 oldest = self._client.zrange(lru, 0, batch_size - 1)
                 if not oldest:
                     logger.warning(
-                        "shared.cache redis trim made no progress for %s (zcard overflow=%s but zrange empty)",
+                        "shared.cache redis trim made no progress for %s "
+                        "(zcard overflow=%s but zrange empty)",
                         self._namespace,
                         overflow,
                     )
                     return
                 keys = [k.decode("utf-8") if isinstance(k, bytes) else k for k in oldest]
-                pipe = self._client.pipeline()
+                # Re-check existence: a concurrent TTL expiry can turn a member
+                # into a ghost between phase 1 and now.
+                to_delete: List[str] = []
+                to_zrem: List[str] = []
                 for k in keys:
+                    if self._value_exists(k):
+                        to_delete.append(k)
+                        to_zrem.append(k)
+                    else:
+                        to_zrem.append(k)
+                if not to_zrem and ghosts_removed == 0:
+                    logger.warning(
+                        "shared.cache redis trim made no progress for %s "
+                        "(overflow=%s, batch=%s)",
+                        self._namespace,
+                        overflow,
+                        keys,
+                    )
+                    return
+                pipe = self._client.pipeline()
+                for k in to_delete:
                     pipe.delete(self._value_key(k))
-                pipe.zrem(lru, *keys)
+                if to_zrem:
+                    pipe.zrem(lru, *to_zrem)
                 pipe.execute()
         except _REDIS_OP_ERRORS:  # pragma: no cover - defensive trim failure
             logger.debug("shared.cache redis trim failed", exc_info=True)

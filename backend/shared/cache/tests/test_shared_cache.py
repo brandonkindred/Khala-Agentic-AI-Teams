@@ -328,6 +328,53 @@ def test_redis_trim_evicts_oldest():
     assert cache.get("c") == b"3"
 
 
+def test_redis_trim_drops_ttl_ghosts_before_evicting_live():
+    """TTL-expired ZSET members must not displace colder live keys.
+
+    Value keys expire via EX while the LRU ZSET keeps the member and its score.
+    A high-score ghost must be purged on trim; otherwise oldest live keys are
+    evicted first and effective capacity shrinks below ``max_entries``.
+    """
+    client = FakeRedis()
+    cache = RedisBackend(client, "ns")
+    cache.set("cold", b"1", max_entries=8)
+    time.sleep(0.01)
+    cache.set("hot", b"2", max_entries=8)
+    # Simulate value TTL expiry without touching the LRU ZSET (get() would zrem).
+    hot_value_key = cache._value_key("hot")
+    client._kv.pop(hot_value_key, None)
+    client._expiry.pop(hot_value_key, None)
+    assert "hot" in client._zsets[cache._lru_key()]
+
+    cache.set("new", b"3", max_entries=2)
+
+    assert cache.get("cold") == b"1"
+    assert cache.get("new") == b"3"
+    assert cache.get("hot") is None
+    assert "hot" not in client._zsets.get(cache._lru_key(), {})
+
+
+def test_redis_trim_purges_hot_ghost_beyond_oldest_overflow_window():
+    """Ghosts with high scores (not among the oldest overflow) must still be purged."""
+    client = FakeRedis()
+    cache = RedisBackend(client, "ns")
+    cache.set("a", b"1", max_entries=8)
+    time.sleep(0.01)
+    cache.set("b", b"2", max_entries=8)
+    time.sleep(0.01)
+    cache.set("ghost", b"g", max_entries=8)
+    ghost_vk = cache._value_key("ghost")
+    client._kv.pop(ghost_vk, None)
+    client._expiry.pop(ghost_vk, None)
+
+    cache.set("c", b"3", max_entries=3)
+
+    assert cache.get("a") == b"1"
+    assert cache.get("b") == b"2"
+    assert cache.get("c") == b"3"
+    assert "ghost" not in client._zsets.get(cache._lru_key(), {})
+
+
 def test_redis_set_retries_once_after_write_failure():
     """OOM/transient SET failure trims then retries once before fail-open."""
     client = FakeRedis()
