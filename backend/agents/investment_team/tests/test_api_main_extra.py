@@ -694,10 +694,12 @@ def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
 
 
 def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() -> None:
-    """A run with no persisted "generation" field (pre-fencing, or a durable
-    read that failed) must bootstrap by +2, not +1 -- +1 would mint
+    """A run with no persisted "generation" field (pre-fencing, or a missing
+    job record passed as ``{}``) must bootstrap by +2, not +1 -- +1 would mint
     generation 1, which is also what a stale legacy activity that omits
-    "generation" entirely is treated as presenting, defeating fencing."""
+    "generation" entirely is treated as presenting, defeating fencing.
+    Transport failures on the bootstrap read fail closed at the route instead
+    of being rewritten as ``{}`` here."""
     from investment_team.api.main import (
         GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
         _legacy_generation_bootstrap_increment,

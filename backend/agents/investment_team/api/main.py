@@ -574,18 +574,22 @@ def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
 
     Preconditions:
         - ``durable_data`` is the run's durable job record (its ``"data"``
-          column merged in) -- or ``{}`` when the durable read failed or the
-          job doesn't exist. Callers MUST pass the DURABLE record here, not
-          `_get_run_state`'s process-local ``active_runs`` snapshot: a
-          resume of this same legacy run can already have populated that
-          in-memory entry with a ``generation=1`` default
-          (``resume_strategy_lab_run`` deliberately excludes "generation"
-          from ITS durable write, so the durable record stays legacy even
-          after that). Passing the in-memory snapshot instead would see
-          "generation" present, mint only +1, and land on durable generation
-          1 -- exactly what a still-in-flight legacy activity (which omits
-          ``generation`` entirely, defaulting to 1) presents, defeating
-          fencing.
+          column merged in) -- or ``{}`` when the job does not exist.
+          Callers MUST pass the DURABLE record here, not `_get_run_state`'s
+          process-local ``active_runs`` snapshot: a resume of this same
+          legacy run can already have populated that in-memory entry with a
+          ``generation=1`` default (``resume_strategy_lab_run`` deliberately
+          excludes "generation" from ITS durable write, so the durable
+          record stays legacy even after that). Passing the in-memory
+          snapshot instead would see "generation" present, mint only +1,
+          and land on durable generation 1 -- exactly what a still-in-flight
+          legacy activity (which omits ``generation`` entirely, defaulting
+          to 1) presents, defeating fencing.
+        - Callers MUST NOT substitute ``{}`` for a failed durable read.
+          Blindly treating a read failure as legacy and minting +2 can
+          regress a durable non-native positive token (e.g. ``\"5\"``) via
+          job-service zeroing. Restart fails closed on bootstrap-read
+          failure instead.
 
     Postconditions:
         - Returns ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` when
@@ -599,8 +603,6 @@ def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
           ``>= DEFAULT_FENCING_GENERATION`` (increment would regress the
           token). Callers must translate that into a fail-closed response
           rather than minting.
-        - A durable read that failed (and was passed here as ``{}``) is
-          treated the same as a genuinely legacy/fieldless record.
     """
     if "generation" not in durable_data:
         return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
@@ -3680,18 +3682,25 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # or whether the result is still a valid, monotonically-newer
         # fencing token. A deleted-job race is caught by apply_and_get's own
         # falsy-result handling below.
+        #
+        # A get_job *transport* failure is different: without seeing the
+        # durable representation we cannot choose a safe increment (a blind
+        # +2 would zero a durable numeric-string token like "5" and regress
+        # fencing). Fail closed with 503 rather than minting.
         client = _get_lab_run_job_client()
         try:
             durable_job = client.get_job(run_id)
         except Exception as exc:
-            # Best-effort: falling back to the legacy/+2 branch is safe
-            # regardless of why this read failed (see
-            # _legacy_generation_bootstrap_increment's docstring), but log it
-            # so a non-transient job-service problem isn't silently invisible.
             logger.warning(
                 "get_job failed during restart's legacy-generation check for %s: %s", run_id, exc
             )
-            durable_job = None
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; could not "
+                    "read the durable generation to choose a safe increment."
+                ),
+            ) from exc
         # get_job's contract is Optional[Dict[str, Any]] -- a JSONB "data"
         # column merged into the top-level dict server-side (job_service.db's
         # _row_to_dict), never returned as a separate nested key. `or {}`

@@ -1355,15 +1355,13 @@ def test_restart_strategy_lab_run_fails_closed_on_numeric_string_generation(
     assert stub.by_id["run-str-gen"]["generation"] == "5"
 
 
-def test_restart_strategy_lab_run_bootstrap_check_read_failure_still_succeeds(
+def test_restart_strategy_lab_run_bootstrap_check_read_failure_fails_closed(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
     """A get_job failure during restart's legacy-generation bootstrap check
-    (the read used only to decide +1 vs +2 for the mint) must not block the
-    restart -- it's explicitly best-effort: falling back to the legacy/+2
-    branch is safe regardless of why this read failed, since the actual
-    fencing-critical write is the atomic apply_and_get increment right
-    after, which is unaffected by this read's outcome."""
+    must fail closed with 503 -- without seeing the durable representation
+    we cannot choose a safe increment (a blind +2 would zero a durable
+    numeric-string token like \"5\" and regress fencing)."""
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-bootstrapreadfail"] = {
@@ -1374,27 +1372,46 @@ def test_restart_strategy_lab_run_bootstrap_check_read_failure_still_succeeds(
     }
 
     stub = _StubLabClient(jobs=[{"job_id": "run-bootstrapreadfail", "generation": 3}])
-    real_get_job = stub.get_job
-    read_calls: List[str] = []
 
-    def _get_job_failing_on_first_read(jid: str):
-        read_calls.append(jid)
-        if len(read_calls) == 1:
-            raise ConnectionError("connection refused")
-        return real_get_job(jid)
+    def _get_job_failing(_jid: str):
+        raise ConnectionError("connection refused")
 
-    monkeypatch.setattr(stub, "get_job", _get_job_failing_on_first_read)
+    monkeypatch.setattr(stub, "get_job", _get_job_failing)
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
 
     resp = api_client.post("/strategy-lab/runs/run-bootstrapreadfail/restart")
 
-    assert resp.status_code == 200
-    # The bootstrap read failed, so durable_data fell back to {} -- treated
-    # the same as a genuinely legacy/fieldless record, bootstrapping by +2
-    # (3 -> 5) rather than the ordinary +1, per
-    # _legacy_generation_bootstrap_increment's documented safety margin.
-    assert api_main._active_runs["run-bootstrapreadfail"]["generation"] == 5
-    assert stub.by_id["run-bootstrapreadfail"]["generation"] == 5
+    assert resp.status_code == 503
+    assert "durable generation" in resp.json()["detail"].lower()
+    # Mint must not have run -- durable value stays at the pre-restart token.
+    assert stub.by_id["run-bootstrapreadfail"]["generation"] == 3
+
+
+def test_restart_strategy_lab_run_bootstrap_read_failure_does_not_regress_numeric_string_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: bootstrap get_job failure must not fall through to a blind
+    +2 mint that zeros durable \"5\" to 2 and reopens fencing for in-flight
+    activities presenting conceptual generation 5."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-str-readfail"] = {
+        "run_id": "run-str-readfail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-str-readfail", "generation": "5"}])
+
+    def _get_job_failing(_jid: str):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-str-readfail/restart")
+
+    assert resp.status_code == 503
+    assert stub.by_id["run-str-readfail"]["generation"] == "5"
 
 
 def test_restart_strategy_lab_run_bootstraps_from_durable_record_not_stale_in_memory_generation(
