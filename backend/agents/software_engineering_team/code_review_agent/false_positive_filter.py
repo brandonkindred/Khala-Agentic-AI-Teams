@@ -715,7 +715,10 @@ class CodebaseIndex:
             - ``max_matches`` > 0.
 
         Postconditions:
-            - On complete hits with a reader: newline-joined ``path:line`` only.
+            - On complete hits with a reader: newline-joined hit blocks; each block
+              starts with ``path:line`` and may append an enclosing-construct
+              excerpt for readable ``.py``/``.pyi`` files (same shape as
+              ``read_function``).
             - When truncated (repo scan incomplete, or submission filled
               ``max_matches`` so the repo half was skipped): append a truncated
               banner (hits) or an empty-truncated message (no hits).
@@ -740,7 +743,9 @@ class CodebaseIndex:
         truncated = False
         if self.repo_reader is None:
             body = (
-                "\n".join(f"{path}:{lineno}" for path, lineno, _ in hits)
+                "\n\n".join(
+                    _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
+                )
                 if hits
                 else f"No references for {symbol!r}."
             )
@@ -766,7 +771,9 @@ class CodebaseIndex:
                 )
             return f"No references for {symbol!r}."
 
-        result = "\n".join(f"{path}:{lineno}" for path, lineno, _ in hits)
+        result = "\n\n".join(
+            _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
+        )
         if truncated:
             result += (
                 f"\n\n(Scan truncated before covering the whole repository -- there may be "
@@ -885,6 +892,45 @@ def _format_construct_slice(
         for i in range(construct.start_line, construct.end_line + 1)
     )
     return f"{header}\n{body}"
+
+
+def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
+    """Format one find_references hit as path:line plus optional construct excerpt.
+
+    Preconditions:
+        - ``lineno`` >= 1.
+
+    Postconditions:
+        - Always starts with ``{path}:{lineno}``.
+        - When readable ``.py``/``.pyi`` content has an enclosing construct at
+          ``lineno``, appends a blank-line-free construct slice from
+          ``_format_construct_slice`` (same shape as ``read_function``).
+        - Otherwise returns only ``{path}:{lineno}`` (no fallback window).
+        - Never raises.
+    """
+    loc = f"{path}:{lineno}"
+    content, _error = index._read(path)
+    if content is None:
+        return loc
+    display = index.resolve_path(path) or path
+    if display == index.EXISTING_CODEBASE_PATH:
+        display = path
+    _, ext = os.path.splitext(display)
+    if ext.lower() not in (".py", ".pyi"):
+        return loc
+    try:
+        stripped, physical, mapper = strip_numbered_prefixes(content, lineno)
+        construct = enclosing_construct(
+            stripped, physical, annotated_hunks=mapper is not None
+        )
+    except Exception:  # noqa: BLE001 - excerpt failure must not abort find_references
+        return loc
+    if construct is None:
+        return loc
+    excerpt = _format_construct_slice(
+        display, construct, stripped.splitlines(), mapper=mapper
+    )
+    return f"{loc}\n{excerpt}"
 
 
 def _find_python_function_at_line(

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -558,9 +559,24 @@ def test_search_rejects_nonpositive_max(bad_max: int) -> None:
 
 _NO_REPO = "No repository access is available beyond this submission."
 
+_HIT_LOC_RE = re.compile(r"^.+:\d+$")
+
+
+def _hit_body(result: str) -> str:
+    """Strip trailing no-reader / truncation banners from a find_references result."""
+    for marker in ("\n\n(Scan truncated", f"\n\n{_NO_REPO}"):
+        if marker in result:
+            return result.split(marker, 1)[0]
+    return result
+
+
+def _hit_locs(result: str) -> list[str]:
+    """Return path:line locator lines from the hit body (ignore excerpt bodies)."""
+    return [ln for ln in _hit_body(result).splitlines() if _HIT_LOC_RE.match(ln)]
+
 
 def test_find_references_returns_capped_path_line_hits() -> None:
-    """Hits are path:line only (no line text), across files and the excerpt."""
+    """Hits include path:line locators across files and the excerpt."""
     idx = CodebaseIndex(
         files={
             "a.py": "def foo():\n    pass\n",
@@ -569,11 +585,10 @@ def test_find_references_returns_capped_path_line_hits() -> None:
         existing_codebase="legacy_foo()\n",
     )
     result = idx.find_references("foo")
-    assert result.startswith(
-        "a.py:1\n"
-        "b.py:1\n"
-        f"{CodebaseIndex.EXISTING_CODEBASE_PATH}:1"
-    )
+    locs = _hit_locs(result)
+    assert "a.py:1" in locs
+    assert "b.py:1" in locs
+    assert f"{CodebaseIndex.EXISTING_CODEBASE_PATH}:1" in locs
     assert _NO_REPO in result
 
 
@@ -607,8 +622,7 @@ def test_find_references_respects_max_matches() -> None:
     """Result is capped at max_matches path:line lines."""
     idx = CodebaseIndex(files={"a.py": "x\n" * 100})
     result = idx.find_references("x", max_matches=5)
-    hit_lines = result.split("\n\n", 1)[0].splitlines()
-    assert hit_lines == [f"a.py:{i}" for i in range(1, 6)]
+    assert _hit_locs(result) == [f"a.py:{i}" for i in range(1, 6)]
     assert _NO_REPO in result
 
 
@@ -626,7 +640,7 @@ def test_find_references_includes_repo_reader_hits() -> None:
         repo_reader=_FakeReader({"other/caller.py": "from changed import x\nx()\n"}),
     )
     result = idx.find_references("changed")
-    assert "other/caller.py:1" in result.splitlines()
+    assert "other/caller.py:1" in _hit_locs(result)
     assert "No references" not in result
 
 
@@ -643,10 +657,9 @@ def test_find_references_merges_submission_then_repo_under_cap() -> None:
         ),
     )
     result = idx.find_references("needle", max_matches=3)
-    lines = result.split("\n\n", 1)[0].splitlines()
-    assert lines[0] == "a.py:1"
-    assert len(lines) == 3
-    assert all(":" in line and "needle" not in line for line in lines)
+    locs = _hit_locs(result)
+    assert locs[0] == "a.py:1"
+    assert len(locs) == 3
     assert "Scan truncated" in result
 
 
@@ -662,10 +675,10 @@ def test_find_references_skips_submission_paths_in_repo_half() -> None:
         ),
     )
     result = idx.find_references("needle", max_matches=10)
-    lines = result.split("\n\n", 1)[0].splitlines()
-    assert lines.count("shared.py:1") == 1
-    assert "shared.py:2" not in lines
-    assert "only_repo.py:1" in lines
+    locs = _hit_locs(result)
+    assert locs.count("shared.py:1") == 1
+    assert "shared.py:2" not in locs
+    assert "only_repo.py:1" in locs
 
 
 def test_search_repo_references_respects_max_files_scanned() -> None:
@@ -687,14 +700,17 @@ def test_search_repo_references_respects_max_files_scanned() -> None:
 def test_find_references_no_reader_unchanged() -> None:
     """Without a reader, results stay submission-only and note that explicitly."""
     idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
-    assert idx.find_references("foo") == f"a.py:1\n\n{_NO_REPO}"
+    result = idx.find_references("foo")
+    assert "a.py:1" in _hit_locs(result)
+    assert "function foo" in result
+    assert _NO_REPO in result
     assert idx.find_references("zzz") == f"No references for 'zzz'.\n\n{_NO_REPO}"
 
 
 def test_find_references_no_reader_note_on_hits() -> None:
     idx = CodebaseIndex(files={"a.py": "foo\n"})
     result = idx.find_references("foo")
-    assert result.startswith("a.py:1")
+    assert "a.py:1" in _hit_locs(result)
     assert _NO_REPO in result
 
 
@@ -705,8 +721,7 @@ def test_find_references_truncated_banner_when_match_cap_skips_repo() -> None:
         repo_reader=_FakeReader({"r.py": "x\n"}),
     )
     result = idx.find_references("x", max_matches=2)
-    lines = result.split("\n\n", 1)[0].splitlines()
-    assert lines == ["a.py:1", "a.py:2"]
+    assert _hit_locs(result) == ["a.py:1", "a.py:2"]
     assert "Scan truncated" in result
     assert "more matches" in result
 
@@ -736,6 +751,35 @@ def test_find_references_list_files_failure_is_empty_truncated() -> None:
     assert "No references for 'needle'" in result
     assert "truncated" in result
     assert "does NOT prove" in result
+
+
+def test_find_references_attaches_enclosing_construct_excerpt() -> None:
+    """A hit inside a Python function includes the construct slice."""
+    src = (
+        "def outer():\n"
+        "    return 1\n"
+        "\n"
+        "def caller():\n"
+        "    return outer()\n"
+    )
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("outer")
+    assert "mod.py:5" in _hit_locs(result)
+    assert "function caller" in result
+    assert "return outer()" in result
+    assert "def outer():" in result  # definition hit may also appear
+    assert _NO_REPO in result
+
+
+def test_find_references_unresolved_construct_is_path_line_only() -> None:
+    """Module-level / non-Python hits stay path:line without a construct slice."""
+    idx = CodebaseIndex(files={"mod.py": "NEEDLE = 1\n"})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:1"]
+    assert _hit_body(result).strip() == "mod.py:1"
+    assert "function" not in result
+    assert "class" not in result
+    assert _NO_REPO in result
 
 
 # --------------------------------------------------------------------------- tools
