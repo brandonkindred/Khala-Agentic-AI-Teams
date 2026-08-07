@@ -101,13 +101,29 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
           promptly — no further job-store read, no blocking call past the
           point of pause.
         - Otherwise (the orchestrator returned ``None``, i.e. the pipeline
-          reached a terminal state) returns the final job snapshot as a dict,
-          or a minimal synthetic ``{"job_id": ..., "status": "unknown"}`` dict
-          when the job row is missing or unreadable after the orchestrator
-          run — unchanged from before ``pause_strategy`` existed. Raises with
-          an actionable message when the worker is mis-wired (no provider) or
-          the request carries no plan — instead of failing later, mid-run,
-          with a generic error.
+          reached a terminal state) returns a small fixed-shape summary --
+          ``{"outcome": "completed" | "failed", "job_id": ..., "status": ...,
+          "error": <optional>, "summary": <optional>}`` -- rather than the
+          full job record: this activity's result becomes
+          ``CodingTeamWorkflow.run``'s own return value, so an unbounded
+          job-record payload (e.g. a large ``task_graph_snapshot``) risks
+          exceeding Temporal's activity-result payload limit, and a retry
+          triggered by an oversized payload would re-run completion logic
+          against state the first attempt already changed. ``outcome`` is
+          ``"completed"`` for every terminal SUCCESS status
+          (``hitl.TERMINAL_SUCCESS_STATUSES``: completed, completed with
+          failures, already-complete) and for GitHub runs whose terminal
+          success was deferred to ``running``/``publishing`` via
+          ``_defer_terminal_success``; ``"failed"`` otherwise (failed,
+          cancelled). ``error``/``summary`` are included only when the job
+          record actually carries a value for them. Returns
+          ``{"outcome": "unknown", "job_id": ..., "status": "unknown"}`` when
+          the job row is missing or unreadable after the orchestrator run --
+          the full job record remains the source of truth in the job store,
+          and callers already poll ``GET /status/{job_id}`` for complete
+          state. Raises with an actionable message when the worker is
+          mis-wired (no provider) or the request carries no plan — instead of
+          failing later, mid-run, with a generic error.
         - For GitHub runs, orchestrator ``completed``/``already_complete``/
           ``completed_with_failures`` writes are remapped to
           ``running``/``publishing`` until ``github_publish_activity`` writes
@@ -120,6 +136,7 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     """
     import uuid
 
+    from software_engineering_team import hitl
     from software_engineering_team.api.coding_team_main import (
         RunRequest,
         create_job,
@@ -129,6 +146,7 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     )
     from software_engineering_team.api.orchestration import _defer_terminal_success
     from software_engineering_team.engine_provider import get_engine_provider
+    from software_engineering_team.models import JobStatus
 
     if get_engine_provider() is None:
         raise RuntimeError(
@@ -167,7 +185,32 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     )
     if paused is not None:
         return paused
-    return get_job(job_id) or {"job_id": job_id, "status": "unknown"}
+    job = get_job(job_id)
+    if job is None:
+        return {"outcome": "unknown", "job_id": job_id, "status": "unknown"}
+    status = job.get("status")
+    # GitHub Temporal runs remap terminal success to running/publishing until
+    # publish finishes; that deferred window is still a success outcome for the
+    # workflow's publish gate (which keys off status, not outcome).
+    deferred_github_success = (
+        status == JobStatus.RUNNING.value and job.get("phase") == "publishing"
+    )
+    result: dict[str, Any] = {
+        "outcome": (
+            "completed"
+            if status in hitl.TERMINAL_SUCCESS_STATUSES or deferred_github_success
+            else "failed"
+        ),
+        "job_id": job_id,
+        "status": status,
+    }
+    error = job.get("error")
+    if error:
+        result["error"] = error
+    summary = job.get("status_text")
+    if summary:
+        result["summary"] = summary
+    return result
 
 
 @workflow.defn(name="CodingTeamWorkflow")
@@ -187,15 +230,24 @@ class CodingTeamWorkflow:
           ``None`` before re-arming ``wait_condition`` — so a stale answer
           batch from one pause round can never be mistaken for a fresh one
           in the next.
+        - ``self._buffered_signals`` holds at most one early-arrived answer
+          batch per not-yet-activated ``resume_token`` — an entry is
+          inserted only when no pause is active yet (``submit_answers``
+          received a signal ahead of ``run``'s loop arming that token). The
+          moment ``run`` arms a pause token it applies the matching entry
+          (if any) and clears the entire dict (HITL contract §2), so stale
+          keys buffered during the no-active-pause window cannot accumulate
+          across pause rounds in durable workflow state.
     """
 
     def __init__(self) -> None:
         self._active_resume_token: str | None = None
         self._submitted_answers: list[dict[str, Any]] | None = None
+        self._buffered_signals: dict[str, list[dict[str, Any]]] = {}
 
     @workflow.signal(name="submit_answers")
     def submit_answers(self, payload: dict[str, Any]) -> None:
-        """Deliver a human answer batch for the current pause (wakes ``wait_condition``).
+        """Deliver a human answer batch for the current (or next) pause.
 
         Preconditions:
             - None enforced — ``payload`` arrives from outside the workflow
@@ -212,43 +264,52 @@ class CodingTeamWorkflow:
         Postconditions:
             - Any payload that is not a dict, or a dict without a list
               ``"answers"`` value, is ignored (returns without side effects).
-            - Validates ``payload.get("resume_token")`` against
+            - When no pause is currently active
+              (``self._active_resume_token is None``), a well-formed payload
+              is treated as an early arrival for a pause ``run``'s loop has
+              not armed yet (contract §2 rule 1) — the exact race
+              ``run_pipeline_activity`` opened by returning
+              ``{"outcome": "paused", ...}`` promptly instead of blocking: a
+              client can read the persisted ``resume_token`` from the job
+              record and signal before this workflow has processed the
+              paused activity result. A non-empty string ``resume_token`` is
+              buffered in ``self._buffered_signals``, keyed by that token, so
+              ``run`` can apply it the instant it arms the matching pause;
+              first submission per token wins (an already-buffered token is
+              left alone, not overwritten). A payload with no usable
+              ``resume_token`` while no pause is active has nothing to key a
+              buffer entry on and is dropped. A mismatched-but-active token
+              is never buffered (only the "no pause active yet" case is) —
+              since each pause round mints a fresh unique token and the
+              workflow only ever awaits one pause at a time, a token that
+              does not match the currently active one can only belong to an
+              already-resolved earlier round, not a legitimate future one.
+            - Otherwise, validates ``payload.get("resume_token")`` against
               ``self._active_resume_token`` per the contract's §2 match rules
-              2 and 3: a mismatch — including no pause being active yet
-              (``self._active_resume_token is None``) — is ignored, not
-              applied; and once a batch is accepted for the current token, a
-              second matching-token signal (a double-submit, or two clients
-              racing to answer the same pause) is ignored too — first
-              submission per token wins, an unconditional overwrite would
-              make which human answer "wins" depend on delivery order. Only
-              a token-matching first submission with a list ``"answers"``
-              sets ``self._submitted_answers`` to that list, satisfying a
+              2 and 3: a mismatch is ignored, not applied; and once a batch
+              is accepted for the current token, a second matching-token
+              signal (a double-submit, or two clients racing to answer the
+              same pause) is ignored too — first submission per token wins,
+              an unconditional overwrite would make which human answer
+              "wins" depend on delivery order. Only a token-matching first
+              submission with a list ``"answers"`` sets
+              ``self._submitted_answers`` to that list, satisfying a
               ``wait_condition`` predicate of
               ``self._submitted_answers is not None``.
-            - Deliberately NOT implemented here: buffering a signal that
-              arrives before ``self._active_resume_token`` is set (the
-              contract's §2 rule 1, ``self._buffered_signals``) — such a
-              signal is simply dropped by this skeleton. Since
-              ``run_pipeline_activity`` now returns
-              ``{"outcome": "paused", ...}`` under ``pause_strategy="return"``,
-              this gap IS reachable in production (a client that reads the
-              persisted ``resume_token`` from the job record and signals
-              before this workflow has processed the paused activity result
-              and set ``self._active_resume_token`` loses that signal). It
-              remains open future work (not yet filed — #3988's scope is
-              limited to an integration test proving the existing pause/
-              resume cycle; buffering itself is separate, unimplemented work).
         """
         if not isinstance(payload, dict):
             return
-        if self._active_resume_token is None:
-            return
-        if payload.get("resume_token") != self._active_resume_token:
-            return
-        if self._submitted_answers is not None:
-            return
         answers = payload.get("answers")
         if not isinstance(answers, list):
+            return
+        resume_token = payload.get("resume_token")
+        if self._active_resume_token is None:
+            if isinstance(resume_token, str) and resume_token:
+                self._buffered_signals.setdefault(resume_token, answers)
+            return
+        if resume_token != self._active_resume_token:
+            return
+        if self._submitted_answers is not None:
             return
         self._submitted_answers = answers
 
@@ -376,11 +437,17 @@ class CodingTeamWorkflow:
               would instead make ``submit_answers``'s guard silently drop
               every future signal, stranding this workflow in
               ``wait_condition`` forever with no diagnostic. Otherwise
-              records it as ``self._active_resume_token``, resets
-              ``self._submitted_answers`` to ``None``, and waits on
-              ``workflow.wait_condition`` for a token-matching
-              ``submit_answers`` signal to set it (see ``submit_answers``'s
-              contract). Once resolved, it sets
+              records it as ``self._active_resume_token``, then immediately
+              applies any early signal already buffered for that exact token
+              and discards every other buffered key (HITL contract §2 —
+              ``self._submitted_answers = self._buffered_signals.pop(
+              resume_token, None)`` then ``self._buffered_signals.clear()``;
+              ``None`` when nothing matched, otherwise the buffered
+              ``answers`` list) before arming ``workflow.wait_condition`` for
+              a token-matching ``submit_answers`` signal to set it (see
+              ``submit_answers``'s contract) — a buffered entry already
+              satisfies that predicate, so the wait resolves immediately
+              without an extra signal round trip. Once resolved, it sets
               ``request["acknowledged_resume_token"]`` to that same token —
               telling ``run_coding_team_orchestrator``'s re-entry check
               (``_check_pending_pause_reentry``) which persisted pause this
@@ -461,7 +528,11 @@ class CodingTeamWorkflow:
                         f"Paused activity result missing a valid resume_token: {result!r}"
                     )
                 self._active_resume_token = resume_token
-                self._submitted_answers = None
+                self._submitted_answers = self._buffered_signals.pop(resume_token, None)
+                # Contract §2: once a pause token activates, every other buffered
+                # key is stale (tokens are never reused) — drop them so retries
+                # across many pause rounds cannot grow durable workflow state.
+                self._buffered_signals.clear()
                 await workflow.wait_condition(lambda: self._submitted_answers is not None)
                 request["acknowledged_resume_token"] = self._active_resume_token
                 self._submitted_answers = None

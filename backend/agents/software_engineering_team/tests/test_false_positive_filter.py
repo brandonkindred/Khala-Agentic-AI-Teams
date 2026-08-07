@@ -556,6 +556,9 @@ def test_search_rejects_nonpositive_max(bad_max: int) -> None:
         CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=bad_max)
 
 
+_NO_REPO = "No repository access is available beyond this submission."
+
+
 def test_find_references_returns_capped_path_line_hits() -> None:
     """Hits are path:line only (no line text), across files and the excerpt."""
     idx = CodebaseIndex(
@@ -566,25 +569,47 @@ def test_find_references_returns_capped_path_line_hits() -> None:
         existing_codebase="legacy_foo()\n",
     )
     result = idx.find_references("foo")
-    assert result == (
+    assert result.startswith(
         "a.py:1\n"
         "b.py:1\n"
         f"{CodebaseIndex.EXISTING_CODEBASE_PATH}:1"
     )
+    assert _NO_REPO in result
 
 
 def test_find_references_empty_and_blank_symbol() -> None:
     """Unknown or whitespace-only symbol returns the empty-references message."""
     idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
-    assert idx.find_references("zzz-not-there") == "No references for 'zzz-not-there'."
-    assert idx.find_references("   ") == "No references for '   '."
+    assert idx.find_references("zzz-not-there") == (
+        f"No references for 'zzz-not-there'.\n\n{_NO_REPO}"
+    )
+    blank = idx.find_references("   ")
+    assert blank.startswith("No references for '   '.")
+    assert _NO_REPO in blank
+    assert "not searched" not in blank  # no-reader path uses the access note only
+
+
+def test_find_references_blank_symbol_with_reader_does_not_imply_complete_scan() -> None:
+    """Blank symbol with a reader must not look like a finished empty repo search."""
+    idx = CodebaseIndex(
+        files={"a.py": "def foo():\n    pass\n"},
+        repo_reader=_FakeReader({"other.py": "foo()\n"}),
+    )
+    result = idx.find_references("   ")
+    assert "No references for '   '." in result
+    assert "not searched" in result
+    assert "does NOT prove" in result
+    assert "other.py" not in result
+    assert _NO_REPO not in result
 
 
 def test_find_references_respects_max_matches() -> None:
     """Result is capped at max_matches path:line lines."""
     idx = CodebaseIndex(files={"a.py": "x\n" * 100})
     result = idx.find_references("x", max_matches=5)
-    assert result.splitlines() == [f"a.py:{i}" for i in range(1, 6)]
+    hit_lines = result.split("\n\n", 1)[0].splitlines()
+    assert hit_lines == [f"a.py:{i}" for i in range(1, 6)]
+    assert _NO_REPO in result
 
 
 @pytest.mark.parametrize("bad_max", [0, -1, -100])
@@ -592,6 +617,125 @@ def test_find_references_rejects_nonpositive_max(bad_max: int) -> None:
     """Non-positive max_matches raises ValueError (same precondition as search)."""
     with pytest.raises(ValueError):
         CodebaseIndex(files={"a.py": "x"}).find_references("x", max_matches=bad_max)
+
+
+def test_find_references_includes_repo_reader_hits() -> None:
+    """When a reader is present, out-of-submission matches appear as path:line."""
+    idx = CodebaseIndex(
+        files={"changed.py": "x = 1\n"},
+        repo_reader=_FakeReader({"other/caller.py": "from changed import x\nx()\n"}),
+    )
+    result = idx.find_references("changed")
+    assert "other/caller.py:1" in result.splitlines()
+    assert "No references" not in result
+
+
+def test_find_references_merges_submission_then_repo_under_cap() -> None:
+    """Submission hits come first; total length respects max_matches."""
+    idx = CodebaseIndex(
+        files={"a.py": "needle\n"},
+        repo_reader=_FakeReader(
+            {
+                "r1.py": "needle\n",
+                "r2.py": "needle\n",
+                "r3.py": "needle\n",
+            }
+        ),
+    )
+    result = idx.find_references("needle", max_matches=3)
+    lines = result.split("\n\n", 1)[0].splitlines()
+    assert lines[0] == "a.py:1"
+    assert len(lines) == 3
+    assert all(":" in line and "needle" not in line for line in lines)
+    assert "Scan truncated" in result
+
+
+def test_find_references_skips_submission_paths_in_repo_half() -> None:
+    """A reader path that is also a submission key is not double-counted from repo."""
+    idx = CodebaseIndex(
+        files={"shared.py": "needle\n"},
+        repo_reader=_FakeReader(
+            {
+                "shared.py": "needle\nneedle\n",  # would add extra lines if not skipped
+                "only_repo.py": "needle\n",
+            }
+        ),
+    )
+    result = idx.find_references("needle", max_matches=10)
+    lines = result.split("\n\n", 1)[0].splitlines()
+    assert lines.count("shared.py:1") == 1
+    assert "shared.py:2" not in lines
+    assert "only_repo.py:1" in lines
+
+
+def test_search_repo_references_respects_max_files_scanned() -> None:
+    """File-scan cap limits how many non-submission reader files are opened."""
+    from software_engineering_team.code_review_agent.false_positive_filter import (
+        _search_repo_references,
+    )
+
+    reader_files = {f"f{i}.py": "needle\n" for i in range(5)}
+    idx = CodebaseIndex(files={"sub.py": "other\n"}, repo_reader=_FakeReader(reader_files))
+    hits, truncated = _search_repo_references(
+        idx, "needle", max_matches=10, max_files_scanned=2
+    )
+    assert len(hits) == 2
+    assert truncated is True
+    assert {path for path, _, _ in hits} <= set(reader_files)
+
+
+def test_find_references_no_reader_unchanged() -> None:
+    """Without a reader, results stay submission-only and note that explicitly."""
+    idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
+    assert idx.find_references("foo") == f"a.py:1\n\n{_NO_REPO}"
+    assert idx.find_references("zzz") == f"No references for 'zzz'.\n\n{_NO_REPO}"
+
+
+def test_find_references_no_reader_note_on_hits() -> None:
+    idx = CodebaseIndex(files={"a.py": "foo\n"})
+    result = idx.find_references("foo")
+    assert result.startswith("a.py:1")
+    assert _NO_REPO in result
+
+
+def test_find_references_truncated_banner_when_match_cap_skips_repo() -> None:
+    """Submission fills max_matches with a reader present → truncated (repo not searched)."""
+    idx = CodebaseIndex(
+        files={"a.py": "x\nx\nx\n"},
+        repo_reader=_FakeReader({"r.py": "x\n"}),
+    )
+    result = idx.find_references("x", max_matches=2)
+    lines = result.split("\n\n", 1)[0].splitlines()
+    assert lines == ["a.py:1", "a.py:2"]
+    assert "Scan truncated" in result
+    assert "more matches" in result
+
+
+def test_find_references_truncated_empty_message(monkeypatch) -> None:
+    """Repo scan hits file-scan cap with no matches → empty-truncated wording."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_REPO_SEARCH_FILE_SCAN_LIMIT", 2)
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_FakeReader({f"f{i}.py": "zzz\n" for i in range(5)}),
+    )
+    result = idx.find_references("needle")
+    assert "No references for 'needle'" in result
+    assert "truncated" in result
+    assert "does NOT prove" in result
+
+
+def test_find_references_list_files_failure_is_empty_truncated() -> None:
+    """Reader list_files failure must surface as empty-truncated, not a complete miss."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_BoomReader(),
+    )
+    result = idx.find_references("needle")
+    assert "No references for 'needle'" in result
+    assert "truncated" in result
+    assert "does NOT prove" in result
 
 
 # --------------------------------------------------------------------------- tools

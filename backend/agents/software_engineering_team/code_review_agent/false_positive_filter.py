@@ -61,7 +61,7 @@ from .function_boundaries import (
 from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
-from .repo_reader import RepoReader
+from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,14 @@ _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 # Cap on substring matches returned by ``search_codebase`` so a common token
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
+
+# Cap on how many repository files one find_references repo half will scan when
+# the reader's per-fetch cost is unknown/expensive (e.g. GitHub-backed readers).
+_REPO_SEARCH_FILE_SCAN_LIMIT = 40
+
+# Cap used instead for DiskRepoReader (no per-file fetch cost) — match the
+# reader's own listing bound so alphabetical prefixes are not silently missed.
+_DISK_REPO_SEARCH_FILE_SCAN_LIMIT = DEFAULT_MAX_LISTED_FILES
 
 # Hard cap on inclusive line span returned by ``read_lines`` so a tool call
 # cannot pull an unbounded slice into the verifier context.
@@ -697,27 +705,144 @@ class CodebaseIndex:
     def find_references(
         self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT
     ) -> str:
-        """Search in-memory sources for ``symbol`` and return capped path:line hits.
+        """Search submission (and repo_reader when present) for capped path:line hits.
 
-        Thin wrapper over :meth:`search`: same corpus (submission files plus the
-        existing-codebase excerpt), case-insensitive substring match, and cap.
-        Does not consult the repo reader and does not attach excerpts.
+        Submission matches come from :meth:`search` first. When a ``repo_reader``
+        is attached and slots remain under ``max_matches``, fills them from the
+        repository (skipping submission paths) via ``_search_repo_references``.
 
         Preconditions:
             - ``max_matches`` > 0.
 
         Postconditions:
-            - On hits, returns newline-joined ``path:line`` strings for the first
-              ``max_matches`` occurrences in path-then-line order (no line text).
-            - On no hits (including a blank/whitespace-only ``symbol``), returns
-              ``No references for {symbol!r}.``
-            - Never raises for missing symbols; raises ``ValueError`` when
-              ``max_matches`` is non-positive (delegated via ``search``).
+            - On complete hits with a reader: newline-joined ``path:line`` only.
+            - When truncated (repo scan incomplete, or submission filled
+              ``max_matches`` so the repo half was skipped): append a truncated
+              banner (hits) or an empty-truncated message (no hits).
+            - When no ``repo_reader``: always append the no-repository-access note.
+            - Blank/whitespace-only ``symbol`` is not searched; the response must
+              not read as a complete empty scan of submission or repository.
+            - Never raises for missing symbols or reader failures; raises
+              ``ValueError`` when ``max_matches`` is non-positive (via ``search``).
         """
-        hits = self.search(symbol, max_matches=max_matches)
+        if not (symbol or "").strip():
+            body = f"No references for {symbol!r}."
+            if self.repo_reader is None:
+                return (
+                    f"{body}\n\nNo repository access is available beyond this submission."
+                )
+            return (
+                f"{body} Blank/whitespace symbols are not searched -- this does NOT prove "
+                "the symbol is absent from the submission or repository."
+            )
+
+        hits = list(self.search(symbol, max_matches=max_matches))
+        truncated = False
+        if self.repo_reader is None:
+            body = (
+                "\n".join(f"{path}:{lineno}" for path, lineno, _ in hits)
+                if hits
+                else f"No references for {symbol!r}."
+            )
+            return f"{body}\n\nNo repository access is available beyond this submission."
+
+        remaining = max_matches - len(hits)
+        if remaining == 0:
+            truncated = True
+        elif remaining > 0:
+            repo_hits, repo_truncated = _search_repo_references(
+                self, symbol, max_matches=remaining
+            )
+            hits.extend(repo_hits)
+            truncated = repo_truncated
+
         if not hits:
+            if truncated:
+                return (
+                    f"No references for {symbol!r} in the files scanned, but the scan was "
+                    "truncated before covering the whole repository -- this does NOT prove "
+                    "the symbol is absent elsewhere. Use list_files()/read_file() for a "
+                    "more targeted follow-up if this matters."
+                )
             return f"No references for {symbol!r}."
-        return "\n".join(f"{path}:{lineno}" for path, lineno, _text in hits)
+
+        result = "\n".join(f"{path}:{lineno}" for path, lineno, _ in hits)
+        if truncated:
+            result += (
+                f"\n\n(Scan truncated before covering the whole repository -- there may be "
+                f"more matches for {symbol!r} beyond what's shown above.)"
+            )
+        return result
+
+
+def _search_repo_references(
+    index: CodebaseIndex,
+    query: str,
+    max_matches: int,
+    max_files_scanned: Optional[int] = None,
+) -> Tuple[List[Tuple[str, int, str]], bool]:
+    """Find case-insensitive substring hits via ``index.repo_reader`` only.
+
+    Preconditions:
+        - ``max_matches`` > 0 and, when given, ``max_files_scanned`` > 0.
+
+    Postconditions:
+        - Returns ``([], False)`` when ``repo_reader`` is None or ``query`` is blank.
+        - When ``max_files_scanned`` is None, uses ``_DISK_REPO_SEARCH_FILE_SCAN_LIMIT``
+          for ``DiskRepoReader`` else ``_REPO_SEARCH_FILE_SCAN_LIMIT``.
+        - Skips paths already keys of ``index.files``; returns up to ``max_matches``
+          ``(path, 1-based-line, line-text)`` tuples alongside a ``truncated`` flag.
+        - ``truncated`` is ``True`` whenever the scan did not inspect every candidate
+          path (file-scan cap, match cap, reader listing truncation, or read failures).
+        - Never raises on reader errors.
+    """
+    if max_matches <= 0:
+        raise ValueError("max_matches must be positive")
+    if max_files_scanned is not None and max_files_scanned <= 0:
+        raise ValueError("max_files_scanned must be positive")
+    if index.repo_reader is None:
+        return [], False
+    if max_files_scanned is None:
+        max_files_scanned = (
+            _DISK_REPO_SEARCH_FILE_SCAN_LIMIT
+            if isinstance(index.repo_reader, DiskRepoReader)
+            else _REPO_SEARCH_FILE_SCAN_LIMIT
+        )
+    needle = (query or "").strip().lower()
+    if not needle:
+        return [], False
+    try:
+        paths = index.repo_reader.list_files()
+    except Exception as exc:  # noqa: BLE001 - fail-safe
+        logger.debug("find_references: repo_reader.list_files() failed: %s", exc)
+        return [], True
+
+    results: List[Tuple[str, int, str]] = []
+    scanned = 0
+    incomplete = (
+        isinstance(index.repo_reader, DiskRepoReader) and index.repo_reader.listing_truncated()
+    )
+    for path in paths:
+        if path in index.files:
+            continue
+        if scanned >= max_files_scanned:
+            return results, True
+        scanned += 1
+        try:
+            content = index.repo_reader.read_file(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("find_references: repo_reader.read_file(%r) failed: %s", path, exc)
+            incomplete = True
+            continue
+        if content is None:
+            incomplete = True
+            continue
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            if needle in line.lower():
+                results.append((path, lineno, line.rstrip()))
+                if len(results) >= max_matches:
+                    return results, True
+    return results, incomplete
 
 
 def _strip_numbered_prefixes(
