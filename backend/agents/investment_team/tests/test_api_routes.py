@@ -1447,7 +1447,7 @@ def test_complete_advisor_session_malformed_ips_payload_returns_500(
     start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
     sid = start.json()["session_id"]
 
-    monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
     monkeypatch.setattr(
         api_main,
         "_execute_advisory",
