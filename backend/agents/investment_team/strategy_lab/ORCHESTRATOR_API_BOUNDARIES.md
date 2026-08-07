@@ -9,10 +9,11 @@ later extraction steps do not invent ownership mid-refactor.
 Companion notes: `MIXIN_BOUNDARIES.md` (pipeline mixin family),
 `run_state.py` (already-extracted in-memory run registry + shared `lock`).
 
-**Partial body move complete (persist / reconcile / purge).** Run-state I/O and
-purge helper bodies now live in `orchestrator_api.py`; `api.main` keeps thin
-aliases for routes and tests. Five Temporal-hot helpers remain deferred via
-lazy `__getattr__` (see below). Runtime semantics are unchanged.
+**Partial body move complete (persist / reconcile / purge / dispatch).**
+Run-state I/O, purge, and dispatch/failure/concurrency-guard helper bodies now
+live in `orchestrator_api.py`; `api.main` keeps thin aliases for routes and
+tests. Five Temporal-hot helpers remain deferred via lazy `__getattr__` (see
+below). Runtime semantics are unchanged.
 
 ---
 
@@ -69,7 +70,9 @@ for the façade step.
 | `_STRATEGY_LAB_PROGRESS_FIELDS` | Field allowlist for reconcile | `_reconcile_run_progress` |
 | `STRATEGY_LAB_TERMINAL_STATUSES` | Terminal status frozenset | reconcile, fail, routes |
 
-### Cluster 2 — Dispatch / failure / concurrency guards (still in `api.main`)
+### Cluster 2 — Dispatch / failure / concurrency guards
+
+**Owner:** bodies in `orchestrator_api`; `api.main` aliases for routes/tests.
 
 | Helper | Role | Primary callers |
 |---|---|---|
@@ -179,7 +182,7 @@ activities.finalize_cycle_record_activity
 
 ---
 
-## Partial body move (persist / reconcile / purge)
+## Partial body move (persist / reconcile / purge / dispatch)
 
 **Bodies now in `orchestrator_api`:**
 
@@ -194,10 +197,21 @@ activities.finalize_cycle_record_activity
 - `_delete_jobs_concurrently`
 - `_delete_paper_sessions_for_lab_record`
 - `_purge_strategy_lab_job_storage`
+- `_dispatch_strategy_lab_run`
+- `_fail_strategy_lab_run`
+- `_no_active_run_locked`
+- `_ensure_no_active_run`
+- `_require_run_transition_lock`
 
 **`api.main` aliases:** routes and tests import the same symbols from
 `api.main`; those names re-export from `orchestrator_api` so monkeypatches and
 existing call sites keep working.
+
+**Monkeypatch caveat:** aliasing helper **names** on `api.main` keeps route
+stubs and tests that patch via `api.main` working for the moved bodies.
+Closed-over module globals (`_active_runs`, `_persist_run_state`,
+`threading.Timer`) are bound inside `orchestrator_api` / `run_state` — patch
+those on the module where the real body lives, not only on `api.main`.
 
 **Deferred via lazy `__getattr__` → `api.main` (five Temporal-hot helpers):**
 
@@ -224,22 +238,25 @@ implementation without circular imports:
 1. **Store extraction** — move lab `_PersistentDict` instances (and optionally
    `_PersistentDict` itself) behind `run_state` or `strategy_lab/stores.py`;
    leave aliases on `api.main` if other teams still need them.
-2. **Remaining Temporal-hot bodies** — `_snapshot_prior_records`, signal brief,
-   cancel/external-terminal helpers, `_finalize_strategy_lab_cycle_record`;
-   drop `__getattr__` indirection for those five.
-3. **Dispatch / fail / transition guards** (cluster 2); routes become thin
-   callers.
-4. **Optional:** extract `_run_paper_trading_step` dependency cleanly if it
+2. **Remaining Temporal-hot bodies** — finalize, snapshot, signal brief, and
+   external-terminal helpers (`_finalize_strategy_lab_cycle_record`,
+   `_snapshot_prior_records`, `_compute_signal_brief_snapshot`,
+   `_is_strategy_lab_run_externally_stopped`,
+   `_strategy_lab_external_terminal_status`); drop `__getattr__` indirection
+   for those five.
+3. **Optional:** extract `_run_paper_trading_step` dependency cleanly if it
    still couples finalize to the paper-trading route module.
+
+Cluster 2 (dispatch / fail / transition guards) landed before finalize by
+deliberate narrow scope — not the original suggested order above.
 
 Each step should stay behavior-preserving (verbatim move + import rewires),
 with the investment_team test suite as the gate.
 
 ---
 
-## Out of scope for the persist/reconcile/purge extract
+## Out of scope for the persist/reconcile/purge/dispatch extract
 
 - Moving the five deferred Temporal-hot bodies (still via `__getattr__`)
 - Changing Strategy Lab runtime semantics
 - Splitting the shared `lock`
-- Extracting dispatch / fail / transition guards (cluster 2)
