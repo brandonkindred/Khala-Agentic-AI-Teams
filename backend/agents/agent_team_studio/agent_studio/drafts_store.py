@@ -63,6 +63,11 @@ def validate_user_id(user_id: str) -> str:
 def validate_optional_name(name: str | None) -> str | None:
     """Validate an optional name; ``None`` means leave unchanged / use default.
 
+    Preconditions:
+        * ``name`` is ``None`` or a ``str``.
+    Postconditions:
+        * Returns ``None`` when ``name`` is ``None``.
+        * Returns the stripped ``name`` when provided.
     Raises:
         ValueError: when ``name`` is provided but empty/whitespace.
     """
@@ -76,6 +81,11 @@ def validate_optional_name(name: str | None) -> str | None:
 def validate_optional_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Validate an optional opaque payload object.
 
+    Preconditions:
+        * ``payload`` is ``None`` or a ``dict``.
+    Postconditions:
+        * Returns ``None`` when ``payload`` is ``None``.
+        * Returns the provided ``dict`` when valid (store deep-copies on persist).
     Raises:
         ValueError: when ``payload`` is not ``None`` and not a ``dict``.
     """
@@ -171,6 +181,10 @@ class AgentStudioDraftStore:
 
         Preconditions:
             * ``user_id`` non-empty; optional ``name``/``payload`` validated when provided.
+        Postconditions:
+            * Returns patched draft when owned; ``updated_at`` advances.
+            * Omitted ``name``/``payload`` leave those fields unchanged.
+            * Returns ``None`` when missing or owned by another user.
         """
         uid = validate_user_id(user_id)
         new_name = validate_optional_name(name)
@@ -187,7 +201,14 @@ class AgentStudioDraftStore:
             return self._to_draft(record)
 
     def get(self, user_id: str, draft_id: str) -> AgentStudioDraft | None:
-        """Return the full draft if owned by ``user_id``, else ``None``."""
+        """Return the full draft if owned by ``user_id``, else ``None``.
+
+        Preconditions:
+            * ``user_id`` non-empty.
+        Postconditions:
+            * Returns a deep-copied draft when ``draft_id`` exists and is owned by ``user_id``.
+            * Returns ``None`` when missing or owned by another user.
+        """
         uid = validate_user_id(user_id)
         with self._lock:
             record = self._records.get(draft_id)
@@ -198,7 +219,15 @@ class AgentStudioDraftStore:
     def list_summaries(
         self, user_id: str, *, limit: int = 50, offset: int = 0
     ) -> list[AgentStudioDraftSummary]:
-        """List owned draft summaries, most-recent ``updated_at`` first."""
+        """List owned draft summaries, most-recent ``updated_at`` first.
+
+        Preconditions:
+            * ``user_id`` non-empty.
+        Postconditions:
+            * Returns summaries for ``user_id`` only, ordered ``updated_at`` DESC.
+            * Pagination clamped via ``clamp_pagination`` (limit ∈ [1,100], offset ≥ 0).
+            * Empty list when the user has no drafts or offset is past the end.
+        """
         uid = validate_user_id(user_id)
         lim, off = clamp_pagination(limit, offset)
         with self._lock:
@@ -213,7 +242,16 @@ class AgentStudioDraftStore:
             ]
 
     def rename(self, user_id: str, draft_id: str, name: str) -> AgentStudioDraftSummary | None:
-        """Rename an owned draft; ``None`` if missing or wrong user."""
+        """Rename an owned draft; ``None`` if missing or wrong user.
+
+        Preconditions:
+            * ``user_id`` non-empty; ``name`` non-empty.
+        Postconditions:
+            * Returns updated summary when owned; ``updated_at`` advances.
+            * Returns ``None`` when missing or owned by another user.
+        Raises:
+            ValueError: when ``name`` is empty/whitespace (via ``validate_optional_name``).
+        """
         uid = validate_user_id(user_id)
         new_name = validate_optional_name(name)
         assert new_name is not None  # rename requires a name
@@ -228,7 +266,14 @@ class AgentStudioDraftStore:
             )
 
     def delete(self, user_id: str, draft_id: str) -> bool:
-        """Delete an owned draft; ``False`` if missing or wrong user."""
+        """Delete an owned draft; ``False`` if missing or wrong user.
+
+        Preconditions:
+            * ``user_id`` non-empty.
+        Postconditions:
+            * Returns ``True`` and removes the record when owned by ``user_id``.
+            * Returns ``False`` when missing or owned by another user; map unchanged.
+        """
         uid = validate_user_id(user_id)
         with self._lock:
             record = self._records.get(draft_id)
