@@ -23,16 +23,15 @@ Invariants:
 from __future__ import annotations
 
 import logging
-import sys
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from pydantic import ValidationError
 
-from investment_team.strategy_lab.run_state import active_runs as _active_runs
 from investment_team.strategy_lab.run_state import (
+    active_runs as _active_runs,
     get_lab_run_job_client as _get_lab_run_job_client,
+    lock as _lock,
 )
-from investment_team.strategy_lab.run_state import lock as _lock
 
 if TYPE_CHECKING:
     from investment_team.api.main import (
@@ -50,50 +49,6 @@ logger = logging.getLogger(__name__)
 STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
 )
-
-
-def _api_main_attr(name: str, default: Any) -> Any:
-    """Return an already-imported ``api.main`` attribute override when present.
-
-    Preconditions:
-        ``name`` is an attribute name and ``default`` is the run-state-backed
-        implementation this module normally owns.
-    Postconditions:
-        Returns ``default`` when ``api.main`` has not been imported or has not
-        replaced the alias. Returns the ``api.main`` attribute otherwise. Never
-        imports ``api.main``.
-    """
-    api_main = sys.modules.get("investment_team.api.main")
-    if api_main is None:
-        return default
-    return getattr(api_main, name, default)
-
-
-def _active_run_store() -> Dict[str, Dict[str, Any]]:
-    """Return the active-run mapping, honoring ``api.main`` test monkeypatches.
-
-    Preconditions:
-        None.
-    Postconditions:
-        Returns the run-state mapping by default, or the current
-        ``api.main._active_runs`` alias when an already-imported test/module has
-        intentionally replaced it. Never imports ``api.main``.
-    """
-    return _api_main_attr("_active_runs", _active_runs)
-
-
-def _lab_run_job_client_factory() -> Any:
-    """Return the lab-run job-client factory, honoring ``api.main`` monkeypatches.
-
-    Preconditions:
-        None.
-    Postconditions:
-        Returns ``run_state.get_lab_run_job_client`` by default, or the current
-        ``api.main._get_lab_run_job_client`` alias when an already-imported
-        test/module has intentionally replaced it. Never imports ``api.main``.
-    """
-    return _api_main_attr("_get_lab_run_job_client", _get_lab_run_job_client)
-
 
 def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusResponse":
     """Convert an ``_active_runs`` entry to a Pydantic response.
@@ -199,11 +154,7 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
           rollback-on-collision persist) must catch and log locally instead
           of relying on this helper to swallow the error.
     """
-    override = _api_main_attr("_persist_run_state", _persist_run_state)
-    if override is not _persist_run_state:
-        override(run_id, state, create=create)
-        return
-    client = _lab_run_job_client_factory()()
+    client = _get_lab_run_job_client()
     fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
     if create:
         client.create_job(run_id, status=state.get("status", "running"), **fields)
@@ -276,16 +227,14 @@ def _reconcile_run_progress(run_id: str) -> None:
           left unchanged in that case.
     """
     with _lock:
-        state = _active_run_store().get(run_id)
+        state = _active_runs.get(run_id)
     if not state or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
         return
     try:
-        client = _lab_run_job_client_factory()()
+        client = _get_lab_run_job_client()
         persisted = client.get_job(run_id)
     except Exception:
-        _api_main_attr("logger", logger).debug(
-            "Job service reconciliation failed for run %s", run_id, exc_info=True
-        )
+        logger.debug("Job service reconciliation failed for run %s", run_id, exc_info=True)
         return
     if not persisted:
         return
@@ -298,7 +247,7 @@ def _reconcile_run_progress(run_id: str) -> None:
         # "Raises: None" contract.
         data = persisted
     with _lock:
-        current = _active_run_store().get(run_id)
+        current = _active_runs.get(run_id)
         if current is None or current.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
             # Another thread (e.g. the worker's own completion write) may have
             # removed the entry or advanced it to terminal while the

@@ -114,11 +114,12 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     # the ``api.main`` alias and the source module attribute to the *same* object,
     # so direct reads/writes (routes) and ``_get_run_state`` (which closes over
     # ``run_state.active_runs``) observe one consistent store.
-    from investment_team.strategy_lab import run_state as _run_state
+    from investment_team.strategy_lab import orchestrator_api, run_state as _run_state
 
     shared_runs: Dict[str, Any] = {}
     monkeypatch.setattr(api_main, "_active_runs", shared_runs)
     monkeypatch.setattr(_run_state, "active_runs", shared_runs)
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared_runs)
 
     # Reset the per-run_id transition-lock registry too, so a test that
     # deliberately pre-holds a lock to simulate contention can't leak it into
@@ -140,6 +141,11 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
 
     # Stub the persistence calls so they don't try to reach the job service.
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    monkeypatch.setattr(
+        orchestrator_api,
+        "_get_lab_run_job_client",
+        lambda: api_main._get_lab_run_job_client(),
+    )
 
     return TestClient(api_main.app)
 
@@ -2051,6 +2057,7 @@ def test_get_strategy_lab_run_status_logs_reconciliation_failure(
     """A job-service failure during reconciliation is logged (at DEBUG) and the
     endpoint still returns 200 with the last-known in-memory status."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     api_main._active_runs["run-broken"] = {
         "run_id": "run-broken",
@@ -2065,7 +2072,7 @@ def test_get_strategy_lab_run_status_logs_reconciliation_failure(
 
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
 
-    with caplog.at_level("DEBUG", logger=api_main.logger.name):
+    with caplog.at_level("DEBUG", logger=orchestrator_api.logger.name):
         resp = api_client.get("/strategy-lab/runs/run-broken/status")
 
     body = resp.json()
