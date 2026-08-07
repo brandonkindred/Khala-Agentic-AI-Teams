@@ -642,7 +642,7 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
     code = "### app/main.py ###\n" + "".join(f"x{i} = {i}\n" for i in range(4000))
 
     client = _MapCounter()
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(
         CodeReviewInput(
             code=code,
@@ -3276,7 +3276,7 @@ def test_large_synthetic_input_is_fully_covered_with_bounded_prompts() -> None:
     cap = compute_code_review_map_chunk_chars(client)
     files = {f"app/mod_{i}.py": _numbered_file(2_500) for i in range(5)}  # ~500K chars total
 
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(CodeReviewInput(files=files, task_description="t", language="python"))
 
     assert isinstance(result, CodeReviewOutput)

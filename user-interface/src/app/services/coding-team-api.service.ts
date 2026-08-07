@@ -27,9 +27,12 @@ export class CodingTeamApiService {
    *
    * Preconditions: `jobId` identifies a job with `waiting_for_answers: true`;
    * every required pending question has an answer (the backend re-validates
-   * fail-closed and returns 400 otherwise).
-   * Postconditions: on success the job's pause flag is cleared and the
-   * orchestrator resumes; the returned status reflects the post-submit state.
+   * fail-closed and returns 400 otherwise). For Temporal-native pauses the
+   * request must echo `resume_token` from status.
+   * Postconditions: Temporal-native pauses append answers and signal the
+   * workflow (pause envelope uncleared). Block-mode pauses store answers and
+   * clear `waiting_for_answers` so a live wait loop can proceed (no thread
+   * restart). The returned status reflects the post-submit state.
    */
   submitAnswers(jobId: string, request: SubmitAnswersRequest): Observable<CodingTeamJobStatus> {
     return this.http.post<CodingTeamJobStatus>(`${this.baseUrl}/run/${jobId}/answers`, request);
@@ -50,14 +53,13 @@ export class CodingTeamApiService {
   }
 
   /**
-   * Restart a paused job whose thread died after answers were stored.
+   * Resume a Temporal-native paused job by signaling CodingTeamWorkflow.
    *
-   * Preconditions: `jobId` identifies a `waiting_for_user` job with no live
-   * thread or heartbeat; answers have already been submitted via
-   * `submitAnswers`.
-   * Postconditions: on success the orchestrator is restarted (or the response
-   * reports it was already running). Returns 400 for terminal or non-paused
-   * jobs, or a GitHub job with no available token.
+   * Preconditions: `jobId` identifies a `waiting_for_user` job with a
+   * `resume_token` (pause_strategy="return").
+   * Postconditions: on success the workflow receives `submit_answers` with
+   * any stored answers. Returns 400 when the job lacks `resume_token`, is
+   * terminal, or is not waiting_for_user.
    */
   resumeJob(jobId: string): Observable<{ job_id: string; status: string; message: string }> {
     return this.http.post<{ job_id: string; status: string; message: string }>(

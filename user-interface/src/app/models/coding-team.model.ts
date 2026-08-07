@@ -40,6 +40,11 @@ export interface CodingTeamJobStatus {
   /** True when the job is paused waiting for the user to answer pending questions. */
   waiting_for_answers?: boolean;
   /**
+   * Set only for a Temporal-native pause (`pause_strategy="return"`). Required to
+   * echo on answer submit and to call `/resume`; absent for legacy block-mode pauses.
+   */
+  resume_token?: string | null;
+  /**
    * Per-agent status roster (Tech Lead + one implementation worker per stack), derived server-side: who
    * is working now, each agent's status, and the task each is on. Absent on older records.
    */

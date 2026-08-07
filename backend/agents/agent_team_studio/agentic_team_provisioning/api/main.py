@@ -1,4 +1,21 @@
-"""FastAPI application for the Agentic Team Provisioning service."""
+"""FastAPI application for the Agentic Team Provisioning service.
+
+This module is the app-assembly hub. Extracted concerns live in:
+
+* ``api.routes.teams`` / ``api.services.teams`` — teams CRUD + roster
+* ``api.routes.conversations`` / ``api.services.conversations`` — conversations
+* ``api.routes.testing`` / ``api.services.testing`` — mode, test-chat, test-pipeline
+
+Remaining endpoint groups (processes, jobs, questions, assets, forms) still
+live here pending later splits.
+
+This module remains the owning namespace for collaborators the test suite
+monkeypatches (``_store``, ``_agent``, ``_test_store``, ``_pipeline_runner``,
+``_save_agents_from_llm``, ``_roster_agent_from_manifest``, ``enrich_roster_agent``,
+``resolve_persona``, ``_chat_context_agents``, ``_build_test_agent``,
+``_call_test_agent``, …). Route and
+service modules dereference those names through ``main`` at call time.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +24,12 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, List
 from urllib.parse import quote
 
-from fastapi import HTTPException, Response, UploadFile
+from fastapi import HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import ValidationError
 
-from agent_registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import (
     schedule_provision_step_agents,
 )
@@ -23,74 +38,43 @@ from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticT
 from agent_team_studio.agentic_team_provisioning.infrastructure import (
     TeamInfrastructure,
     get_team_infrastructure,
-    provision_team,
+    provision_team,  # noqa: F401 — re-export: tests monkeypatch via main
 )
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
-    build_agent_manifest,
-    is_generated_manifest,
     manifest_agent_id,
     register_team_manifests,
 )
 from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_GENERATED,
-    SOURCE_REGISTRY,
-    AddAgentFromRegistryRequest,
     AgentEnvProvisionSummary,
     AgenticTeam,
     AgenticTeamAgent,
-    AgentQualityScore,
     AssetInfo,
-    ConversationStateResponse,
-    ConversationSummaryResponse,
-    CreateConversationRequest,
     CreateFormRecordRequest,
-    CreateTeamRequest,
-    CreateTeamResponse,
-    CreateTestChatSessionRequest,
     EnrichedRosterAgent,
     FormRecord,
-    GeneratedManifestsResponse,
     ProcessDefinition,
     ProcessOutput,
     ProcessStatus,
     ProcessTrigger,
-    RateMessageRequest,
     RecommendAgentsResponse,
     RecommendedAgent,
-    RenameTestChatSessionRequest,
-    RosterValidationResult,
-    SendMessageRequest,
-    SendTestChatMessageRequest,
-    SetConversationProcessRequest,
-    SetTeamModeRequest,
-    StartPipelineRunRequest,
-    SubmitPipelineInputRequest,
     SubmitTeamAnswersRequest,
-    TeamDetailResponse,
     TeamJobDetail,
     TeamJobSummary,
     TeamPendingQuestion,
-    TeamSummary,
-    TestChatMessage,
-    TestChatSession,
-    TestChatSessionDetail,
-    TestPipelineRun,
-    UpdateAgentRequest,
     UpdateFormRecordRequest,
 )
-from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agent_team_studio.agentic_team_provisioning.roster_resolve import (
     EMPTY_ROSTER_PERSONA,
     resolve_persona,
 )
+from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
-    build_agent as _build_test_agent,
+    build_agent as _build_test_agent,  # noqa: F401 — hub alias: services.testing + tests
 )
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
-    call_agent as _call_test_agent,
-)
-from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
-    generate_starter_prompts,
+    call_agent as _call_test_agent,  # noqa: F401 — hub alias: services.testing + tests
 )
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
 from agent_team_studio.agentic_team_provisioning.testing.store import get_test_store
@@ -304,6 +288,7 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     _store.merge_generated_agents(team_id, generated, on_merged=_register)
 
 
+
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
     """Provision per-step agent environments via agent_provisioning_team (background)."""
     schedule_provision_step_agents(team_id, process, _store)
@@ -317,373 +302,6 @@ def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "agentic-team-provisioning"}
-
-
-# ---------------------------------------------------------------------------
-# Teams
-# ---------------------------------------------------------------------------
-
-
-@app.post("/teams", response_model=CreateTeamResponse)
-def create_team(req: CreateTeamRequest):
-    """Create a new agentic team and provision its infrastructure.
-
-    Persists the team row first, then provisions the team's infrastructure.
-    If provisioning fails, the team row is rolled back via ``_store.delete_team``
-    so no orphaned, infrastructure-less row survives a failed create.
-
-    Preconditions: ``req.name`` is a non-empty team name (enforced by
-        ``CreateTeamRequest``).
-    Postconditions: on success, the team row exists, infrastructure is
-        provisioned, and ``200`` is returned with the created team. On
-        provisioning failure, the team row is removed (best-effort — a
-        rollback failure is logged but never masks the ``500``) and an
-        ``HTTPException(500)`` is raised.
-    Invariants: when provisioning fails and the compensating delete succeeds,
-        no team row remains in Postgres without corresponding infrastructure.
-        The delete is best-effort, so a rollback failure is logged but the row
-        may remain — see Postconditions.
-    """
-    team = _store.create_team(name=req.name, description=req.description)
-    try:
-        provision_team(team.team_id)
-    except Exception as exc:
-        logger.exception(
-            "Failed to provision infrastructure for team %s; rolling back team row",
-            team.team_id,
-        )
-        try:
-            _store.delete_team(team.team_id)
-        except Exception:
-            # Best-effort: a rollback failure must not swallow the 500 below
-            # or hide the original provisioning error from the caller.
-            logger.exception(
-                "Failed to roll back team row for team %s after provisioning failure",
-                team.team_id,
-            )
-        raise HTTPException(
-            status_code=500, detail="Failed to provision team infrastructure."
-        ) from exc
-    return CreateTeamResponse(
-        team_id=team.team_id,
-        name=team.name,
-        description=team.description,
-        created_at=team.created_at,
-    )
-
-
-@app.get("/teams", response_model=list[TeamSummary])
-def list_teams():
-    """List all agentic teams.
-
-    Preconditions: none.
-    Postconditions: ``200`` with a ``TeamSummary`` for every persisted team, in the
-        store's default order; an empty list if no teams exist.
-    """
-    rows = _store.list_teams()
-    return [TeamSummary(**r) for r in rows]
-
-
-@app.get("/teams/{team_id}", response_model=TeamDetailResponse)
-def get_team(team_id: str):
-    """Retrieve a single agentic team by id.
-
-    Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with the full ``TeamDetailResponse`` when the team
-        exists; ``404`` if no team with the given id is found.
-    """
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    return TeamDetailResponse(team=team)
-
-
-# ---------------------------------------------------------------------------
-# Team agents pool
-# ---------------------------------------------------------------------------
-
-
-@app.get("/teams/{team_id}/agents", response_model=list[EnrichedRosterAgent])
-def list_team_agents(team_id: str):
-    """Named agents pool (roster) for this team.
-
-    Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with the team's roster as a list of
-        ``EnrichedRosterAgent`` (thin refs plus persona fields resolved from each
-        agent's ``manifest_id``; empty if no agents have been added yet); ``404``
-        if the team is not found.
-    Invariants: none.
-    """
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    return [enrich_roster_agent(a) for a in team.agents]
-
-
-@app.get("/teams/{team_id}/agents/manifests", response_model=GeneratedManifestsResponse)
-def list_team_agent_manifests(team_id: str):
-    """Generated agent_registry manifests (with the cognition core stamped) for the roster.
-
-    Each **generated** roster agent is rendered into a validated ``AgentManifest``
-    carrying the batteries-included ``cognition`` block; nothing is written to the
-    registry's manifest discovery paths. A **registry-source** agent (added via Agent
-    Studio's from-registry endpoint) instead returns its *original* registry manifest
-    so the advertised id is the one that actually resolves for the Agent Console /
-    ``/api/agents/{id}/invoke``.
-
-    Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with one manifest per roster agent — a generated agent's
-        stamped wrapper, or a registry-source agent's *original* registry manifest;
-        a registry-source agent whose manifest no longer resolves in this process is
-        **omitted** rather than advertised with a synthetic generated id this team
-        never registered (which would 404 on invoke). ``404`` if the team is unknown.
-    """
-    # ``get_registry`` is imported inline (not at module top) so the test suite's
-    # ``monkeypatch.setattr("agent_registry.get_registry", …)`` is resolved at call
-    # time — a top-level ``from agent_registry import get_registry`` would bind the
-    # name before the patch and bypass the fake registry.
-    from agent_registry import get_registry
-
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    registry = get_registry()
-    manifests = []
-    for a in team.agents:
-        if a.source == SOURCE_REGISTRY:
-            # Advertise only the original, resolvable registry manifest; if it no
-            # longer resolves here, omit the agent rather than fabricate an
-            # unresolvable wrapper id.
-            original = registry.get(a.manifest_id) if a.manifest_id else None
-            if original is not None:
-                manifests.append(original)
-            continue
-        existing = registry.get(a.manifest_id) if a.manifest_id else None
-        if existing is not None:
-            manifests.append(existing)
-        else:
-            manifests.append(build_agent_manifest(team_id, a.agent_name))
-    return GeneratedManifestsResponse(team_id=team_id, manifests=manifests)
-
-
-@app.get("/teams/{team_id}/roster/validation", response_model=RosterValidationResult)
-def validate_team_roster(team_id: str):
-    """Validate whether the roster fully covers the team's process needs.
-
-    Runs every process's step/agent requirements against the roster (each
-    referenced agent must exist and be assigned), flags roster agents unused by
-    any process, and flags agents whose profile is too sparse (missing most of
-    skills/capabilities/tools/expertise) — see ``roster_validation.validate_roster``.
-
-    Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with a ``RosterValidationResult`` summarizing
-        coverage gaps (empty ``gaps`` and ``is_fully_staffed=True`` when the
-        roster fully covers every process); ``404`` if the team is not found.
-    Invariants: none — a read-only check, no roster or process state changes.
-    """
-    from agent_team_studio.agentic_team_provisioning.roster_validation import validate_roster
-
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    return validate_roster(team)
-
-
-def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
-    """Project a registry ``AgentManifest`` into a thin roster ref (Agent Studio §5.3).
-
-    Preconditions: ``manifest`` is a registered manifest with non-empty ``id`` and
-        ``name``.
-    Postconditions: returns an ``AgenticTeamAgent`` with only ``agent_name``,
-        ``source == "registry"``, and ``manifest_id == manifest.id``. Persona
-        fields are resolved at read time via ``enrich_roster_agent`` /
-        ``resolve_persona``.
-    """
-    if not (manifest.name and manifest.name.strip()):
-        raise ValueError("manifest.name must be non-empty")
-    if not manifest.id:
-        raise ValueError("manifest.id must be set")
-    return AgenticTeamAgent(
-        agent_name=manifest.name,
-        source=SOURCE_REGISTRY,
-        manifest_id=manifest.id,
-    )
-
-
-def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> None:
-    """Best-effort: drop a generated agent's stale in-process manifest from the registry.
-
-    Called (as an ``on_replaced`` / ``on_deleted`` hook) under the store's team-row
-    lock when a *generated* roster agent is removed or replaced, so the Agent Console
-    catalog / ``/api/agents/{id}/invoke`` route stop resolving it. Running under the
-    lock serializes it with the chat-save register, closing the re-add/replace races.
-
-    Preconditions: ``agent.source == SOURCE_GENERATED`` (caller checks); invoked
-        within the locked roster mutation that removes/replaces the row.
-    Postconditions: the agent's generated manifest is unregistered if present. A
-        registry failure is logged, **never raised** — so this best-effort cleanup
-        can neither 500 the request nor roll back the committed roster mutation.
-        (Chat-save registration via ``register_team_manifests`` is fail-closed
-        instead; cleanup hooks stay best-effort so a transient unregister blip
-        cannot undo a successful delete/replace.)
-    """
-    try:
-        # ``get_registry`` stays inline so tests' ``monkeypatch`` of
-        # ``agent_registry.get_registry`` resolves at call time (see
-        # ``list_team_agent_manifests``).
-        from agent_registry import get_registry
-
-        get_registry().unregister(agent.manifest_id)
-    except Exception:
-        logger.warning(
-            "Failed to unregister stale generated manifest for agent %s in team %s",
-            agent.agent_name,
-            team_id,
-            exc_info=True,
-        )
-
-
-def _generated_manifest_cleanup(team_id: str) -> Callable[[Optional[AgenticTeamAgent]], None]:
-    """Build the registry-cleanup hook shared by the add (``on_replaced``) and delete
-    (``on_deleted``) routes.
-
-    Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: returns a callback that, run under the store's team lock with the
-        row a roster mutation removed/replaced (``None`` for a plain insert),
-        unregisters that row's stale manifest **iff** it was generated. Registry-source
-        rows and ``None`` are left untouched. The callback is best-effort (non-raising).
-    """
-
-    def _cleanup(prior: Optional[AgenticTeamAgent]) -> None:
-        if prior is not None and prior.source == SOURCE_GENERATED:
-            _unregister_generated_manifest(team_id, prior)
-
-    return _cleanup
-
-
-@app.post(
-    "/teams/{team_id}/agents/from-registry", response_model=EnrichedRosterAgent, status_code=201
-)
-def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
-    """Add a registered agent to the team roster as a thin ref linked to its manifest.
-
-    Re-adding the same manifest updates that roster entry in place. If this replaces a
-    *generated* agent of the same name, that generated agent's stale in-process
-    manifest is unregistered (the new entry is registry-source and resolves on its
-    own) — the cleanup runs in the store's locked transaction against the row actually
-    replaced, so it can't race a concurrent chat-save's register.
-
-    Preconditions: ``req.manifest_id`` is non-empty (enforced by the request model).
-    Postconditions: ``201`` with the thin roster ref persisted and an enriched response
-        (persona joined from the manifest at read time);
-        ``404`` if the team or the manifest id is unknown (roster unchanged); ``409``
-        if the manifest is a *generated* roster agent (any team's — see below; roster
-        unchanged); ``422`` if the resolved manifest is too malformed to project (e.g.
-        blank name/id), so a bad registry entry surfaces as a client error rather than
-        an unhandled 500; ``503`` if the registry lookup itself fails (e.g. the
-        registry is unavailable), so an outage surfaces as a clear service-unavailable
-        response rather than an opaque 500.
-    """
-    from agent_registry import get_registry
-
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    try:
-        manifest = get_registry().get(req.manifest_id)
-    except Exception as e:
-        logger.warning("Registry lookup failed for manifest %s: %s", req.manifest_id, e)
-        raise HTTPException(status_code=503, detail="Agent registry unavailable")
-    if manifest is None:
-        raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
-    # Reject adding a *generated* roster manifest via the registry. Generated agents
-    # are registered in-process (so they surface in the catalog) but are ephemeral and
-    # roster-owned: ``register_team_manifests`` (un)registers them as their team's
-    # roster changes. Projecting one back here creates a registry-source row whose
-    # ``manifest_id`` the owning team can later unregister — leaving a roster entry
-    # whose manifest no longer resolves for the catalog / invoke route. This is true
-    # both for *this* team's own generated agent (already on the roster in generated
-    # form with the same deterministic ``manifest_id``) AND for another team's
-    # generated agent (it would dangle the moment that team drops the agent). Classify
-    # on the ``"generated"`` tag — the same marker ``register_team_manifests`` uses — so
-    # a hand-authored registry agent (real catalog entry, e.g. the same-name swap flow)
-    # is unaffected.
-    if is_generated_manifest(manifest):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Agent '{manifest.name}' is a generated team agent; generated agents "
-                "are managed on their team's roster and cannot be added from the registry."
-            ),
-        )
-    try:
-        agent = _roster_agent_from_manifest(manifest)
-    except (ValueError, ValidationError) as e:
-        logger.warning(
-            "Malformed registered manifest %s for team %s: %s", req.manifest_id, team_id, e
-        )
-        raise HTTPException(status_code=422, detail=f"Malformed agent manifest: {e}")
-    _store.add_or_replace_team_agent(
-        team_id, agent, on_replaced=_generated_manifest_cleanup(team_id)
-    )
-    return enrich_roster_agent(agent)
-
-
-@app.delete("/teams/{team_id}/agents/{agent_name:path}", status_code=204)
-def remove_agent_from_roster(team_id: str, agent_name: str):
-    """Remove a single agent from the team roster by name (§5.3).
-
-    The ``:path`` converter lets roster names that contain ``/`` (e.g.
-    "Backend — API/OpenAPI Specialist") match instead of 404-ing on the slash. If the
-    removed agent was **generated** (installed into the live registry via the LLM save
-    path's ``register_team_manifests``), its in-process manifest is also unregistered
-    so catalog/invoke consumers stop resolving it — run under the team lock before the
-    delete commits, so a concurrent chat-save can't re-add+register the same
-    deterministic id in the gap. Registry-source agents are left in the registry, since
-    they exist there independently of this team.
-
-    Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
-    Postconditions: ``204`` and the named agent removed from the roster; ``404`` when
-        the team is unknown or no roster entry has that name (roster unchanged).
-    """
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    deleted = _store.delete_team_agent(
-        team_id, agent_name, on_deleted=_generated_manifest_cleanup(team_id)
-    )
-    if deleted is None:
-        raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
-    return Response(status_code=204)
-
-
-@app.put("/teams/{team_id}/agents/{agent_name:path}", response_model=EnrichedRosterAgent)
-def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
-    """Inline roster edit endpoint (legacy contract).
-
-    Persona fields now live on ``AgentManifest``; roster rows are thin refs only.
-    Any request that supplies persona fields is rejected. An empty body is a no-op
-    that returns the current enriched agent.
-
-    Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
-    Postconditions: ``200`` with the enriched agent when the body is empty;
-        ``400`` when any persona field is supplied; ``404`` if the team or agent
-        is unknown (roster unchanged).
-    """
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-
-    if req.model_dump(exclude_unset=True):
-        raise HTTPException(
-            status_code=400,
-            detail="Roster persona edits are not supported; AgentManifest is the source of truth",
-        )
-
-    current = next((a for a in team.agents if a.agent_name == agent_name), None)
-    if current is None:
-        raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
-    return enrich_roster_agent(current)
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +407,7 @@ def recommend_agents_for_step(process_id: str, step_id: str):
 
     Scoring is a simple token-overlap heuristic, not semantic matching:
     lowercased words (length > 2) from the step's ``name``/``description`` are
-    intersected against each roster agent's combined
+    intersected against each roster agent's Manifest-resolved
     skills/capabilities/tools/expertise; the overlap *count* is the
     ``match_score``. Agents with zero overlap are omitted entirely, and the
     remaining ones are sorted by descending score and capped to the top 10.
@@ -849,188 +467,6 @@ def recommend_agents_for_step(process_id: str, step_id: str):
         step_name=step.name,
         recommended_agents=recommendations[:10],
     )
-
-
-# ---------------------------------------------------------------------------
-# Conversations (chat-based process design)
-# ---------------------------------------------------------------------------
-
-
-def _build_state_response(
-    conversation_id: str,
-    team_id: str,
-    process: Optional[ProcessDefinition],
-    suggested_questions: list[str],
-) -> ConversationStateResponse:
-    messages = _store.get_messages(conversation_id)
-    return ConversationStateResponse(
-        conversation_id=conversation_id,
-        team_id=team_id,
-        messages=messages,
-        current_process=process,
-        suggested_questions=suggested_questions,
-    )
-
-
-@app.post("/conversations", response_model=ConversationStateResponse)
-def create_conversation(req: CreateConversationRequest):
-    """Start a new conversation for a team, optionally seeded with an initial message.
-
-    Preconditions: ``req.team_id`` refers to an existing team.
-    Postconditions: ``200`` with the conversation's state; ``404`` if the team is
-        unknown (nothing persisted). When ``req.initial_message`` is given, the
-        user/assistant chat turn is appended to the store *before* the LLM's
-        roster is saved via ``_save_agents_from_llm``; if that save fails because
-        the agent registry is unavailable, this raises ``503`` instead of an
-        opaque ``500`` — but the conversation is left with the chat turn already
-        persisted and the roster/registry write rolled back (partial state). A
-        client retrying the same message re-processes it against a conversation
-        that already contains the prior turn.
-    """
-    # Validate team exists
-    team = _store.get_team(req.team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-
-    conversation_id = _store.create_conversation(team_id=req.team_id)
-
-    if req.initial_message:
-        _store.append_message(conversation_id, "user", req.initial_message)
-
-        existing_agents = _chat_context_agents(req.team_id)
-
-        reply, process, suggestions, agents_data = _agent.respond(
-            conversation_history=[],
-            current_process=None,
-            user_message=req.initial_message,
-            current_agents=existing_agents,
-        )
-
-        _store.append_message(conversation_id, "assistant", reply)
-        try:
-            _save_agents_from_llm(req.team_id, agents_data)
-        except Exception as e:
-            logger.warning(
-                "Roster save failed for team %s after conversation %s turn: %s",
-                req.team_id,
-                conversation_id,
-                e,
-            )
-            raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
-        if process:
-            _store.save_process(req.team_id, process)
-            _store.set_conversation_process(conversation_id, process.process_id)
-            _after_process_saved(req.team_id, process)
-
-        return _build_state_response(conversation_id, req.team_id, process, suggestions)
-
-    # No initial message — just add the greeting
-    _store.append_message(conversation_id, "assistant", GREETING)
-    return _build_state_response(conversation_id, req.team_id, None, DEFAULT_SUGGESTIONS)
-
-
-@app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
-def send_message(conversation_id: str, req: SendMessageRequest):
-    """Send a user message on an existing conversation and get the assistant's reply.
-
-    Preconditions: ``conversation_id`` refers to an existing conversation.
-    Postconditions: ``200`` with the conversation's updated state; ``404`` if the
-        conversation is unknown (nothing persisted). The user/assistant chat turn
-        is appended to the store *before* the LLM's roster is saved via
-        ``_save_agents_from_llm``; if that save fails because the agent registry
-        is unavailable, this raises ``503`` instead of an opaque ``500`` — but the
-        conversation is left with the chat turn already persisted and the
-        roster/registry write rolled back (partial state). A client retrying the
-        same message re-processes it against a conversation that already contains
-        the prior turn.
-    """
-    team_id = _store.get_conversation_team_id(conversation_id)
-    if not team_id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    process_id = _store.get_conversation_process_id(conversation_id)
-    current_process = _store.get_process(process_id) if process_id else None
-
-    existing_agents = _chat_context_agents(team_id)
-
-    existing_messages = _store.get_messages(conversation_id)
-    history = [(m.role, m.content) for m in existing_messages]
-
-    _store.append_message(conversation_id, "user", req.message)
-
-    reply, updated_process, suggestions, agents_data = _agent.respond(
-        conversation_history=history,
-        current_process=current_process,
-        user_message=req.message,
-        current_agents=existing_agents,
-    )
-
-    _store.append_message(conversation_id, "assistant", reply)
-    try:
-        _save_agents_from_llm(team_id, agents_data)
-    except Exception as e:
-        logger.warning(
-            "Roster save failed for team %s after conversation %s turn: %s",
-            team_id,
-            conversation_id,
-            e,
-        )
-        raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
-
-    effective_process = current_process
-    if updated_process:
-        _store.save_process(team_id, updated_process)
-        _store.set_conversation_process(conversation_id, updated_process.process_id)
-        effective_process = updated_process
-        _after_process_saved(team_id, updated_process)
-
-    return _build_state_response(conversation_id, team_id, effective_process, suggestions)
-
-
-@app.put("/conversations/{conversation_id}/process")
-def set_conversation_process(conversation_id: str, req: SetConversationProcessRequest):
-    """Link a process to the active conversation so chat stays in sync with the visual editor.
-
-    Preconditions: ``req.process_id`` is non-empty (enforced by the request model;
-        a missing/blank value is a ``422`` before this handler runs).
-    Postconditions: ``200`` with the linked ``conversation_id``/``process_id`` pair;
-        ``404`` if the conversation or the process is unknown (link unchanged); ``403``
-        if the process belongs to a different team than the conversation (link
-        unchanged) — a conversation may only be linked to its own team's processes.
-    """
-    team_id = _store.get_conversation_team_id(conversation_id)
-    if not team_id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    process = _store.get_process(req.process_id)
-    if not process:
-        raise HTTPException(status_code=404, detail="Process not found")
-    if _store.get_process_team_id(req.process_id) != team_id:
-        raise HTTPException(
-            status_code=403, detail="Process does not belong to this conversation's team"
-        )
-    _store.set_conversation_process(conversation_id, req.process_id)
-    return {"conversation_id": conversation_id, "process_id": req.process_id}
-
-
-@app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
-def get_conversation(conversation_id: str):
-    team_id = _store.get_conversation_team_id(conversation_id)
-    if not team_id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    process_id = _store.get_conversation_process_id(conversation_id)
-    process = _store.get_process(process_id) if process_id else None
-
-    return _build_state_response(conversation_id, team_id, process, [])
-
-
-@app.get("/teams/{team_id}/conversations", response_model=list[ConversationSummaryResponse])
-def list_conversations(team_id: str):
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    rows = _store.list_conversations(team_id)
-    return [ConversationSummaryResponse(**r) for r in rows]
 
 
 @app.get("/teams/{team_id}/agent-environments", response_model=List[AgentEnvProvisionSummary])
@@ -1301,462 +737,28 @@ def delete_team_form_record(team_id: str, form_key: str, record_id: str):
         raise HTTPException(status_code=404, detail="Record not found")
 
 
-# ---------------------------------------------------------------------------
-# Interactive Testing Mode
-# ---------------------------------------------------------------------------
-
-
-@app.put("/teams/{team_id}/mode")
-def set_team_mode(team_id: str, req: SetTeamModeRequest):
-    """Toggle team between development and testing mode."""
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    _test_store.set_team_mode(team_id, req.mode.value)
-    return {"team_id": team_id, "mode": req.mode.value}
-
-
-# ---------------------------------------------------------------------------
-# Agent Chat Testing
-# ---------------------------------------------------------------------------
-
-
-def _find_agent_in_roster(team_id: str, agent_name: str) -> AgenticTeamAgent:
-    """Look up an agent by name in the team roster."""
-    agents = _store.list_team_agents(team_id)
-    for a in agents:
-        if a.agent_name == agent_name:
-            return a
-    raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found in team roster")
-
-
-@app.post("/teams/{team_id}/test-chat/sessions", response_model=TestChatSession, status_code=201)
-def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
-    """Create a new chat test session for an agent."""
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    _find_agent_in_roster(team_id, req.agent_name)
-    session_id = str(uuid.uuid4())
-    row = _test_store.create_chat_session(session_id, team_id, req.agent_name)
-    return TestChatSession(**row)
-
-
-@app.get("/teams/{team_id}/test-chat/sessions", response_model=List[TestChatSession])
-def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
-    """List chat test sessions for a team, optionally filtered by agent.
-
-    Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with a ``TestChatSession`` for each session belonging
-        to ``team_id`` (filtered to ``agent_name`` when given); ``404`` if
-        ``team_id`` is unknown, consistent with the sibling test-chat endpoints.
-    """
-    _get_team_or_404(team_id)
-    rows = _test_store.list_chat_sessions(team_id, agent_name=agent_name)
-    return [TestChatSession(**r) for r in rows]
-
-
-@app.get("/teams/{team_id}/test-chat/sessions/{session_id}", response_model=TestChatSessionDetail)
-def get_test_chat_session(team_id: str, session_id: str):
-    """Get a chat session with full message history and suggested prompts.
-
-    Preconditions: ``team_id`` and ``session_id`` are non-empty strings.
-    Postconditions: ``200`` with the session, its messages, and starter prompts
-        (only generated when the session has no messages yet); ``404`` if the
-        session doesn't exist or belongs to a different team. If starter-prompt
-        generation raises a 404 because the session's agent isn't on the
-        roster, or ``LookupError`` because the linked Manifest is missing
-        (orphan ``manifest_id``), the prompts list is empty rather than failing
-        the request; any other failure (e.g. a registry 500) propagates instead
-        of being swallowed.
-    """
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    messages = _test_store.list_chat_messages(session_id)
-    session = TestChatSession(**session_row)
-
-    # Generate suggested prompts if no messages yet
-    prompts: list[str] = []
-    if not messages:
-        try:
-            agent_def = _find_agent_in_roster(team_id, session.agent_name)
-            persona = resolve_persona(agent_def.manifest_id)
-            prompts = generate_starter_prompts(
-                agent_def.agent_name, persona.role, persona.skills, persona.expertise
-            )
-        except LookupError as exc:
-            # Orphan manifest_id: soft-fail like list enrichment — empty prompts,
-            # not a 500 on an otherwise-valid session GET.
-            logger.warning(
-                "Could not generate starter prompts for session %s (agent=%s): %s",
-                session_id,
-                session.agent_name,
-                exc,
-            )
-        except HTTPException as exc:
-            # Only the genuine "agent not on roster" case falls back to an empty
-            # prompt list. Anything else (e.g. a registry 500) is a real failure
-            # worth surfacing to the caller, not silently swallowing.
-            if exc.status_code != 404:
-                raise
-            logger.warning(
-                "Could not generate starter prompts for session %s (agent=%s): %s",
-                session_id,
-                session.agent_name,
-                exc.detail,
-            )
-
-    return TestChatSessionDetail(
-        session=session,
-        messages=[TestChatMessage(**m) for m in messages],
-        suggested_prompts=prompts,
-    )
-
-
-@app.put("/teams/{team_id}/test-chat/sessions/{session_id}/name")
-def rename_test_chat_session(team_id: str, session_id: str, req: RenameTestChatSessionRequest):
-    """Rename a chat test session."""
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-    _test_store.rename_chat_session(session_id, req.session_name)
-    return {"session_id": session_id, "session_name": req.session_name}
-
-
-@app.delete("/teams/{team_id}/test-chat/sessions/{session_id}", status_code=204)
-def delete_test_chat_session(team_id: str, session_id: str):
-    """Delete a chat test session and its messages."""
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-    _test_store.delete_chat_session(session_id)
-
-
-@app.post("/teams/{team_id}/test-chat/sessions/{session_id}/messages")
-def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessageRequest):
-    """Send a message to an agent and get a synchronous response.
-
-    The full conversation history is sent to the agent for multi-turn context.
-
-    Preconditions: ``team_id``/``session_id`` refer to an existing session;
-        ``req.content`` is non-empty (enforced by the request model).
-    Postconditions: ``200`` with the session and its full message list,
-        including the new user/assistant turn; ``404`` if the session is
-        unknown or belongs to a different team; ``502`` if the agent
-        invocation fails. The user and assistant messages are persisted
-        together as a single turn only after the agent call succeeds, so a
-        failed invocation leaves no orphaned user message for a retry to
-        duplicate.
-    """
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    agent_name = session_row["agent_name"]
-    agent_def = _find_agent_in_roster(team_id, agent_name)
-
-    # Build conversation context from history plus the pending message. The
-    # user message isn't persisted yet, so it's appended directly here rather
-    # than read back from the store.
-    history = _test_store.list_chat_messages(session_id)
-    context_parts = []
-    for msg in history:
-        prefix = "User" if msg["role"] == "user" else "Assistant"
-        context_parts.append(f"{prefix}: {msg['content']}")
-    context_parts.append(f"User: {req.content}")
-    full_context = "\n\n".join(context_parts)
-
-    # Build and invoke the agent. This local test-chat path has no cognition
-    # injector (no proxy / open side channel) and no idempotency ledger, so it
-    # uses the plain runtime rather than the cognition-aware wrapper — advisory
-    # rules + memory digest are rendered on the gated sandbox invoke path, where
-    # the shim opens the channel.
-    try:
-        persona = resolve_persona(agent_def.manifest_id)
-        agent_instance = _build_test_agent(
-            agent_def.agent_name,
-            persona.role,
-            persona.skills,
-            persona.capabilities,
-            persona.tools,
-            persona.expertise,
-        )
-        response_text = _call_test_agent(agent_instance, full_context)
-    except Exception as exc:
-        logger.exception("Agent invocation failed for test-chat session %s", session_id)
-        raise HTTPException(status_code=502, detail="Agent invocation failed") from exc
-
-    # Persist the user and assistant messages together as a complete turn.
-    user_msg_id = str(uuid.uuid4())
-    _test_store.create_chat_message(user_msg_id, session_id, "user", req.content)
-    asst_msg_id = str(uuid.uuid4())
-    _test_store.create_chat_message(asst_msg_id, session_id, "assistant", response_text)
-
-    # Return all messages
-    all_messages = _test_store.list_chat_messages(session_id)
-    return {
-        "session": TestChatSession(**session_row),
-        "messages": [TestChatMessage(**m) for m in all_messages],
-    }
-
-
-@app.get("/teams/{team_id}/test-chat/sessions/{session_id}/export")
-def export_test_chat_session(team_id: str, session_id: str):
-    """Export a chat session transcript as Markdown text."""
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    messages = _test_store.list_chat_messages(session_id)
-    agent_name = session_row["agent_name"]
-    session_name = session_row.get("session_name") or f"Chat with {agent_name}"
-
-    lines = [f"# {session_name}", f"Agent: {agent_name}", ""]
-    for msg in messages:
-        role_label = "**User**" if msg["role"] == "user" else f"**{agent_name}**"
-        rating_str = ""
-        if msg.get("rating"):
-            rating_str = " \u2705" if msg["rating"] == "thumbs_up" else " \u274c"
-        lines.append(f"{role_label}{rating_str}:")
-        lines.append(msg["content"])
-        lines.append("")
-
-    return Response(
-        content="\n".join(lines),
-        media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{session_id}.md"'},
-    )
-
-
-@app.put("/teams/{team_id}/test-chat/messages/{message_id}/rating")
-def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageRequest):
-    """Rate an assistant message (thumbs up/thumbs down)."""
-    if not _test_store.update_message_rating(team_id, message_id, req.rating.value):
-        raise HTTPException(status_code=404, detail="Message not found")
-    return {"message_id": message_id, "rating": req.rating.value}
-
-
-@app.get("/teams/{team_id}/test-chat/quality-scores", response_model=List[AgentQualityScore])
-def get_agent_quality_scores(team_id: str):
-    """Get aggregated quality scores per agent based on chat ratings."""
-    _get_team_or_404(team_id)
-    rows = _test_store.get_agent_quality_scores(team_id)
-    return [AgentQualityScore(**r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Pipeline Testing (End-to-End Walkthrough)
-# ---------------------------------------------------------------------------
-
-
-def _temporal_enabled() -> bool:
-    """Return whether Temporal dispatch is active (``TEMPORAL_ADDRESS`` set).
-
-    Preconditions: none.
-    Postconditions: ``True`` iff ``shared.temporal`` is importable and reports Temporal
-        enabled; ``False`` if Temporal is disabled or ``shared.temporal`` is absent (so
-        the daemon-thread path is always reachable).
-    """
-    try:
-        from shared.temporal import is_temporal_enabled
-    except ImportError:
-        return False
-    return is_temporal_enabled()
-
-
-def _dispatch_pipeline_run(
-    run_id: str,
-    team_agents: list[AgenticTeamAgent],
-    process_def: ProcessDefinition,
-    initial_input: Optional[str],
-    *,
-    temporal_owned: bool,
-) -> str:
-    """Dispatch a pipeline run via Temporal when enabled, else a daemon thread.
-
-    Preconditions:
-        - ``run_id`` refers to a run already created in the store with
-          ``temporal_owned`` set to the same value passed here.
-        - ``temporal_owned`` is the single ``_temporal_enabled()`` reading the caller
-          used for the run's stored flag — computed once and passed in, never
-          recomputed here, so the dispatch path can't diverge from what was persisted
-          if Temporal availability changes between the two checks.
-
-    Postconditions:
-        - Starts exactly one execution path, selected by ``temporal_owned``, and
-          returns its label ("Temporal" or "thread"). When true the run is started as
-          a durable ``AgenticPipelineWorkflow``; otherwise the legacy daemon-thread
-          path runs unchanged.
-        - Any failure while starting the workflow propagates to the caller, which marks
-          the run FAILED — a Temporal-enabled run is never silently downgraded.
-    """
-    if temporal_owned:
-        from agent_team_studio.agentic_team_provisioning.temporal.start_workflow import (
-            start_agentic_pipeline_workflow,
-        )
-
-        team_agents_json = [a.model_dump(mode="json") for a in team_agents]
-        process_json = process_def.model_dump(mode="json")
-        start_agentic_pipeline_workflow(run_id, team_agents_json, process_json, initial_input)
-        return "Temporal"
-
-    _pipeline_runner.start_run(run_id, team_agents, process_def)
-    return "thread"
-
-
-@app.post("/teams/{team_id}/test-pipeline/runs", response_model=TestPipelineRun, status_code=201)
-def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
-    """Start an end-to-end pipeline test run."""
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-
-    # Find the process
-    process = None
-    for p in team.processes:
-        if p.process_id == req.process_id:
-            process = p
-            break
-    if process is None:
-        raise HTTPException(status_code=404, detail="Process not found")
-
-    # Build ProcessDefinition from stored data
-    process_def = (
-        process if isinstance(process, ProcessDefinition) else ProcessDefinition(**process)
-    )
-
-    # Gather team agents
-    team_agents_raw = _store.list_team_agents(team_id)
-    team_agents = [
-        a if isinstance(a, AgenticTeamAgent) else AgenticTeamAgent(**a) for a in team_agents_raw
-    ]
-
-    temporal_owned = _temporal_enabled()
-    run_id = str(uuid.uuid4())
-    run_row = _test_store.create_pipeline_run(
-        run_id, team_id, req.process_id, req.initial_input, temporal_owned=temporal_owned
-    )
-
-    try:
-        dispatch_method = _dispatch_pipeline_run(
-            run_id, team_agents, process_def, req.initial_input, temporal_owned=temporal_owned
-        )
-    except Exception as exc:
-        logger.exception("Failed to dispatch agentic pipeline run %s", run_id)
-        _test_store.try_fail_pipeline_run(run_id, f"Dispatch failed: {exc}")
-        raise HTTPException(status_code=500, detail="Failed to start pipeline run.") from exc
-    logger.info("Agentic pipeline run %s dispatched via %s", run_id, dispatch_method)
-
-    return TestPipelineRun(**run_row)
-
-
-@app.get("/teams/{team_id}/test-pipeline/runs", response_model=List[TestPipelineRun])
-def list_pipeline_runs(team_id: str):
-    """List pipeline test runs for a team."""
-    _get_team_or_404(team_id)
-    rows = _test_store.list_pipeline_runs(team_id)
-    return [TestPipelineRun(**r) for r in rows]
-
-
-@app.get("/teams/{team_id}/test-pipeline/runs/{run_id}", response_model=TestPipelineRun)
-def get_pipeline_run(team_id: str, run_id: str):
-    """Get the current status and step results of a pipeline test run."""
-    row = _test_store.get_pipeline_run(run_id)
-    if not row or row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-    return TestPipelineRun(**row)
-
-
-@app.post("/teams/{team_id}/test-pipeline/runs/{run_id}/input")
-def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputRequest):
-    """Submit human input at a WAIT step to resume the pipeline."""
-    row = _test_store.get_pipeline_run(run_id)
-    if not row or row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-    if row["status"] != "waiting_for_input":
-        raise HTTPException(status_code=400, detail="Pipeline is not waiting for input")
-
-    if _test_store.is_pipeline_run_temporal_owned(run_id):
-        # Temporal-owned run. Do the authoritative resume transition synchronously here
-        # (mirroring the thread path's compare-and-swap) BEFORE waking the workflow, then
-        # deliver the answer as a signal:
-        #   * The CAS flips waiting_for_input -> running and persists the input, so the
-        #     /input contract holds — the response (and the caller's next poll) no longer
-        #     shows waiting_for_input, and the same WAIT question is not re-surfaced.
-        #   * Exactly one concurrent submit wins the CAS; a duplicate loses with a 409
-        #     instead of a second signal overwriting the first answer.
-        #   * A cancel that already moved the row terminal makes the CAS a no-op -> 409,
-        #     so a resume can never revive a cancelled run.
-        # The CAS durably records the resume; the workflow's wait_finalize_activity reads
-        # the outcome from the store, so the signal below is only a best-effort *wake* to
-        # resume promptly. If it fails (Temporal client down), the row is already
-        # ``running`` with the input persisted, and the workflow reconciles it at the WAIT
-        # timeout — so the run never gets stuck. We therefore do NOT 500 here (that would
-        # contradict the already-committed running row); we log and return the updated row.
-        from agent_team_studio.agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
-        from shared.temporal import signal_workflow_sync
-
-        if not _test_store.try_resume_pipeline_run_temporal(run_id, req.input):
-            raise HTTPException(
-                status_code=409,
-                detail="Pipeline run is no longer resumable (it timed out, was cancelled, "
-                "or was reaped). Start a new run.",
-            )
-        try:
-            signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}", "submit_input", req.input)
-        except Exception:
-            logger.warning(
-                "Failed to signal agentic pipeline run %s; the resume is durably recorded "
-                "and will be reconciled at the WAIT timeout",
-                run_id,
-                exc_info=True,
-            )
-        updated = _test_store.get_pipeline_run(run_id)
-        return TestPipelineRun(**(updated or row))
-
-    # The terminal transition is decided by a DB compare-and-swap, so this is race-free
-    # even if the run timed out or was reaped between the read above and here — and it
-    # works regardless of which worker owns the run's thread. A False return means the
-    # run left waiting_for_input first (lost the race): report a conflict.
-    if not _pipeline_runner.submit_human_input(run_id, req.input):
-        raise HTTPException(
-            status_code=409,
-            detail="Pipeline run is no longer resumable (it timed out, was cancelled, "
-            "or was reaped). Start a new run.",
-        )
-    updated = _test_store.get_pipeline_run(run_id)
-    return TestPipelineRun(**(updated or row))
-
-
-@app.post("/teams/{team_id}/test-pipeline/runs/{run_id}/cancel")
-def cancel_pipeline_run(team_id: str, run_id: str):
-    """Cancel a running or waiting pipeline test run."""
-    row = _test_store.get_pipeline_run(run_id)
-    if not row or row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-    if row["status"] not in ("running", "waiting_for_input"):
-        raise HTTPException(status_code=400, detail="Pipeline is not in a cancellable state")
-
-    if _test_store.is_pipeline_run_temporal_owned(run_id):
-        # Temporal-owned run: flip the store row first (immediate, consistent read for
-        # this response) then request workflow cancellation — its cancel_reconcile
-        # activity is then a CAS no-op. A cancel-signal failure is best-effort: the row
-        # is already cancelled and the workflow will observe it out-of-band.
-        from agent_team_studio.agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
-        from shared.temporal import cancel_workflow_sync
-
-        _test_store.try_cancel_pipeline_run(run_id)
-        try:
-            cancel_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}")
-        except Exception:
-            logger.warning(
-                "Failed to cancel agentic pipeline workflow for run %s", run_id, exc_info=True
-            )
-        updated = _test_store.get_pipeline_run(run_id)
-        return TestPipelineRun(**(updated or row))
-
-    _pipeline_runner.cancel_run(run_id)
-    updated = _test_store.get_pipeline_run(run_id)
-    return TestPipelineRun(**(updated or row))
+# --- Mount extracted routers last (hub + globals already defined) ---
+from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
+    conversations as conversations_routes,
+)
+from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
+    teams as teams_routes,
+)
+from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
+    testing as testing_routes,
+)
+from agent_team_studio.agentic_team_provisioning.api.services.teams import (  # noqa: E402,F401
+    _roster_agent_from_manifest,  # re-export: tests import + monkeypatch via main
+)
+from agent_team_studio.agentic_team_provisioning.api.services.testing import (  # noqa: E402,F401
+    _dispatch_pipeline_run,  # re-export: hub call surface
+    _find_agent_in_roster,  # re-export: tests monkeypatch via main
+    _temporal_enabled,  # re-export: tests monkeypatch via main
+)
+
+_teams_router = teams_routes.router
+_conversations_router = conversations_routes.router
+_testing_router = testing_routes.router
+app.include_router(_teams_router)
+app.include_router(_conversations_router)
+app.include_router(_testing_router)

@@ -391,7 +391,7 @@ def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_clien
     _enable_temporal(
         monkeypatch,
         "start_strategy_lab_batch_workflow",
-        lambda run_id, request: started.append(run_id),
+        lambda run_id, request, generation: started.append((run_id, generation)),
         module=sl_sw,
     )
     thread_ctor = mock.Mock()
@@ -403,7 +403,10 @@ def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_clien
     )
 
     assert resp.status_code == 200
-    assert len(started) == 1 and started[0].startswith("run-")
+    assert len(started) == 1
+    run_id, generation = started[0]
+    assert run_id.startswith("run-")
+    assert generation  # a real fencing generation was threaded through, not None/0
     thread_ctor.assert_not_called()
 
 
@@ -685,7 +688,7 @@ def test_strategy_lab_dispatch_returns_503_on_dispatch_failure(monkeypatch, api_
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
-    def _boom(run_id, request):
+    def _boom(run_id, request, generation):
         raise RuntimeError("Temporal client not available")
 
     monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _boom)
@@ -752,7 +755,7 @@ def test_strategy_lab_dispatch_treats_already_started_workflow_as_success(
 
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
-    def _already_started(run_id, request):
+    def _already_started(run_id, request, generation):
         raise WorkflowAlreadyStartedError(
             workflow_id=f"strategy-lab-{run_id}", run_id="prior-run", workflow_type="X"
         )
@@ -799,6 +802,29 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
+    class _GenerationClient:
+        """Stateful stub: get_job reflects apply_and_get's latest mint, so the
+        restart route's bootstrap check, mint, and pre-dispatch/rollback
+        revalidation reads (all added by generation fencing) see a
+        consistent durable value rather than a fixed, un-mutating one."""
+
+        def __init__(self):
+            self.generation = 1
+
+        def get_job(self, jid):
+            return {"generation": self.generation}
+
+        def apply_and_get(self, jid, **kwargs):
+            self.generation += (kwargs.get("increment") or {}).get("generation", 0)
+            return {"generation": self.generation}
+
+    # A single shared instance: _get_lab_run_job_client() is called multiple
+    # times per request (bootstrap check, mint, pre-dispatch/rollback
+    # revalidation) and each call must observe the same durable state, not
+    # a fresh instance reset back to generation 1.
+    generation_client = _GenerationClient()
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: generation_client)
+
     persisted_calls = []
     monkeypatch.setattr(
         api_main,
@@ -806,7 +832,7 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
         lambda rid, state, **k: persisted_calls.append(state),
     )
 
-    def _already_started(rid, request):
+    def _already_started(rid, request, generation):
         raise WorkflowAlreadyStartedError(
             workflow_id=f"strategy-lab-{rid}", run_id="prior-run", workflow_type="X"
         )
@@ -819,12 +845,21 @@ def test_strategy_lab_restart_returns_409_on_workflow_already_started(
     (run_state,) = api_main._active_runs.values()
     assert run_state["status"] != "failed"
     # The optimistic reset (status "running", contiguous_cycles=0) must be
-    # rolled back to the pre-restart snapshot, not left wedged as "running"
-    # (which would block every future run/resume/restart via
-    # _ensure_no_active_run()).
-    assert run_state is persisted
+    # rolled back to the pre-restart snapshot's status/counters, not left
+    # wedged as "running" (which would block every future run/resume/restart
+    # via _ensure_no_active_run()).
     assert run_state["status"] == "cancelled"
-    assert persisted_calls[-1] is persisted
+    for key, value in persisted.items():
+        if key == "generation":
+            continue
+        assert run_state[key] == value
+    # The freshly minted generation is NOT rolled back with the rest of the
+    # snapshot: the prior workflow was already confirmed terminated, so its
+    # activities must stay fenced out regardless of this dispatch collision
+    # -- reverting to the pre-restart generation would let a still-in-flight
+    # activity from that terminated workflow pass fencing again.
+    assert run_state["generation"] == 2
+    assert persisted_calls[-1] is run_state
 
 
 def test_strategy_lab_restart_returns_409_when_termination_times_out(
@@ -893,7 +928,7 @@ def test_strategy_lab_restart_returns_503_when_termination_fails(monkeypatch, ap
 
     assert resp.status_code == 503
     assert api_main._active_runs == {}  # never written
-    assert persist_calls == []
+    assert persist_calls == []  # never written
 
 
 def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
@@ -944,9 +979,12 @@ def test_rehydrate_active_run_offset_repopulates_from_job_store(monkeypatch) -> 
     from investment_team.strategy_lab import run_state
 
     monkeypatch.setattr(run_state, "active_runs", {})
+    # rehydrate_active_run_offset reads via get_run_state_strict (not the
+    # lenient get_run_state/load_run_from_job_service) -- see its own
+    # docstring for why a durable-read failure must propagate here.
     monkeypatch.setattr(
         run_state,
-        "load_run_from_job_service",
+        "get_run_state_strict",
         lambda rid: {"run_id": rid, "status": "running", "contiguous_cycles": 4},
     )
 
@@ -961,7 +999,7 @@ def test_rehydrate_active_run_offset_defaults_to_zero(monkeypatch) -> None:
     from investment_team.strategy_lab import run_state
 
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
     assert run_state.rehydrate_active_run_offset("missing") == 0
 
@@ -1003,7 +1041,7 @@ def test_get_resume_seed_counters_defaults_for_unknown_run(monkeypatch) -> None:
     from investment_team.strategy_lab import run_state
 
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
     assert run_state.get_resume_seed_counters("missing") == {
         "skipped_cycles": 0,
@@ -1112,9 +1150,18 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     # is ``run_state.load_run_from_job_service`` — patch that (not the api.main alias).
     monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: dict(state))
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
+
+    class _GenerationClient:
+        def get_job(self, jid):
+            return {"job_id": jid, "generation": 1}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _GenerationClient())
+
     started = []
     monkeypatch.setattr(
-        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)
+        sl_sw,
+        "start_strategy_lab_batch_workflow",
+        lambda rid, req, generation: started.append((rid, generation)),
     )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
@@ -1122,7 +1169,9 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     resp = api_client.post("/strategy-lab/runs/run-r/resume")
 
     assert resp.status_code == 200
-    assert started == ["run-r"]
+    # A resume carries the current (durable, generation=1 here) generation
+    # forward unchanged -- confirms the route doesn't drop or hardcode it.
+    assert started == [("run-r", 1)]
     thread_ctor.assert_not_called()
 
 
@@ -1153,9 +1202,35 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     monkeypatch.setattr(api_main, "_persist_run_state", lambda rid, s, **k: persisted.update(s))
     monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
+
+    class _GenerationClient:
+        """Stateful stub: get_job reflects apply_and_get's latest mint, so the
+        restart route's bootstrap check and pre-dispatch revalidation reads
+        (both added by generation fencing) see a consistent durable value
+        rather than a fixed, un-mutating one."""
+
+        def __init__(self):
+            self.generation = 1
+
+        def get_job(self, jid):
+            return {"generation": self.generation}
+
+        def apply_and_get(self, jid, **kwargs):
+            self.generation += (kwargs.get("increment") or {}).get("generation", 0)
+            return {"generation": self.generation}
+
+    # A single shared instance: _get_lab_run_job_client() is called multiple
+    # times per request (bootstrap check, mint, pre-dispatch revalidation)
+    # and each call must observe the same durable state, not a fresh
+    # instance reset back to generation 1.
+    generation_client = _GenerationClient()
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: generation_client)
+
     started = []
     monkeypatch.setattr(
-        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)
+        sl_sw,
+        "start_strategy_lab_batch_workflow",
+        lambda rid, req, generation: started.append((rid, generation)),
     )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
@@ -1163,6 +1238,9 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     resp = api_client.post("/strategy-lab/runs/run-x/restart")
 
     assert resp.status_code == 200
-    assert started == ["run-x"]
+    # Restart mints a fresh generation (1 -> 2 via the stub's atomic
+    # increment) and must thread that exact minted value through to the
+    # dispatched workflow, not drop or hardcode it.
+    assert started == [("run-x", 2)]
     thread_ctor.assert_not_called()
     assert persisted["contiguous_cycles"] == 0  # reset so the activity restarts from 0

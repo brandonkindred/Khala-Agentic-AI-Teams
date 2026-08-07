@@ -1396,7 +1396,7 @@ class TestReviewEndpoint:
     def test_far_future_heartbeat_treated_as_stale_not_live(self, review_app, monkeypatch) -> None:
         """A stamp beyond the clock-skew tolerance in the future is implausible (bad
         clock or corrupt data) — it must NOT count as live, or a dead job would block
-        reviews until that future time passes. Mirrors _answer_wait_heartbeat_fresh."""
+        reviews until that future time passes."""
         from datetime import datetime, timedelta, timezone
 
         api = review_app["api"]
@@ -3261,7 +3261,15 @@ class TestWholeFileReview:
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import ChangeSurface
         from software_engineering_team.github_source import GitHubRepoReader
+
+        monkeypatch.setattr(
+            pr_review,
+            "_build_change_surface_for_reviewable",
+            lambda files_arg, head: ChangeSurface(blocks={}),
+        )
 
         gh = review_app["github"]["client"]
         gh.get_file_contents = lambda o, r, path, ref: "def a():\n    return 1\n"
@@ -3278,7 +3286,7 @@ class TestWholeFileReview:
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Whole-file mode: files mapping passed, pre_numbered off, reader supplied.
+        # Empty surface: fetched path stays in whole-file fallback inputs.
         assert captured["files"] == {"a.py": "def a():\n    return 1\n"}
         assert captured["pre_numbered"] is False
         assert isinstance(captured["repo_reader"], GitHubRepoReader)
@@ -3303,20 +3311,24 @@ class TestWholeFileReview:
         assert captured.get("files") is None
         assert captured["pre_numbered"] is True
         assert captured["code"]  # the hunk-rendered blob
-        # Hunk mode now carries the same "tag pre-existing findings" focus note as
-        # whole-file mode (previously it passed pr.body verbatim, with no tagging
-        # instruction at all) -- see _hunk_review_focus.
+        # Hunk mode carries the same diff-first focus note as whole-file mode.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
         assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
-        # Content assertions beyond the shared prefix: both whole-file and
-        # hunk-mode notes start with REVIEW_FOCUS_NOTE_PREFIX, so that check
-        # alone wouldn't catch _hunk_review_focus regressing into an alias of
-        # _whole_file_focus. Assert on the hunk-specific wording too.
         assert "pre_existing" in captured["task_requirements"]
-        assert "diff hunks" in captured["task_requirements"]
+        assert "Architectural standards" in captured["task_requirements"]
+        assert "diff-first" in captured["task_requirements"].lower()
 
     def test_whole_file_mode_appends_focus_note(self, review_app, monkeypatch) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import ChangeSurface
+
+        monkeypatch.setattr(
+            pr_review,
+            "_build_change_surface_for_reviewable",
+            lambda files_arg, head: ChangeSurface(blocks={}),
+        )
+
         gh = review_app["github"]["client"]  # default: single reviewable file a.py
         gh.get_file_contents = lambda o, r, path, ref: "def a():\n    return 1\n"
         gh.get_repository_tree = lambda o, r, ref, recursive=True: ["a.py"]
@@ -3331,15 +3343,13 @@ class TestWholeFileReview:
         monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
+        # Whole-file mode steers the reviewer with the shared diff-first focus note.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
         assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
-        # Whole-file-specific wording, and NOT the hunk-mode wording -- so a
-        # regression collapsing _whole_file_focus into _hunk_review_focus (or
-        # vice versa) can't hide behind the shared prefix check above.
-        assert "complete file contents" in captured["task_requirements"]
-        assert "diff hunks" not in captured["task_requirements"]
+        assert "pre_existing" in captured["task_requirements"]
+        assert "Architectural standards" in captured["task_requirements"]
+        assert "diff-first" in captured["task_requirements"].lower()
 
     def test_partial_head_fetch_reviews_fetched_subset_whole_and_missing_subset_via_hunks(
         self, review_app, monkeypatch
@@ -3363,34 +3373,39 @@ class TestWholeFileReview:
         monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Only 1 of 2 reviewable files fetched whole -> a.py must NOT silently
-        # revert to hunk mode, and b.py must NOT be silently dropped: two
-        # calls, one whole-file (a.py only), one hunk (b.py only).
+        # a.py covered by change surface; b.py falls back to hunks only.
+        # Both attempts are pre-numbered code= (no files=).
         assert len(calls) == 2
-        whole_call = next(c for c in calls if c.get("files"))
-        hunk_call = next(c for c in calls if c.get("code"))
-        assert whole_call["files"] == {"a.py": "whole a\n"}
-        assert whole_call["pre_numbered"] is False
+        assert all("files" not in c for c in calls)
+        assert all(c["pre_numbered"] is True for c in calls)
+        surface_call = next(
+            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
+        )
+        hunk_call = next(
+            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
+        )
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
         )
 
-        assert REVIEW_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
+        assert REVIEW_FOCUS_NOTE_PREFIX in surface_call["task_requirements"]
+        assert "pre_existing" in surface_call["task_requirements"]
+        assert "Architectural standards" in surface_call["task_requirements"]
+        assert "diff-first" in surface_call["task_requirements"].lower()
         assert not hunk_call.get("files")
         assert hunk_call["pre_numbered"] is True
         assert "b.py" in hunk_call["code"]
         assert "a.py" not in hunk_call["code"]
-        # Hunk call must also carry the focus note, and with hunk-specific
-        # wording -- not just the prefix shared with the whole-file note,
-        # which alone wouldn't catch a hunk/whole-file mode mixup.
+        # Both calls share the same diff-first focus note (input shape differs).
         assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
         assert "pre_existing" in hunk_call["task_requirements"]
-        assert "diff hunks" in hunk_call["task_requirements"]
+        assert "Architectural standards" in hunk_call["task_requirements"]
+        assert "diff-first" in hunk_call["task_requirements"].lower()
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["files_reviewed"] == 2  # 1 whole + 1 hunk
+        assert job["review_summary"]["files_reviewed"] == 2  # 1 surface + 1 hunk
 
     def test_partial_head_fetch_posts_findings_from_both_whole_file_and_hunk_subsets(
         self, review_app, monkeypatch
@@ -3405,14 +3420,15 @@ class TestWholeFileReview:
 
         class _SplitProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                if kw.get("files"):
+                code = kw.get("code") or ""
+                if "### a.py ###" in code:
                     return _FakeOutput(
                         issues=[
                             _FakeReviewIssue(
                                 "high",
                                 line=2,
                                 file_path="a.py",
-                                description="whole-file finding",
+                                description="surface finding",
                             )
                         ],
                         summary="",  # blank: must not blank out the merged narrative
@@ -3441,11 +3457,11 @@ class TestWholeFileReview:
             + [c["body"] for c in gh.review_comments]
             + [b for _n, b in gh.comments]
         )
-        assert any("whole-file finding" in b for b in posted_bodies)
+        assert any("surface finding" in b for b in posted_bodies)
         assert any("hunk finding" in b for b in posted_bodies)
         assert job["review_summary"]["total_issues"] == 2
 
-        # The merged narrative drops the blank whole-file summary and keeps
+        # The merged narrative drops the blank surface summary and keeps
         # the hunk-fallback summary -- proves _MergedReviewerOutput ran.
         assert len(gh.reviews) >= 1, "Expected at least one review submission"
         assert "Hunk summary text" in gh.reviews[-1]["body"]
@@ -4555,9 +4571,7 @@ class TestDecideReviewModeUnit:
         )
 
         def _must_not_parse(*_a: Any, **_kw: Any) -> Any:
-            raise AssertionError(
-                "parse_valid_lines must not run on the no-reviewable noop path"
-            )
+            raise AssertionError("parse_valid_lines must not run on the no-reviewable noop path")
 
         monkeypatch.setattr(pr_review, "parse_valid_lines", _must_not_parse)
 
@@ -4766,7 +4780,9 @@ class TestPartitionReviewIssuesUnit:
             def list_review_comments(self, o, r, n):
                 raise AssertionError("should not be called when pr_issues is empty")
 
-        result = pr_review._partition_review_issues(output, _FakeGitHubClient(), "o", "r", 7, {}, {})
+        result = pr_review._partition_review_issues(
+            output, _FakeGitHubClient(), "o", "r", 7, {}, {}
+        )
         assert result.pr_issues == []
         assert result.addressed_issues == []
 
@@ -5473,11 +5489,10 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
 
         def _fail_client(**_k):
-            raise AssertionError(
-                "GitHubClient must not be constructed for malformed proposals"
-            )
+            raise AssertionError("GitHubClient must not be constructed for malformed proposals")
 
         monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
+
         def _no_client(**_kw):
             raise AssertionError("GitHubClient must not be constructed for malformed proposals")
 
@@ -5800,9 +5815,9 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     # Simulate a runner-provided PYTHONPATH entry that must survive into the child.
     prior = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(p for p in (prior, sentinel) if p)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(backend_root), env.get("PYTHONPATH", "")]
-    ).rstrip(os.pathsep)
+    env["PYTHONPATH"] = os.pathsep.join([str(backend_root), env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
     proc = subprocess.run(
         [
             sys.executable,
@@ -5820,6 +5835,5 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     child_pp = proc.stdout.strip().split(os.pathsep)
     assert str(backend_root) in child_pp
     assert sentinel in child_pp, (
-        "subprocess PYTHONPATH must preserve pre-existing entries; "
-        f"got {proc.stdout.strip()!r}"
+        f"subprocess PYTHONPATH must preserve pre-existing entries; got {proc.stdout.strip()!r}"
     )

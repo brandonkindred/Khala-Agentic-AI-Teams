@@ -190,7 +190,7 @@ class CodeReviewAgent:
         # Temporal is the default execution mode for the code review agent (see
         # ``temporal/config.py``). Dispatch the durable ``CodeReviewWorkflow`` when
         # enabled; fall back to the in-process coordinator only when Temporal is
-        # explicitly disabled (sentinel / dummy / pytest), force_in_process is set
+        # explicitly disabled (address sentinel), force_in_process is set
         # (Temporal activity callers), or Temporal dispatch is unavailable.
         if not self._force_in_process and _code_review_temporal_enabled():
             try:
