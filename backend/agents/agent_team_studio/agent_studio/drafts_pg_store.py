@@ -10,7 +10,8 @@ unified API lifespan. Import this module only when Postgres is enabled.
 
 from __future__ import annotations
 
-import logging
+import copy
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -30,8 +31,6 @@ from .drafts_store import (
 )
 from .models import AgentStudioDraft, AgentStudioDraftSummary
 
-logger = logging.getLogger(__name__)
-
 _STORE = "agent_studio_drafts"
 _TABLE = "agent_studio_drafts"
 
@@ -44,9 +43,14 @@ def _iso(value: Any) -> str:
 
 
 def _row_to_draft(row: dict[str, Any]) -> AgentStudioDraft:
-    payload = row["payload_json"]
-    if not isinstance(payload, dict):
-        payload = dict(payload) if payload is not None else {}
+    """Map a drafts row to :class:`AgentStudioDraft`.
+
+    Postconditions:
+        * ``payload`` is always a ``dict`` (non-object JSONB coerces to ``{}``).
+        * The returned payload is a deep copy so callers cannot mutate stored state.
+    """
+    raw = row["payload_json"]
+    payload: dict[str, Any] = copy.deepcopy(raw) if isinstance(raw, dict) else {}
     return AgentStudioDraft(
         draft_id=row["draft_id"],
         name=row["name"],
@@ -58,6 +62,14 @@ def _row_to_draft(row: dict[str, Any]) -> AgentStudioDraft:
 
 class PostgresAgentStudioDraftStore:
     """Postgres-backed user-scoped drafts store."""
+
+    def __init__(self, *, now_fn: Callable[[], str] | None = None) -> None:
+        """Create a Postgres drafts store.
+
+        Preconditions:
+            * ``now_fn``, when provided, returns an ISO-8601 timestamp string on each call.
+        """
+        self._now = now_fn or iso_now
 
     @timed_query(store=_STORE, op="create")
     def create(
@@ -80,7 +92,7 @@ class PostgresAgentStudioDraftStore:
         if resolved_payload is None:
             resolved_payload = {}
         draft_id = str(uuid4())
-        now = iso_now()
+        now = self._now()
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"INSERT INTO {_TABLE} "
@@ -114,7 +126,7 @@ class PostgresAgentStudioDraftStore:
         uid = validate_user_id(user_id)
         new_name = validate_optional_name(name)
         new_payload = validate_optional_payload(payload)
-        now = iso_now()
+        now = self._now()
         sets: list[str] = ["updated_at = %s::timestamptz"]
         params: list[Any] = [now]
         if new_name is not None:
@@ -199,7 +211,7 @@ class PostgresAgentStudioDraftStore:
         uid = validate_user_id(user_id)
         new_name = validate_optional_name(name)
         assert new_name is not None
-        now = iso_now()
+        now = self._now()
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"UPDATE {_TABLE} SET name = %s, updated_at = %s::timestamptz "

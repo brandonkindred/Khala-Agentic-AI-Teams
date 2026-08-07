@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -130,9 +131,15 @@ class _DraftRecord:
 class AgentStudioDraftStore:
     """Process-local, user-scoped drafts store."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, now_fn: Callable[[], str] | None = None) -> None:
+        """Create an empty in-memory drafts store.
+
+        Preconditions:
+            * ``now_fn``, when provided, returns an ISO-8601 timestamp string on each call.
+        """
         self._records: dict[str, _DraftRecord] = {}
         self._lock = threading.Lock()
+        self._now = now_fn or iso_now
 
     def create(
         self,
@@ -155,7 +162,7 @@ class AgentStudioDraftStore:
         resolved_payload = validate_optional_payload(payload)
         if resolved_payload is None:
             resolved_payload = {}
-        now = iso_now()
+        now = self._now()
         draft_id = str(uuid.uuid4())
         record = _DraftRecord(
             draft_id=draft_id,
@@ -197,7 +204,7 @@ class AgentStudioDraftStore:
                 record.name = new_name
             if new_payload is not None:
                 record.payload = copy.deepcopy(new_payload)
-            record.updated_at = iso_now()
+            record.updated_at = self._now()
             return self._to_draft(record)
 
     def get(self, user_id: str, draft_id: str) -> AgentStudioDraft | None:
@@ -235,9 +242,7 @@ class AgentStudioDraftStore:
             owned.sort(key=lambda r: r.updated_at, reverse=True)
             page = owned[off : off + lim]
             return [
-                AgentStudioDraftSummary(
-                    draft_id=r.draft_id, name=r.name, updated_at=r.updated_at
-                )
+                AgentStudioDraftSummary(draft_id=r.draft_id, name=r.name, updated_at=r.updated_at)
                 for r in page
             ]
 
@@ -260,7 +265,7 @@ class AgentStudioDraftStore:
             if record is None or record.user_id != uid:
                 return None
             record.name = new_name
-            record.updated_at = iso_now()
+            record.updated_at = self._now()
             return AgentStudioDraftSummary(
                 draft_id=record.draft_id, name=record.name, updated_at=record.updated_at
             )

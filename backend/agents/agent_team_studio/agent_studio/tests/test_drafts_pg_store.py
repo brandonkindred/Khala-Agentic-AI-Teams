@@ -5,15 +5,25 @@ Skipped when ``POSTGRES_HOST`` is unset.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from shared.postgres import is_postgres_enabled
 
 pytestmark = pytest.mark.skipif(
-    not is_postgres_enabled(), reason="POSTGRES_HOST not set; skipping live-Postgres draft store tests"
+    not is_postgres_enabled(),
+    reason="POSTGRES_HOST not set; skipping live-Postgres draft store tests",
 )
+
+
+class _Clock:
+    """Monotonic ISO-8601 clock for deterministic ``updated_at`` ordering."""
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    def __call__(self) -> str:
+        self._n += 1
+        return f"2026-08-07T12:00:00.{self._n:06d}+00:00"
 
 
 @pytest.fixture()
@@ -25,7 +35,7 @@ def store():
 
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)
-    return PostgresAgentStudioDraftStore()
+    return PostgresAgentStudioDraftStore(now_fn=_Clock())
 
 
 def test_create_get_round_trip(store) -> None:
@@ -49,7 +59,6 @@ def test_tenancy_isolation(store) -> None:
 def test_list_summaries_order_and_pagination(store) -> None:
     ids: list[str] = []
     for i in range(3):
-        time.sleep(0.01)
         ids.append(store.create("u1", name=f"d{i}").draft_id)
     summaries = store.list_summaries("u1", limit=50, offset=0)
     assert [s.draft_id for s in summaries] == list(reversed(ids))
@@ -73,3 +82,14 @@ def test_list_clamps_limit(store) -> None:
         store.create("u1", name=f"n{i}")
     assert len(store.list_summaries("u1", limit=0)) == 1
     assert len(store.list_summaries("u1", limit=1000)) == 3
+
+
+def test_returned_payload_is_isolated_from_store(store) -> None:
+    created = store.create("u1", name="iso", payload={"nested": {"k": 1}, "tags": ["a"]})
+    loaded = store.get("u1", created.draft_id)
+    assert loaded is not None
+    loaded.payload["nested"]["k"] = 99
+    loaded.payload["tags"].append("b")
+    reloaded = store.get("u1", created.draft_id)
+    assert reloaded is not None
+    assert reloaded.payload == {"nested": {"k": 1}, "tags": ["a"]}
