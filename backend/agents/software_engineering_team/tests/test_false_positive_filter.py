@@ -24,9 +24,9 @@ from typing import Any, Dict, List, Optional
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
+    _READ_LINES_MAX_SPAN,
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
-    _READ_LINES_MAX_SPAN,
     CodebaseIndex,
     _build_group_prompt,
     _build_tools,
