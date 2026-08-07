@@ -8,8 +8,8 @@ import pytest
 
 from llm_service import DummyLLMClient
 from llm_service.compaction import (  # noqa: PLC2701 - internals are under test
-    DEFAULT_COMPACTION_CACHE_SIZE,
     _COMPACTION_CACHE_NAMESPACE,
+    DEFAULT_COMPACTION_CACHE_SIZE,
     _compaction_cache_key,
     _compaction_cache_size,
     _model_fingerprint,
