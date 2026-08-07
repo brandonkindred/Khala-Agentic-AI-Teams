@@ -60,6 +60,12 @@ from agent_team_studio.agentic_team_provisioning.models import (
     UpdateFormRecordRequest,
 )
 from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
+from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
+    build_agent as _build_test_agent,  # noqa: F401 — hub alias: services.testing + tests
+)
+from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
+    call_agent as _call_test_agent,  # noqa: F401 — hub alias: services.testing + tests
+)
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
 from agent_team_studio.agentic_team_provisioning.testing.store import get_test_store
 from shared.app import create_team_app
