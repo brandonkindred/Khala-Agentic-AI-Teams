@@ -138,7 +138,9 @@ def test_testing_service_reads_test_store_from_main(monkeypatch: pytest.MonkeyPa
         def set_team_mode(self, *_a, **_k):
             raise RuntimeError("hub-test-store-hit")
 
-    monkeypatch.setattr(main_mod, "_store", type("Store", (), {"get_team": lambda self, tid: _Team()})())
+    monkeypatch.setattr(
+        main_mod, "_store", type("Store", (), {"get_team": lambda self, tid: _Team()})()
+    )
     monkeypatch.setattr(main_mod, "_test_store", _Boom())
     with pytest.raises(RuntimeError, match="hub-test-store-hit"):
         testing_svc.set_team_mode(team_id="t1", req=SetTeamModeRequest(mode=TeamMode.TESTING))
