@@ -25,6 +25,11 @@ _MOVED = (
     "_delete_jobs_concurrently",
     "_delete_paper_sessions_for_lab_record",
     "_purge_strategy_lab_job_storage",
+    "_fail_strategy_lab_run",
+    "_dispatch_strategy_lab_run",
+    "_no_active_run_locked",
+    "_ensure_no_active_run",
+    "_require_run_transition_lock",
 )
 
 _DEFERRED = (
