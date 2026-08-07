@@ -1859,7 +1859,12 @@ class RunStrategyLabRequest(BaseModel):
         ),
     )
     paper_trading_lookback_days: int = Field(
-        default=365,
+        # Cap the default at the configured ceiling: Pydantic v2 doesn't validate
+        # field defaults, so a bare `default=365` would slip past
+        # `le=_MAX_PAPER_TRADING_LOOKBACK_DAYS` for an omitted request when an
+        # operator lowers STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS below 365,
+        # bypassing the advertised cap (the UI omits this field).
+        default=min(365, _MAX_PAPER_TRADING_LOOKBACK_DAYS),
         ge=30,
         le=_MAX_PAPER_TRADING_LOOKBACK_DAYS,
         description=(

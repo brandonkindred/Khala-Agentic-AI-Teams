@@ -156,6 +156,93 @@ def test_paper_trading_lookback_days_rejects_above_ceiling() -> None:
         RunStrategyLabRequest(paper_trading_lookback_days=MAX_PAPER_TRADING_LOOKBACK_DAYS + 1)
 
 
+def test_paper_trading_lookback_days_default_within_cap() -> None:
+    """The omitted lookback default must never exceed the configured schema
+    ceiling — Pydantic v2 doesn't validate defaults, so the default itself
+    has to be derived from the cap (same pattern as ``max_parallel``)."""
+    from investment_team.api import main as api_main
+
+    default_days = api_main.RunStrategyLabRequest().paper_trading_lookback_days
+    assert default_days == min(365, api_main._MAX_PAPER_TRADING_LOOKBACK_DAYS)
+    assert 30 <= default_days <= api_main._MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+
+def test_paper_trading_lookback_default_clamped_under_lowered_env_ceiling() -> None:
+    """Omitting the field must still respect a lowered env ceiling.
+
+    Preconditions: a fresh Python process can import ``investment_team`` with
+    ``agents/`` on ``PYTHONPATH`` and
+    ``STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS=90``.
+    Postconditions: the child exits 0; an omitted
+    ``paper_trading_lookback_days`` equals 90 (not the bare 365 default).
+    Runs in a subprocess so the import-time Field default/``le=`` bind against
+    the lowered ceiling without polluting this session's ``sys.modules``.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[3]
+    agents_root = backend_root / "agents"
+    script = """
+from investment_team.api.main import RunStrategyLabRequest, _MAX_PAPER_TRADING_LOOKBACK_DAYS
+assert _MAX_PAPER_TRADING_LOOKBACK_DAYS == 90, _MAX_PAPER_TRADING_LOOKBACK_DAYS
+req = RunStrategyLabRequest()
+assert req.paper_trading_lookback_days == 90, req.paper_trading_lookback_days
+"""
+    env = os.environ.copy()
+    env["STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS"] = "90"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(agents_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(backend_root),
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_max_paper_trading_lookback_days_floors_below_field_ge() -> None:
+    """Env ceiling below the Field ``ge=30`` must floor to 30 so ``le`` cannot
+    fall below ``ge`` and make every request unsatisfiable.
+
+    Runs in a subprocess so import-time config evaluation sees the lowered env
+    without reloading modules already imported by this session.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[3]
+    agents_root = backend_root / "agents"
+    script = """
+from investment_team.strategy_lab.config import MAX_PAPER_TRADING_LOOKBACK_DAYS
+assert MAX_PAPER_TRADING_LOOKBACK_DAYS == 30, MAX_PAPER_TRADING_LOOKBACK_DAYS
+"""
+    env = os.environ.copy()
+    env["STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS"] = "10"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(agents_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(backend_root),
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
 # ---------------------------------------------------------------------------
 # asset_class_mix_hint(..., exclude=...)
 # ---------------------------------------------------------------------------
