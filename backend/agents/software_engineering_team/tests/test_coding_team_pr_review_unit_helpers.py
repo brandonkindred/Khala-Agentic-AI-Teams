@@ -627,13 +627,13 @@ class TestRunReviewerUnit:
         with pytest.raises(AssertionError):
             pr_review._run_reviewer(provider, **kwargs)
 
-    def test_nonempty_surface_primary_skips_whole_file(self, monkeypatch) -> None:
+    def test_nonempty_surface_alone_skips_whole_file(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         output = _FakeOutput(["issue"], "summary", "notes")
         provider = _RecordingProvider([output])
         surface = ChangeSurface(blocks={"mod.py": "1: def f():\n2:     return 1"})
         kwargs = _run_reviewer_kwargs(
-            head_files={"mod.py": "def f():\n    return 1\n"},
+            head_files=None,  # admission cleared surface-covered paths
             code="",
             change_surface=surface,
         )
@@ -647,7 +647,31 @@ class TestRunReviewerUnit:
         assert call["code"] == surface.code
         assert "files" not in call
         assert call["task_requirements"] == pr_review._hunk_review_focus("PR body")
-        assert "pre_existing" in call["task_requirements"]
+
+    def test_surface_plus_filtered_head_files_two_attempts(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        surface_out = _FakeOutput(["s"], "s", "")
+        whole_out = _FakeOutput(["w"], "", "w")
+        provider = _RecordingProvider([surface_out, whole_out])
+        surface = ChangeSurface(blocks={"a.py": "1: a"})
+        fallback_head = {"b.py": "whole b\n"}  # path-disjoint from surface
+        kwargs = _run_reviewer_kwargs(
+            head_files=fallback_head,
+            code="",
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        assert provider.calls[0]["pre_numbered"] is True
+        assert provider.calls[0]["code"] == surface.code
+        assert "files" not in provider.calls[0]
+        assert provider.calls[1]["pre_numbered"] is False
+        assert provider.calls[1]["files"] == fallback_head
+        assert set(provider.calls[1]["files"]).isdisjoint(surface.blocks)
+        assert isinstance(result, pr_review._MergedReviewerOutput)
+        assert result.issues == ["s", "w"]
 
     def test_empty_surface_keeps_whole_file(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
@@ -673,7 +697,7 @@ class TestRunReviewerUnit:
         provider = _RecordingProvider([surface_out, hunk_out])
         surface = ChangeSurface(blocks={"a.py": "1: a"})
         kwargs = _run_reviewer_kwargs(
-            head_files={"a.py": "a\n"},
+            head_files=None,
             code="### b.py ###\n1: y = 2",
             change_surface=surface,
         )

@@ -759,23 +759,27 @@ def _join_nonblank(parts: List[str]) -> str:
 
 
 class _MergedReviewerOutput:
-    """Duck-typed merge of a PR's whole-file and hunk-fallback reviewer outputs.
+    """Duck-typed merge of a PR's surface, whole-file, and hunk reviewer outputs.
 
     A partial whole-file fetch (see ``_run_reviewer``) reviews the fetched
-    subset of files whole and the rest via hunks, as two separate reviewer
-    calls. This combines both calls' outputs into one object exposing only
-    the three attributes this module reads downstream: ``issues``,
+    subset of files whole and the rest via hunks, as separate reviewer
+    calls. When admission attaches a non-empty change surface alongside
+    path-disjoint whole-file paths, surface and whole-file attempts also
+    merge here. This combines all calls' outputs into one object exposing
+    only the three attributes this module reads downstream: ``issues``,
     ``summary``, ``spec_compliance_notes``.
 
     Preconditions:
         - ``outputs`` has at least one entry; each exposes ``.issues`` (a
           list), ``.summary``/``.spec_compliance_notes`` (str). The outputs
-          originate from disjoint file sets (the whole-file subset and the
-          hunk-fallback subset), so their issues never describe the same
-          finding twice.
+          originate from disjoint file sets (surface-covered paths,
+          whole-file subset, and/or hunk-fallback subset), so their issues
+          never describe the same finding twice when admission partitions
+          paths correctly.
     Postconditions:
         - ``.issues`` is the concatenation of every output's ``.issues``, in
-          ``outputs`` order (whole-file findings before hunk-fallback ones).
+          ``outputs`` order (surface findings before whole-file, then hunk
+          fallback).
         - ``.summary``/``.spec_compliance_notes`` join each output's non-blank
           text via :func:`_join_nonblank`, so neither call's narrative is
           silently dropped.
@@ -813,10 +817,10 @@ def _run_reviewer(
 
     One reviewer call per non-empty source. A non-empty ``change_surface``
     drives the primary pre-numbered attempt (``pre_numbered=True``,
-    ``_hunk_review_focus``) and replaces a whole-file ``head_files`` attempt;
-    when the surface is empty or absent, a truthy ``head_files`` drives
-    whole-file review (``pre_numbered=False``, ``_whole_file_focus``). A
-    truthy ``code`` always drives an additional diff-hunk attempt
+    ``_hunk_review_focus``) for covered paths; a truthy ``head_files`` **also**
+    drives whole-file review when present (``pre_numbered=False``,
+    ``_whole_file_focus``) — admission must pass only surface-uncovered paths.
+    A truthy ``code`` always drives an additional diff-hunk attempt
     (``pre_numbered=True``, ``_hunk_review_focus``). The sources can never be
     mixed into a single call (the underlying engine's ``files``/``code`` are
     mutually exclusive), which is why partial-fetch PRs may need two calls
@@ -827,21 +831,24 @@ def _run_reviewer(
         - At least one of ``change_surface`` (non-empty), ``head_files``, or
           ``code`` is truthy — the caller (``_run_pr_review_body``) never
           reaches this function otherwise (its own "nothing reviewable" guard
-          returns first). A PR whose whole-file fetch fully succeeds supplies
-          only ``head_files`` (``code=""``); one whose fetch fully failed
-          supplies only ``code`` (``head_files`` falsy); one whose fetch
-          PARTIALLY failed supplies BOTH — ``head_files`` for the fetched
-          subset, ``code`` built ONLY from the files that failed to fetch — so
-          both attempts run and are merged. When admission attaches a non-empty
-          ``change_surface``, it replaces the whole-file attempt while hunk
-          ``code`` still merges when present.
+          returns first). Mixed combinations are allowed when paths are
+          disjoint: a PR whose whole-file fetch fully succeeds supplies only
+          ``head_files`` (``code=""``); one whose fetch fully failed supplies
+          only ``code`` (``head_files`` falsy); one whose fetch PARTIALLY
+          failed supplies BOTH — ``head_files`` for the fetched subset,
+          ``code`` built ONLY from the files that failed to fetch — so both
+          attempts run and are merged. When admission attaches a non-empty
+          ``change_surface`` alongside path-disjoint ``head_files``, surface
+          and whole-file attempts both run; hunk ``code`` still merges when
+          present.
         - ``repo_reader`` is None or a ``RepoReader`` handed to the false-positive
           verifier so it can confirm existing repository files outside the diff.
     Postconditions:
         - On success, returns the single attempt's output unchanged when only
           one ran (identical behavior/kwargs to a single-mode dispatch for
-          the all-whole-file, all-surface, and all-hunk cases). When two ran,
-          returns a merged duck-typed output — see ``_MergedReviewerOutput``.
+          the all-whole-file, all-surface, and all-hunk cases). When two or
+          three ran, returns a merged duck-typed output — see
+          ``_MergedReviewerOutput``.
         - On ANY attempt's failure — an exception, OR a reviewer that returns
           ``None`` without raising — records the failure on the PR/job via
           ``_record_review_outage`` and returns ``None`` immediately, without
@@ -874,7 +881,7 @@ def _run_reviewer(
                 task_requirements=_hunk_review_focus(pr.body or ""),
             )
         )
-    elif head_files:
+    if head_files:
         # Whole-file review: the reviewer sees complete files (no hunk-end
         # "truncation"), and the false-positive filter (via repo_reader) can
         # confirm existing files a finding claims are missing. Because it now
