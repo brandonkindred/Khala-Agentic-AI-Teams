@@ -32,6 +32,10 @@ class RosterPersonaView(BaseModel):
     expertise: list[str] = Field(default_factory=list)
 
 
+# Soft-enrich fallback when a roster ref's manifest_id no longer resolves (read paths only).
+EMPTY_ROSTER_PERSONA = RosterPersonaView()
+
+
 def persona_from_manifest(manifest: AgentManifest) -> RosterPersonaView:
     """Map Manifest fields to the free-text persona view used by ``build_agent``.
 

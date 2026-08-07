@@ -126,11 +126,23 @@ def _check_roster_depth(
     """Flag agents that lack detail — they need at least one of skills/capabilities/tools/expertise."""
     gaps: list[RosterGap] = []
     for a in agents:
-        persona = (
-            personas[a.manifest_id]
-            if personas is not None and a.manifest_id in personas
-            else resolve_persona(a.manifest_id)
-        )
+        if personas is not None and a.manifest_id in personas:
+            persona = personas[a.manifest_id]
+        else:
+            try:
+                persona = resolve_persona(a.manifest_id)
+            except LookupError:
+                gaps.append(
+                    RosterGap(
+                        category="missing_manifest",
+                        detail=(
+                            f"Agent '{a.agent_name}' links to manifest '{a.manifest_id}' "
+                            "which is not in the registry."
+                        ),
+                        agent_name=a.agent_name,
+                    )
+                )
+                continue
         missing: list[str] = []
         if not persona.skills:
             missing.append("skills")

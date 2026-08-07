@@ -79,7 +79,10 @@ from agent_team_studio.agentic_team_provisioning.models import (
     UpdateFormRecordRequest,
 )
 from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
-from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_persona
+from agent_team_studio.agentic_team_provisioning.roster_resolve import (
+    EMPTY_ROSTER_PERSONA,
+    resolve_persona,
+)
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
     build_agent as _build_test_agent,
 )
@@ -195,11 +198,16 @@ DEFAULT_SUGGESTIONS = [
 def enrich_roster_agent(agent: AgenticTeamAgent) -> EnrichedRosterAgent:
     """Flatten a thin roster ref with persona fields from its linked manifest.
 
-    Preconditions: ``agent.manifest_id`` is non-empty.
-    Postconditions: returns an ``EnrichedRosterAgent`` whose persona fields equal
-        ``resolve_persona(agent.manifest_id)``.
+    Preconditions: ``agent`` is a valid ``AgenticTeamAgent``.
+    Postconditions: returns an ``EnrichedRosterAgent`` with thin-ref fields intact.
+        When ``agent.manifest_id`` resolves in the registry, persona fields equal
+        ``resolve_persona(agent.manifest_id)``; when the manifest is missing, persona
+        fields are empty (soft enrich — one orphan must not fail a list endpoint).
     """
-    persona = resolve_persona(agent.manifest_id)
+    try:
+        persona = resolve_persona(agent.manifest_id)
+    except LookupError:
+        persona = EMPTY_ROSTER_PERSONA
     return EnrichedRosterAgent(
         agent_name=agent.agent_name,
         source=agent.source,
@@ -800,7 +808,10 @@ def recommend_agents_for_step(process_id: str, step_id: str):
                 t.lower() for t in f"{step.name} {step.description}".split() if len(t) > 2
             }
             for agent in team.agents:
-                persona = resolve_persona(agent.manifest_id)
+                try:
+                    persona = resolve_persona(agent.manifest_id)
+                except LookupError:
+                    continue
                 agent_tokens = {
                     t.lower()
                     for t in (
