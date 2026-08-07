@@ -1252,9 +1252,7 @@ def _decide_review_mode(
     surface_paths = set(change_surface.blocks)
 
     # Whole-file reviewer inputs: fetched paths the surface did not cover.
-    head_files = {
-        path: text for path, text in fetched.items() if path not in surface_paths
-    }
+    head_files = {path: text for path, text in fetched.items() if path not in surface_paths}
 
     uncovered = reviewable - surface_paths - set(head_files)
     code = ""
@@ -1281,8 +1279,7 @@ def _decide_review_mode(
 
     if uncovered:
         logger.info(
-            "PR review #%s: surface=%d whole-file-fallback=%d hunk-fallback=%d "
-            "(reviewable=%d)",
+            "PR review #%s: surface=%d whole-file-fallback=%d hunk-fallback=%d (reviewable=%d)",
             pr_number,
             len(surface_paths),
             len(head_files),

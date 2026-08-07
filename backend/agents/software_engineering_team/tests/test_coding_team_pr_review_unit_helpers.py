@@ -214,7 +214,9 @@ class TestRunningSiblingOnCheckoutUnit:
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [sibling])
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="Directory symlinks require privileges on Windows")
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="Directory symlinks require privileges on Windows"
+    )
     def test_symlinked_path_matches_canonically(self, monkeypatch, tmp_path) -> None:
         real_dir = tmp_path / "real"
         real_dir.mkdir()

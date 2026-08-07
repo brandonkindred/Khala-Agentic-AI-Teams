@@ -3383,14 +3383,10 @@ class TestWholeFileReview:
         # a.py covered by change surface; b.py falls back to hunks only.
         assert len(calls) == 2
         surface_call = next(
-            c
-            for c in calls
-            if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
+            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
         )
         hunk_call = next(
-            c
-            for c in calls
-            if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
+            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
         )
         assert not surface_call.get("files")
         assert surface_call["pre_numbered"] is True
@@ -4584,9 +4580,7 @@ class TestDecideReviewModeUnit:
         )
 
         def _must_not_parse(*_a: Any, **_kw: Any) -> Any:
-            raise AssertionError(
-                "parse_valid_lines must not run on the no-reviewable noop path"
-            )
+            raise AssertionError("parse_valid_lines must not run on the no-reviewable noop path")
 
         monkeypatch.setattr(pr_review, "parse_valid_lines", _must_not_parse)
 
@@ -4788,9 +4782,7 @@ class TestDecideReviewModeUnit:
         monkeypatch.setattr(
             pr_review,
             "_build_change_surface_for_reviewable",
-            lambda files_arg, head: ChangeSurface(
-                blocks={"a.py": "1: x", "b.py": "1: y"}
-            ),
+            lambda files_arg, head: ChangeSurface(blocks={"a.py": "1: x", "b.py": "1: y"}),
         )
 
         result = pr_review._decide_review_mode(
@@ -4815,12 +4807,8 @@ class TestDecideReviewModeUnit:
         from software_engineering_team.code_review_agent.change_surface import ChangeSurface
 
         files = [
-            PullRequestFile(
-                "a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None
-            ),
-            PullRequestFile(
-                "b.py", "modified", "@@ -1,1 +1,2 @@\n x\n+y", 1, 0, None
-            ),
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1,1 +1,2 @@\n x\n+y", 1, 0, None),
         ]
         monkeypatch.setattr(
             pr_review,
@@ -4829,9 +4817,7 @@ class TestDecideReviewModeUnit:
         )
 
         result = pr_review._decide_review_mode(
-            _file_contents_client(
-                lambda o, r, path, ref: "whole a\n" if path == "a.py" else None
-            ),
+            _file_contents_client(lambda o, r, path, ref: "whole a\n" if path == "a.py" else None),
             "job1",
             "o",
             "r",
@@ -4912,7 +4898,9 @@ class TestPartitionReviewIssuesUnit:
             def list_review_comments(self, o, r, n):
                 raise AssertionError("should not be called when pr_issues is empty")
 
-        result = pr_review._partition_review_issues(output, _FakeGitHubClient(), "o", "r", 7, {}, {})
+        result = pr_review._partition_review_issues(
+            output, _FakeGitHubClient(), "o", "r", 7, {}, {}
+        )
         assert result.pr_issues == []
         assert result.addressed_issues == []
 
@@ -5619,11 +5607,10 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
 
         def _fail_client(**_k):
-            raise AssertionError(
-                "GitHubClient must not be constructed for malformed proposals"
-            )
+            raise AssertionError("GitHubClient must not be constructed for malformed proposals")
 
         monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
+
         def _no_client(**_kw):
             raise AssertionError("GitHubClient must not be constructed for malformed proposals")
 
@@ -5946,9 +5933,9 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     # Simulate a runner-provided PYTHONPATH entry that must survive into the child.
     prior = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(p for p in (prior, sentinel) if p)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(backend_root), env.get("PYTHONPATH", "")]
-    ).rstrip(os.pathsep)
+    env["PYTHONPATH"] = os.pathsep.join([str(backend_root), env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
     proc = subprocess.run(
         [
             sys.executable,
@@ -5966,6 +5953,5 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     child_pp = proc.stdout.strip().split(os.pathsep)
     assert str(backend_root) in child_pp
     assert sentinel in child_pp, (
-        "subprocess PYTHONPATH must preserve pre-existing entries; "
-        f"got {proc.stdout.strip()!r}"
+        f"subprocess PYTHONPATH must preserve pre-existing entries; got {proc.stdout.strip()!r}"
     )
