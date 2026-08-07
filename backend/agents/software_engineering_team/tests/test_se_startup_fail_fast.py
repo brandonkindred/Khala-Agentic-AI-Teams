@@ -92,18 +92,13 @@ def _stub_non_worker_startup(monkeypatch, calls: list[str]) -> None:
 
 
 def _stub_worker_ready_waits(monkeypatch, calls: list[str] | None = None) -> None:
-    """Skip real await_client / thread polls in unit tests."""
+    """Skip real wait_for_team_worker_ready in unit tests."""
 
-    async def _client_ready() -> None:
+    async def _ready(team: str) -> None:
         if calls is not None:
-            calls.append("client_ready")
+            calls.append(f"worker_ready:{team}")
 
-    async def _thread_ready(team: str) -> None:
-        if calls is not None:
-            calls.append(f"thread_ready:{team}")
-
-    monkeypatch.setattr(lifecycle, "_wait_for_shared_temporal_client", _client_ready)
-    monkeypatch.setattr(lifecycle, "_wait_for_team_worker_thread", _thread_ready)
+    monkeypatch.setattr(lifecycle, "_wait_for_team_worker_ready", _ready)
 
 
 def test_se_startup_awaits_assert_before_workers(monkeypatch):
@@ -138,10 +133,9 @@ def test_se_startup_awaits_assert_before_workers(monkeypatch):
 
     assert calls[0] == "assert"
     assert calls.index("assert") < calls.index("se_worker")
-    assert calls.index("se_worker") < calls.index("client_ready")
-    assert calls.index("client_ready") < calls.index("thread_ready:software_engineering")
+    assert calls.index("se_worker") < calls.index("worker_ready:software_engineering")
     assert calls.index("assert") < calls.index("ct_worker")
-    assert calls.index("ct_worker") < calls.index("thread_ready:coding_team")
+    assert calls.index("ct_worker") < calls.index("worker_ready:coding_team")
 
 
 def test_se_startup_propagates_assert_failure_before_workers(monkeypatch):
@@ -192,7 +186,7 @@ def test_se_startup_raises_when_se_worker_fails(monkeypatch):
         asyncio.run(lifecycle._se_startup())
 
     assert "ct_worker" not in calls
-    assert "client_ready" not in calls
+    assert "worker_ready:software_engineering" not in calls
 
 
 def test_se_startup_raises_when_coding_team_worker_fails(monkeypatch):
@@ -217,8 +211,8 @@ def test_se_startup_raises_when_coding_team_worker_fails(monkeypatch):
         asyncio.run(lifecycle._se_startup())
 
     assert "se_worker" in calls
-    assert "client_ready" in calls
-    assert "thread_ready:coding_team" not in calls
+    assert "worker_ready:software_engineering" in calls
+    assert "worker_ready:coding_team" not in calls
 
 
 def test_se_startup_raises_when_se_worker_start_returns_false(monkeypatch):
@@ -262,24 +256,22 @@ def test_se_startup_raises_when_coding_team_worker_start_returns_false(monkeypat
     with pytest.raises(RuntimeError, match="coding_team Temporal worker"):
         asyncio.run(lifecycle._se_startup())
 
-    assert "client_ready" in calls
-    assert "thread_ready:coding_team" not in calls
+    assert "worker_ready:software_engineering" in calls
+    assert "worker_ready:coding_team" not in calls
 
 
-def test_se_startup_raises_when_shared_client_never_ready(monkeypatch):
+def test_se_startup_raises_when_worker_never_ready(monkeypatch):
     async def _assert() -> None:
         return None
 
-    async def _client_never_ready() -> None:
-        raise RuntimeError("Temporal client not available; is the team's worker running?")
+    async def _never_ready(team: str) -> None:
+        raise RuntimeError(
+            f"{team} Temporal worker thread never became ready; "
+            "refusing to serve without a worker"
+        )
 
     monkeypatch.setattr(lifecycle, "_assert_temporal_ready", _assert)
-    monkeypatch.setattr(lifecycle, "_wait_for_shared_temporal_client", _client_never_ready)
-    monkeypatch.setattr(
-        lifecycle,
-        "_wait_for_team_worker_thread",
-        AsyncMock(),
-    )
+    monkeypatch.setattr(lifecycle, "_wait_for_team_worker_ready", _never_ready)
     monkeypatch.setattr(
         "software_engineering_team.temporal.worker.start_se_temporal_worker_thread",
         lambda: True,
@@ -290,31 +282,18 @@ def test_se_startup_raises_when_shared_client_never_ready(monkeypatch):
     )
     _stub_non_worker_startup(monkeypatch, [])
 
-    with pytest.raises(RuntimeError, match="Temporal client not available"):
+    with pytest.raises(RuntimeError, match="never became ready"):
         asyncio.run(lifecycle._se_startup())
 
 
-def test_wait_for_team_worker_thread_raises_when_thread_missing(monkeypatch):
-    from shared.temporal import runner as temporal_runner
-    from shared.temporal import worker as temporal_worker
+def test_wait_for_team_worker_ready_delegates_to_shared(monkeypatch):
+    called: list[str] = []
 
-    monkeypatch.setattr(temporal_runner, "CLIENT_READY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(temporal_runner, "CLIENT_READY_POLL_S", 0.01)
-    temporal_worker._worker_threads.pop("coding_team", None)
+    def _wait(team: str, timeout_s=None):
+        called.append(team)
 
-    with pytest.raises(RuntimeError, match="coding_team Temporal worker thread never became ready"):
-        asyncio.run(lifecycle._wait_for_team_worker_thread("coding_team"))
+    monkeypatch.setattr("shared.temporal.wait_for_team_worker_ready", _wait)
 
+    asyncio.run(lifecycle._wait_for_team_worker_ready("coding_team"))
 
-def test_wait_for_shared_temporal_client_delegates_to_await_client(monkeypatch):
-    called: list[bool] = []
-
-    def _await_client(timeout_s=None):
-        called.append(True)
-        return object(), object()
-
-    monkeypatch.setattr("shared.temporal.await_client", _await_client)
-
-    asyncio.run(lifecycle._wait_for_shared_temporal_client())
-
-    assert called == [True]
+    assert called == ["coding_team"]
