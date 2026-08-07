@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
 
+import code_review_agent.previous_content as previous_content
 import pytest
 from code_review_agent.previous_content import (
     PreviousContentResult,
@@ -74,21 +74,22 @@ def test_resolve_blank_revision_is_disk_only(tmp_path: Path) -> None:
         assert out.misses == frozenset()
 
 
-def test_resolve_with_revision_is_git_only_no_disk_fill(tmp_path: Path) -> None:
-    """Untracked / absent paths stay misses; disk bytes are not previous content."""
+def test_resolve_git_first_mixed_hit_miss(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     tracked = repo / "tracked.py"
     tracked.write_text("old-git\n", encoding="utf-8")
     _git(repo, "add", "tracked.py")
     _git(repo, "commit", "-m", "add tracked")
+    # Untracked file: git miss, disk hit.
     (repo / "untracked.py").write_text("only-disk\n", encoding="utf-8")
     out = resolve_previous_content(
         str(repo),
         ["tracked.py", "untracked.py", "absent.py"],
         revision="HEAD",
     )
-    assert out.contents == {"tracked.py": "old-git\n"}
-    assert out.misses == frozenset({"untracked.py", "absent.py"})
+    assert out.contents["tracked.py"] == "old-git\n"
+    assert out.contents["untracked.py"] == "only-disk\n"
+    assert out.misses == frozenset({"absent.py"})
 
 
 def test_resolve_both_miss_no_raise(tmp_path: Path) -> None:
@@ -99,32 +100,6 @@ def test_resolve_both_miss_no_raise(tmp_path: Path) -> None:
     out = resolve_previous_content(str(repo), ["missing.py"], revision="HEAD")
     assert out.contents == {}
     assert out.misses == frozenset({"missing.py"})
-
-
-def test_resolve_full_git_hits_skips_disk_io(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    tracked = repo / "tracked.py"
-    tracked.write_text("old-git\n", encoding="utf-8")
-    _git(repo, "add", "tracked.py")
-    _git(repo, "commit", "-m", "add tracked")
-    with patch(
-        "code_review_agent.previous_content.read_previous_content_from_disk",
-    ) as disk_read:
-        out = resolve_previous_content(str(repo), ["tracked.py"], revision="HEAD")
-    assert out.contents == {"tracked.py": "old-git\n"}
-    assert out.misses == frozenset()
-    disk_read.assert_not_called()
-
-
-def test_resolve_bad_revision_does_not_disk_fill(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    (repo / "a.py").write_text("on-disk\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    _git(repo, "commit", "-m", "init")
-    for rev in ("--all", "not-a-real-sha", "HEAD:sneaky"):
-        out = resolve_previous_content(str(repo), ["a.py"], revision=rev)
-        assert out.contents == {}
-        assert out.misses == frozenset({"a.py"})
 
 
 def test_resolve_blank_repo_path_raises() -> None:
@@ -142,12 +117,12 @@ def test_resolve_empty_paths(tmp_path: Path) -> None:
     assert out.misses == frozenset()
 
 
-def test_resolve_all_git_hits_skips_disk(tmp_path: Path) -> None:
+def test_resolve_all_git_hits_returns_git_without_disk_fill(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     (repo / "a.py").write_text("old\n", encoding="utf-8")
     _git(repo, "add", "a.py")
     _git(repo, "commit", "-m", "add a")
-    # Change on-disk bytes so a disk fill would be detectable.
+    # Change on-disk bytes so a mistaken disk fill would be detectable.
     (repo / "a.py").write_text("new-on-disk\n", encoding="utf-8")
     out = resolve_previous_content(str(repo), ["a.py"], revision="HEAD")
     assert out.contents == {"a.py": "old\n"}
@@ -157,15 +132,13 @@ def test_resolve_all_git_hits_skips_disk(tmp_path: Path) -> None:
 def test_resolve_git_overflow_miss_not_filled_from_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import code_review_agent.previous_content as previous_content
-
     monkeypatch.setattr(previous_content, "_MAX_GIT_BLOBS_READ", 1)
     repo = _init_repo(tmp_path)
     (repo / "first.py").write_text("git-first\n", encoding="utf-8")
     _git(repo, "add", "first.py")
     _git(repo, "commit", "-m", "add first")
-    # Second path is overflow (never fetched). Put distinct disk bytes so a
-    # mistaken disk fill would show up as a hit with this text.
+    # Second path is overflow (never fetched). Distinct disk bytes would
+    # appear as a hit if resolve incorrectly disk-filled overflow misses.
     (repo / "second.py").write_text("disk-only-new\n", encoding="utf-8")
     out = resolve_previous_content(
         str(repo),

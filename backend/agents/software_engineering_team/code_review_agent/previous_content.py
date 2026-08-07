@@ -11,6 +11,7 @@ failures are misses; only blank ``repo_path`` raises on disk reads, and blank
 ``repo_path`` / ``revision`` raise on leaf git reads (blank revision on
 ``resolve_previous_content`` is disk-only).
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -263,23 +264,22 @@ def resolve_previous_content(
     paths: Iterable[str],
     revision: str | None = None,
 ) -> PreviousContentResult:
-    """Resolve previous content: disk-only without revision, else git-only.
+    """Resolve previous content git-first, falling back to disk for misses.
 
     Preconditions:
         - ``repo_path`` is strip-nonempty; otherwise raise ``ValueError``.
         - ``paths`` is an iterable of strings (may be empty).
         - ``revision`` may be ``None``/blank (disk-only) or strip-nonempty
-          (git-only).
+          (git-first).
 
     Postconditions:
         - Empty ``paths`` → empty ``contents`` and empty ``misses``.
         - Blank/missing ``revision`` → ``read_previous_content_from_disk``.
-        - Non-blank ``revision`` → ``read_previous_content_from_git`` only
-          (no disk fill). Git misses stay misses — including untracked paths
-          present on disk and unusable revisions (flag-like, unresolved, no
-          ``.git``) — so post-execution workspace bytes are never treated as
-          previous content. Callers that intentionally merge a safe disk
-          snapshot with git should use ``merge_previous_content``.
+        - Non-blank ``revision`` → git for all paths; disk only for git
+          misses that were actually attempted (not spawn-cap overflow);
+          merge with git preferred. Paths beyond ``_MAX_GIT_BLOBS_READ``
+          stay misses and are never filled from disk. If there are no
+          fillable misses, return git unchanged.
         - Never raises for leaf/environment failures once ``repo_path`` is valid.
     """
     stripped_repo = (repo_path or "").strip()
@@ -294,4 +294,12 @@ def resolve_previous_content(
     if not stripped_rev:
         return read_previous_content_from_disk(stripped_repo, unique)
 
-    return read_previous_content_from_git(stripped_repo, stripped_rev, unique)
+    git = read_previous_content_from_git(stripped_repo, stripped_rev, unique)
+    # Overflow paths were never fetched from git — do not substitute disk
+    # (often post-execution *new*) bytes as if they were a true previous miss.
+    overflow = frozenset(unique[_MAX_GIT_BLOBS_READ:])
+    fillable = [path for path in git.misses if path not in overflow]
+    if not fillable:
+        return git
+    disk = read_previous_content_from_disk(stripped_repo, fillable)
+    return merge_previous_content(git, disk)
