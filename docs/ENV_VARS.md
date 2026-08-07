@@ -916,7 +916,8 @@ could be reviewed at all the run still raises `CodeReviewUnavailableError`.
 Max entries in the shared map-phase chunk-outcome cache (`shared.cache`; owned by
 `mapping._cached_review_chunk`). Applies to both backends: the in-process LRU and
 the Redis ZSET trim on write. Redis keys also expire via `REDIS_CACHE_TTL_S`, and
-compose Redis is further bounded by `maxmemory`/`allkeys-lru`. Hits are shared
+compose Redis is further bounded by `maxmemory`/`noeviction` (app trim + TTLs;
+avoids LRU-evicting idle single-flight locks). Hits are shared
 across workers when `REDIS_URL`/`REDIS_HOST` is configured; otherwise each process
 keeps an in-process store. Backend failures fail open to a miss/recompute.
 The review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
@@ -1422,15 +1423,15 @@ rule-proposal grounding.
 Redis endpoint for `shared.cache` — the shared backend behind the code-review chunk-outcome cache,
 submission short-circuit cache, and `compact_text` memoization. When `REDIS_URL` (or `REDIS_HOST`) is
 set, those caches persist across worker processes and restarts; when unset, each process keeps an
-in-memory LRU (today's single-process behavior). Compose defaults `REDIS_URL` to `redis://:${REDIS_PASSWORD}@redis:6379/0` when unset
-(nested substitution; password defaults to `please-change-me`, same local placeholder as
-Neo4j). Set `REDIS_URL=`
-(empty) in the compose env file to fall back to in-process memory. `REDIS_URL` wins over
-host/port/password. `REDIS_HOST` must be a bare hostname or bare IPv6 literal (no embedded
-port — use `REDIS_PORT`; no zone-ID / scoped addresses — use `REDIS_URL` for those). Compose
-passes `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` through (password defaults to
-`please-change-me` to match compose Redis `--requirepass`; host/port/db have no defaults so
-an empty `REDIS_URL` cannot silently re-enable Redis via a default host). Backend unavailability fails open to a cache miss (recompute),
+in-memory LRU (today's single-process behavior). Compose wires Redis **only on `se-service`** via
+`*se-redis-env` (not every team container): default `REDIS_HOST=redis` + `REDIS_PASSWORD` (local
+placeholder `please-change-me`, same as Neo4j) with blank `REDIS_URL`, so Python builds
+`redis://[:quoted-password@]host:port/db` and percent-encodes the password. Do **not** embed an
+unquoted password in a compose `REDIS_URL` default — characters like `@` / `:` / `/` break URL
+userinfo parsing. Set `REDIS_URL=` and `REDIS_HOST=` (empty) on SE to fall back to in-process
+memory. `REDIS_URL` wins over host/port/password when non-blank. `REDIS_HOST` must be a bare
+hostname or bare IPv6 literal (no embedded port — use `REDIS_PORT`; no zone-ID / scoped addresses —
+use `REDIS_URL` for those). Backend unavailability fails open to a cache miss (recompute),
 never a review failure. When Redis is unreachable (or the `redis` wheel is missing),
 `shared.cache` logs a warning that includes the exception class and falls back to the
 in-process LRU / a local recompute — reviews continue without raising. Operators can
@@ -1439,13 +1440,14 @@ client/healthcheck failures); there is no separate metric today. Optional
 `REDIS_SOCKET_CONNECT_TIMEOUT_S` (default `1.0`) tunes redis-py's connect timeout.
 
 **Local compose vs production auth.** The in-repo `docker-compose.yml` Redis service enables
-`requirepass` from `REDIS_PASSWORD` (default `please-change-me`) so siblings on the `stack`
-network cannot silently poison the shared cache without credentials. Host publish is IPv4
-loopback only (`127.0.0.1:6379`) — from the host use `127.0.0.1:6379`, not `localhost` / `::1`.
-Override `REDIS_PASSWORD` (the nested default `REDIS_URL` picks it up when `REDIS_URL` is unset).
+`requirepass` from `REDIS_PASSWORD` (default `please-change-me`). Redis credentials are injected
+only into `se-service`, so other team containers on `stack` cannot read/write review or
+compaction namespaces without credentials. Host publish is IPv4 loopback only
+(`127.0.0.1:6379`) — from the host use `127.0.0.1:6379`, not `localhost` / `::1`.
 Production deployments must use a strong secret, ACL/`requirepass`, and keep Redis off public
 interfaces. Compose Redis is intentionally ephemeral (no volume) — a restart is a cold cache;
-durable state lives elsewhere.
+durable state lives elsewhere. Memory policy is `noeviction` (app ZSET trim + TTLs bound
+capacity; avoids LRU-evicting idle single-flight lock keys mid-compute).
 
 ### REDIS_CACHE_TTL_S / REDIS_LOCK_TTL_S / REDIS_WAITER_POLL_S / REDIS_WAITER_TIMEOUT_S / REDIS_RESULT_TTL_S
 Redis backend tuning for `shared.cache`: value-key TTL (default `86400` s), single-flight lock TTL

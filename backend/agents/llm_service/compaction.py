@@ -252,8 +252,9 @@ def compact_text(
     is configured; in-process lock otherwise). Capacity is passed as
     ``max_entries`` on each ``single_flight`` call (read from
     ``LLM_COMPACTION_CACHE_SIZE`` each invocation so env changes apply without
-    restart). Value TTL / Redis ``maxmemory`` LRU come from ``REDIS_CACHE_TTL_S``
-    and the Redis service config — not a separate compaction TTL. Compaction is
+    restart). Value TTL comes from ``REDIS_CACHE_TTL_S``; compose Redis uses
+    ``maxmemory``/``noeviction`` with app-side ZSET trim (not Redis LRU) — not a
+    separate compaction TTL. Compaction is
     deterministic given those inputs, so a cache hit is byte-identical to what a
     fresh call would return. Only genuine full compactions are cached — every
     fallback path (LLM failure, empty result, or a chunked run with any
@@ -294,7 +295,17 @@ def compact_text(
                 key,
                 exc_info=True,
             )
-        return _compact_uncached(text, max_chars, llm, content_description)[0]
+        result, cacheable = _compact_uncached(text, max_chars, llm, content_description)
+        if cacheable:
+            try:
+                cache.set(key, result.encode("utf-8"), max_entries=capacity)
+            except Exception:
+                logger.warning(
+                    "Failed to re-store compaction after corrupt eviction for %s",
+                    key,
+                    exc_info=True,
+                )
+        return result
 
 
 def _compact_uncached(

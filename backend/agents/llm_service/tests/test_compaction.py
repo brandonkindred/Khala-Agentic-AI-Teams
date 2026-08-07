@@ -9,6 +9,7 @@ import pytest
 from llm_service import DummyLLMClient
 from llm_service.compaction import (  # noqa: PLC2701 - internals are under test
     DEFAULT_COMPACTION_CACHE_SIZE,
+    _COMPACTION_CACHE_NAMESPACE,
     _compaction_cache_key,
     _compaction_cache_size,
     _model_fingerprint,
@@ -258,6 +259,27 @@ def test_clear_compaction_cache_forces_cold_recompute() -> None:
     clear_compaction_cache()
     compact_text(text, 50, client, "spec")
     assert client.calls == 2
+
+
+def test_corrupt_compaction_cache_entry_is_evicted_and_recomputed() -> None:
+    """Non-UTF-8 durable bytes are deleted; compaction recomputes and re-caches."""
+    from shared.cache import get_shared_cache
+
+    client = _CountingClient(result="REBUILT")
+    text = "c" * 200
+    key = _compaction_cache_key(text, 50, "spec", client)
+    cache = get_shared_cache(_COMPACTION_CACHE_NAMESPACE)
+    cache.set(key, b"\xff\xfe not-utf8", max_entries=8)
+
+    first = compact_text(text, 50, client, "spec")
+    assert first == "REBUILT"
+    assert client.calls == 1
+    raw = cache.get(key)
+    assert raw == b"REBUILT"
+
+    second = compact_text(text, 50, client, "spec")
+    assert second == "REBUILT"
+    assert client.calls == 1  # hit after re-store
 
 
 # ---------------------------------------------------------------------------
