@@ -666,6 +666,23 @@ def test_factory_redis_unreachable_falls_back(monkeypatch):
     assert isinstance(cache, MemoryBackend)
 
 
+def test_factory_invalid_key_prefix_falls_back_to_memory(monkeypatch):
+    """Bad REDIS_KEY_PREFIX must not abort reviews on first get_shared_cache.
+
+    ``key_prefix()`` / ``RedisBackend`` raise ``ValueError`` for ``:`` in the
+    prefix; the factory catches construction errors and fails open to memory
+    the same way a missing Redis client does.
+    """
+    client = FakeRedis()
+    monkeypatch.setenv("REDIS_URL", "redis://fake:6379/0")
+    monkeypatch.setenv("REDIS_KEY_PREFIX", "bad:prefix")
+    monkeypatch.setattr(factory_mod, "_build_redis_client", lambda: client)
+    cache = get_shared_cache("cr:chunk")
+    assert isinstance(cache, MemoryBackend)
+    cache.set("k", b"v", max_entries=4)
+    assert cache.get("k") == b"v"
+
+
 def test_redis_single_flight_hit_short_circuits_compute():
     """A durable hit skips compute entirely in single_flight."""
     client = FakeRedis()
@@ -861,6 +878,16 @@ def test_redis_rejects_colon_in_logical_key():
     cache = RedisBackend(FakeRedis(), "ns")
     with pytest.raises(ValueError, match=":"):
         cache.set("bad:key", b"v", max_entries=8)
+
+
+@pytest.mark.parametrize("reserved", ["__lru", "__sf_lock", "__sf_result", "__sf_custom"])
+def test_redis_rejects_reserved_logical_keys(reserved: str):
+    """``__lru`` and ``__sf_*`` collide with coordination / LRU metadata keys."""
+    cache = RedisBackend(FakeRedis(), "ns")
+    with pytest.raises(ValueError, match="reserved"):
+        cache.set(reserved, b"v", max_entries=8)
+    with pytest.raises(ValueError, match="reserved"):
+        cache.get(reserved)
 
 
 def test_redis_get_rejects_non_string_key():

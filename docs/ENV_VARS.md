@@ -1443,14 +1443,16 @@ timeout must stay finite so a Redis that accepts TCP but stalls on GET/SET/EVAL
 fails open to miss/recompute instead of hanging the review thread forever.
 
 **Local compose vs production auth.** The in-repo `docker-compose.yml` Redis service enables
-`requirepass` from `REDIS_PASSWORD` (default `please-change-me`). Redis credentials are injected
-only into `se-service`, so other team containers on `stack` cannot read/write review or
-compaction namespaces without credentials. Host publish is IPv4 loopback only
-(`127.0.0.1:6379`) — from the host use `127.0.0.1:6379`, not `localhost` / `::1`.
-Production deployments must use a strong secret, ACL/`requirepass`, and keep Redis off public
-interfaces. Compose Redis is intentionally ephemeral (no volume) — a restart is a cold cache;
-durable state lives elsewhere. Memory policy is `noeviction` (app ZSET trim + TTLs bound
-capacity; avoids LRU-evicting idle single-flight lock keys mid-compute).
+`requirepass` from `REDIS_PASSWORD` (default `please-change-me`), written into a generated
+config file so the password is not on the `redis-server` process argv (healthcheck still uses
+`REDISCLI_AUTH`). Redis credentials are injected only into `se-service`, so other team
+containers on `stack` cannot read/write review or compaction namespaces without credentials.
+Host publish is IPv4 loopback only (`127.0.0.1:6379`) — from the host use `127.0.0.1:6379`,
+not `localhost` / `::1`. Production deployments must use a strong secret, ACL/`requirepass`,
+and keep Redis off public interfaces. Compose Redis is intentionally ephemeral (no volume) —
+a restart is a cold cache; durable state lives elsewhere. Memory policy is `noeviction`
+(app ZSET trim + TTLs bound capacity; avoids LRU-evicting idle single-flight lock keys
+mid-compute).
 
 ### REDIS_CACHE_TTL_S / REDIS_LOCK_TTL_S / REDIS_WAITER_POLL_S / REDIS_WAITER_TIMEOUT_S / REDIS_RESULT_TTL_S
 Redis backend tuning for `shared.cache`: value-key TTL (default `86400` s), single-flight lock TTL
@@ -1464,7 +1466,9 @@ floored at `1` s; poll-interval floored at `0.01` s.
 
 ### REDIS_KEY_PREFIX
 Optional prefix for all `shared.cache` Redis keys (default `khala`). Blank falls back to the
-default. Must not contain `:` — the backend appends `:{namespace}:` itself.
+default. Must not contain `:` — the backend appends `:{namespace}:` itself. An invalid prefix
+(or other RedisBackend construction error) fails open: `get_shared_cache` logs and uses the
+in-process memory backend instead of raising on first cache touch.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change

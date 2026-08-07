@@ -177,19 +177,25 @@ services:
     # Intentionally no named volume — Redis is an ephemeral shared cache here;
     # durability lives in Postgres / job state, not Redis. A restart is a cold
     # cache, which shared.cache treats as misses (recompute).
-    # requirepass is read from the container env (single source with healthcheck).
+    # requirepass lives in a generated conf file so the redis-server argv does
+    # not include the password (process listings). Healthcheck still uses
+    # REDISCLI_AUTH from the service env.
     command:
       - /bin/sh
       - -c
-      - >-
-        exec redis-server
-        --bind 0.0.0.0
-        --requirepass "$$REDIS_PASSWORD"
-        --maxmemory 256mb
-        --maxmemory-policy noeviction
-        --save ""
-        --appendonly no
-    # Host publish is IPv4 loopback only (127.0.0.1:6379). There is no IPv6
+      - |
+        set -eu
+        conf=/tmp/khala-redis.conf
+        esc=$$(printf '%s' "$$REDIS_PASSWORD" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        cat > "$$conf" <<EOF
+        bind 0.0.0.0
+        requirepass "$$esc"
+        maxmemory 256mb
+        maxmemory-policy noeviction
+        save ""
+        appendonly no
+        EOF
+        exec redis-server "$$conf"    # Host publish is IPv4 loopback only (127.0.0.1:6379). There is no IPv6
     # host publish — on IPv6-preferring systems use ``127.0.0.1:6379``, not
     # bare ``localhost`` (which may resolve to ``::1`` and fail to connect).
     # Containers still reach Redis via the stack network (redis:6379 /

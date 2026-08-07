@@ -155,9 +155,16 @@ jobs:
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
             # shared_cache: Redis-backed shared LRU for code-review + compaction.
-            # Tests use FakeRedis (no live Redis required).
+            # Tests use FakeRedis (no live Redis required). Include consumer trees
+            # so mapping/compaction-only PRs still run the live Redis CI step when
+            # that job is enabled.
             shared_cache:
               - 'backend/shared/cache/**'
+              - 'backend/agents/software_engineering_team/code_review_agent/**'
+              - 'backend/agents/software_engineering_team/tests/test_code_review_cache.py'
+              - 'backend/agents/software_engineering_team/tests/test_shared_review_cache_integration.py'
+              - 'backend/agents/llm_service/compaction.py'
+              - 'backend/agents/llm_service/tests/test_compaction.py'
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
             # agent_cognition: the memory/rules substrate + knowledge-graph layer.

@@ -29,6 +29,11 @@ _LOCK_SUFFIX = ":__sf_lock"
 _RESULT_PREFIX = b"\x00OK\x00"
 _ERROR_PREFIX = b"\x00ERR\x00"
 _LRU_ZSET = "__lru"
+# Logical keys must not collide with the per-namespace LRU ZSET name or with
+# single-flight coordination suffixes (``:__sf_lock`` / ``:__sf_result``).
+# Callers today use sha256 hex digests; reserved names are rejected so a future
+# caller cannot overwrite the ZSET or confuse ownership scans.
+_RESERVED_LOGICAL_KEY_PREFIX = "__sf_"
 # Short-lived single-flight publish TTL. Caps how long waiters can observe a
 # non-durable result/error marker; durable values use ``cache_ttl_s()``. Kept
 # below typical lock TTL so abandoned markers do not linger after leadership
@@ -175,15 +180,17 @@ class RedisBackend:
 
     @staticmethod
     def _require_logical_key(key: str) -> None:
-        """Reject non-str / empty / colon-containing logical keys (namespace invariant).
+        """Reject non-str / empty / colon-containing / reserved logical keys.
 
         Preconditions:
             - Callers pass the logical key (not a fully-qualified Redis key).
         Postconditions:
             - Raises ``TypeError`` when ``key`` is not a ``str``.
-            - Raises ``ValueError`` when ``key`` is empty or contains ``:``
-              (empty would collide with the namespace prefix; ``:`` would break
-              namespace ownership / clear scoping).
+            - Raises ``ValueError`` when ``key`` is empty, contains ``:``, equals
+              ``__lru`` (collides with the LRU ZSET), or starts with ``__sf_``
+              (reserved for single-flight coordination suffixes). Empty would
+              collide with the namespace prefix; ``:`` would break namespace
+              ownership / clear scoping.
         """
         if not isinstance(key, str):
             raise TypeError("key must be str")
@@ -191,6 +198,11 @@ class RedisBackend:
             raise ValueError("key must be non-empty")
         if ":" in key:
             raise ValueError("cache logical keys must not contain ':'")
+        if key == _LRU_ZSET or key.startswith(_RESERVED_LOGICAL_KEY_PREFIX):
+            raise ValueError(
+                f"cache logical key {key!r} is reserved "
+                f"(cannot be {_LRU_ZSET!r} or start with {_RESERVED_LOGICAL_KEY_PREFIX!r})"
+            )
 
     @staticmethod
     def _as_bytes(raw: Any) -> Optional[bytes]:

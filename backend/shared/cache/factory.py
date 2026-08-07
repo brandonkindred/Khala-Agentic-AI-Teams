@@ -139,6 +139,9 @@ def get_shared_cache(namespace: str) -> SharedCache:
           ``RedisBackend``; otherwise a ``MemoryBackend``. Connectivity is not
           probed at construction (compose cold-start race); per-op fail-open
           covers an unreachable Redis.
+        - Invalid Redis *setup* (bad ``REDIS_KEY_PREFIX``, non-positive TTLs from
+          env, etc.) logs and falls back to ``MemoryBackend`` the same way a
+          missing client does — never raises into callers on first cache touch.
         - When a test override is installed via ``override_shared_cache_backend``,
           every namespace returns that override backend instead.
     Raises:
@@ -159,7 +162,18 @@ def get_shared_cache(namespace: str) -> SharedCache:
         if config.is_redis_configured():
             client = _get_or_create_redis_client()
             if client is not None:
-                backend = RedisBackend(client, namespace)
+                try:
+                    backend = RedisBackend(client, namespace)
+                except Exception as exc:
+                    # Misconfigured prefix/TTL must not abort reviews on first
+                    # get_shared_cache call (fail open like a missing redis client).
+                    logger.error(
+                        "shared.cache: RedisBackend init failed for namespace %r (%s); "
+                        "using memory backend",
+                        namespace,
+                        exc,
+                    )
+                    backend = MemoryBackend()
             else:
                 backend = MemoryBackend()
         else:
