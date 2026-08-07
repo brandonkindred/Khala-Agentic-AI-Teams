@@ -22,9 +22,9 @@ from typing import Any, Dict
 import pytest
 from pydantic import ValidationError
 
-from investment_team.api import main as lab_main  # noqa: E402
-from investment_team.api.main import RunStrategyLabRequest  # noqa: E402
-from investment_team.models import (  # noqa: E402
+from investment_team.api import main as lab_main
+from investment_team.api.main import RunStrategyLabRequest
+from investment_team.models import (
     BacktestConfig,
     BacktestRecord,
     BacktestResult,
@@ -378,10 +378,14 @@ def _build_batch_input(
     )
 
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    # rehydrate_active_run_offset/get_resume_seed_counters read via
+    # get_run_state_strict (not the lenient get_run_state/
+    # load_run_from_job_service) -- see its own docstring for why a
+    # durable-read failure must propagate rather than being swallowed here.
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
     run_id = f"run-{uuid.uuid4().hex[:6]}"
-    return build_strategy_lab_batch_input(run_id, request)
+    return build_strategy_lab_batch_input(run_id, request, generation=1)
 
 
 def test_batch_input_computes_complement_exclusion(monkeypatch: pytest.MonkeyPatch) -> None:

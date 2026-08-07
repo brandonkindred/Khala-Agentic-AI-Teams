@@ -111,6 +111,9 @@ from investment_team.strategy_lab.config import (
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.run_state import (
+    DEFAULT_FENCING_GENERATION,
+)
+from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
 )
 from investment_team.strategy_lab.run_state import (
@@ -118,6 +121,9 @@ from investment_team.strategy_lab.run_state import (
 )
 from investment_team.strategy_lab.run_state import (
     get_lab_run_job_client as _get_lab_run_job_client,
+)
+from investment_team.strategy_lab.run_state import (
+    get_run_generation_strict as _get_run_generation_strict,
 )
 from investment_team.strategy_lab.run_state import (
     get_run_state as _get_run_state,
@@ -501,6 +507,133 @@ def _now() -> str:
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
 
+# restart_strategy_lab_run's restartable-status gate: "completed_with_errors"
+# is a terminal outcome of the same workflow as "completed" and must be
+# restartable too, but it's lab-specific and doesn't belong in the shared
+# job_service_client.RESTARTABLE_STATUSES constant.
+STRATEGY_LAB_RESTARTABLE_STATUSES: frozenset[str] = RESTARTABLE_STATUSES | {"completed_with_errors"}
+
+# restart_strategy_lab_run's fencing-generation mint amount: a run created
+# before generation fencing shipped has no persisted "generation" field, and
+# the job service's atomic increment treats an absent field as 0 -- a plain
+# +1 would land on 1, which is also what a pre-upgrade caller that omits
+# generation entirely is treated as presenting (check_fencing_token accepts
+# equal tokens), so that first post-upgrade restart must jump straight to 2
+# instead. See restart_strategy_lab_run's own inline comment for the full
+# reasoning.
+GENERATION_INCREMENT_NORMAL = 1
+GENERATION_INCREMENT_LEGACY_BOOTSTRAP = 2
+
+# Passed as `_persist_run_state`'s `exclude_fields` by every write that must
+# never regress the durable fencing high-water mark from a possibly-stale
+# in-memory snapshot (run/resume/restart/rollback state writes) -- the
+# generation field is only ever advanced via `apply_and_get`'s atomic
+# increment, never via one of these ordinary state persists.
+_GENERATION_EXCLUDE_FIELDS = frozenset({"generation"})
+
+
+class UnsafeDurableGenerationError(ValueError):
+    """Durable ``generation`` cannot be advanced safely via job-service increment.
+
+    Raised when the persisted value is a representation ``get_run_generation_strict``
+    would accept as a positive fencing token (e.g. the numeric string ``\"5\"``) but
+    job-service ``apply`` would coerce to ``0`` before adding the delta — so a plain
+    increment would *regress* the conceptual generation and reopen fencing.
+    """
+
+
+def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
+    """Return the fencing-generation increment ``restart_strategy_lab_run``
+    should atomically apply for this run's durable record.
+
+    A run created before generation fencing shipped has no "generation"
+    field in its persisted record at all, and the job service's atomic
+    increment treats an absent field as 0 -- so a plain +1 would mint
+    generation 1 for such a run's first restart. That's exactly the
+    generation ``persist_run_state_activity``/``finalize_cycle_record_activity``
+    fall back to for a caller that omits ``generation`` entirely (an activity
+    scheduled before the field existed), and ``check_fencing_token`` accepts
+    equal tokens -- so that stale activity would pass fencing again. Jumping
+    straight to ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` in that one case
+    makes the minted value strictly exceed the legacy default; a run that
+    already has an explicit positive integer "generation" field (every run
+    created after this change, and any legacy run past its first
+    post-upgrade restart) increments by the ordinary
+    ``GENERATION_INCREMENT_NORMAL`` instead.
+
+    The same +2 bootstrap applies when the key is present but still
+    uninitialized in the sense ``get_run_generation_strict`` already uses for
+    soft defaults: ``None``, ``""``, an int below ``DEFAULT_FENCING_GENERATION``,
+    or a non-int that cannot be parsed as an int (job-service increment
+    coerces those to ``0``, so +2 lands on generation 2). Bools and floats are
+    rejected instead (``get_run_generation_strict`` raises on them). A
+    non-int that *parses* as a positive int (e.g. ``\"5\"``) also fails closed:
+    increment would zero the field first and mint ``2``, regressing the
+    conceptual token and letting in-flight activities that present ``5``
+    pass ``check_fencing_token``.
+
+    Preconditions:
+        - ``durable_data`` is the run's durable job record (its ``"data"``
+          column merged in) -- or ``{}`` when the job does not exist.
+          Callers MUST pass the DURABLE record here, not `_get_run_state`'s
+          process-local ``active_runs`` snapshot: a resume of this same
+          legacy run can already have populated that in-memory entry with a
+          ``generation=1`` default (``resume_strategy_lab_run`` deliberately
+          excludes "generation" from ITS durable write, so the durable
+          record stays legacy even after that). Passing the in-memory
+          snapshot instead would see "generation" present, mint only +1,
+          and land on durable generation 1 -- exactly what a still-in-flight
+          legacy activity (which omits ``generation`` entirely, defaulting
+          to 1) presents, defeating fencing.
+        - Callers MUST NOT substitute ``{}`` for a failed durable read.
+          Blindly treating a read failure as legacy and minting +2 can
+          regress a durable non-native positive token (e.g. ``\"5\"``) via
+          job-service zeroing. Restart fails closed on bootstrap-read
+          failure instead.
+
+    Postconditions:
+        - Returns ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` when
+          ``durable_data`` has no usable positive native-int "generation"
+          (absent, ``None``/empty, unparseable non-int, or native int
+          ``< DEFAULT_FENCING_GENERATION``).
+        - Returns ``GENERATION_INCREMENT_NORMAL`` for a native ``int``
+          ``>= DEFAULT_FENCING_GENERATION``.
+        - Raises ``UnsafeDurableGenerationError`` when the durable value is a
+          bool/float, or a non-int that parses to an int
+          ``>= DEFAULT_FENCING_GENERATION`` (increment would regress the
+          token). Callers must translate that into a fail-closed response
+          rather than minting.
+    """
+    if "generation" not in durable_data:
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    raw = durable_data["generation"]
+    if raw is None or raw == "":
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    # bool is an int subclass; float is accepted by job-service increment but
+    # rejected by get_run_generation_strict — fail closed rather than minting
+    # a float/bool-derived token that fencing reads cannot round-trip.
+    if isinstance(raw, bool) or isinstance(raw, float):
+        raise UnsafeDurableGenerationError(
+            f"durable generation {raw!r} is not a native int fencing token"
+        )
+    if isinstance(raw, int):
+        if raw < DEFAULT_FENCING_GENERATION:
+            return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+        return GENERATION_INCREMENT_NORMAL
+    # Non-int: unparseable garbage zeros under job-service increment → +2 is
+    # safe. A parseable positive value (e.g. "5") must NOT use increment: the
+    # service would zero it first and regress the conceptual generation.
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    if parsed < DEFAULT_FENCING_GENERATION:
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    raise UnsafeDurableGenerationError(
+        f"durable generation {raw!r} parses to {parsed} but is not a native int; "
+        "job-service increment would zero it and regress the fencing token"
+    )
+
 
 class StrategyLabRunStartResponse(BaseModel):
     """Returned immediately when a strategy lab batch is started."""
@@ -550,6 +683,11 @@ class StrategyLabRunStatusResponse(BaseModel):
     batch_count: int = 1
     completed_batches: int = 0
     current_batch: Optional[int] = None
+    # Read-only fencing generation (see run_state.get_run_generation /
+    # _build_run_state) -- exposed so a caller can observe that a restart
+    # superseded a prior incarnation; never accepted as client input anywhere,
+    # so surfacing it carries none of the write-path fencing risk.
+    generation: int = 1
 
 
 class ActiveRunsResponse(BaseModel):
@@ -2839,7 +2977,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
 
         # Dispatch the run as a durable Temporal workflow so it survives a
         # worker/process restart and is visible in the Temporal UI.
-        _dispatch_strategy_lab_run(run_id, request)
+        _dispatch_strategy_lab_run(run_id, request, generation=initial_state["generation"])
     finally:
         run_lock.release()
 
@@ -3067,8 +3205,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status — read INSIDE
-          the transition lock below, not beforehand — is in
+        - ``run_id`` identifies a run whose status — read via ``_get_run_state``
+          (the in-memory ``active_runs`` entry when present, else a durable
+          fallback read; see its own docstring) INSIDE the transition lock
+          below, not beforehand — is in
           ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/
           agent_crash). Reading it (or the counters/payload derived from it)
           before acquiring the lock could observe a stale snapshot: another
@@ -3098,7 +3238,20 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
           progress — ``completed_record_ids``/``errored_cycles``/
           ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
-          — and persists the new state.
+          — and persists the new state. The durable write omits
+          ``generation`` (see ``_persist_run_state``'s ``exclude_fields``):
+          the value read above is a snapshot, and a concurrent restart on
+          another process/replica could mint a newer durable value in the
+          gap before this write lands, so this write must never be able to
+          regress the durable generation back down to that stale snapshot.
+        - Re-reads the durable generation once more immediately before
+          dispatch and, if it has since advanced past the earlier snapshot
+          (a concurrent restart on another process/replica minted a newer
+          one in the gap), dispatches with the newer value instead —
+          narrowing, not eliminating, the window in which this resume's
+          workflow could otherwise be dispatched carrying a generation that
+          is already stale, which would permanently fence out its own
+          activities.
         - Dispatches the durable Temporal workflow from the first
           not-yet-contiguously-completed cycle, so no already-persisted cycle
           is re-run (and thus never duplicated).
@@ -3111,7 +3264,18 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
           dict.
         - ``HTTPException`` 409: another transition for this run_id is
-          already in flight (#4028), or another run is already ``"running"``.
+          already in flight, or another run is already ``"running"``.
+        - ``HTTPException`` 503: reading the current durable generation —
+          either the initial carry-forward read or the pre-dispatch
+          revalidation — failed. Covers both a job-service transport
+          failure (unreachable/timed out) AND ``_get_run_generation_strict``
+          raising ``ValueError`` for a malformed/corrupt persisted
+          ``generation`` value — either way, the generation can't be
+          reliably determined, so the request fails closed with the same
+          503 rather than distinguishing the two causes. The revalidation
+          failure additionally marks the run ``"failed"`` (state was
+          already written by this point, so leaving it ``"running"`` with
+          no workflow ever dispatched would wedge it).
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged).
@@ -3139,9 +3303,31 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # contiguous_cycles tracks the highest unbroken sequence from index 0
         # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
         contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
-        request = RunStrategyLabRequest(**payload)
+        try:
+            request = RunStrategyLabRequest(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid stored request payload: {exc}"
+            ) from exc
         total_cycles = request.batch_size * request.batch_count
-        completed_batches = contiguous_cycles // request.batch_size
+        completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+
+        # The generation carried forward must come from the DURABLE store, not
+        # `state` (which may be `_get_run_state`'s process-local `active_runs`
+        # snapshot): in a multi-process/multi-replica deployment, a restart
+        # handled by a different process already minted a newer generation
+        # there, and copying a stale locally-cached value into
+        # `_persist_run_state` below would regress the durable high-water
+        # mark, un-fencing everything that restart just fenced out.
+        try:
+            current_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to read the current generation for this resume; job service unavailable.",
+            ) from exc
+
+        _ensure_no_active_run()
 
         # Re-initialize in-memory state
         resumed_state = _build_run_state(
@@ -3159,6 +3345,11 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
             completed_record_ids=state.get("completed_record_ids", []),
             completed_batches=completed_batches,
+            # A resume continues the same incarnation rather than superseding
+            # one, so it carries the current (durable, authoritative)
+            # generation forward unchanged (unlike restart, which mints a new
+            # one below).
+            generation=current_generation,
         )
         # Check-and-write atomically under one `_lock` acquisition: an
         # isolated `_ensure_no_active_run()` call followed by a separate
@@ -3168,12 +3359,68 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         with _lock:
             _no_active_run_locked()
             _active_runs[run_id] = resumed_state
-        _persist_run_state(run_id, resumed_state)
+        # Exclude "generation" from this write: current_generation above is a
+        # snapshot from just before this point, and a concurrent restart on
+        # another process/replica could mint a newer durable value in the gap
+        # between that read and this write. update_job/create_job merge
+        # fields into the durable record rather than replacing it wholesale,
+        # so omitting the key here means this write can never regress the
+        # durable generation back down to a stale snapshot.
+        _persist_run_state(run_id, resumed_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+
+        # Revalidate the generation immediately before dispatch: `current_generation`
+        # above is a snapshot from before this request's own state write, and a
+        # concurrent restart on another process/replica could have minted (and
+        # already dispatched under) a newer generation in that gap. Dispatching
+        # this resume's workflow under the stale value would permanently fence
+        # out its own activities the moment it tried to persist anything -- the
+        # only live workflow for this run, wedged with no way to make progress.
+        # Re-reading here narrows that window to the residual gap between this
+        # read and the dispatch call itself; closing it fully would need
+        # cross-replica atomic coordination over both generation selection and
+        # workflow-id dispatch ownership, which is the same out-of-scope
+        # multi-process limitation already accepted for the per-run_id
+        # transition lock.
+        try:
+            dispatch_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception as exc:
+            _fail_strategy_lab_run(run_id, f"Failed to revalidate generation before dispatch: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to revalidate the current generation before resuming; job service unavailable.",
+            ) from exc
+        if dispatch_generation > resumed_state["generation"]:
+            # `resumed_state` is the same dict object installed at
+            # `_active_runs[run_id]` above, so mutating it in place keeps
+            # both in sync -- guard the mutation with `_lock` since a
+            # concurrent same-process reader (e.g. the run-status endpoint)
+            # may be iterating `_active_runs` at the same time.
+            with _lock:
+                resumed_state["generation"] = dispatch_generation
+        elif dispatch_generation < resumed_state["generation"]:
+            # The generation field is meant to be strictly monotonic (only
+            # ever advanced via an atomic job-service increment), so a
+            # LOWER value here can't represent a legitimate concurrent
+            # mint -- it indicates a corrupted or otherwise malformed
+            # durable record. Fail closed rather than dispatch under a
+            # value that violates the invariant fencing depends on.
+            _fail_strategy_lab_run(
+                run_id,
+                f"Durable generation regressed from {resumed_state['generation']} "
+                f"to {dispatch_generation} during pre-dispatch revalidation",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Detected a durable generation regression while revalidating "
+                    "before dispatch; job service state is inconsistent."
+                ),
+            )
 
         # The Temporal activity derives its resume offset from the persisted
         # contiguous-cycle count (set above), so a durable resume picks up where the
         # run left off.
-        _dispatch_strategy_lab_run(run_id, request)
+        _dispatch_strategy_lab_run(run_id, request, generation=resumed_state["generation"])
     finally:
         run_lock.release()
 
@@ -3194,15 +3441,16 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Restart a strategy lab run from the beginning.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status — read INSIDE
-          the transition lock below, not beforehand — is in
-          ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
+        - ``run_id`` identifies a run whose status — read via ``_get_run_state``
+          (the in-memory ``active_runs`` entry when present, else a durable
+          fallback read; see its own docstring) INSIDE the transition lock
+          below, not beforehand — is in ``STRATEGY_LAB_RESTARTABLE_STATUSES``
           (completed/failed/cancelled/interrupted/agent_crash/completed_with_errors).
           Reading it before acquiring the lock could observe another
           transition's transiently-written "running" reset and misreport a
           genuine in-flight-elsewhere race as a permanent 400 instead of a
           retryable 409 ("running" is deliberately excluded from
-          ``RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
+          ``STRATEGY_LAB_RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
           resolves to *some* known run) runs before the lock, so a request
           for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
@@ -3227,14 +3475,36 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - Rebuilds ``_active_runs[run_id]`` as a full reset — ``contiguous_cycles``
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
-          carried forward — and persists the new state.
+          carried forward — and persists the new state. A freshly minted
+          ``generation`` (atomically incremented in the job store) is set on
+          the in-memory state, fencing out any write a still-in-flight
+          activity from the just-terminated workflow attempts afterward. The
+          durable write omits ``generation`` — ``apply_and_get`` already
+          persisted it atomically, and re-asserting it here could regress an
+          even newer value a different restart on another process/replica
+          minted in the gap since (the same reasoning as the rollback's own
+          write below).
+        - Re-reads the durable generation once more immediately before
+          dispatch and, if it has since advanced past this restart's own
+          mint (a different restart on another process/replica minted a
+          newer one in the gap), dispatches with the newer value instead —
+          narrowing, not eliminating, the window in which this restart's
+          workflow could otherwise win the deterministic workflow-id race
+          while carrying a generation that is already stale, which would
+          permanently fence out its own activities.
         - Dispatches the durable Temporal workflow starting at cycle 0. If
           that dispatch still 409s (a residual collision — e.g. a second
           restart/resume racing in after the termination check above), the
-          reset is rolled back — both ``_active_runs[run_id]`` and the
-          persisted state are restored to their pre-restart snapshot — so
-          the run isn't left wedged showing ``"running"`` and blocking every
-          future run/resume/restart call.
+          reset is rolled back — ``_active_runs[run_id]`` and the persisted
+          state are restored to their pre-restart status/counters — so the
+          run isn't left wedged showing ``"running"`` and blocking every
+          future run/resume/restart call. ``generation`` is the one field
+          NOT restored to its pre-restart value: the durable write excludes
+          it entirely, and the in-memory snapshot instead re-reads whatever
+          the durable store currently holds — never this request's own
+          (possibly superseded, in a multi-process race) mint — so a
+          concurrently-dispatched newer transition's generation can never be
+          regressed by this rollback.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
@@ -3250,29 +3520,62 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           ``allow_already_started`` parameter; the optimistic reset is rolled
           back in this case, see Postconditions).
         - ``HTTPException`` 503: Temporal is disabled/unavailable
-          (``_require_temporal``), or the prior execution couldn't be
-          resolved because the worker client never became ready
-          (``RuntimeError``) or a Temporal RPC itself failed
-          (``temporalio.service.RPCError``) -- the only two failure modes
-          ``terminate_and_await_workflow_sync`` raises for a genuine
-          Temporal-side problem (besides ``TimeoutError``, mapped to 409
-          above). Any other exception (e.g. a programming error in this
-          block) is NOT caught here and propagates as an unhandled 500,
-          rather than being misreported as Temporal unavailability.
+          (``_require_temporal``); the prior execution couldn't be resolved
+          because the worker client never became ready (``RuntimeError``) or
+          a Temporal RPC itself failed (``temporalio.service.RPCError``) --
+          the only two failure modes ``terminate_and_await_workflow_sync``
+          raises for a genuine Temporal-side problem (besides
+          ``TimeoutError``, mapped to 409 above; any other exception, e.g. a
+          programming error in this block, is NOT caught here and propagates
+          as an unhandled 500 instead of being misreported as Temporal
+          unavailability); minting the new generation failed; persisting the
+          optimistic reset state failed; or the pre-dispatch revalidation
+          read of the generation failed (job service unavailable in any
+          case). "Minting failed" covers both ways ``apply_and_get`` can
+          fail: it raises on a transport error, or returns a falsy value
+          when the job no longer exists in the job service — the latter also
+          503s rather than some other status, since the prior workflow was
+          already confirmed terminated above and the run cannot safely be
+          left without a fencing generation. The persist-failure and
+          revalidation-failure cases both additionally mark the run
+          ``"failed"`` (state was already written in-memory by this point,
+          so leaving it ``"running"`` with no durably-persisted/dispatched
+          workflow would wedge it).
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
     ``_require_run_transition_lock``, which reserves this run_id for the
     whole check→terminate→write→dispatch sequence below).
 
-    Known, accepted residual race (requires multiple unlikely events to
-    align; closing it is a real feature, not a quick patch — tracked as a
-    follow-up rather than fixed here):
-        - Confirming the old *workflow* terminated does not guarantee an
-          already in-flight, non-heartbeating *activity* has stopped —
-          Strategy Lab's activities aren't cooperatively cancellable, so one
-          can still commit a cycle record or paper trade after the new
-          cycle-0 workflow has started (tracked as #4029).
+    Generation fencing substantially narrows the race left by confirming the
+    old *workflow* terminated: that confirmation alone does not guarantee an
+    already in-flight, non-heartbeating *activity* has stopped — Strategy
+    Lab's activities aren't cooperatively cancellable — so without fencing
+    one could still commit a cycle record or persist progress after the new
+    cycle-0 workflow has started. The generation minted above is threaded
+    through the new workflow's persist/finalize activities (see
+    ``shared.fencing.check_fencing_token``), so a stale activity's write is
+    checked against it rather than always silently landing. For
+    ``persist_run_state_activity`` (a fast, synchronous write immediately
+    adjacent to its check) this closes the realistic window outright. For
+    ``finalize_cycle_record_activity`` (whose write happens after a
+    market-data fetch and paper-trading execution — a real amount of time)
+    the check happens both before and after that work, but the two checks
+    still can't make the underlying write atomic against the generation; see
+    ``strategy_lab.temporal.activities``'s module docstring for the full,
+    honest accounting.
+
+    Known, accepted residual limitation (tracked as a separate follow-up
+    rather than fixed here — closing it is a real feature, not a quick
+    patch): a stale in-flight activity from the terminated incarnation can
+    still run to completion — burning time and cost on an LLM call, a
+    backtest, or a paper trade — before its write is checked/rejected as
+    fenced. Cooperative cancellation (checking
+    ``activity.is_cancelled()``/heartbeating so a terminated workflow's
+    activities actually stop executing) would close this remaining gap, and
+    would also fully close ``finalize_cycle_record_activity``'s wider
+    check-to-write window by stopping its execution outright rather than
+    merely detecting staleness after the fact.
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged),
@@ -3290,12 +3593,8 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # RESTARTABLE_STATUSES, so status is only trustworthy once no other
         # transition for this run_id can be concurrently rewriting it.
         state = _get_run_state(run_id)
-        # "completed_with_errors" is a terminal outcome of the same workflow as
-        # "completed" and must be restartable. Extend the shared set locally
-        # rather than leaking a lab-specific status into job_service_client.
-        _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
         try:
-            validate_job_for_action(state, run_id, _lab_restartable, "restarted")
+            validate_job_for_action(state, run_id, STRATEGY_LAB_RESTARTABLE_STATUSES, "restarted")
         except JobNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except JobStateError as exc:
@@ -3307,7 +3606,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
         _ensure_no_active_run()
 
-        request = RunStrategyLabRequest(**payload)
+        try:
+            request = RunStrategyLabRequest(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid stored request payload: {exc}"
+            ) from exc
         total_cycles = request.batch_size * request.batch_count
 
         # Resolve any prior execution BEFORE writing anything: a still-running
@@ -3342,11 +3646,129 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # above, or a programming error -- is NOT one of the documented
             # Temporal-side failure modes and must propagate as an unhandled
             # 500 instead of being misreported as "Temporal worker unavailable."
+            logger.exception(
+                "Failed to terminate prior strategy-lab workflow for run %s before restart", run_id
+            )
             raise HTTPException(
                 status_code=503,
                 detail=(
                     "Failed to resolve the prior strategy-lab execution before "
                     "restarting; Temporal worker unavailable."
+                ),
+            ) from exc
+
+        # Mint a new generation for this incarnation: the fresh cycle-0
+        # workflow started below carries it through every persist/finalize
+        # activity, so a stale write from the just-terminated workflow's
+        # still-in-flight activity (terminating the workflow doesn't stop an
+        # already-dispatched, non-heartbeating activity) is fenced instead of
+        # silently landing. Atomic increment-and-read-back mirrors
+        # software_engineering_team/job_store.py's claim_resume. The
+        # increment amount itself accounts for a legacy (pre-fencing) run's
+        # missing "generation" field -- see
+        # `_legacy_generation_bootstrap_increment`'s own docstring.
+        #
+        # get_job (below) and apply_and_get (further down) are deliberately
+        # two separate, non-atomic job-service calls -- not a bug. get_job's
+        # result ONLY decides which increment amount apply_and_get applies
+        # (+1 ordinary vs +2 legacy-bootstrap); it never supplies a value
+        # apply_and_get treats as authoritative. apply_and_get's own
+        # increment-and-read-back is what's atomic, and it always increments
+        # from whatever the durable value actually is at the moment it runs,
+        # regardless of what get_job saw. So a race in this gap (another
+        # restart's apply_and_get already advanced the generation, or the
+        # job was deleted) can only affect which increment amount THIS call
+        # applies -- never which direction the generation moves (always up)
+        # or whether the result is still a valid, monotonically-newer
+        # fencing token. A deleted-job race is caught by apply_and_get's own
+        # falsy-result handling below.
+        #
+        # A get_job *transport* failure is different: without seeing the
+        # durable representation we cannot choose a safe increment (a blind
+        # +2 would zero a durable numeric-string token like "5" and regress
+        # fencing). Fail closed with 503 rather than minting.
+        client = _get_lab_run_job_client()
+        try:
+            durable_job = client.get_job(run_id)
+        except Exception as exc:
+            logger.warning(
+                "get_job failed during restart's legacy-generation check for %s: %s", run_id, exc
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; could not "
+                    "read the durable generation to choose a safe increment."
+                ),
+            ) from exc
+        # get_job's contract is Optional[Dict[str, Any]] -- a JSONB "data"
+        # column merged into the top-level dict server-side (job_service.db's
+        # _row_to_dict), never returned as a separate nested key. `or {}`
+        # normalizes only the "no job" case; no further shape-guessing needed.
+        durable_data = durable_job or {}
+        try:
+            generation_increment = _legacy_generation_bootstrap_increment(durable_data)
+        except UnsafeDurableGenerationError as exc:
+            # A parseable-but-non-native generation (e.g. "5") cannot be
+            # advanced via increment without job-service zeroing it first and
+            # regressing the fencing token. Fail closed rather than mint a
+            # weaker generation that in-flight activities presenting the
+            # conceptual value would still pass.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; durable "
+                    "generation is not a native integer and cannot be advanced safely."
+                ),
+            ) from exc
+        try:
+            updated_generation_record = client.apply_and_get(
+                run_id, increment={"generation": generation_increment}
+            )
+        except Exception as exc:
+            # apply_and_get raises on a transport failure (connection refused,
+            # timeout, ...) rather than returning None — only a falsy return
+            # (job not found) is the "expected" failure mode below, so a raised
+            # exception needs its own translation to the same documented 503.
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to mint a new generation for this restart; job service transport error.",
+            ) from exc
+        if not updated_generation_record:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to mint a new generation for this restart; run record not found in job service.",
+            )
+        try:
+            # No default: a missing/non-int "generation" in the mint
+            # response is a malformed reply from the job service, not a
+            # legitimate absent-field case (apply_and_get's increment
+            # target always comes back populated on success) -- treat it
+            # the same as any other mint failure rather than silently
+            # assuming a value that could itself be stale. Checked via
+            # isinstance rather than a bare int(...) coercion: the latter
+            # would silently truncate a float or accept a numeric string
+            # instead of rejecting it as the malformed reply it is, and
+            # would accept a bool (an int subclass in Python) as a
+            # seemingly valid generation.
+            raw_generation = updated_generation_record["generation"]
+            if not isinstance(raw_generation, int) or isinstance(raw_generation, bool):
+                raise ValueError(f"non-integer generation {raw_generation!r}")
+            new_generation = raw_generation
+            if new_generation <= 0:
+                # The increment applied is always positive (see
+                # _legacy_generation_bootstrap_increment), so a non-positive
+                # result means the durable record itself was already
+                # corrupt -- treat it the same as a malformed reply rather
+                # than dispatching with a value that could match a stale
+                # activity's default/legacy token and defeat fencing.
+                raise ValueError(f"non-positive generation {new_generation!r}")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; job service "
+                    "returned an invalid generation value."
                 ),
             ) from exc
 
@@ -3361,6 +3783,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # restart re-runs from cycle 0 instead of resuming a prior run's
             # contiguous-cycle count persisted on this run_id.
             contiguous_cycles=0,
+            generation=new_generation,
         )
         # Re-run the no-active-run check atomically with the write: the
         # early call above (before the Temporal termination RPC) is only a
@@ -3372,25 +3795,138 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         with _lock:
             _no_active_run_locked()
             _active_runs[run_id] = restarted_state
-        _persist_run_state(run_id, restarted_state)
+        # Exclude "generation" from this write: `apply_and_get` above already
+        # durably persisted it atomically, so re-asserting it here is
+        # redundant at best -- and actively harmful in a multi-process/
+        # multi-replica deployment, where a DIFFERENT restart on another
+        # process/replica could mint (and already dispatch under) an even
+        # newer generation in the gap between this request's own mint and
+        # this write. Writing this request's now-stale minted value here
+        # would regress the durable high-water mark and un-fence that
+        # legitimately newer, already-running incarnation -- the exact
+        # regression the rollback path below already guards against for its
+        # own write; this is the same guard for the non-collision path.
+        try:
+            _persist_run_state(run_id, restarted_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+        except Exception as exc:
+            # _persist_run_state is documented to propagate job-service
+            # failures uncaught rather than swallow them -- this call site
+            # must translate that into the same documented 503 every other
+            # job-service failure in this function produces, not let it
+            # escape as a raw 500. _fail_strategy_lab_run is itself
+            # best-effort/never-raises, so it's safe to call even though the
+            # durable write we're reacting to just failed.
+            _fail_strategy_lab_run(run_id, f"Failed to persist restarted run state: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to persist restarted run state; job service unavailable.",
+            ) from exc
+
+        # Revalidate the generation immediately before dispatch: `new_generation`
+        # above is a snapshot from this restart's own mint, and a DIFFERENT
+        # restart on another process/replica could have minted (and already
+        # dispatched under) an even newer one in the gap since. If THIS
+        # request's dispatch then wins the deterministic workflow-id race
+        # (the other replica's collides instead), dispatching under the
+        # stale value here would permanently fence out the only live
+        # workflow's own activities the moment they tried to persist
+        # anything. Re-reading here narrows that window to the residual gap
+        # between this read and the dispatch call itself -- the same
+        # narrowing already applied to resume's dispatch, and the same
+        # out-of-scope multi-process limitation acknowledged there.
+        try:
+            dispatch_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception as exc:
+            _fail_strategy_lab_run(run_id, f"Failed to revalidate generation before dispatch: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to revalidate the current generation before restarting; job service unavailable.",
+            ) from exc
+        if dispatch_generation > restarted_state["generation"]:
+            # `restarted_state` is the same dict object installed at
+            # `_active_runs[run_id]` above, so mutating it in place keeps
+            # both in sync -- guard the mutation with `_lock` since a
+            # concurrent same-process reader (e.g. the run-status endpoint)
+            # may be iterating `_active_runs` at the same time.
+            with _lock:
+                restarted_state["generation"] = dispatch_generation
+        elif dispatch_generation < restarted_state["generation"]:
+            # Same invariant-violation guard as resume's identical check:
+            # generation only ever advances via an atomic increment, so a
+            # lower value here means the durable record is corrupted or
+            # otherwise inconsistent -- fail closed instead of dispatching
+            # under it.
+            _fail_strategy_lab_run(
+                run_id,
+                f"Durable generation regressed from {restarted_state['generation']} "
+                f"to {dispatch_generation} during pre-dispatch revalidation",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Detected a durable generation regression while revalidating "
+                    "before dispatch; job service state is inconsistent."
+                ),
+            )
 
         # Restart from scratch through Temporal (offset 0, per the reset
         # persisted state above). allow_already_started=False: unlike resume, a
         # collision here means an old, un-reset execution is still running, not
         # that the intended restart is already in flight.
         try:
-            _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+            _dispatch_strategy_lab_run(
+                run_id, request, generation=restarted_state["generation"], allow_already_started=False
+            )
         except HTTPException as exc:
             if exc.status_code == 409:
                 # The reset above never actually took effect (an old execution
                 # is still running under this run_id) — restore the pre-restart
-                # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
-                # "running" entry, blocking every future run/resume/restart call
-                # until the stale execution happens to overwrite it on its own.
-                with _lock:
-                    _active_runs[run_id] = state
+                # status/counters so _ensure_no_active_run() doesn't wedge on a
+                # phantom "running" entry, blocking every future run/resume/
+                # restart call until the stale execution happens to overwrite it
+                # on its own. The freshly minted generation is deliberately NOT
+                # rolled back with the rest of the snapshot: the prior workflow
+                # was already confirmed terminated above, so its activities must
+                # stay fenced out regardless of whether this restart's own
+                # dispatch succeeded — reverting to the pre-restart generation
+                # would let a still-in-flight activity from that terminated
+                # workflow pass fencing again, reopening the exact race
+                # generation fencing exists to close.
+                #
+                # But this restart's OWN mint (new_generation) is only correct
+                # to durably re-assert when it's still the current one. In a
+                # multi-process/multi-replica deployment (the per-run_id
+                # transition lock is process-local, see #4028's scope note),
+                # a DIFFERENT restart on another process could have raced this
+                # one, minted an even newer generation, and already dispatched
+                # successfully — that's a real, legitimate active run, not a
+                # stale leftover; overwriting its generation back down to this
+                # request's stale mint would un-fence it. Re-read the current
+                # durable value for the in-memory snapshot (falls back to this
+                # request's own mint only if even that read fails), and
+                # exclude "generation" from the durable write entirely so it
+                # can never be regressed by this rollback either way.
                 try:
-                    _persist_run_state(run_id, state)
+                    current_generation = _get_run_generation_strict(
+                        run_id, client=_get_lab_run_job_client()
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to re-read current generation during restart rollback "
+                        "for run %s; falling back to minted generation %s: %s",
+                        run_id,
+                        new_generation,
+                        exc,
+                    )
+                    current_generation = new_generation
+                rolled_back_state = dict(state)
+                rolled_back_state["generation"] = current_generation
+                with _lock:
+                    _active_runs[run_id] = rolled_back_state
+                try:
+                    _persist_run_state(
+                        run_id, rolled_back_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS
+                    )
                 except Exception:
                     # Best-effort rollback persist: a failure here must not
                     # replace the more actionable 409 below with an unrelated
@@ -3400,6 +3936,15 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                         run_id,
                         exc_info=True,
                     )
+                # Known, accepted residual limitation (matches #4028's own
+                # documented multi-process scope boundary — not new here):
+                # this rollback can still overwrite a concurrently-dispatched
+                # newer transition's status/counters with this request's
+                # stale pre-restart snapshot in that same multi-process race.
+                # Closing that fully would need real cross-process
+                # coordination (e.g. an optimistic-concurrency/conditional
+                # update on the whole record), out of scope for generation
+                # fencing specifically.
             raise
     finally:
         run_lock.release()

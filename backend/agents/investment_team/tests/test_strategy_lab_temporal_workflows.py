@@ -349,6 +349,10 @@ def test_run_increments_trial_count_on_each_phase_back():
 
 
 def test_run_merges_child_drift_into_short_circuit_record():
+    """Drift collected across the reentry attempts (spec/code history, gate
+    timeline) is merged into the drift_collector passed to the
+    short-circuit record builder, not dropped when the run short-circuits."""
+
     def _attempt(args):
         return _reentry_outcome(
             drift={
@@ -387,6 +391,9 @@ def test_run_merges_child_drift_into_short_circuit_record():
 
 
 def test_run_seeds_failure_directives_from_tracker_state():
+    """A convergence tracker whose failure_modes shows a gate failing at or
+    above the seeding threshold (here AcceptanceGate x4) yields a failure
+    directive naming that gate in the first design attempt's directives."""
     seen: Dict[str, Any] = {}
 
     def _attempt(args):
@@ -422,8 +429,21 @@ def test_run_seeds_failure_directives_from_tracker_state():
 
 
 def test_module_exports_workflow_and_activities():
+    """The temporal workflows module exports the expected workflow classes,
+    task queue name, and activity list -- the Pattern-A contract every
+    other team's temporal package registration depends on."""
     from investment_team.strategy_lab.temporal import activities as act
 
     assert wf.WORKFLOWS == [wf.StrategyLabCycleWorkflow, wf.StrategyLabBatchWorkflow]
     assert wf.TASK_QUEUE == "strategy-lab-queue"
     assert wf.ACTIVITIES == act.ACTIVITIES
+
+
+def test_default_fencing_generation_matches_run_state():
+    """wf._DEFAULT_FENCING_GENERATION is duplicated (not imported) from
+    run_state.DEFAULT_FENCING_GENERATION because this module runs inside the
+    temporalio workflow sandbox, which can't tolerate run_state's module-level
+    threading.Lock() side effect. Guard against the two silently drifting."""
+    from investment_team.strategy_lab import run_state
+
+    assert wf._DEFAULT_FENCING_GENERATION == run_state.DEFAULT_FENCING_GENERATION

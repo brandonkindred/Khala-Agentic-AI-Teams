@@ -27,13 +27,17 @@ fixtures. Targets:
 * ``complete_advisor_session`` happy path.
 * ``RunStrategyLabRequest`` batch_size/batch_count bounds.
 * ``acquire_run_transition_lock`` per-run_id serialization primitive.
+* ``run_state.get_run_generation_strict`` and ``_build_run_state``'s
+  ``generation`` field, plus ``_legacy_generation_bootstrap_increment``
+  (generation-fencing coverage).
 """
 
 from __future__ import annotations
 
 import threading
 import uuid
-from typing import Any, Dict, List
+from collections.abc import MutableMapping
+from typing import Any, Dict, Iterator, List
 
 import httpx
 import pytest
@@ -211,7 +215,14 @@ def test_strategy_lab_results_response_derives_counts_from_items() -> None:
     assert filtered.losing_count == 0
 
 
-class _InMemoryDict:
+class _InMemoryDict(MutableMapping):
+    """Plain-dict stand-in for monkeypatching api.main's module-level record
+    stores. Subclasses MutableMapping (rather than hand-rolling the dict
+    protocol) so it gets correct semantics -- including __iter__/__len__/
+    keys/items/update/setdefault and a real KeyError on deleting a missing
+    key -- for free, matching what production code calling these stores
+    would see from an actual dict."""
+
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
 
@@ -221,22 +232,33 @@ class _InMemoryDict:
     def __getitem__(self, k):
         return self._d[k]
 
-    def get(self, k, default=None):
-        return self._d.get(k, default)
-
-    def __contains__(self, k):
-        return k in self._d
-
     def __delitem__(self, k):
-        self._d.pop(k, None)
+        del self._d[k]
 
-    def pop(self, k, *args):
-        if args:
-            return self._d.pop(k, args[0])
-        return self._d.pop(k)
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._d)
 
-    def values(self):
-        return list(self._d.values())
+    def __len__(self) -> int:
+        return len(self._d)
+
+
+def test_in_memory_dict_matches_real_dict_protocol() -> None:
+    """Regression: the hand-rolled predecessor of this MutableMapping-based
+    test double was missing __iter__/__len__/keys/items/update/setdefault,
+    and its __delitem__ silently no-op'd on a missing key instead of
+    raising KeyError like a real dict -- gaps that could mask a bug in
+    production code exercising the full mapping protocol against these
+    monkeypatched stores."""
+    d = _InMemoryDict()
+    d["a"] = 1
+    d.setdefault("b", 2)
+    d.update({"c": 3})
+    assert len(d) == 3
+    assert set(iter(d)) == {"a", "b", "c"}
+    assert dict(d.items()) == {"a": 1, "b": 2, "c": 3}
+    assert set(d.keys()) == {"a", "b", "c"}
+    with pytest.raises(KeyError):
+        del d["missing"]
 
 
 @pytest.fixture
@@ -664,6 +686,89 @@ def test_build_strategy_from_ideation_rejects_non_mapping() -> None:
         _build_strategy_from_ideation(None)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         _build_strategy_from_ideation(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# _legacy_generation_bootstrap_increment
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() -> None:
+    """A run with no persisted "generation" field (pre-fencing, or a missing
+    job record passed as ``{}``) must bootstrap by +2, not +1 -- +1 would mint
+    generation 1, which is also what a stale legacy activity that omits
+    "generation" entirely is treated as presenting, defeating fencing.
+    Transport failures on the bootstrap read fail closed at the route instead
+    of being rewritten as ``{}`` here."""
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert _legacy_generation_bootstrap_increment({}) == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    assert (
+        _legacy_generation_bootstrap_increment({"status": "completed"})
+        == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    )
+
+
+@pytest.mark.parametrize(
+    "uninitialized_generation",
+    [None, "", 0, -1, "0", "-3", "not-an-int", [], {}],
+)
+def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_uninitialized(
+    uninitialized_generation,
+) -> None:
+    """A present but uninitialized/unparseable generation must use the same +2
+    bootstrap as a missing key -- get_run_generation_strict already treats
+    None/empty/<=0 as DEFAULT_FENCING_GENERATION, and job-service increment
+    coerces unparseable non-ints to 0, so +2 lands safely above the legacy
+    activity default of 1."""
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert (
+        _legacy_generation_bootstrap_increment({"generation": uninitialized_generation})
+        == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    )
+
+
+@pytest.mark.parametrize("unsafe_generation", ["5", "1", "42", True, False, 1.5, 2.0])
+def test_legacy_generation_bootstrap_increment_fails_closed_on_non_native_positive_token(
+    unsafe_generation,
+) -> None:
+    """A durable generation that parses as a positive fencing token but is not
+    a native int (numeric string) — or is a bool/float get_run_generation_strict
+    rejects — must raise rather than return +2: job-service increment would
+    zero a string first and mint 2, regressing e.g. conceptual generation 5
+    and letting in-flight activities that present 5 pass check_fencing_token."""
+    from investment_team.api.main import (
+        UnsafeDurableGenerationError,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    with pytest.raises(UnsafeDurableGenerationError):
+        _legacy_generation_bootstrap_increment({"generation": unsafe_generation})
+
+
+def test_legacy_generation_bootstrap_increment_normal_when_field_present() -> None:
+    """A run that already has a persisted positive integer "generation" field
+    (created after fencing shipped, or a legacy run past its first
+    post-upgrade restart) increments by the ordinary amount rather than
+    re-bootstrapping."""
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_NORMAL,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert (
+        _legacy_generation_bootstrap_increment({"generation": 1}) == GENERATION_INCREMENT_NORMAL
+    )
+    assert (
+        _legacy_generation_bootstrap_increment({"generation": 7}) == GENERATION_INCREMENT_NORMAL
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2110,6 +2215,304 @@ def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch)
     assert out["status"] == "completed"
 
 
+def test_get_run_state_strict_propagates_durable_read_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: unlike the lenient get_run_state (whose durable fallback
+    swallows ANY job-service read failure via load_run_from_job_service),
+    get_run_state_strict must propagate a transport failure rather than
+    returning None -- a caller relying on this to distinguish "no prior
+    state" from "the read failed" needs the raise."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_run_state_strict("run-strict-fail")
+
+
+def test_get_run_state_strict_prefers_active_runs_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setitem(run_state.active_runs, "run-cached", {"status": "running"})
+    try:
+        assert run_state.get_run_state_strict("run-cached") == {"status": "running"}
+    finally:
+        del run_state.active_runs["run-cached"]
+
+
+def test_get_run_state_strict_returns_none_for_genuinely_unknown_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NotFound:
+        def get_job(self, jid):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NotFound())
+    assert run_state.get_run_state_strict("run-nonexistent") is None
+
+
+def test_rehydrate_active_run_offset_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a transient job-service outage during dispatch must raise
+    (letting _dispatch_strategy_lab_run's exception boundary turn it into a
+    503 + failed run), not silently return offset 0 -- which would be
+    indistinguishable from "fresh run" and cause a resumed run to replay
+    already-completed cycles with no error for Temporal to retry on."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.rehydrate_active_run_offset("run-offset-fail")
+
+
+def test_rehydrate_active_run_offset_raises_on_corrupt_contiguous_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a durable-read succeeds but the persisted contiguous_cycles
+    field itself is corrupt (unparseable as an int). Silently defaulting to
+    offset 0 here would be indistinguishable from a genuinely fresh run and
+    cause a resumed run to replay already-completed cycles -- the same
+    replay risk this function's docstring already argues against for a
+    durable-read failure, so a corrupt field must raise too, not default."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "contiguous_cycles": "not-a-number"}
+
+    monkeypatch.setattr(run_state, "active_runs", {})
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted contiguous_cycles"):
+        run_state.rehydrate_active_run_offset("run-corrupt-offset")
+
+
+def test_get_resume_seed_counters_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression as rehydrate_active_run_offset's: a transient
+    job-service outage must raise rather than silently reset these counters
+    to zero."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(RuntimeError, match="backend down"):
+        run_state.get_resume_seed_counters("run-counters-fail")
+
+
+# ---------------------------------------------------------------------------
+# get_run_generation_strict + _build_run_state's generation field (#4029)
+#
+# get_run_generation_strict is the sole read path for a run's fencing
+# generation (there is no lenient sibling -- every other caller already has
+# its own known/just-minted value in hand and passes it through explicitly
+# rather than re-deriving it via a read; see _dispatch_strategy_lab_run's
+# precondition).
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_generation_strict_ignores_active_runs_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: unlike get_run_state's other callers, get_run_generation_strict
+    must NOT prefer (or even consult) the process-local active_runs cache. It's
+    called from inside a Temporal worker, which may be a different process than
+    the API server that handled a restart -- if a stale in-memory generation
+    were trusted here, a restart handled elsewhere would never be observed and
+    fencing would be silently defeated."""
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setitem(run_state.active_runs, "run-live", {"generation": 1})  # stale local cache
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": 5}  # authoritative durable value
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    try:
+        assert run_state.get_run_generation_strict("run-live") == 5
+    finally:
+        del run_state.active_runs["run-live"]
+
+
+def test_get_run_generation_strict_null_data_field_defaults_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a job record with "data": None (key present but null --
+    the same shape normalize_persisted_job explicitly guards against) must
+    not crash with AttributeError from None.get(...). Falls back to the
+    top-level job dict, matching normalize_persisted_job's coercion."""
+    from investment_team.strategy_lab import run_state
+
+    class _NullData:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "data": None}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NullData())
+    assert run_state.get_run_generation_strict("run-nulldata") == 1
+
+
+@pytest.mark.parametrize("empty_value", [None, ""])
+def test_get_run_generation_strict_missing_or_empty_value_defaults_to_one(
+    monkeypatch: pytest.MonkeyPatch, empty_value
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": empty_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-bad") == 1
+
+
+@pytest.mark.parametrize("nonpositive_value", [0, -1])
+def test_get_run_generation_strict_nonpositive_value_clamps_to_one(
+    monkeypatch: pytest.MonkeyPatch, nonpositive_value
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": nonpositive_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-bad") == 1
+
+
+@pytest.mark.parametrize("unparseable_value", ["not-a-number", [], {}, object()])
+def test_get_run_generation_strict_raises_on_unparseable_value(
+    monkeypatch: pytest.MonkeyPatch, unparseable_value
+) -> None:
+    """Regression: an unparseable persisted `generation` (durable-record
+    corruption, not a legitimate missing-field case) must raise rather than
+    silently defaulting to the permissive generation 1 -- returning 1 here
+    would let a stale pre-restart activity (carrying token 1) pass
+    check_fencing_token (which accepts provided_token >= current_token),
+    reopening the exact race generation fencing exists to close."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": unparseable_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted generation"):
+        run_state.get_run_generation_strict("run-bad")
+
+
+@pytest.mark.parametrize("non_int_value", [2.9, True, False])
+def test_get_run_generation_strict_raises_on_float_or_bool(
+    monkeypatch: pytest.MonkeyPatch, non_int_value
+) -> None:
+    """A persisted `generation` that's a float or bool (an int subclass in
+    Python, so `isinstance(True, int)` is True) must be rejected as
+    corruption rather than silently coerced via int(...) -- a truncated
+    float or a bool-derived 0/1 could produce a generation lower than the
+    actual persisted value, letting a stale activity pass fencing."""
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": non_int_value}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    with pytest.raises(ValueError, match="Invalid persisted generation"):
+        run_state.get_run_generation_strict("run-bad")
+
+
+def test_get_run_generation_strict_returns_one_for_unknown_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NotFound:
+        def get_job(self, jid):
+            return None
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NotFound())
+    assert run_state.get_run_generation_strict("run-unknown") == 1
+
+
+def test_get_run_generation_strict_reads_persisted_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _Ok:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running", "generation": 4}
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    assert run_state.get_run_generation_strict("run-g4") == 4
+
+
+def test_get_run_generation_strict_defaults_to_one_when_field_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from investment_team.strategy_lab import run_state
+
+    class _NoGenerationField:
+        def get_job(self, jid):
+            return {"job_id": jid, "status": "running"}  # no "generation" key at all
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _NoGenerationField())
+    assert run_state.get_run_generation_strict("run-legacy") == 1
+
+
+def test_get_run_generation_strict_propagates_durable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a transient durable-read failure must NOT silently default to
+    generation 1 -- that would let a stale write past the fencing check during
+    exactly the kind of outage fencing needs to guard against. The failure must
+    propagate so the caller (the fencing check) rejects the write."""
+    from investment_team.strategy_lab import run_state
+
+    class _Broken:
+        def get_job(self, jid):
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    with pytest.raises(ConnectionError):
+        run_state.get_run_generation_strict("run-x")
+
+
+def test_build_run_state_generation_defaults_to_one() -> None:
+    from investment_team.api import main as api_main
+
+    state = api_main._build_run_state(
+        "run-fresh",
+        started_at="2024-01-01T00:00:00Z",
+        total_cycles=1,
+        batch_size=1,
+        batch_count=1,
+        request_payload={},
+    )
+    assert state["generation"] == 1
+
+
+def test_build_run_state_generation_override_is_carried_through() -> None:
+    from investment_team.api import main as api_main
+
+    state = api_main._build_run_state(
+        "run-restarted",
+        started_at="2024-01-01T00:00:00Z",
+        total_cycles=1,
+        batch_size=1,
+        batch_count=1,
+        request_payload={},
+        generation=7,
+    )
+    assert state["generation"] == 7
+
+
 def test_persist_run_state_propagates_job_service_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2642,3 +3045,33 @@ def test_run_state_to_response_tolerates_missing_run_id() -> None:
 
     assert resp.run_id == ""
     assert resp.status == "running"
+
+
+@pytest.mark.parametrize("bad_generation", [None, "", 0, -3, True, 2.5, "x", [], {}])
+def test_run_state_to_response_coerces_uninitialized_generation(bad_generation) -> None:
+    """An explicit null/empty/non-positive/unparseable generation must degrade
+    to DEFAULT_FENCING_GENERATION rather than raising ValidationError --
+    status/list routes feed job-service-shaped state through this helper and
+    must keep their always-200 contract when a persisted record carries a
+    null generation field."""
+    from investment_team.api.main import _run_state_to_response
+    from investment_team.strategy_lab.run_state import DEFAULT_FENCING_GENERATION
+
+    resp = _run_state_to_response(
+        {
+            "run_id": "run-null-gen",
+            "status": "running",
+            "generation": bad_generation,
+        }
+    )
+
+    assert resp.generation == DEFAULT_FENCING_GENERATION
+
+
+def test_run_state_to_response_preserves_positive_generation() -> None:
+    """A positive integer generation must pass through unchanged."""
+    from investment_team.api.main import _run_state_to_response
+
+    resp = _run_state_to_response({"run_id": "run-g", "status": "running", "generation": 4})
+
+    assert resp.generation == 4
