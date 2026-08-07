@@ -170,6 +170,7 @@ _purge_strategy_lab_job_storage = _strategy_lab_orchestrator_api._purge_strategy
 _reconcile_run_progress = _strategy_lab_orchestrator_api._reconcile_run_progress
 _run_state_to_response = _strategy_lab_orchestrator_api._run_state_to_response
 
+
 def _startup() -> None:
     """Start the Temporal worker backstop and recover orphaned paper-trading
     sessions (both best-effort).
@@ -494,6 +495,7 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
+
 
 class StrategyLabRunStartResponse(BaseModel):
     """Returned immediately when a strategy lab batch is started."""

@@ -59,6 +59,7 @@ STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
 )
 
+
 def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusResponse":
     """Convert an ``_active_runs`` entry to a Pydantic response.
 
