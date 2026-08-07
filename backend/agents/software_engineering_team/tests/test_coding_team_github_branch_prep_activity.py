@@ -36,6 +36,28 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Any:
     return api_main
 
 
+def _seed_job_token(
+    monkeypatch: pytest.MonkeyPatch, api: Any, job_id: str, plaintext: str = "tok-123"
+) -> str:
+    """Persist an encrypted token on a fake job and return the plaintext."""
+    from cryptography.fernet import Fernet
+
+    from software_engineering_team import token_crypto
+
+    monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    ct = token_crypto.encrypt_token(plaintext)
+    assert ct is not None
+    monkeypatch.setattr(
+        api,
+        "get_job",
+        lambda jid, cache_dir=None: (
+            {"job_id": jid, "github_token_encrypted": ct} if jid == job_id else None
+        ),
+    )
+    return plaintext
+
+
 def _git(repo: str, *args: str) -> None:
     """Run a git command in ``repo`` with ``check=True``.
 
@@ -72,19 +94,21 @@ def _init_repo(path: pathlib.Path) -> str:
     return repo
 
 
-def test_branch_prep_activity_clean_checkout_returns_ok_true(api, tmp_path) -> None:
+def test_branch_prep_activity_clean_checkout_returns_ok_true(api, monkeypatch, tmp_path) -> None:
     """A clean checkout succeeds and the activity returns the ok/notes shape
-    the caller (a future #3993 workflow) will branch on, proving real
-    delegation to _prepare_issue_branch rather than a stub."""
+    the caller will branch on, proving real delegation to _prepare_issue_branch
+    rather than a stub."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
     )
 
+    _seed_job_token(monkeypatch, api, "job-1")
     repo = _init_repo(tmp_path)
     _git(repo, "fetch", "origin", "main")
 
     out = github_branch_prep_activity(
         {
+            "job_id": "job-1",
             "repo_path": repo,
             "remote": "origin",
             "default_branch": "main",
@@ -103,7 +127,7 @@ def test_branch_prep_activity_clean_checkout_returns_ok_true(api, tmp_path) -> N
     assert head == "khala/issue-9"
 
 
-def test_branch_prep_activity_unsafe_ref_returns_ok_false(api) -> None:
+def test_branch_prep_activity_unsafe_ref_returns_ok_false(api, monkeypatch) -> None:
     """An unsafe ref is rejected fail-closed before any git operation --
     the activity surfaces this as ok=False with the underlying error message,
     not an exception (a git-level failure, not a caller-wiring bug)."""
@@ -111,8 +135,10 @@ def test_branch_prep_activity_unsafe_ref_returns_ok_false(api) -> None:
         github_branch_prep_activity,
     )
 
+    _seed_job_token(monkeypatch, api, "job-1")
     out = github_branch_prep_activity(
         {
+            "job_id": "job-1",
             "repo_path": "/nonexistent",
             "remote": "origin",
             "default_branch": "main",
@@ -126,43 +152,49 @@ def test_branch_prep_activity_unsafe_ref_returns_ok_false(api) -> None:
 
 
 @pytest.mark.parametrize(
-    "request_dict,expected_fields,fake_token",
+    "request_dict,expected_fields,seed_job",
     [
-        ({"repo_path": "/x", "remote": "origin"}, ["default_branch", "integration_branch"], None),
+        (
+            {"job_id": "job-1", "repo_path": "/x", "remote": "origin"},
+            ["default_branch", "integration_branch"],
+            True,
+        ),
         (
             {
+                "job_id": "job-1",
                 "repo_path": "/x",
                 "remote": "origin",
                 "default_branch": "main",
                 "integration_branch": "",
             },
             ["integration_branch"],
-            None,
+            True,
         ),
         (
             {
                 "repo_path": "/x",
                 "remote": "origin",
                 "default_branch": "main",
-                "integration_branch": "",
-                "token": "fake-token-xyz",
+                "integration_branch": "khala/issue-1",
             },
-            ["integration_branch"],
-            "fake-token-xyz",
+            ["job_id"],
+            False,
         ),
     ],
 )
 def test_branch_prep_activity_raises_on_missing_required_field(
-    request_dict: dict[str, Any], expected_fields: list[str], fake_token: Optional[str]
+    api, monkeypatch, request_dict: dict[str, Any], expected_fields: list[str], seed_job: bool
 ) -> None:
     """A missing OR falsy-but-present required field is a caller-wiring bug,
     not a git failure -- it must raise, not be conflated with ok=False, and
     the message must name only the missing fields, never the request payload
-    (which may carry a token -- an activity exception message is recorded in
-    Temporal history)."""
+    or secrets."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
     )
+
+    if seed_job:
+        _seed_job_token(monkeypatch, api, "job-1")
 
     with pytest.raises(ValueError, match="missing") as exc_info:
         github_branch_prep_activity(request_dict)
@@ -171,8 +203,6 @@ def test_branch_prep_activity_raises_on_missing_required_field(
     for field in expected_fields:
         assert field in msg
     assert repr(request_dict) not in msg
-    if fake_token is not None:
-        assert fake_token not in msg
 
 
 def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None:
@@ -185,6 +215,7 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
     )
 
     calls = []
+    _seed_job_token(monkeypatch, api, "job-1")
 
     def fake_git(
         repo_path: str, *args: str, timeout: float = 120.0, env: Optional[dict[str, str]] = None
@@ -197,11 +228,11 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
 
     out = github_branch_prep_activity(
         {
+            "job_id": "job-1",
             "repo_path": "/repo",
             "remote": "origin",
             "default_branch": "main",
             "integration_branch": "khala/issue-1",
-            "token": "tok-123",
         }
     )
 
@@ -214,34 +245,45 @@ def test_branch_prep_activity_passes_auth_env_to_fetch(api, monkeypatch) -> None
     assert all(env is None for args, env in calls if args[0] != "fetch")
 
 
-def test_branch_prep_activity_without_token_uses_no_auth_env(api, monkeypatch) -> None:
-    """No token in the request means no auth env on any call."""
+def test_branch_prep_activity_rejects_unresolvable_token(api, monkeypatch) -> None:
+    """No encrypted job token and no GITHUB_TOKEN must fail closed."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
     )
 
-    calls = []
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(api, "get_job", lambda jid, cache_dir=None: {"job_id": jid})
+    with pytest.raises(ValueError, match="token"):
+        github_branch_prep_activity(
+            {
+                "job_id": "job-1",
+                "repo_path": "/repo",
+                "remote": "origin",
+                "default_branch": "main",
+                "integration_branch": "khala/issue-1",
+            }
+        )
 
-    def fake_git(
-        repo_path: str, *args: str, timeout: float = 120.0, env: Optional[dict[str, str]] = None
-    ) -> tuple[int, str]:
-        calls.append((args, env))
-        return 0, ""
 
-    monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
-    monkeypatch.setattr(api, "_git", fake_git)
-
-    out = github_branch_prep_activity(
-        {
-            "repo_path": "/repo",
-            "remote": "origin",
-            "default_branch": "main",
-            "integration_branch": "khala/issue-1",
-        }
+def test_branch_prep_activity_rejects_plaintext_token_arg(api, monkeypatch) -> None:
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
     )
 
-    assert out["ok"] is True
-    assert all(env is None for _, env in calls)
+    _seed_job_token(monkeypatch, api, "job-1")
+    secret = "ghp_leaked"
+    with pytest.raises(ValueError, match="token") as exc_info:
+        github_branch_prep_activity(
+            {
+                "job_id": "job-1",
+                "repo_path": "/repo",
+                "remote": "origin",
+                "default_branch": "main",
+                "integration_branch": "khala/issue-1",
+                "token": secret,
+            }
+        )
+    assert secret not in str(exc_info.value)
 
 
 def test_branch_prep_activity_registered_under_expected_temporal_name() -> None:

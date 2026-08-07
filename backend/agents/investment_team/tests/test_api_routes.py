@@ -534,6 +534,188 @@ def test_promotion_decision_updates_workflow_status_in_api_process(api_client) -
     assert any(item["payload_id"] == sid for item in queues["queues"]["escalation"])
 
 
+def _promotion_decide_setup(api_client) -> str:
+    """Create a profile, strategy, and validation report; return the strategy_id."""
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+    api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    return sid
+
+
+def test_promotion_decision_missing_decision_field_returns_500(api_client, monkeypatch) -> None:
+    """A result missing 'decision' triggers a clean 500, not an unhandled KeyError."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {})
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert "decision" in resp.json()["detail"]
+
+
+def test_promotion_decision_invalid_decision_payload_returns_500(api_client, monkeypatch) -> None:
+    """A present but schema-invalid 'decision' is a server/integration fault → 500,
+    matching advisor routes' handling of malformed Temporal payloads."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"decision": {"not": "valid"}}
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert "decision" in resp.json()["detail"].lower() or "invalid" in resp.json()["detail"].lower()
+
+
+def test_promotion_decision_unknown_escalation_queue_returns_500(api_client, monkeypatch) -> None:
+    """An escalation naming a queue outside the known set is rejected before any
+    _workflow_state mutation, instead of raising an unhandled KeyError."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "escalation_enqueued": {
+                "queue": "not-a-real-queue",
+                "payload_id": sid,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert "queue" in resp.json()["detail"].lower()
+    assert api_main._workflow_state.audit_log == []
+    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+
+
+def test_promotion_decision_escalation_missing_payload_id_does_not_mutate_audit_log(
+    api_client, monkeypatch
+) -> None:
+    """A known-queue escalation missing payload_id must 500 before any shared-state
+    mutation — not extend audit_log then raise KeyError inside the lock."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "audit_log_appended": [f"promotion:{sid}:paper"],
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert "escalation" in resp.json()["detail"].lower()
+    assert api_main._workflow_state.audit_log == []
+    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+
+
+def test_promotion_decision_non_dict_escalation_does_not_mutate_audit_log(
+    api_client, monkeypatch
+) -> None:
+    """A truthy non-dict escalation_enqueued must 500 before mutating shared state."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "audit_log_appended": [f"promotion:{sid}:paper"],
+            "escalation_enqueued": "not-a-dict",
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert api_main._workflow_state.audit_log == []
+    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+
+
+def test_promotion_decision_invalid_audit_log_entries_returns_500(api_client, monkeypatch) -> None:
+    """Non-string audit-log entries are rejected before extending _workflow_state,
+    instead of corrupting the audit log or raising an unhandled TypeError."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "audit_log_appended": [{"not": "a string"}],
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert api_main._workflow_state.audit_log == []
+
+
 def test_workflow_status_and_queues(api_client) -> None:
     resp = api_client.get("/workflow/status")
     assert resp.status_code == 200
@@ -561,6 +743,47 @@ def test_create_memo_returns_memo(api_client) -> None:
     body = resp.json()
     assert body["memo"]["recommendation"] == "Buy"
     assert "bear case" in body["memo"]["dissenting_views"]
+
+
+def test_create_memo_502_when_advisory_result_missing_memo(api_client, monkeypatch) -> None:
+    """A committee_memo payload without ``memo`` must return 502, not an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"unexpected": True}
+    )
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": [],
+        },
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "Memo generation result is missing"
+
+
+def test_create_memo_invalid_memo_payload_returns_500(api_client, monkeypatch) -> None:
+    """A present but schema-invalid 'memo' is a server/integration fault → 500,
+    matching advisor routes' handling of malformed Temporal payloads."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"memo": {"not": "valid"}}
+    )
+    resp = api_client.post(
+        "/memos",
+        json={
+            "user_id": "u1",
+            "recommendation": "Buy",
+            "rationale": "valuations attractive",
+            "dissenting_views": [],
+        },
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -654,15 +877,23 @@ def test_strategy_lab_results_filter_by_winning(
     assert body["losing_count"] == 1
     assert body["count"] == 2
 
-    # Filter winning=true → just the winner.
+    # Filter winning=true → just the winner. Regression coverage: counts must
+    # be derived from the same filtered list as `items`/`count`, not the
+    # unfiltered global set -- winning_count + losing_count == count always.
     resp_w = api_client.get("/strategy-lab/results?winning=true")
     body_w = resp_w.json()
     assert [r["lab_record_id"] for r in body_w["items"]] == ["w"]
+    assert body_w["count"] == 1
+    assert body_w["winning_count"] == 1
+    assert body_w["losing_count"] == 0
 
-    # Filter winning=false → just the loser.
+    # Filter winning=false → just the loser, with matching counts.
     resp_l = api_client.get("/strategy-lab/results?winning=false")
     body_l = resp_l.json()
     assert [r["lab_record_id"] for r in body_l["items"]] == ["l"]
+    assert body_l["count"] == 1
+    assert body_l["winning_count"] == 0
+    assert body_l["losing_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +939,14 @@ def test_paper_trading_results_empty(api_client) -> None:
     assert body["count"] == 0
 
 
-def _paper_trading_session(session_id: str, verdict):
+def _paper_trading_session(
+    session_id: str,
+    verdict,
+    *,
+    status=None,
+    started_at: str = "2024-01-01T00:00:00Z",
+    completed_at: str = "2024-01-01T01:00:00Z",
+):
     from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
 
     strat = StrategySpec(
@@ -723,12 +961,12 @@ def _paper_trading_session(session_id: str, verdict):
         session_id=session_id,
         lab_record_id=f"lab-{session_id}",
         strategy=strat,
-        status=PaperTradingStatus.COMPLETED,
+        status=status or PaperTradingStatus.COMPLETED,
         initial_capital=100_000.0,
         current_capital=100_000.0,
         verdict=verdict,
-        started_at="2024-01-01T00:00:00Z",
-        completed_at="2024-01-01T01:00:00Z",
+        started_at=started_at,
+        completed_at=completed_at,
     )
 
 
@@ -793,6 +1031,82 @@ def test_paper_trading_results_rejects_unknown_verdict(api_client) -> None:
     assert resp.status_code == 422
 
 
+def test_paper_trading_results_orders_terminal_before_active_sessions(api_client) -> None:
+    """Terminal (completed/failed) sessions sort first by ``completed_at``
+    descending; active sessions sort after, by ``started_at`` descending.
+
+    A single ``completed_at or started_at`` sort key would let an in-flight
+    session's ``started_at`` outrank a genuinely more-recent completed
+    session's ``completed_at`` — the two timestamps aren't the same kind of
+    "recency". Here the active session's ``started_at`` (2024-01-03) is later
+    than either completed session's ``completed_at``, so a naive single-key
+    sort would put it first; the bucketed policy must still rank it last.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, PaperTradingVerdict
+
+    api_main._paper_trading_sessions["older-completed"] = _paper_trading_session(
+        "older-completed",
+        PaperTradingVerdict.READY_FOR_LIVE,
+        completed_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["newer-completed"] = _paper_trading_session(
+        "newer-completed",
+        PaperTradingVerdict.NOT_PERFORMANT,
+        completed_at="2024-01-02T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["still-active"] = _paper_trading_session(
+        "still-active",
+        None,
+        status=PaperTradingStatus.LIVE,
+        started_at="2024-01-03T00:00:00Z",
+        completed_at="",
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == [
+        "newer-completed",
+        "older-completed",
+        "still-active",
+    ]
+
+
+def test_paper_trading_results_orders_by_real_time_not_lexicographic_string(
+    api_client,
+) -> None:
+    """A ``completed_at`` with a non-UTC timezone offset must sort by its
+    actual chronological instant, not by comparing the raw ISO-8601 strings
+    lexicographically — the two can disagree when the date/time digits don't
+    happen to move in the same direction as the UTC-normalized instant."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingVerdict
+
+    # 2024-01-01T23:00:00+00:00 == 2024-01-01T23:00:00 UTC — the later instant.
+    api_main._paper_trading_sessions["actually-newer"] = _paper_trading_session(
+        "actually-newer",
+        PaperTradingVerdict.READY_FOR_LIVE,
+        completed_at="2024-01-01T23:00:00+00:00",
+    )
+    # 2024-01-02T00:30:00+02:00 == 2024-01-01T22:30:00 UTC — the earlier
+    # instant, but its string sorts *after* the one above lexicographically
+    # because the date digit "02" outranks "01" in plain string comparison.
+    api_main._paper_trading_sessions["actually-older"] = _paper_trading_session(
+        "actually-older",
+        PaperTradingVerdict.NOT_PERFORMANT,
+        completed_at="2024-01-02T00:30:00+02:00",
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/results")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["session_id"] for i in body["items"]] == [
+        "actually-newer",
+        "actually-older",
+    ]
+
+
 def test_paper_trading_results_skips_unparseable_session(api_client) -> None:
     """A single corrupt in-memory session record must not 500 the bulk
     endpoint — it should be logged and excluded, while parseable sessions
@@ -818,6 +1132,22 @@ def test_paper_trading_results_skips_unparseable_session(api_client) -> None:
 def test_paper_trading_session_get_404(api_client) -> None:
     resp = api_client.get("/strategy-lab/paper-trade/pt-missing")
     assert resp.status_code == 404
+
+
+def test_paper_trading_session_get_corrupted_record_returns_500(api_client) -> None:
+    """A corrupted persisted record must surface as a controlled 500 with a
+    generic client-facing detail, not leak the raw parse/validation
+    exception as an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    # Missing required fields (e.g. strategy, status) -> parse_persisted raises.
+    api_main._paper_trading_sessions["pt-corrupt"] = {"session_id": "pt-corrupt"}
+
+    resp = api_client.get("/strategy-lab/paper-trade/pt-corrupt")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == (
+        "Paper trading session 'pt-corrupt' is corrupted and cannot be loaded."
+    )
 
 
 def test_stop_live_paper_trading_disabled_returns_404(api_client) -> None:
@@ -1087,6 +1417,23 @@ def test_start_advisor_session_500_on_malformed_advisory_result(api_client, monk
     assert resp.json()["detail"]
 
 
+def test_start_advisor_session_malformed_session_payload_returns_500(
+    api_client, monkeypatch
+) -> None:
+    """A present but schema-invalid 'session' triggers a clean 500 via
+    ValidationError, not an unhandled exception."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"advisor_message": "hi", "session": {"not": "valid"}},
+    )
+    resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    assert resp.status_code == 500
+    assert resp.json()["detail"]
+
+
 def test_send_advisor_message_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
     from investment_team.api import main as api_main
 
@@ -1101,6 +1448,50 @@ def test_send_advisor_message_500_on_malformed_advisory_result(api_client, monke
     assert resp.json()["detail"]
 
 
+def test_send_advisor_message_404_when_session_removed_concurrently(
+    api_client, monkeypatch
+) -> None:
+    """If the session disappears between the initial existence check and the
+    re-check immediately before dispatch, the route must 404 instead of
+    dispatching a workflow call against a session that no longer exists."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    class _DeleteOnFirstGet:
+        """Mimics another request deleting the session right after this
+        route's first `.get()` read, so the pre-dispatch `in` re-check
+        under `_lock` must observe it as gone."""
+
+        def __init__(self, initial: Dict[str, Any]) -> None:
+            self._d = dict(initial)
+
+        def get(self, key: str, default: Any = None) -> Any:
+            value = self._d.get(key, default)
+            self._d.pop(key, None)
+            return value
+
+        def __contains__(self, key: str) -> bool:
+            return key in self._d
+
+    monkeypatch.setattr(
+        api_main,
+        "_advisor_sessions",
+        _DeleteOnFirstGet({sid: api_main._advisor_sessions.get(sid)}),
+    )
+    dispatched: List[bool] = []
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: dispatched.append(True) or {},
+    )
+
+    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
+    assert resp.status_code == 404
+    assert dispatched == []
+
+
 def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
     from investment_team.api import main as api_main
 
@@ -1108,9 +1499,30 @@ def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, m
     sid = start.json()["session_id"]
 
     # Bypass the "missing required fields" 400 branch so we reach the guard under test.
-    monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
     monkeypatch.setattr(
         api_main, "_execute_advisory", lambda op, payload, *, key: {"user_id": "u1"}
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert resp.status_code == 500
+    assert resp.json()["detail"]
+
+
+def test_complete_advisor_session_malformed_ips_payload_returns_500(
+    api_client, monkeypatch
+) -> None:
+    """A present but schema-invalid 'ips' triggers a clean 500 via
+    ValidationError, not an unhandled exception."""
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(api_main._get_advisor_agent(), "missing_fields", lambda collected: [])
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {"user_id": "u1", "ips": {"not": "valid"}},
     )
     resp = api_client.post(f"/advisor/sessions/{sid}/complete")
     assert resp.status_code == 500

@@ -5,8 +5,8 @@ dict-backed fake routes each SQL statement the store issues to an
 in-process handler, so the tests verify the real control flow
 (INSERT/SELECT/UPDATE, RETURNING id, dynamic SET clause ordering)
 without needing a live Postgres. Integration coverage against a real
-``postgres:18`` service container runs in the ``test-shared-postgres``
-CI job from PR 0.
+``postgres:16-alpine`` service container runs in the ``test-shared-postgres``
+CI job.
 """
 
 from __future__ import annotations

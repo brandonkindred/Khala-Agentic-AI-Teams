@@ -40,7 +40,7 @@ curl http://localhost:18005/health
 
 To override the default model, create a `.env` file with `LLM_MODEL=your-model` and add it to the service, or run:
 ```bash
-LLM_MODEL=llama3.2:latest docker-compose up -d
+LLM_MODEL=deepseek-v4-flash:cloud:latest docker-compose up -d
 ```
 
 ## Port Mapping

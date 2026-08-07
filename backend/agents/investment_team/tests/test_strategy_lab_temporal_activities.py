@@ -167,15 +167,14 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_persist_run_state_activity_delegates_to_api_main(monkeypatch):
-    from investment_team.api import main as api_main
-    from investment_team.strategy_lab import run_state
+def test_persist_run_state_activity_delegates_to_orchestrator_api(monkeypatch):
+    from investment_team.strategy_lab import orchestrator_api, run_state
 
     monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
 
     captured = {}
     monkeypatch.setattr(
-        api_main,
+        orchestrator_api,
         "_persist_run_state",
         lambda run_id, state, *, create=False: captured.update(
             run_id=run_id, state=state, create=create
@@ -201,10 +200,10 @@ def test_persist_run_state_activity_rejects_stale_generation(monkeypatch):
     monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
 
     persisted = []
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     monkeypatch.setattr(
-        api_main, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
     )
 
     with pytest.raises(ApplicationError) as exc_info:
@@ -221,10 +220,10 @@ def test_persist_run_state_activity_accepts_current_or_newer_generation(monkeypa
     monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
 
     captured = {}
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     monkeypatch.setattr(
-        api_main,
+        orchestrator_api,
         "_persist_run_state",
         lambda run_id, state, *, create=False: captured.update(
             run_id=run_id, state=state, create=create
@@ -248,10 +247,10 @@ def test_persist_run_state_activity_default_generation_backward_compat(monkeypat
     monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
 
     captured = {}
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     monkeypatch.setattr(
-        api_main,
+        orchestrator_api,
         "_persist_run_state",
         lambda run_id, state, *, create=False: captured.update(state=state),
     )
@@ -274,10 +273,10 @@ def test_persist_run_state_activity_fails_closed_on_generation_lookup_failure(mo
     monkeypatch.setattr(run_state, "get_run_generation_strict", _broken)
 
     persisted = []
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     monkeypatch.setattr(
-        api_main, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
     )
 
     with pytest.raises(ApplicationError) as exc_info:

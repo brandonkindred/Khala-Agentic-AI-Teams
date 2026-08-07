@@ -74,6 +74,7 @@ def _run_llm_review(
     llm: LLMClient,
     task: Task,
     files: Dict[str, str],
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> LlmReviewOutput[ReviewIssue]:
@@ -86,8 +87,15 @@ def _run_llm_review(
     the shared ``run_team_llm_review`` helper, passing this team's prompt,
     parser, and ``ReviewIssue`` factory.
 
-    Preconditions/Postconditions: see
-    ``software_engineering_team.shared.llm_review.run_team_llm_review``.
+    Preconditions:
+        - ``language`` is accepted for call-signature compatibility with the
+          shared ``llm_review_fn`` contract (see
+          ``shared.v2_review._code_review_step``) but is otherwise unused:
+          this team's ``REVIEW_PROMPT``/``parse_review_template`` pair has no
+          language placeholder, and this team's code is always TypeScript, so
+          there is nothing for the value to change.
+        - All other preconditions/postconditions: see
+          ``software_engineering_team.shared.llm_review.run_team_llm_review``.
     """
 
     def _invoke(prompt: str) -> str:

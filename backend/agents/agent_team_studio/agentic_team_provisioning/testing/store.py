@@ -219,11 +219,19 @@ class AgenticTestStore:
         return [{**r, "created_at": _row_ts(r["created_at"])} for r in rows]
 
     @timed_query(store=_STORE, op="update_message_rating")
-    def update_message_rating(self, message_id: str, rating: str) -> bool:
+    def update_message_rating(self, team_id: str, message_id: str, rating: str) -> bool:
+        """Rate a message, scoped to the team owning its session.
+
+        Postconditions: the rating is applied and ``True`` is returned only when
+        ``message_id`` resolves to a message whose session belongs to ``team_id`` —
+        a message id from another team's session is a no-op that returns ``False``.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE agentic_test_chat_messages SET rating = %s WHERE message_id = %s",
-                (rating, message_id),
+                "UPDATE agentic_test_chat_messages m SET rating = %s "
+                "FROM agentic_test_chat_sessions s "
+                "WHERE m.message_id = %s AND m.session_id = s.session_id AND s.team_id = %s",
+                (rating, message_id, team_id),
             )
             return cur.rowcount > 0
 

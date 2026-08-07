@@ -349,7 +349,7 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
         instead of writing when ``generation`` is older than the run's
         current persisted generation — a later restart has already minted a
         newer one, so this write belongs to a superseded incarnation and
-        must not land. Otherwise delegates to ``investment_team.api.main.
+        must not land. Otherwise delegates to ``investment_team.strategy_lab.orchestrator_api.
         _persist_run_state`` verbatim, which now propagates any job-service
         failure rather than swallowing it -- letting this activity raise
         too, so its caller's Temporal retry policy (``_ACTIVITY_RETRY`` in
@@ -372,7 +372,7 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
         Temporal's retry policy wait for the store to recover rather than
         permanently failing the workflow over a momentary blip.
     """
-    from investment_team.api.main import _persist_run_state
+    from investment_team.strategy_lab.orchestrator_api import _persist_run_state
 
     # Nothing has been written yet, so a lookup failure is safe to retry.
     _check_generation_fencing(run_id, generation, retry_on_lookup_failure=True)
@@ -389,9 +389,10 @@ def snapshot_prior_records_activity(reverse: bool = False) -> List[Dict[str, Any
         Returns a list of ``StrategyLabRecord`` JSON dumps sorted by
         ``created_at`` (ascending by default, descending when
         ``reverse=True``), delegating to
-        ``investment_team.api.main._snapshot_prior_records`` verbatim.
+        ``investment_team.strategy_lab.orchestrator_api._snapshot_prior_records``
+        verbatim (façade over ``api.main`` until the helper body moves).
     """
-    from investment_team.api.main import _snapshot_prior_records
+    from investment_team.strategy_lab.orchestrator_api import _snapshot_prior_records
 
     records = _snapshot_prior_records(reverse=reverse)
     return [r.model_dump(mode="json") for r in records]
@@ -728,12 +729,12 @@ def compute_signal_brief_activity(benchmark_symbol: str) -> Dict[str, Any]:
         "signal_brief_storage": <dict or None>}`` — the JSON-shaped pair the batch
         workflow threads into each cycle's ``signal_brief`` input and into
         ``finalize_cycle_record_activity``. Delegates to
-        ``investment_team.api.main._compute_signal_brief_snapshot``, which is
-        fail-open (never raises; returns a skipped/degraded marker instead), so
-        this activity likewise only raises ``ApplicationError`` on a genuinely
-        unexpected exception.
+        ``investment_team.strategy_lab.orchestrator_api._compute_signal_brief_snapshot``
+        (façade over ``api.main``; fail-open — never raises; returns a
+        skipped/degraded marker instead), so this activity likewise only raises
+        ``ApplicationError`` on a genuinely unexpected exception.
     """
-    from investment_team.api.main import _compute_signal_brief_snapshot
+    from investment_team.strategy_lab.orchestrator_api import _compute_signal_brief_snapshot
 
     try:
         brief, storage = _compute_signal_brief_snapshot(benchmark_symbol)
@@ -757,12 +758,14 @@ def is_run_cancelled_activity(run_id: str) -> bool:
     Preconditions:
         ``run_id`` is the strategy-lab run identifier.
     Postconditions:
-        Returns ``investment_team.api.main._is_strategy_lab_run_externally_stopped``'s
+        Returns ``orchestrator_api._is_strategy_lab_run_externally_stopped``'s
         result verbatim — True for a ``cancelled``/``failed``/``interrupted``
         job status, False otherwise. That helper never raises, so this activity
         never raises either.
     """
-    from investment_team.api.main import _is_strategy_lab_run_externally_stopped
+    from investment_team.strategy_lab.orchestrator_api import (
+        _is_strategy_lab_run_externally_stopped,
+    )
 
     return _is_strategy_lab_run_externally_stopped(run_id)
 
@@ -774,7 +777,7 @@ def external_terminal_status_activity(run_id: str) -> Optional[str]:
     Preconditions:
         ``run_id`` is the strategy-lab run identifier.
     Postconditions:
-        Returns ``investment_team.api.main._strategy_lab_external_terminal_status``'s
+        Returns ``orchestrator_api._strategy_lab_external_terminal_status``'s
         result verbatim — the exact persisted status string (``cancelled``,
         ``failed``, or ``interrupted``) when the job was externally marked
         terminal, else ``None``. That helper never raises, so this activity never
@@ -782,7 +785,9 @@ def external_terminal_status_activity(run_id: str) -> Optional[str]:
         external interrupt/failure is not mislabeled a user cancellation (thread
         mode's ``_strategy_lab_worker`` makes the same distinction).
     """
-    from investment_team.api.main import _strategy_lab_external_terminal_status
+    from investment_team.strategy_lab.orchestrator_api import (
+        _strategy_lab_external_terminal_status,
+    )
 
     return _strategy_lab_external_terminal_status(run_id)
 
@@ -794,7 +799,8 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     The per-cycle child workflow (``StrategyLabCycleWorkflow``) returns only the
     raw ``run_cycle`` record; this activity reproduces the tail that thread-mode's
     ``_run_one_strategy_lab_cycle`` runs after it, by delegating to the shared
-    ``investment_team.api.main._finalize_strategy_lab_cycle_record`` helper.
+    ``orchestrator_api._finalize_strategy_lab_cycle_record`` helper (façade over
+    ``api.main`` until the helper body moves).
 
     Preconditions:
         ``params`` carries ``record`` (a ``StrategyLabRecord`` JSON dump from the
@@ -841,9 +847,11 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         exception from ``_finalize_strategy_lab_cycle_record`` itself
         (paper-trading failures are already non-fatal inside the helper).
     """
-    from investment_team.api.main import _finalize_strategy_lab_cycle_record
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.run_state import DEFAULT_FENCING_GENERATION
+    from investment_team.strategy_lab.orchestrator_api import (
+        _finalize_strategy_lab_cycle_record,
+    )
 
     def _check_generation(
         run_id: str, *, retry_on_lookup_failure: bool, lookup_retry_delays: Tuple[float, ...] = ()

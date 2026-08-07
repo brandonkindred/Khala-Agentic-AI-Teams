@@ -12,10 +12,19 @@ dicts, live paper-trading polling, etc.) — it predates this extraction and was
 never exclusive to the run registry. Splitting it into per-concern locks is a
 larger change and out of scope here; this module only relocates where the
 single shared lock is constructed.
+
+``async_lock`` is a companion ``asyncio.Lock`` for async callers (notably the
+strategy-lab SSE stream) that need to read ``active_runs`` without blocking the
+event loop on the threading ``lock``. Sync writers continue to use ``lock``;
+async readers use ``async_lock``. Individual ``dict.get`` / pointer reads are
+atomic under the GIL, so the companion lock's job is serializing concurrent
+async readers without stalling other coroutines — not replacing ``lock`` for
+multi-key sync mutations.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -26,6 +35,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 lock = threading.Lock()
+async_lock = asyncio.Lock()
 
 # The fencing generation a fresh/never-restarted run presents, and the value
 # every "generation" read/default falls back to when the field is absent,
@@ -434,7 +444,9 @@ def get_resume_seed_counters(run_id: str) -> Dict[str, Any]:
 
 
 __all__ = [
+    "DEFAULT_FENCING_GENERATION",
     "lock",
+    "async_lock",
     "active_runs",
     "acquire_run_transition_lock",
     "get_run_generation_strict",

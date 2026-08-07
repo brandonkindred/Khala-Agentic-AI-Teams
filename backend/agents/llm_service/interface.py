@@ -306,7 +306,12 @@ class LLMClient(ABC):
         ``ClaudeLLMClient``). ``None`` (default) means no caller-supplied cap
         — the implementation falls back to its own default/resolution logic.
 
-        Preconditions: ``objective`` is a non-empty string.
+        Preconditions: ``objective`` is a non-empty string. ``DummyLLMClient``
+        is a documented exception: it defaults ``objective`` to ``"dummy"``
+        on ``complete``/``complete_json``/``chat`` because it makes no real
+        LLM call and performs no attribution, so test stubs are not required
+        to declare one. Real providers (``OllamaLLMClient``,
+        ``ClaudeLLMClient``) enforce the non-empty precondition.
         """
         ...
 
