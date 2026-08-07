@@ -3261,7 +3261,15 @@ class TestWholeFileReview:
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import ChangeSurface
         from software_engineering_team.github_source import GitHubRepoReader
+
+        monkeypatch.setattr(
+            pr_review,
+            "_build_change_surface_for_reviewable",
+            lambda files_arg, head: ChangeSurface(blocks={}),
+        )
 
         gh = review_app["github"]["client"]
         gh.get_file_contents = lambda o, r, path, ref: "def a():\n    return 1\n"
@@ -3278,7 +3286,7 @@ class TestWholeFileReview:
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Whole-file mode: files mapping passed, pre_numbered off, reader supplied.
+        # Empty surface: fetched path stays in whole-file fallback inputs.
         assert captured["files"] == {"a.py": "def a():\n    return 1\n"}
         assert captured["pre_numbered"] is False
         assert isinstance(captured["repo_reader"], GitHubRepoReader)
@@ -3317,6 +3325,15 @@ class TestWholeFileReview:
         assert "diff hunks" in captured["task_requirements"]
 
     def test_whole_file_mode_appends_focus_note(self, review_app, monkeypatch) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import ChangeSurface
+
+        monkeypatch.setattr(
+            pr_review,
+            "_build_change_surface_for_reviewable",
+            lambda files_arg, head: ChangeSurface(blocks={}),
+        )
+
         gh = review_app["github"]["client"]  # default: single reviewable file a.py
         gh.get_file_contents = lambda o, r, path, ref: "def a():\n    return 1\n"
         gh.get_repository_tree = lambda o, r, ref, recursive=True: ["a.py"]
@@ -3363,34 +3380,36 @@ class TestWholeFileReview:
         monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Only 1 of 2 reviewable files fetched whole -> a.py must NOT silently
-        # revert to hunk mode, and b.py must NOT be silently dropped: two
-        # calls, one whole-file (a.py only), one hunk (b.py only).
+        # a.py covered by change surface; b.py falls back to hunks only.
         assert len(calls) == 2
-        whole_call = next(c for c in calls if c.get("files"))
-        hunk_call = next(c for c in calls if c.get("code"))
-        assert whole_call["files"] == {"a.py": "whole a\n"}
-        assert whole_call["pre_numbered"] is False
+        surface_call = next(
+            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
+        )
+        hunk_call = next(
+            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
+        )
+        assert not surface_call.get("files")
+        assert surface_call["pre_numbered"] is True
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
         )
 
-        assert REVIEW_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
+        assert REVIEW_FOCUS_NOTE_PREFIX in surface_call["task_requirements"]
         assert not hunk_call.get("files")
         assert hunk_call["pre_numbered"] is True
         assert "b.py" in hunk_call["code"]
         assert "a.py" not in hunk_call["code"]
         # Hunk call must also carry the focus note, and with hunk-specific
-        # wording -- not just the prefix shared with the whole-file note,
-        # which alone wouldn't catch a hunk/whole-file mode mixup.
+        # wording -- not just the prefix shared with the surface note,
+        # which alone wouldn't catch a hunk/surface mode mixup.
         assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
         assert "pre_existing" in hunk_call["task_requirements"]
         assert "diff hunks" in hunk_call["task_requirements"]
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["files_reviewed"] == 2  # 1 whole + 1 hunk
+        assert job["review_summary"]["files_reviewed"] == 2  # 1 surface + 1 hunk
 
     def test_partial_head_fetch_posts_findings_from_both_whole_file_and_hunk_subsets(
         self, review_app, monkeypatch
@@ -3405,14 +3424,15 @@ class TestWholeFileReview:
 
         class _SplitProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                if kw.get("files"):
+                code = kw.get("code") or ""
+                if code and "a.py" in code and "b.py" not in code:
                     return _FakeOutput(
                         issues=[
                             _FakeReviewIssue(
                                 "high",
                                 line=2,
                                 file_path="a.py",
-                                description="whole-file finding",
+                                description="surface finding",
                             )
                         ],
                         summary="",  # blank: must not blank out the merged narrative
@@ -3441,11 +3461,11 @@ class TestWholeFileReview:
             + [c["body"] for c in gh.review_comments]
             + [b for _n, b in gh.comments]
         )
-        assert any("whole-file finding" in b for b in posted_bodies)
+        assert any("surface finding" in b for b in posted_bodies)
         assert any("hunk finding" in b for b in posted_bodies)
         assert job["review_summary"]["total_issues"] == 2
 
-        # The merged narrative drops the blank whole-file summary and keeps
+        # The merged narrative drops the blank surface summary and keeps
         # the hunk-fallback summary -- proves _MergedReviewerOutput ran.
         assert len(gh.reviews) >= 1, "Expected at least one review submission"
         assert "Hunk summary text" in gh.reviews[-1]["body"]
@@ -4555,9 +4575,7 @@ class TestDecideReviewModeUnit:
         )
 
         def _must_not_parse(*_a: Any, **_kw: Any) -> Any:
-            raise AssertionError(
-                "parse_valid_lines must not run on the no-reviewable noop path"
-            )
+            raise AssertionError("parse_valid_lines must not run on the no-reviewable noop path")
 
         monkeypatch.setattr(pr_review, "parse_valid_lines", _must_not_parse)
 
@@ -4766,7 +4784,9 @@ class TestPartitionReviewIssuesUnit:
             def list_review_comments(self, o, r, n):
                 raise AssertionError("should not be called when pr_issues is empty")
 
-        result = pr_review._partition_review_issues(output, _FakeGitHubClient(), "o", "r", 7, {}, {})
+        result = pr_review._partition_review_issues(
+            output, _FakeGitHubClient(), "o", "r", 7, {}, {}
+        )
         assert result.pr_issues == []
         assert result.addressed_issues == []
 
@@ -5473,11 +5493,10 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
 
         def _fail_client(**_k):
-            raise AssertionError(
-                "GitHubClient must not be constructed for malformed proposals"
-            )
+            raise AssertionError("GitHubClient must not be constructed for malformed proposals")
 
         monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
+
         def _no_client(**_kw):
             raise AssertionError("GitHubClient must not be constructed for malformed proposals")
 
@@ -5800,9 +5819,9 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     # Simulate a runner-provided PYTHONPATH entry that must survive into the child.
     prior = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(p for p in (prior, sentinel) if p)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(backend_root), env.get("PYTHONPATH", "")]
-    ).rstrip(os.pathsep)
+    env["PYTHONPATH"] = os.pathsep.join([str(backend_root), env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
     proc = subprocess.run(
         [
             sys.executable,
@@ -5820,6 +5839,5 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     child_pp = proc.stdout.strip().split(os.pathsep)
     assert str(backend_root) in child_pp
     assert sentinel in child_pp, (
-        "subprocess PYTHONPATH must preserve pre-existing entries; "
-        f"got {proc.stdout.strip()!r}"
+        f"subprocess PYTHONPATH must preserve pre-existing entries; got {proc.stdout.strip()!r}"
     )
