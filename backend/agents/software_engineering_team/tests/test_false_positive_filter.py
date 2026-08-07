@@ -411,6 +411,30 @@ def test_read_function_by_name_ambiguous_errors() -> None:
     assert msg.startswith("Error:")
     assert "ambiguous" in msg
     assert "twin" in msg
+    assert "line number" in msg
+
+
+def test_read_function_by_name_property_setter_not_ambiguous() -> None:
+    """Property getter and setter share bare name but are distinct lookup keys."""
+    src = (
+        "class C:\n"
+        "    @property\n"
+        "    def x(self):\n"
+        "        return self._x\n"
+        "\n"
+        "    @x.setter\n"
+        "    def x(self, value):\n"
+        "        self._x = value\n"
+    )
+    idx = CodebaseIndex(files={"app/mod.py": src})
+    getter = idx.read_function_by_name("app/mod.py", "C.x")
+    setter = idx.read_function_by_name("app/mod.py", "C.x.setter")
+    assert getter.startswith("app/mod.py function C.x lines")
+    assert setter.startswith("app/mod.py function C.x.setter lines")
+    assert "ambiguous" not in getter
+    assert "ambiguous" not in setter
+    assert "@property" in getter or "return self._x" in getter
+    assert "self._x = value" in setter
 
 
 def test_read_function_by_name_ambiguous_pre_numbered_shows_original_lines() -> None:
@@ -478,6 +502,24 @@ def test_read_function_tool_dispatches_line_and_name() -> None:
     by_name = read_function("app/mod.py", "f")
     assert by_line == by_digit == by_name
     assert by_name.startswith("app/mod.py function f lines 1–2")
+
+
+def test_read_function_tool_rejects_bool_and_non_str_non_int() -> None:
+    """Bool must not coerce to int; other non-str/non-int types error."""
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    read_function = next(t for t in _build_tools(idx) if t.tool_name == "read_function")
+    for bad in (True, False, 1.5, None, ["f"]):
+        msg = read_function("app/mod.py", bad)
+        assert msg.startswith("Error:")
+        assert "line number or name" in msg
+
+
+def test_false_positive_prompt_documents_read_function() -> None:
+    """Verifier system prompt must advertise the unified read_function tool."""
+    from code_review_agent.prompts import FALSE_POSITIVE_VERIFY_PROMPT
+
+    assert "read_function(path, name_or_line)" in FALSE_POSITIVE_VERIFY_PROMPT
+    assert "read_lines(path, start, end)" in FALSE_POSITIVE_VERIFY_PROMPT
 
 
 def test_list_files_appends_existing_codebase_only_when_present() -> None:

@@ -307,6 +307,32 @@ def test_iter_constructs_qualifies_methods_and_lists_all() -> None:
     assert method.start_line == 2 and method.end_line == 3
 
 
+def test_iter_constructs_disambiguates_property_setter_deleter() -> None:
+    """Property getter keeps Class.x; setter/deleter append role suffixes."""
+    src = (
+        "class C:\n"
+        "    @property\n"
+        "    def x(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @x.setter\n"
+        "    def x(self, value):\n"
+        "        pass\n"
+        "\n"
+        "    @x.deleter\n"
+        "    def x(self):\n"
+        "        pass\n"
+    )
+    names = {c.name for c in iter_constructs(src)}
+    assert names == {"C", "C.x", "C.x.setter", "C.x.deleter"}
+    setter = enclosing_construct(src, 8)  # body of setter
+    assert setter is not None
+    assert setter.name == "C.x.setter"
+    getter = enclosing_construct(src, 4)
+    assert getter is not None
+    assert getter.name == "C.x"
+
+
 def test_iter_constructs_parse_failure_returns_empty() -> None:
     assert iter_constructs("def broken(\n") == []
 

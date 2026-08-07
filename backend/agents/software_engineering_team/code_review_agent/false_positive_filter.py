@@ -651,7 +651,10 @@ class CodebaseIndex:
             detail = ", ".join(
                 f"{c.name} (lines {_disp(c.start_line)}–{_disp(c.end_line)})" for c in matches
             )
-            return f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}."
+            return (
+                f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}. "
+                f"Call read_function with a line number from one of those ranges."
+            )
         return _format_construct_slice(
             display, matches[0], stripped.splitlines(), mapper=mapper
         )
