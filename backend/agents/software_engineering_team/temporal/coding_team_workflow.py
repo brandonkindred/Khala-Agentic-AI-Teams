@@ -369,7 +369,9 @@ class CodingTeamWorkflow:
                     # predicate become permanently unsatisfiable (submit_answers drops every signal
                     # while self._active_resume_token is None) -- an unresolvable hang is a much
                     # worse failure mode than an immediate, diagnosable workflow-task error.
-                    raise ValueError(f"Paused activity result missing a valid resume_token: {result!r}")
+                    raise ValueError(
+                        f"Paused activity result missing a valid resume_token: {result!r}"
+                    )
                 self._active_resume_token = resume_token
                 self._submitted_answers = self._buffered_signals.pop(resume_token, None)
                 # Contract §2: once a pause token activates, every other buffered

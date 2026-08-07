@@ -1021,6 +1021,8 @@ async def test_workflow_resumes_via_early_signal_buffered_before_pause_processed
     assert result == {"job_id": "test-job-2", "status": "completed"}
 
     await Replayer(workflows=[CodingTeamWorkflow]).replay_workflow(history)
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_workflow_github_path_prep_pipeline_publish() -> None:
