@@ -1274,6 +1274,7 @@ jobs:
       - test-agent-cognition
       - test-backend
       - test-integration
+      - test-branding
     steps:
       - name: Verify dependencies
         env:

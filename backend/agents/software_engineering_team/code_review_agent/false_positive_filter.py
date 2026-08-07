@@ -72,6 +72,10 @@ _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
 
+# Hard cap on inclusive line span returned by ``read_lines`` so a tool call
+# cannot pull an unbounded slice into the verifier context.
+_READ_LINES_MAX_SPAN = 400
+
 # Cap on file paths listed inline in the verification prompt's manifest, so a
 # submission touching a large repo can't by itself blow the prompt past the
 # model's context window; the rest remains reachable via list_files()/
@@ -496,6 +500,59 @@ class CodebaseIndex:
         content, _ = self._read(path)
         return content
 
+    def read_lines(self, path: str, start: int, end: int) -> str:
+        """Return an inclusive 1-based line slice of ``path``, capped by max span.
+
+        Preconditions:
+            - Callers should pass 1-based inclusive ``start``/``end``. Invalid
+              bounds are reported as ``Error: ...`` strings rather than raised.
+
+        Postconditions:
+            - Returns ``Error: ...`` for non-positive/non-int bounds, inverted
+              ranges, spans above ``_READ_LINES_MAX_SPAN``, unreadable paths, or
+              ``start`` past EOF — never raises on those cases.
+            - On success, returns a header ``{path} lines {start}–{end_eff} ({n} lines):``
+              followed by ``N| content`` body lines for the inclusive slice.
+            - When ``end`` exceeds file length and ``start`` is in range, clamps
+              ``end`` to the last line.
+            - Path resolution matches ``read_file``.
+        """
+        if not isinstance(start, int) or isinstance(start, bool) or start < 1:
+            return f"Error: start must be a positive integer, got {start!r}."
+        if not isinstance(end, int) or isinstance(end, bool) or end < 1:
+            return f"Error: end must be a positive integer, got {end!r}."
+        if start > end:
+            return f"Error: invalid range: start ({start}) > end ({end})."
+        span = end - start + 1
+        if span > _READ_LINES_MAX_SPAN:
+            return (
+                f"Error: range spans {span} lines; maximum is {_READ_LINES_MAX_SPAN}. "
+                "Narrow start/end or use read_function."
+            )
+
+        content, error = self._read(path)
+        if content is None:
+            return error if error is not None else f"Error: file not found: {path}."
+
+        lines = content.splitlines()
+        n_lines = len(lines)
+        if start > n_lines:
+            display = self.resolve_path(path) or path
+            if display == self.EXISTING_CODEBASE_PATH:
+                display = path
+            return (
+                f"Error: start line {start} is beyond the end of {display} "
+                f"(file has {n_lines} lines)."
+            )
+        end_eff = min(end, n_lines)
+        display = self.resolve_path(path) or path
+        if display == self.EXISTING_CODEBASE_PATH:
+            display = path
+        n = end_eff - start + 1
+        header = f"{display} lines {start}–{end_eff} ({n} lines):"
+        body = "\n".join(f"{i}| {lines[i - 1]}" for i in range(start, end_eff + 1))
+        return f"{header}\n{body}"
+
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
     ) -> List[Tuple[str, int, str]]:
@@ -703,10 +760,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns four tools (``read_file``, ``list_files``, ``search_codebase``,
-          ``find_function_at_line``) that delegate to ``index``; each returns a
-          string and never raises, so a bad model-supplied argument becomes a
-          tool message rather than an error that aborts the agent loop.
+        - Returns five tools (``read_file``, ``read_lines``, ``list_files``,
+          ``search_codebase``, ``find_function_at_line``) that delegate to
+          ``index``; each returns a string and never raises, so a bad
+          model-supplied argument becomes a tool message rather than an error
+          that aborts the agent loop.
     """
 
     @tool
@@ -729,6 +787,30 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
             return index.read_file(path)
         except Exception as exc:
             return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
+
+    @tool
+    def read_lines(path: str, start: int, end: int) -> str:
+        """Read an inclusive 1-based line range from a file under review.
+
+        Prefer this over read_file when you only need a bounded slice. The
+        maximum span is 400 lines; use a narrower range or read_function for
+        larger constructs.
+
+        Args:
+            path: File path (same paths accepted by read_file).
+            start: 1-based inclusive start line.
+            end: 1-based inclusive end line.
+
+        Returns:
+            A header plus ``N| content`` lines, or an ``Error: ...`` message.
+        """
+        try:
+            return index.read_lines(path, start, end)
+        except Exception as exc:
+            return (
+                f"Error: could not read_lines {path!r} [{start}:{end}]: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     @tool
     def list_files() -> str:
@@ -815,7 +897,7 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, list_files, search_codebase, find_function_at_line]
+    return [read_file, read_lines, list_files, search_codebase, find_function_at_line]
 
 
 @dataclass

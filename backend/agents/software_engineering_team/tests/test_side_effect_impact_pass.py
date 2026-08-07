@@ -334,6 +334,7 @@ def test_build_side_effect_tools_includes_search_repository() -> None:
     names = {getattr(t, "tool_name", "") for t in tools}
     assert names == {
         "read_file",
+        "read_lines",
         "list_files",
         "search_codebase",
         "find_function_at_line",

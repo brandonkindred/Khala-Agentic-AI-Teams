@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import hashlib
 import logging
 import os
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -101,6 +99,7 @@ from investment_team.shared.job_store import (
 )
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+from investment_team.strategy_lab import orchestrator_api as _strategy_lab_orchestrator_api
 from investment_team.strategy_lab.config import (
     MAX_BATCH_COUNT as _MAX_BATCH_COUNT,
 )
@@ -109,10 +108,10 @@ from investment_team.strategy_lab.config import (
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.run_state import (
-    acquire_run_transition_lock as _acquire_run_transition_lock,
+    active_runs as _active_runs,
 )
 from investment_team.strategy_lab.run_state import (
-    active_runs as _active_runs,
+    async_lock as _async_lock,
 )
 from investment_team.strategy_lab.run_state import (
     get_lab_run_job_client as _get_lab_run_job_client,
@@ -148,11 +147,30 @@ from job_service_client import (
     validate_job_for_action,
 )
 from shared.app import create_team_app
-from shared.concurrency import parallel_map
 from shared.env_config import env_float
 from shared.sse import sse_job_stream_async, sse_line
 
 logger = logging.getLogger(__name__)
+
+STRATEGY_LAB_TERMINAL_STATUSES = _strategy_lab_orchestrator_api.STRATEGY_LAB_TERMINAL_STATUSES
+_STRATEGY_LAB_PROGRESS_FIELDS = _strategy_lab_orchestrator_api._STRATEGY_LAB_PROGRESS_FIELDS
+_PURGE_MAX_WORKERS = _strategy_lab_orchestrator_api._PURGE_MAX_WORKERS
+_PURGE_TIMEOUT_S = _strategy_lab_orchestrator_api._PURGE_TIMEOUT_S
+_build_run_state = _strategy_lab_orchestrator_api._build_run_state
+_delete_jobs_concurrently = _strategy_lab_orchestrator_api._delete_jobs_concurrently
+_delete_paper_sessions_for_lab_record = (
+    _strategy_lab_orchestrator_api._delete_paper_sessions_for_lab_record
+)
+_job_progress_percent = _strategy_lab_orchestrator_api._job_progress_percent
+_persist_run_state = _strategy_lab_orchestrator_api._persist_run_state
+_purge_strategy_lab_job_storage = _strategy_lab_orchestrator_api._purge_strategy_lab_job_storage
+_reconcile_run_progress = _strategy_lab_orchestrator_api._reconcile_run_progress
+_run_state_to_response = _strategy_lab_orchestrator_api._run_state_to_response
+_fail_strategy_lab_run = _strategy_lab_orchestrator_api._fail_strategy_lab_run
+_dispatch_strategy_lab_run = _strategy_lab_orchestrator_api._dispatch_strategy_lab_run
+_no_active_run_locked = _strategy_lab_orchestrator_api._no_active_run_locked
+_ensure_no_active_run = _strategy_lab_orchestrator_api._ensure_no_active_run
+_require_run_transition_lock = _strategy_lab_orchestrator_api._require_run_transition_lock
 
 
 def _startup() -> None:
@@ -480,15 +498,6 @@ def _now() -> str:
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
 
-# All terminal statuses a strategy lab run can land in. Kept local to this
-# module because "completed_with_errors" is a lab-specific concept and the
-# shared job_service_client constants don't know about it. Used by the SSE
-# stream short-circuit, status reconciliation, and restart gating so a
-# freshly-introduced terminal state can't silently diverge.
-STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
-)
-
 
 class StrategyLabRunStartResponse(BaseModel):
     """Returned immediately when a strategy lab batch is started."""
@@ -555,63 +564,6 @@ class StrategyLabConfigResponse(BaseModel):
     # strategies for. Served so the UI's category selector is sourced from the
     # backend (single source of truth) rather than a hand-maintained copy.
     asset_categories: List[str] = Field(default_factory=list)
-
-
-def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusResponse:
-    """Convert an ``_active_runs`` entry to a Pydantic response.
-
-    Preconditions:
-        ``state`` is an ``_active_runs`` entry (or a persisted job dict of the
-        same shape). Every field, including ``run_id``, ``status``,
-        ``started_at``, and ``total_cycles``, is read with a default, so a
-        partially-populated merged/resume/snapshot dict (e.g. a job-service
-        entry with unexpected gaps) is safe -- this defends the same
-        currently-enforced-by-construction invariant (every writer of
-        ``_active_runs`` sets ``run_id``) that ``status`` already defended
-        against, rather than assuming it can never be violated.
-    Postconditions:
-        Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
-        field, defaulting each absent field to its response default
-        (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
-        lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
-        and mapping a present ``current_cycle`` dict to a
-        ``StrategyLabCycleProgress`` (``None`` when absent). ``batch_size`` is
-        the one field that deliberately does NOT fall back to the model's
-        structural default of ``1``: an absent ``batch_size`` means this is a
-        legacy single-batch record predating multi-batch support, so it falls
-        back to ``total_cycles`` (the whole run was one batch) rather than to
-        ``1`` (which would misreport it as ``total_cycles`` batches of size 1).
-        Pure: ``state`` is not mutated. A ``current_cycle`` that is not a
-        dict, or is a dict whose fields fail ``StrategyLabCycleProgress``
-        validation, degrades to ``None`` instead of raising -- ``state`` can
-        be job-service data reconciled with no shape check (see
-        ``_reconcile_run_progress``), so it is not assumed well-formed.
-    """
-    cc = state.get("current_cycle")
-    current_cycle: Optional[StrategyLabCycleProgress] = None
-    if isinstance(cc, dict):
-        try:
-            current_cycle = StrategyLabCycleProgress(**cc)
-        except ValidationError:
-            current_cycle = None
-    return StrategyLabRunStatusResponse(
-        run_id=state.get("run_id", ""),
-        status=state.get("status", "unknown"),
-        started_at=state.get("started_at", ""),
-        total_cycles=state.get("total_cycles", 0),
-        completed_cycles=state.get("completed_cycles", 0),
-        skipped_cycles=state.get("skipped_cycles", 0),
-        errored_cycles=state.get("errored_cycles", 0),
-        errored_details=state.get("errored_details", []),
-        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
-        current_cycle=current_cycle,
-        completed_record_ids=state.get("completed_record_ids", []),
-        error=state.get("error"),
-        batch_size=state.get("batch_size", state.get("total_cycles", 1)),
-        batch_count=state.get("batch_count", 1),
-        completed_batches=state.get("completed_batches", 0),
-        current_batch=state.get("current_batch"),
-    )
 
 
 class CreateProfileRequest(BaseModel):
@@ -1158,7 +1110,7 @@ def _run_backtest_background(
     config: BacktestConfig,
     submitted_by: str,
     notes: List[str],
-) -> None:
+) -> str:
     """Background worker: run a real-data backtest and persist the completed record.
 
     Long-running (market data + sandbox execution), so this runs off the request
@@ -1180,22 +1132,24 @@ def _run_backtest_background(
           deterministically from ``job_id``. A second invocation for the same
           ``job_id`` (e.g. a Temporal activity retry that lands after a worker
           crash left the job at RUNNING) therefore overwrites the same record
-          instead of orphaning a duplicate.
+          instead of orphaning a duplicate. Returns ``_BT_JOB_STATUS_COMPLETED``.
         - On ``BacktestExecutionError`` or other exceptions: job status becomes
-          FAILED with an error string, unless a cancel check already returned
+          FAILED with an error string, unless a cancel check already returned.
+          Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
-          without writing COMPLETED or FAILED so the cancelled status visible at
-          that check is preserved. Updates use unconditional ``_bt_update_job``,
-          so a cancel that lands between a check and the next update can still be
-          overwritten with RUNNING, COMPLETED, or FAILED.
+          ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
+          cancelled status visible at that check is preserved. Updates use
+          unconditional ``_bt_update_job``, so a cancel that lands between a
+          check and the next update can still be overwritten with RUNNING,
+          COMPLETED, or FAILED.
     """
     try:
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         # Deterministic (not random) so a retry of the same job_id — e.g. a
         # Temporal activity retry after a worker crash left the job RUNNING —
         # overwrites the same record instead of minting a duplicate.
@@ -1221,15 +1175,18 @@ def _run_backtest_background(
             result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
             backtest_id=backtest_id,
         )
+        return _BT_JOB_STATUS_COMPLETED
     except BacktestExecutionError as exc:
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc.detail))
+        return _BT_JOB_STATUS_FAILED
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        return _BT_JOB_STATUS_FAILED
 
 
 @app.post("/backtests", response_model=BacktestJobSubmission)
@@ -1516,8 +1473,9 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         check, unlike ``promotion_decision``). Raises ``HTTPException(503)``
         when Temporal is disabled/unavailable; on any other workflow
         failure, raises the ``HTTPException`` that
-        ``_translate_advisory_failure`` maps it to. On success, returns the
-        generated ``InvestmentCommitteeMemo``.
+        ``_translate_advisory_failure`` maps it to. Raises
+        ``HTTPException(502)`` when the advisory result lacks a ``memo``
+        payload. On success, returns the generated ``InvestmentCommitteeMemo``.
     """
     result = _execute_advisory(
         "committee_memo",
@@ -1529,7 +1487,11 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(result["memo"]))
+    memo_data = result.get("memo")
+    if not memo_data:
+        logger.error("committee_memo activity returned no memo: %r", result)
+        raise HTTPException(status_code=502, detail="Memo generation result is missing")
+    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(memo_data))
 
 
 # ---------------------------------------------------------------------------
@@ -1852,7 +1814,9 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
 # The timeframe values StrategySpec.timeframe (a strict Literal) accepts.
 # Derived from the field itself so this can never drift out of sync with
 # models.py.
-_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(get_args(StrategySpec.model_fields["timeframe"].annotation))
+_STRATEGY_SPEC_TIMEFRAMES: frozenset[str] = frozenset(
+    get_args(StrategySpec.model_fields["timeframe"].annotation)
+)
 
 
 def _coerce_strategy_lab_timeframe(raw: object) -> str:
@@ -2335,170 +2299,6 @@ def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
     return _strategy_lab_external_terminal_status(run_id) == "cancelled"
 
 
-def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = False) -> None:
-    """Write the run state to the job service so it survives restarts.
-
-    Preconditions:
-        - ``run_id`` is a non-empty ``str``.
-
-    Postconditions:
-        - ``create=True``: creates the job via ``client.create_job(...)``,
-          defaulting ``status`` to ``"running"`` when ``state`` omits it (a
-          fresh run's initial persist always has a real status in practice --
-          see ``_build_run_state`` -- so this default is a pure safety net).
-        - ``create=False`` (default): updates the existing job via
-          ``client.update_job(...)``. When ``state`` includes a ``status``
-          key, that value is written. When it does NOT (a progress-only delta
-          -- e.g. the Temporal batch workflow's per-cycle/per-batch persists
-          via ``persist_run_state_activity``, which routinely omit ``status``
-          -- see ``_STRATEGY_LAB_PROGRESS_FIELDS``), NO ``status`` kwarg is
-          passed at all, so the job service's own update path
-          (``backend/job_service/db.py``: ``status`` is only written to the
-          ``UPDATE`` when actually supplied) leaves the persisted status
-          untouched. This previously defaulted a status-less update to
-          ``"running"`` unconditionally, which could clobber a
-          ``cancelled``/``failed``/``completed`` status a concurrent
-          restart/resume/cancel had already persisted with a routine
-          progress-only write.
-        - Every key in ``state`` other than ``run_id``/``status`` is persisted
-          as a field.
-
-    Raises:
-        - Whatever ``create_job``/``update_job`` raises (transport errors,
-          HTTP error statuses, a ``RuntimeError`` for unconfigured
-          ``JOB_SERVICE_URL``, ...) propagates uncaught. A durable-write
-          failure must not be silently absorbed here: run/resume/restart
-          dispatch a Temporal workflow immediately after calling this, and
-          that workflow's own resume-from-restart safety depends on this
-          write having actually landed. ``persist_run_state_activity``
-          (``strategy_lab/temporal/activities.py``) delegates to this
-          verbatim, so propagating also lets that activity's already-
-          configured Temporal retry policy (``_ACTIVITY_RETRY`` in
-          ``strategy_lab/temporal/workflows.py``) retry a transient failure
-          instead of it going unnoticed. A caller with a genuine best-effort/
-          never-raises contract (``_fail_strategy_lab_run``, or restart's
-          rollback-on-collision persist) must catch and log locally instead
-          of relying on this helper to swallow the error.
-    """
-    client = _get_lab_run_job_client()
-    fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
-    if create:
-        client.create_job(run_id, status=state.get("status", "running"), **fields)
-    elif "status" in state:
-        client.update_job(run_id, status=state["status"], **fields)
-    else:
-        client.update_job(run_id, **fields)
-
-
-# Fields the Temporal workflow's persist-state activity writes as partial
-# deltas over a run's lifetime (see strategy_lab/temporal/workflows.py
-# _persist_state call sites): per-batch-start (current_batch), per-wave
-# (completed_cycles, contiguous_cycles, completed_record_ids, errored_cycles,
-# skipped_cycles, errored_details, tracker_merge_error_count),
-# per-batch-complete (completed_batches). current_cycle is included
-# defensively even though no persist point currently sets it -- the ``if
-# field in data`` guard in ``_reconcile_run_progress`` makes it inert until,
-# and unless, that changes.
-_STRATEGY_LAB_PROGRESS_FIELDS: tuple[str, ...] = (
-    "completed_cycles",
-    "skipped_cycles",
-    "errored_cycles",
-    "errored_details",
-    "tracker_merge_error_count",
-    "completed_record_ids",
-    "current_batch",
-    "completed_batches",
-    "contiguous_cycles",
-    "current_cycle",
-)
-
-
-def _reconcile_run_progress(run_id: str) -> None:
-    """Sync run_id's in-memory progress counters + terminal status from the job service.
-
-    Shared by ``list_strategy_lab_runs``, ``get_strategy_lab_run_status``, and
-    ``stream_strategy_lab_run``'s connect-time snapshot so all three read
-    surfaces see live progress instead of stale dispatch-time/last-resume
-    values. Re-reads ``_active_runs`` itself (rather than accepting a
-    caller-supplied snapshot) so it always mutates whatever dict object is
-    currently installed for ``run_id`` -- a resume/restart that installs a new
-    dict between a caller's initial read and this call can't have its state
-    clobbered by a stale reference.
-
-    Preconditions:
-        - ``run_id`` may or may not be present in ``_active_runs``.
-
-    Postconditions:
-        - No-op (no job-service call) when ``run_id`` is absent from
-          ``_active_runs``, or its in-memory ``status`` is already in
-          ``STRATEGY_LAB_TERMINAL_STATUSES``.
-        - Otherwise calls ``client.get_job(run_id)`` at most once. When a
-          persisted record is returned, every key in
-          ``_STRATEGY_LAB_PROGRESS_FIELDS`` present in the record's data (via
-          the ``job.get("data", job)`` fallback used elsewhere in this file,
-          with an explicit ``"data": None`` treated the same as a missing
-          ``"data"`` key) is copied onto ``_active_runs[run_id]``; a key
-          absent from the persisted record is left untouched (a sparse/early
-          persisted record can never erase a more-complete in-memory value).
-          ``status``/
-          ``error`` are copied onto ``_active_runs[run_id]`` only when the
-          persisted status is itself in ``STRATEGY_LAB_TERMINAL_STATUSES``
-          (unchanged from prior behavior).
-        - All mutation happens under ``_lock`` and is guarded by re-checking,
-          immediately before writing, both that the entry still exists and
-          that its status is still non-terminal (the run may have been
-          deleted, replaced by a resume/restart, or independently completed —
-          e.g. by the worker's own finishing write — between the initial
-          check and the job-service round trip); a terminal transition in
-          that window makes this call a no-op rather than overwriting the
-          fresher authoritative state with the (possibly pre-completion)
-          fetched data. The network call itself is never made while holding
-          ``_lock``.
-
-    Raises:
-        - None. Job-service construction/lookup failures are caught and
-          logged via ``logger.debug("Job service reconciliation failed for
-          run %s", run_id, exc_info=True)``; the run's in-memory state is
-          left unchanged in that case.
-    """
-    with _lock:
-        state = _active_runs.get(run_id)
-    if not state or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
-        return
-    try:
-        client = _get_lab_run_job_client()
-        persisted = client.get_job(run_id)
-    except Exception:
-        logger.debug("Job service reconciliation failed for run %s", run_id, exc_info=True)
-        return
-    if not persisted:
-        return
-    data = persisted.get("data", persisted)
-    if data is None:
-        # "data" can be explicitly present but None (distinct from being
-        # absent, which the .get default above already handles) -- treat
-        # both the same instead of letting a bare None reach the `field in
-        # data` loop below and raise TypeError, violating this function's
-        # "Raises: None" contract.
-        data = persisted
-    with _lock:
-        current = _active_runs.get(run_id)
-        if current is None or current.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
-            # Another thread (e.g. the worker's own completion write) may have
-            # removed the entry or advanced it to terminal while the
-            # job-service round trip above was in flight. Either way, this
-            # call's (possibly stale, pre-completion) fetch must not clobber
-            # the fresher authoritative state with older progress counters.
-            return
-        for field in _STRATEGY_LAB_PROGRESS_FIELDS:
-            if field in data:
-                current[field] = data[field]
-        js_status = persisted.get("status", "")
-        if js_status in STRATEGY_LAB_TERMINAL_STATUSES:
-            current["status"] = js_status
-            current["error"] = persisted.get("error") or data.get("error")
-
-
 def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
     """Dispatch a job through Temporal when it is enabled, else report failure.
 
@@ -2539,296 +2339,6 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
     except Exception:
         logger.exception("Temporal dispatch failed; falling back to in-process execution")
         return False
-
-
-def _fail_strategy_lab_run(run_id: str, error: str) -> None:
-    """Mark a strategy-lab run "failed" (best-effort, idempotent).
-
-    Preconditions:
-        - ``run_id`` may or may not exist in ``_active_runs``.
-    Postconditions:
-        - If the run exists and isn't already in
-          ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
-          with ``error`` recorded, the new state persisted, and a delayed
-          cleanup of the ``_active_runs`` entry scheduled 900s out — so a
-          dispatch failure (e.g. a Temporal outage) doesn't leak the entry
-          forever. That cleanup is a no-op if
-          ``run_id`` gets resumed (and thus a new state object installed)
-          before the delay elapses, so it never tears down a live resumed
-          run. A missing run and an already-terminal run are both no-ops.
-          Never raises.
-    """
-    try:
-        with _lock:
-            state = _active_runs.get(run_id)
-            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
-                return
-            state["status"] = "failed"
-            state["error"] = error
-            state["current_cycle"] = None
-            # Snapshot for persistence outside the lock: _persist_run_state
-            # performs a synchronous job-service RPC, and _lock is the
-            # process-wide lock also used by run-status queries, dispatch,
-            # and reconciliation -- holding it across network I/O would
-            # block all of those for the RPC's duration. A shallow copy is
-            # enough (_persist_run_state only reads top-level keys) and
-            # protects the persisted snapshot from a concurrent mutator of
-            # this same dict object racing the now-unlocked persist call.
-            persisted_state = dict(state)
-        _persist_run_state(run_id, persisted_state)
-
-        from investment_team.api.job_event_bus import cleanup_job
-
-        def _cleanup() -> None:
-            # Runs on threading.Timer's own daemon thread, 900s after this
-            # function returns -- the outer try/except below has long since
-            # exited by then, so it can't catch anything raised in here. An
-            # uncaught cleanup_job failure would otherwise surface only as an
-            # unhandled exception trace on a background thread, with the
-            # rest of this callback silently skipped.
-            try:
-                with _lock:
-                    # resume/restart always replace the entry with a new dict
-                    # rather than mutate this one in place, so an identity check
-                    # reliably detects a run that got resumed within this delay
-                    # window — pop/cleanup would otherwise tear down a live,
-                    # freshly-resumed run's tracking state.
-                    if _active_runs.get(run_id) is not state:
-                        return
-                    _active_runs.pop(run_id, None)
-                cleanup_job(run_id)
-            except Exception:
-                logger.warning("Failed to clean up strategy-lab run %s after failure timeout", run_id, exc_info=True)
-
-        timer = threading.Timer(900.0, _cleanup)
-        timer.daemon = True
-        timer.start()
-    except Exception:
-        logger.warning(
-            "Failed to mark strategy-lab run %s failed: %s", run_id, error, exc_info=True
-        )
-
-
-def _dispatch_strategy_lab_run(
-    run_id: str, request: RunStrategyLabRequest, *, allow_already_started: bool = True
-) -> None:
-    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
-
-    Preconditions:
-        - ``run_id``'s state is already registered in ``_active_runs`` and
-          persisted (the activity reads its resume offset from that state).
-
-    Postconditions:
-        - The durable workflow is started. A collision with an already-running
-          workflow under this run_id's deterministic id (e.g. a resume issued
-          after an API-process restart, while the durable workflow itself kept
-          running) is handled per ``allow_already_started``:
-          - ``True`` (the default — used by the initial run and resume,
-            whose intent matches what's already running): treated as a
-            successful dispatch, a no-op; the run is NOT marked failed.
-          - ``False`` (used by restart, whose reset-to-cycle-0 intent does
-            NOT match a lingering old execution): raises
-            ``HTTPException(409)`` instead — also without marking the run
-            failed, since the old workflow may still be healthy and marking
-            it failed would cause that workflow to observe the status and
-            abort itself.
-          On any other failure (Temporal disabled/unavailable, or the start
-          RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` (which schedules a delayed cleanup
-          timer), and then: if ``exc`` is already an ``HTTPException`` (e.g.
-          ``_require_temporal()``'s own 503, or one the dispatch RPC itself
-          raised), it is re-raised unchanged, preserving its original status
-          code and detail; otherwise it is wrapped in a fresh
-          ``HTTPException(503)``.
-    """
-    try:
-        from temporalio.exceptions import WorkflowAlreadyStartedError
-    except ImportError:  # pragma: no cover - temporalio always installed
-        # Import outside the dispatch try/except below (not inside its
-        # `except Exception`) so a hypothetical ImportError here can't mask
-        # the dispatch failure that block is meant to translate into a 503.
-        # `()` as an isinstance target always resolves False, so the
-        # WorkflowAlreadyStartedError branch below simply never matches --
-        # every dispatch failure then falls through to the generic 503 path.
-        WorkflowAlreadyStartedError = ()  # type: ignore[assignment]
-
-    try:
-        _require_temporal()
-        from investment_team.strategy_lab.temporal.start_workflow import (
-            start_strategy_lab_batch_workflow,
-        )
-
-        start_strategy_lab_batch_workflow(run_id, request)
-    except Exception as exc:
-        if isinstance(exc, WorkflowAlreadyStartedError):
-            if allow_already_started:
-                # The durable workflow for this run_id is already running
-                # (most commonly: resume was called after an API-process
-                # restart wiped _active_runs, but the workflow itself
-                # survived). Marking the run "failed" here would be observed
-                # by that still-running workflow as an external stop signal
-                # (via strategy_lab_external_terminal_status) and abort a
-                # healthy run, so treat the collision as the dispatch
-                # already having succeeded.
-                logger.info(
-                    "Strategy-lab workflow for run %s is already running; "
-                    "treating dispatch as a no-op success.",
-                    run_id,
-                )
-                return
-            # Restart's reset-to-cycle-0 intent does NOT match a lingering
-            # old execution the way resume's does — silently succeeding
-            # would tell the caller "restarted from scratch" while the old
-            # execution (old input, old progress) is what's actually still
-            # running. Reject distinctly from a real Temporal-down 503 so
-            # callers can tell "retry shortly" from "Temporal is down", and
-            # don't mark the run failed — the old workflow may still be
-            # healthy, and failing it would cause it to observe that status
-            # and abort itself.
-            raise HTTPException(
-                status_code=409,
-                detail="A prior execution for this run is still winding down; retry shortly.",
-            ) from exc
-        _fail_strategy_lab_run(
-            run_id, "Failed to start the strategy-lab workflow (Temporal unavailable)."
-        )
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to start the strategy-lab workflow; Temporal worker unavailable.",
-        ) from exc
-
-
-def _no_active_run_locked() -> None:
-    """Raise 409 if any strategy-lab run is currently running.
-
-    Lock-free core of ``_ensure_no_active_run``, factored out so a caller that
-    also needs to write ``_active_runs`` can run the check and the write
-    inside the *same* ``_lock`` acquisition — see ``resume_strategy_lab_run``,
-    which does exactly that so a concurrent transition for a *different*
-    run_id can't interleave between an isolated check and an isolated write
-    and slip past this guard.
-
-    Preconditions:
-        - Caller already holds ``_lock``.
-
-    Postconditions:
-        - Returns ``None`` when no entry in ``_active_runs`` has status
-          ``"running"``; otherwise raises ``HTTPException(409)``. Does not
-          mutate ``_active_runs`` and does not itself acquire or release
-          ``_lock``. An entry missing a ``"status"`` key is treated as not
-          running (``.get()`` default) rather than raising ``KeyError`` --
-          a malformed entry must not defeat this conflict guard.
-    """
-    if any(r.get("status") == "running" for r in _active_runs.values()):
-        raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
-
-
-def _ensure_no_active_run() -> None:
-    """Raise 409 if any strategy-lab run is currently running.
-
-    Shared 409-guard for the run/resume/restart endpoints, which each allow at
-    most one concurrent strategy-lab run.
-
-    Preconditions:
-        - Caller does not already hold ``_lock`` (this acquires it itself).
-
-    Postconditions:
-        - Returns ``None`` when no entry in ``_active_runs`` has status
-          ``"running"``; otherwise raises ``HTTPException(409)``. Does not mutate
-          ``_active_runs``.
-    """
-    with _lock:
-        _no_active_run_locked()
-
-
-def _require_run_transition_lock(run_id: str) -> threading.Lock:
-    """Acquire run_id's transition lock, or raise 409 when another transition
-    for the same run_id is already in flight.
-
-    Shared guard for the run/resume/restart endpoints: serializes same-run_id
-    transitions so two concurrent calls (e.g. two restarts, or a resume
-    racing a restart) for the same run_id can't both pass the check-then-act
-    window between ``_ensure_no_active_run()`` and this run_id's state being
-    written (#4028).
-
-    Preconditions:
-        - None.
-
-    Postconditions:
-        - Returns the acquired ``threading.Lock`` — held by the caller, who
-          MUST release it (``try/finally: run_lock.release()``) — when no
-          other run/resume/restart transition for this ``run_id`` is
-          currently in flight.
-
-    Raises:
-        - ``HTTPException`` 409 when another transition for this ``run_id``
-          is already in flight. Never blocks; holds nothing in that case.
-    """
-    run_lock = _acquire_run_transition_lock(run_id)
-    if run_lock is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Another transition for this run is already in progress; retry shortly.",
-        )
-    return run_lock
-
-
-def _build_run_state(
-    run_id: str,
-    *,
-    started_at: str,
-    total_cycles: int,
-    batch_size: int,
-    batch_count: int,
-    request_payload: Dict[str, Any],
-    completed_cycles: int = 0,
-    contiguous_cycles: Optional[int] = None,
-    skipped_cycles: int = 0,
-    errored_cycles: int = 0,
-    errored_details: Optional[List[Any]] = None,
-    tracker_merge_error_count: int = 0,
-    completed_record_ids: Optional[List[Any]] = None,
-    completed_batches: int = 0,
-) -> Dict[str, Any]:
-    """Build a strategy-lab run-state dict, shared by run/resume/restart.
-
-    Defaults match the fresh-run (initial) case; resume/restart override the
-    fields that carry forward or reset.
-
-    Preconditions:
-        - ``request_payload`` is the serialized ``RunStrategyLabRequest`` for this run.
-
-    Postconditions:
-        - Returns a new dict with ``status == "running"``. The ``contiguous_cycles``
-          key is present iff ``contiguous_cycles`` is not ``None`` (the initial run
-          omits it; resume sets the offset; restart resets it to ``0``). Mutable
-          defaults (``errored_details``, ``completed_record_ids``) become fresh lists
-          when not supplied. Does not mutate its arguments.
-    """
-    state: Dict[str, Any] = {
-        "run_id": run_id,
-        "status": "running",
-        "started_at": started_at,
-        "total_cycles": total_cycles,
-        "completed_cycles": completed_cycles,
-        "skipped_cycles": skipped_cycles,
-        "errored_cycles": errored_cycles,
-        "errored_details": errored_details if errored_details is not None else [],
-        "tracker_merge_error_count": tracker_merge_error_count,
-        "current_cycle": None,
-        "completed_record_ids": (completed_record_ids if completed_record_ids is not None else []),
-        "error": None,
-        "request_payload": request_payload,
-        "batch_size": batch_size,
-        "batch_count": batch_count,
-        "completed_batches": completed_batches,
-        "current_batch": None,
-    }
-    if contiguous_cycles is not None:
-        state["contiguous_cycles"] = contiguous_cycles
-    return state
 
 
 def _dispatch_backtest_run(
@@ -3183,26 +2693,6 @@ class InvestmentJobsListResponse(BaseModel):
     jobs: List[InvestmentJobSummary] = Field(default_factory=list)
 
 
-def _job_progress_percent(completed: int, total: int) -> int:
-    """Compute a job's completion percentage, tolerating a non-positive total.
-
-    Preconditions:
-        - ``completed`` and ``total`` are integers (possibly 0 or negative,
-          e.g. from malformed persisted state).
-
-    Postconditions:
-        - Returns ``0`` when ``total <= 0`` (never divides by a non-positive
-          total, so this can never raise ``ZeroDivisionError``).
-        - Otherwise returns ``int((completed / total) * 100)``, clamped to
-          ``0..100`` -- ``completed`` exceeding ``total`` or being negative
-          (both possible from malformed persisted state) can never produce
-          an out-of-range percentage.
-    """
-    if total <= 0:
-        return 0
-    return max(0, min(100, int((completed / total) * 100)))
-
-
 @app.get(
     "/strategy-lab/jobs",
     response_model=InvestmentJobsListResponse,
@@ -3258,7 +2748,9 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     # since it acquires `_lock` internally (it is not reentrant).
     with _lock:
         running_ids = [
-            rid for rid, r in _active_runs.items() if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
+            rid
+            for rid, r in _active_runs.items()
+            if r.get("status") not in STRATEGY_LAB_TERMINAL_STATUSES
         ]
     for rid in running_ids:
         _reconcile_run_progress(rid)
@@ -3355,9 +2847,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             # genuinely malformed payload the isinstance guard above didn't
             # anticipate) must not discard every other persisted/in-memory
             # job already collected -- log distinctly and move on.
-            logger.warning(
-                "Skipping malformed persisted strategy lab job %s", jid, exc_info=True
-            )
+            logger.warning("Skipping malformed persisted strategy lab job %s", jid, exc_info=True)
 
     if running_only:
         jobs = [j for j in jobs if j.status in ("running", "pending")]
@@ -3860,7 +3350,9 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         for job in persisted_list:
             rid = job.get("job_id") or job.get("run_id", "")
             if rid and rid not in in_memory:
-                in_memory[rid] = _normalize_persisted_job(job, fallback_status="running", run_id=rid)
+                in_memory[rid] = _normalize_persisted_job(
+                    job, fallback_status="running", run_id=rid
+                )
     except Exception:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         in_memory = _in_memory_runs_by_id()
@@ -3925,8 +3417,9 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     Starlette's threadpool (``run_in_threadpool``) rather than run directly on
     this coroutine — otherwise they'd stall the asyncio event loop, and with
     it every other in-flight request on this worker, for the fetch+retry
-    window. The streaming generator itself remains async so it doesn't block
-    Uvicorn worker threads once connected.
+    window. In-memory ``_active_runs`` lookups use ``_async_lock`` (not the
+    threading ``_lock``) for the same reason. The streaming generator itself
+    remains async so it doesn't block Uvicorn worker threads once connected.
     """
     # Deliberately local (not module-level): tests substitute a fake
     # subscribe/unsubscribe by monkeypatching them directly on the
@@ -3941,7 +3434,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     # and its siblings).
     from investment_team.api.job_event_bus import subscribe, unsubscribe
 
-    with _lock:
+    async with _async_lock:
         state = _active_runs.get(run_id)
     if state:
         # Reconcile before the terminal check so an externally-completed run
@@ -3951,7 +3444,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         # reads _active_runs.get(run_id, {}) fresh -- picks up these same
         # values automatically.
         await run_in_threadpool(_reconcile_run_progress, run_id)
-        with _lock:
+        async with _async_lock:
             state = _active_runs.get(run_id, state)
     else:
         state = await run_in_threadpool(_load_run_from_job_service, run_id)
@@ -3969,9 +3462,9 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
-    def _snapshot_event() -> Optional[dict]:
+    async def _snapshot_event() -> Optional[dict]:
         # Skip the snapshot when there's no current in-memory state to send.
-        with _lock:
+        async with _async_lock:
             current = _active_runs.get(run_id, {})
         if not current:
             return None
@@ -4012,190 +3505,6 @@ class DeleteStrategyLabRecordResponse(BaseModel):
     deleted_paper_trading_sessions: int = 0
 
 
-# Bounded thread-pool ceiling for the job-service fan-out helpers below. These
-# issue blocking sync HTTP calls, so threads (not asyncio) are the right tool;
-# the cap keeps a large server-side job list from spawning unbounded threads.
-# NB: _purge_strategy_lab_job_storage runs the four teams on an outer pool of 4,
-# so a full purge peaks at 4 x _PURGE_MAX_WORKERS = 64 transient threads against
-# the job service — keep both widths in mind when tuning either.
-_PURGE_MAX_WORKERS = 16
-
-# Overall wall-clock ceiling for a full purge fan-out. Each underlying HTTP call
-# is already bounded by the job-service client's per-request timeout + finite
-# retries, but a pathological straggler must never wedge the endpoint, so the
-# collection below stops waiting past this deadline and abandons any unfinished
-# unit (counting it as 0 deleted) rather than blocking a server thread.
-_PURGE_TIMEOUT_S = 120.0
-
-
-def _delete_jobs_concurrently(
-    client: Any,
-    job_ids: list[str],
-    *,
-    max_workers: int = _PURGE_MAX_WORKERS,
-) -> int:
-    """Delete the given job ids via ``client.delete_job`` concurrently.
-
-    Preconditions:
-        - ``client`` exposes a thread-safe ``delete_job(job_id: str) -> truthy``.
-        - ``job_ids`` contains the already-filtered ids to delete (no further
-          filtering happens here).
-
-    Postconditions:
-        - Returns the count of ids for which ``delete_job`` returned a truthy
-          value. The count equals the number of jobs successfully deleted and is
-          independent of completion order (each task contributes its own 0/1 and
-          the results are summed — no shared mutable counter).
-        - A per-item ``delete_job`` exception is logged and counted as not-deleted,
-          so a single failure never aborts the batch.
-        - When ``job_ids`` is empty, returns 0 without spawning any threads.
-    """
-    if not job_ids:
-        return 0
-
-    def _delete_one(jid: str) -> int:
-        # Isolate per-item failures: one job's delete raising (e.g. a transient
-        # network error) must not abort the remaining concurrent deletions.
-        try:
-            return 1 if client.delete_job(jid) else 0
-        except Exception:
-            logger.warning("delete_job failed for %s; counted as not deleted", jid, exc_info=True)
-            return 0
-
-    workers = min(max_workers, len(job_ids))
-    return sum(
-        parallel_map(
-            job_ids, _delete_one, max_workers=workers, preserve_order=False, skip_none=False
-        )
-    )
-
-
-def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
-    """Remove paper trading jobs whose payload references this lab record.
-
-    Preconditions:
-        - ``lab_record_id`` is the lab record id to match against each job's
-          ``data["lab_record_id"]``.
-        - ``JobServiceClient`` for ``investment_paper_trading_sessions`` is
-          importable and thread-safe for concurrent ``delete_job`` calls.
-
-    Postconditions:
-        - Only jobs with a truthy ``job_id`` whose ``data`` is a dict and whose
-          ``data["lab_record_id"]`` equals ``lab_record_id`` are deleted.
-        - Returns the number of those jobs for which ``delete_job`` returned a
-          truthy value. The count equals the number of jobs successfully deleted
-          and is independent of the order in which the concurrent deletes finish.
-    """
-    from job_service_client import JobServiceClient
-
-    client = JobServiceClient(team="investment_paper_trading_sessions")
-    matching_ids: list[str] = []
-    for job in client.list_jobs() or []:
-        jid = job.get("job_id")
-        if not jid:
-            continue
-        payload = job.get("data")
-        if not isinstance(payload, dict):
-            continue
-        if payload.get("lab_record_id") != lab_record_id:
-            continue
-        matching_ids.append(str(jid))
-
-    return _delete_jobs_concurrently(client, matching_ids)
-
-
-def _purge_strategy_lab_job_storage() -> dict[str, Optional[int]]:
-    """Delete strategy lab jobs plus all paper-trading session jobs for this team.
-
-    Preconditions:
-        - ``JobServiceClient`` is importable and each per-team client is
-          thread-safe for concurrent ``delete_job`` calls (the four teams are
-          processed in parallel, and the deletes within each team are too).
-
-    Postconditions:
-        - ``deleted_lab_records`` counts ``investment_strategy_lab_records`` jobs
-          with a truthy ``job_id`` that ``delete_job`` removed.
-        - ``deleted_lab_strategies`` counts ``investment_strategies`` jobs whose
-          id starts with ``strat-lab-`` that ``delete_job`` removed.
-        - ``deleted_lab_backtests`` counts ``investment_backtests`` jobs whose id
-          starts with ``bt-lab-`` that ``delete_job`` removed.
-        - ``deleted_paper_trading_sessions`` counts
-          ``investment_paper_trading_sessions`` jobs with a truthy ``job_id``
-          that ``delete_job`` removed.
-        - Each count equals the number of matching jobs the corresponding unit
-          *reported* deleting within the shared deadline, and is independent
-          of the order in which the concurrent units/deletes finish; the
-          returned dict always has exactly these four keys.
-        - A unit that does not finish within the shared deadline
-          (``_PURGE_TIMEOUT_S``) is reported as ``None`` — not ``0`` — even
-          though its background thread keeps running (see
-          ``pool.shutdown(wait=False, ...)`` below) and may go on to delete
-          some or all of its matching jobs asynchronously, after this
-          function (and the endpoint calling it) has already returned.
-          ``None`` means "unknown, still in flight"; only a non-``None`` int
-          is a confirmed count. Callers must not treat ``None`` as ``0``.
-    """
-    from job_service_client import JobServiceClient
-
-    def _purge_all(team: str) -> int:
-        """Delete every truthy-id job for ``team`` (no id-prefix filter)."""
-        client = JobServiceClient(team=team)
-        ids = [str(jid) for job in (client.list_jobs() or []) if (jid := job.get("job_id"))]
-        return _delete_jobs_concurrently(client, ids)
-
-    def _purge_prefixed(team: str, prefix: str) -> int:
-        """Delete jobs for ``team`` whose id starts with ``prefix``."""
-        client = JobServiceClient(team=team)
-        ids = [
-            jid
-            for job in (client.list_jobs() or [])
-            if (jid := str(job.get("job_id") or "")).startswith(prefix)
-        ]
-        return _delete_jobs_concurrently(client, ids)
-
-    units: dict[str, concurrent.futures.Future[int]] = {}
-    # NB: not a `with` block — the context manager's exit calls shutdown(wait=True),
-    # which would re-introduce the very unbounded join the deadline below avoids.
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
-    try:
-        units["deleted_lab_records"] = pool.submit(_purge_all, "investment_strategy_lab_records")
-        units["deleted_lab_strategies"] = pool.submit(
-            _purge_prefixed, "investment_strategies", "strat-lab-"
-        )
-        units["deleted_lab_backtests"] = pool.submit(
-            _purge_prefixed, "investment_backtests", "bt-lab-"
-        )
-        units["deleted_paper_trading_sessions"] = pool.submit(
-            _purge_all, "investment_paper_trading_sessions"
-        )
-
-        # Collect against a single shared deadline so the whole fan-out is bounded
-        # (per-unit timeouts would let each unit reset the clock). A unit that
-        # overruns is reported as None (unknown, not a confirmed 0 — its worker
-        # thread is still running and may delete jobs after this call returns,
-        # see the docstring); a unit that *raises* still propagates (preserving
-        # the prior error contract).
-        deadline = time.monotonic() + _PURGE_TIMEOUT_S
-        results: dict[str, Optional[int]] = {}
-        for key, future in units.items():
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                results[key] = future.result(timeout=remaining)
-            except concurrent.futures.TimeoutError:
-                logger.warning(
-                    "purge unit %s did not finish within %.0fs; reported as unknown (None)",
-                    key,
-                    _PURGE_TIMEOUT_S,
-                )
-                results[key] = None
-        return results
-    finally:
-        # Never block on a straggler: in-flight HTTP deletes are themselves bounded
-        # by the client's per-request timeout, so abandoning the worker thread leaks
-        # nothing unbounded. cancel_futures drops any unit that hasn't started.
-        pool.shutdown(wait=False, cancel_futures=True)
-
-
 @app.delete(
     "/strategy-lab/records/{lab_record_id}",
     response_model=DeleteStrategyLabRecordResponse,
@@ -4211,12 +3520,13 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
     Postconditions:
         - Paper-trading session cleanup (``_delete_paper_sessions_for_lab_record``,
           a job-service network call) runs *before* the lab record is removed
-          from memory. If it raises or times out, the lab record and its linked
-          strategy/backtest are left intact and the exception propagates
-          (surfacing as a 500) instead of being silently swallowed — a retry
-          then re-attempts the same cleanup rather than 404ing against an
-          already-deleted record while paper sessions sit orphaned in the job
-          service.
+          from memory. If listing or other environmental failures occur (e.g.
+          unconfigured ``JOB_SERVICE_URL``, job-service transport errors), the
+          lab record and its linked strategy/backtest are left intact and the
+          failure surfaces as **503** instead of being silently swallowed — a
+          retry then re-attempts the same cleanup rather than 404ing against
+          an already-deleted record while paper sessions sit orphaned in the
+          job service. Other unexpected exceptions may still surface as 500.
         - ``_strategy_lab_records[lab_record_id]`` is removed only if it is
           still present by the time the in-memory-mutation step runs — a
           concurrent delete of the same ``lab_record_id`` may have already
@@ -4831,9 +4141,21 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                 session_id,
                 exc_info=True,
             )
-        _fail_paper_trading_session(
-            session_id, "Failed to start the paper-trading workflow (Temporal unavailable)."
-        )
+        # Best-effort failure recording must not mask the original dispatch
+        # error (especially an HTTPException with the intended status/detail).
+        # If the session was concurrently removed or is unparseable,
+        # _fail_paper_trading_session can raise — log and continue so the
+        # caller still receives the original exception.
+        try:
+            _fail_paper_trading_session(
+                session_id,
+                "Failed to start the paper-trading workflow (Temporal unavailable).",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to mark paper-trading session %s as failed",
+                session_id,
+            )
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(
@@ -4983,7 +4305,9 @@ def _default_tx_cost_bps() -> float:
     ``_DEFAULT_TX_COST_BPS``) on every call rather than once at import time,
     so operators can retune this business parameter without a redeploy.
     """
-    return env_float("INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0)
+    return env_float(
+        "INVESTMENT_DEFAULT_TX_COST_BPS", _DEFAULT_TX_COST_BPS, floor=0.0, ceiling=1000.0
+    )
 
 
 def _default_slippage_bps() -> float:
@@ -4994,7 +4318,9 @@ def _default_slippage_bps() -> float:
     ``_DEFAULT_SLIPPAGE_BPS``) on every call rather than once at import time,
     so operators can retune this business parameter without a redeploy.
     """
-    return env_float("INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0)
+    return env_float(
+        "INVESTMENT_DEFAULT_SLIPPAGE_BPS", _DEFAULT_SLIPPAGE_BPS, floor=0.0, ceiling=1000.0
+    )
 
 
 def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
@@ -5696,11 +5022,11 @@ def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
     Preconditions:
         - `session_id` must identify a previously started advisor session.
-        
+
     Postconditions:
         - Returns the session if found.
         - Otherwise, returns `found=False` with `session=None`.
-        
+
     Raises:
         - None (intentionally avoids standard 404 errors for missing sessions).
     """

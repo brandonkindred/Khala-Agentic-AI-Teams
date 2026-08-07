@@ -633,262 +633,469 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     return None
 
 
-def _branding_phase4_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
-    """Return a Phase 4 agent structured-output stub, or ``None`` if unmatched.
+def _phase4_channel_value(system_lowered: str) -> str:
+    """Extract the channel identifier from a lowercased channel-guide prompt.
+
+    Preconditions:
+        ``system_lowered`` is already lowercased (may be empty).
+    Postconditions:
+        Returns the ``[a-z_]+`` group from ``channel: '…'`` when present,
+        otherwise ``"channel"``.
+    """
+    channel_match = re.search(r"channel:\s*'([a-z_]+)'", system_lowered)
+    return channel_match.group(1) if channel_match else "channel"
+
+
+def _phase4_channel_guide_stub(channel_value: str) -> Dict[str, Any]:
+    """Return the shared ``ChannelGuidelineOutput`` dummy payload.
+
+    Preconditions:
+        ``channel_value`` is a non-empty string (caller supplies the extracted
+        or default channel id).
+    Postconditions:
+        Returns a fresh dict matching the ``ChannelGuidelineOutput`` field set.
+    """
+    assert isinstance(channel_value, str) and channel_value, (
+        "channel_value must be a non-empty string"
+    )
+    return {
+        "channel": channel_value,
+        "strategy": f"Lead with proof points tailored to the {channel_value} audience (dummy).",
+        "dos": [
+            "Match the channel's native format (dummy).",
+            "Lead with the strongest proof point (dummy).",
+            "Keep a consistent voice across posts (dummy).",
+        ],
+        "donts": [
+            "Don't repurpose copy verbatim from other channels (dummy).",
+            "Don't bury the call to action (dummy).",
+            "Don't ignore channel-specific limits (dummy).",
+        ],
+        "content_types": [
+            "Short-form updates (dummy).",
+            "Case study highlights (dummy).",
+            "Behind-the-scenes moments (dummy).",
+        ],
+        "frequency_guidance": "Publish on a predictable weekly cadence (dummy).",
+    }
+
+
+def _phase4_experience_principles_stub() -> Dict[str, Any]:
+    """Return the ``BrandExperiencePrinciplesOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "brand_experience_principles": [
+            "Every touchpoint should feel intentional (dummy).",
+            "Consistency builds trust over time (dummy).",
+            "Speed should never break polish (dummy).",
+        ],
+        "signature_moments": [
+            "First login walkthrough (dummy).",
+            "Onboarding welcome email (dummy).",
+            "Renewal confirmation moment (dummy).",
+        ],
+        "sensory_elements": [
+            "Confident, low-pitched notification chime (dummy).",
+            "Matte, tactile packaging texture (dummy).",
+        ],
+    }
+
+
+def _phase4_architecture_stub() -> Dict[str, Any]:
+    """Return the ``BrandArchitectureOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "brand_architecture": [
+            {
+                "entity": "parent brand",
+                "relationship": "Umbrella over all products (dummy).",
+                "naming_convention": "Dummy Co. + [Product] (dummy).",
+                "visual_treatment": "Shared wordmark, distinct accent color (dummy).",
+            }
+        ],
+        "naming_conventions": [
+            "Product names are one word (dummy).",
+            "Avoid internal codenames externally (dummy).",
+            "Always pair sub-brand with parent brand on first mention (dummy).",
+        ],
+        "terminology_glossary": {
+            "brand architecture": "How parent and sub-brands relate (dummy).",
+            "sub-brand": "A named offering under the parent brand (dummy).",
+            "wordmark": "The brand's logotype (dummy).",
+            "boilerplate": "Standard company description (dummy).",
+            "voice": "How the brand sounds in writing (dummy).",
+        },
+    }
+
+
+def _phase4_brand_in_action_stub() -> Dict[str, Any]:
+    """Return the ``BrandInActionOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "brand_in_action": [
+            {
+                "context": "Sales deck header (dummy).",
+                "correct_example": "Uses the approved wordmark and tagline (dummy).",
+                "incorrect_example": "Stretches the logo and adds a drop shadow (dummy).",
+                "rationale": "Keeps the mark legible and on-brand (dummy).",
+            },
+            {
+                "context": "Support email signature (dummy).",
+                "correct_example": "Plain-text signature with the approved title (dummy).",
+                "incorrect_example": "Adds an unapproved emoji and banner image (dummy).",
+                "rationale": "Matches the calm, helpful support tone (dummy).",
+            },
+            {
+                "context": "Social post header (dummy).",
+                "correct_example": "Uses the brand accent color and approved crop (dummy).",
+                "incorrect_example": "Uses an off-palette gradient background (dummy).",
+                "rationale": "Preserves visual consistency across channels (dummy).",
+            },
+        ]
+    }
+
+
+_PHASE4_STRUCTURED_OUTPUT_MODEL_NAMES: frozenset[str] = frozenset(
+    {
+        "BrandExperiencePrinciplesOutput",
+        "ChannelGuidelineOutput",
+        "BrandArchitectureOutput",
+        "BrandInActionOutput",
+    }
+)
+
+
+def _branding_phase4_structured_output_stub(
+    model_name: str, system_lowered: str = ""
+) -> Optional[Dict[str, Any]]:
+    """Deterministic Branding Phase 4 stub for a known ``structured_output`` class name.
+
+    Preconditions:
+        ``model_name`` is a string (typically ``type.__name__``);
+        ``system_lowered`` is already lowercased (may be empty) and is used
+        only to fill ``channel`` for ``ChannelGuidelineOutput``.
+    Postconditions:
+        Returns the matching Phase 4 stub dict, or ``None`` for unrecognized names.
+    """
+    if model_name == "BrandExperiencePrinciplesOutput":
+        return _phase4_experience_principles_stub()
+    if model_name == "ChannelGuidelineOutput":
+        return _phase4_channel_guide_stub(_phase4_channel_value(system_lowered))
+    if model_name == "BrandArchitectureOutput":
+        return _phase4_architecture_stub()
+    if model_name == "BrandInActionOutput":
+        return _phase4_brand_in_action_stub()
+    return None
+
+
+def _branding_phase4_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Text-anchor fallback for Phase 4 branding structured-output stubs.
 
     Preconditions:
         ``system_lowered`` is the agent system prompt already lowercased (may be empty).
     Postconditions:
         Returns a dict that validates against the matching Phase 4 agent
         ``structured_output`` schema, or ``None`` when no Phase 4 agent matches.
-        Covers all four distinct Phase 4 schemas: ``brand_experience_principler``,
-        the six ``_make_channel_guide`` agents (all share ``ChannelGuidelineOutput``,
-        so one stub branch covers all six), ``brand_architecture_builder``, and
-        ``brand_in_action_illustrator``.
+        Covers all four distinct Phase 4 schemas: experience principles,
+        the six channel guides (shared ``ChannelGuidelineOutput``),
+        architecture, and brand-in-action.
     """
     if "content_types" in system_lowered and "frequency_guidance" in system_lowered:
-        channel_match = re.search(r"channel:\s*'([a-z_]+)'", system_lowered)
-        channel_value = channel_match.group(1) if channel_match else "channel"
-        return {
-            "channel": channel_value,
-            "strategy": f"Lead with proof points tailored to the {channel_value} audience (dummy).",
-            "dos": [
-                "Match the channel's native format (dummy).",
-                "Lead with the strongest proof point (dummy).",
-                "Keep a consistent voice across posts (dummy).",
-            ],
-            "donts": [
-                "Don't repurpose copy verbatim from other channels (dummy).",
-                "Don't bury the call to action (dummy).",
-                "Don't ignore channel-specific limits (dummy).",
-            ],
-            "content_types": [
-                "Short-form updates (dummy).",
-                "Case study highlights (dummy).",
-                "Behind-the-scenes moments (dummy).",
-            ],
-            "frequency_guidance": "Publish on a predictable weekly cadence (dummy).",
-        }
+        return _phase4_channel_guide_stub(_phase4_channel_value(system_lowered))
     if "brand_experience_principles" in system_lowered and "sensory_elements" in system_lowered:
-        return {
-            "brand_experience_principles": [
-                "Every touchpoint should feel intentional (dummy).",
-                "Consistency builds trust over time (dummy).",
-                "Speed should never break polish (dummy).",
-            ],
-            "signature_moments": [
-                "First login walkthrough (dummy).",
-                "Onboarding welcome email (dummy).",
-                "Renewal confirmation moment (dummy).",
-            ],
-            "sensory_elements": [
-                "Confident, low-pitched notification chime (dummy).",
-                "Matte, tactile packaging texture (dummy).",
-            ],
-        }
+        return _phase4_experience_principles_stub()
     if "brand_architecture" in system_lowered and "terminology_glossary" in system_lowered:
-        return {
-            "brand_architecture": [
-                {
-                    "entity": "parent brand",
-                    "relationship": "Umbrella over all products (dummy).",
-                    "naming_convention": "Dummy Co. + [Product] (dummy).",
-                    "visual_treatment": "Shared wordmark, distinct accent color (dummy).",
-                }
-            ],
-            "naming_conventions": [
-                "Product names are one word (dummy).",
-                "Avoid internal codenames externally (dummy).",
-                "Always pair sub-brand with parent brand on first mention (dummy).",
-            ],
-            "terminology_glossary": {
-                "brand architecture": "How parent and sub-brands relate (dummy).",
-                "sub-brand": "A named offering under the parent brand (dummy).",
-                "wordmark": "The brand's logotype (dummy).",
-                "boilerplate": "Standard company description (dummy).",
-                "voice": "How the brand sounds in writing (dummy).",
-            },
-        }
+        return _phase4_architecture_stub()
     if "correct_example" in system_lowered and "incorrect_example" in system_lowered:
-        return {
-            "brand_in_action": [
-                {
-                    "context": "Sales deck header (dummy).",
-                    "correct_example": "Uses the approved wordmark and tagline (dummy).",
-                    "incorrect_example": "Stretches the logo and adds a drop shadow (dummy).",
-                    "rationale": "Keeps the mark legible and on-brand (dummy).",
-                },
-                {
-                    "context": "Support email signature (dummy).",
-                    "correct_example": "Plain-text signature with the approved title (dummy).",
-                    "incorrect_example": "Adds an unapproved emoji and banner image (dummy).",
-                    "rationale": "Matches the calm, helpful support tone (dummy).",
-                },
-                {
-                    "context": "Social post header (dummy).",
-                    "correct_example": "Uses the brand accent color and approved crop (dummy).",
-                    "incorrect_example": "Uses an off-palette gradient background (dummy).",
-                    "rationale": "Preserves visual consistency across channels (dummy).",
-                },
-            ]
-        }
+        return _phase4_brand_in_action_stub()
     return None
 
 
-def _branding_phase5_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
-    """Return a Phase 5 agent structured-output stub, or ``None`` if unmatched.
+def _phase5_ownership_stub() -> Dict[str, Any]:
+    """Return the ``OwnershipOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "ownership_model": (
+            "The Brand Director owns final say on all brand decisions, with input from "
+            "Marketing and Product leads (dummy)."
+        ),
+        "decision_authority": {
+            "logo_changes": "Brand Director",
+            "campaign_messaging": "Marketing Lead",
+            "product_naming": "Product Lead",
+        },
+    }
+
+
+def _phase5_approval_workflows_stub() -> Dict[str, Any]:
+    """Return the ``ApprovalWorkflowsOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "approval_workflows": [
+            {
+                "asset_type": "Logo usage",
+                "approvers": ["Brand Director"],
+                "sla": "2 business days",
+                "escalation_path": "Escalate to CMO after 3 days (dummy).",
+            },
+            {
+                "asset_type": "Campaign messaging",
+                "approvers": ["Marketing Lead", "Brand Director"],
+                "sla": "3 business days",
+                "escalation_path": "Escalate to CMO after 5 days (dummy).",
+            },
+            {
+                "asset_type": "Product naming",
+                "approvers": ["Product Lead", "Brand Director"],
+                "sla": "5 business days",
+                "escalation_path": "Escalate to VP Product after 7 days (dummy).",
+            },
+        ],
+        "agency_briefing_protocols": [
+            "Share the brand guidelines doc before kickoff (dummy).",
+            "Require a written creative brief signed off by the Brand Director (dummy).",
+            "Hold a kickoff call covering voice, tone, and visual do's/don'ts (dummy).",
+        ],
+    }
+
+
+def _phase5_asset_wiki_stub() -> Dict[str, Any]:
+    """Return the ``AssetWikiOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "asset_management_guidance": [
+            "Store all approved assets in the central DAM (dummy).",
+            "Archive deprecated assets instead of deleting them (dummy).",
+            "Tag every asset with its approval date and owner (dummy).",
+        ],
+        "wiki_backlog": [
+            {
+                "title": "Brand North Star",
+                "summary": "One-page summary of purpose, vision, and positioning (dummy).",
+                "owners": ["Brand Director"],
+                "update_cadence": "quarterly",
+            },
+            {
+                "title": "Voice Playbook",
+                "summary": "Tone spectrum and language dos/don'ts (dummy).",
+                "owners": ["Brand Lead"],
+                "update_cadence": "quarterly",
+            },
+            {
+                "title": "Design System",
+                "summary": "Logo, color, typography, and component specs (dummy).",
+                "owners": ["Design Lead"],
+                "update_cadence": "monthly",
+            },
+            {
+                "title": "Brand Review Intake",
+                "summary": "How to submit assets for brand review (dummy).",
+                "owners": ["Brand Director"],
+                "update_cadence": "monthly",
+            },
+        ],
+    }
+
+
+def _phase5_training_stub() -> Dict[str, Any]:
+    """Return the ``TrainingOnboardingOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "training_onboarding_plan": [
+            "New-hire brand orientation session in week one (dummy).",
+            "Quarterly brand refresher workshop (dummy).",
+            "Self-serve brand guideline course in the LMS (dummy).",
+            "Office-hours with the Brand team for open questions (dummy).",
+        ],
+    }
+
+
+def _phase5_kpi_stub() -> Dict[str, Any]:
+    """Return the ``BrandHealthKPIsOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "brand_health_kpis": [
+            {
+                "metric": "Brand awareness",
+                "measurement_method": "Quarterly survey (dummy).",
+                "target": "60% aided awareness",
+                "review_frequency": "quarterly",
+            },
+            {
+                "metric": "Message consistency score",
+                "measurement_method": "Content audit against guidelines (dummy).",
+                "target": "90% compliant",
+                "review_frequency": "monthly",
+            },
+            {
+                "metric": "NPS",
+                "measurement_method": "Post-purchase survey (dummy).",
+                "target": "+40",
+                "review_frequency": "quarterly",
+            },
+            {
+                "metric": "Guideline adoption rate",
+                "measurement_method": "Percent of assets passing first-pass review (dummy).",
+                "target": "85%",
+                "review_frequency": "monthly",
+            },
+        ],
+        "tracking_methodology": (
+            "Combine quarterly surveys with ongoing content audits, reviewed in a monthly "
+            "brand health dashboard (dummy)."
+        ),
+        "review_trigger_points": [
+            "NPS drops more than 10 points quarter-over-quarter (dummy).",
+            "A rebrand or major product launch is planned (dummy).",
+            "Guideline adoption falls below 70% (dummy).",
+        ],
+    }
+
+
+def _phase5_evolution_stub() -> Dict[str, Any]:
+    """Return the ``EvolutionFrameworkOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "evolution_framework": (
+            "The brand evolves incrementally through versioned updates, with major shifts "
+            "reserved for strategic inflection points (dummy)."
+        ),
+        "version_control_cadence": (
+            "Formal review every two quarters, with minor patches as needed (dummy)."
+        ),
+    }
+
+
+def _phase5_brand_guidelines_stub() -> Dict[str, Any]:
+    """Return the ``BrandGuidelinesOutput`` dummy payload.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict matching that schema's field set.
+    """
+    return {
+        "brand_guidelines": [
+            "Always use the approved wordmark; never recreate it (dummy).",
+            "Lead every message with the customer outcome, not the feature (dummy).",
+            "All external assets require Brand Director sign-off before release (dummy).",
+            "Store approved assets only in the central DAM (dummy).",
+            "Review the brand system every two quarters (dummy).",
+        ],
+    }
+
+
+_PHASE5_STRUCTURED_OUTPUT_MODEL_NAMES: frozenset[str] = frozenset(
+    {
+        "OwnershipOutput",
+        "ApprovalWorkflowsOutput",
+        "AssetWikiOutput",
+        "TrainingOnboardingOutput",
+        "BrandHealthKPIsOutput",
+        "EvolutionFrameworkOutput",
+        "BrandGuidelinesOutput",
+    }
+)
+
+
+def _branding_phase5_structured_output_stub(model_name: str) -> Optional[Dict[str, Any]]:
+    """Deterministic Branding Phase 5 stub for a known ``structured_output`` class name.
+
+    Preconditions:
+        ``model_name`` is a string (typically ``type.__name__``).
+    Postconditions:
+        Returns the matching Phase 5 stub dict, or ``None`` for unrecognized names.
+    """
+    if model_name == "OwnershipOutput":
+        return _phase5_ownership_stub()
+    if model_name == "ApprovalWorkflowsOutput":
+        return _phase5_approval_workflows_stub()
+    if model_name == "AssetWikiOutput":
+        return _phase5_asset_wiki_stub()
+    if model_name == "TrainingOnboardingOutput":
+        return _phase5_training_stub()
+    if model_name == "BrandHealthKPIsOutput":
+        return _phase5_kpi_stub()
+    if model_name == "EvolutionFrameworkOutput":
+        return _phase5_evolution_stub()
+    if model_name == "BrandGuidelinesOutput":
+        return _phase5_brand_guidelines_stub()
+    return None
+
+
+def _branding_structured_output_stub_by_model_name(
+    model_name: str, system_lowered: str = ""
+) -> Optional[Dict[str, Any]]:
+    """Resolve a branding stub by structured-output model class name.
+
+    Tries Phase 2, then Phase 4, then Phase 5. Shared by ``complete_json``,
+    ``chat``, and ``stream`` so all three keep one precedence order.
+
+    Preconditions:
+        ``model_name`` is a string; ``system_lowered`` is already lowercased
+        (may be empty) and is forwarded to Phase 4 for channel extraction only.
+    Postconditions:
+        Returns the first matching stub dict, or ``None`` so callers fall
+        through to text-anchor / generic paths.
+    """
+    stub = _branding_phase2_structured_output_stub(model_name)
+    if stub is not None:
+        return stub
+    stub = _branding_phase4_structured_output_stub(model_name, system_lowered)
+    if stub is not None:
+        return stub
+    return _branding_phase5_structured_output_stub(model_name)
+
+
+def _branding_phase5_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
+    """Text-anchor fallback for Phase 5 branding structured-output stubs.
 
     Preconditions:
         ``system_lowered`` is the agent system prompt already lowercased (may be empty).
     Postconditions:
         Returns a dict that validates against the matching Phase 5 agent
         ``structured_output`` schema, or ``None`` when no Phase 5 agent matches.
-        Covers all 7 Phase 5 factories: ``ownership_definer``,
-        ``approval_workflow_designer``, ``asset_wiki_planner``,
-        ``training_planner``, ``kpi_designer``, ``evolution_framer``, and
-        ``brand_rules_codifier``.
+        Covers all seven Phase 5 factories.
     """
     if "ownership_model" in system_lowered and "decision_authority" in system_lowered:
-        return {
-            "ownership_model": (
-                "The Brand Director owns final say on all brand decisions, with input from "
-                "Marketing and Product leads (dummy)."
-            ),
-            "decision_authority": {
-                "logo_changes": "Brand Director",
-                "campaign_messaging": "Marketing Lead",
-                "product_naming": "Product Lead",
-            },
-        }
+        return _phase5_ownership_stub()
     if "approval_workflows" in system_lowered and "agency_briefing_protocols" in system_lowered:
-        return {
-            "approval_workflows": [
-                {
-                    "asset_type": "Logo usage",
-                    "approvers": ["Brand Director"],
-                    "sla": "2 business days",
-                    "escalation_path": "Escalate to CMO after 3 days (dummy).",
-                },
-                {
-                    "asset_type": "Campaign messaging",
-                    "approvers": ["Marketing Lead", "Brand Director"],
-                    "sla": "3 business days",
-                    "escalation_path": "Escalate to CMO after 5 days (dummy).",
-                },
-                {
-                    "asset_type": "Product naming",
-                    "approvers": ["Product Lead", "Brand Director"],
-                    "sla": "5 business days",
-                    "escalation_path": "Escalate to VP Product after 7 days (dummy).",
-                },
-            ],
-            "agency_briefing_protocols": [
-                "Share the brand guidelines doc before kickoff (dummy).",
-                "Require a written creative brief signed off by the Brand Director (dummy).",
-                "Hold a kickoff call covering voice, tone, and visual do's/don'ts (dummy).",
-            ],
-        }
+        return _phase5_approval_workflows_stub()
     if "asset_management_guidance" in system_lowered and "wiki_backlog" in system_lowered:
-        return {
-            "asset_management_guidance": [
-                "Store all approved assets in the central DAM (dummy).",
-                "Archive deprecated assets instead of deleting them (dummy).",
-                "Tag every asset with its approval date and owner (dummy).",
-            ],
-            "wiki_backlog": [
-                {
-                    "title": "Brand North Star",
-                    "summary": "One-page summary of purpose, vision, and positioning (dummy).",
-                    "owners": ["Brand Director"],
-                    "update_cadence": "quarterly",
-                },
-                {
-                    "title": "Voice Playbook",
-                    "summary": "Tone spectrum and language dos/don'ts (dummy).",
-                    "owners": ["Brand Lead"],
-                    "update_cadence": "quarterly",
-                },
-                {
-                    "title": "Design System",
-                    "summary": "Logo, color, typography, and component specs (dummy).",
-                    "owners": ["Design Lead"],
-                    "update_cadence": "monthly",
-                },
-                {
-                    "title": "Brand Review Intake",
-                    "summary": "How to submit assets for brand review (dummy).",
-                    "owners": ["Brand Director"],
-                    "update_cadence": "monthly",
-                },
-            ],
-        }
+        return _phase5_asset_wiki_stub()
     if "training_onboarding_plan" in system_lowered and "brand literacy" in system_lowered:
-        return {
-            "training_onboarding_plan": [
-                "New-hire brand orientation session in week one (dummy).",
-                "Quarterly brand refresher workshop (dummy).",
-                "Self-serve brand guideline course in the LMS (dummy).",
-                "Office-hours with the Brand team for open questions (dummy).",
-            ],
-        }
+        return _phase5_training_stub()
     if "brand_health_kpis" in system_lowered and "tracking_methodology" in system_lowered:
-        return {
-            "brand_health_kpis": [
-                {
-                    "metric": "Brand awareness",
-                    "measurement_method": "Quarterly survey (dummy).",
-                    "target": "60% aided awareness",
-                    "review_frequency": "quarterly",
-                },
-                {
-                    "metric": "Message consistency score",
-                    "measurement_method": "Content audit against guidelines (dummy).",
-                    "target": "90% compliant",
-                    "review_frequency": "monthly",
-                },
-                {
-                    "metric": "NPS",
-                    "measurement_method": "Post-purchase survey (dummy).",
-                    "target": "+40",
-                    "review_frequency": "quarterly",
-                },
-                {
-                    "metric": "Guideline adoption rate",
-                    "measurement_method": "Percent of assets passing first-pass review (dummy).",
-                    "target": "85%",
-                    "review_frequency": "monthly",
-                },
-            ],
-            "tracking_methodology": (
-                "Combine quarterly surveys with ongoing content audits, reviewed in a monthly "
-                "brand health dashboard (dummy)."
-            ),
-            "review_trigger_points": [
-                "NPS drops more than 10 points quarter-over-quarter (dummy).",
-                "A rebrand or major product launch is planned (dummy).",
-                "Guideline adoption falls below 70% (dummy).",
-            ],
-        }
+        return _phase5_kpi_stub()
     if "evolution_framework" in system_lowered and "version_control_cadence" in system_lowered:
-        return {
-            "evolution_framework": (
-                "The brand evolves incrementally through versioned updates, with major shifts "
-                "reserved for strategic inflection points (dummy)."
-            ),
-            "version_control_cadence": (
-                "Formal review every two quarters, with minor patches as needed (dummy)."
-            ),
-        }
+        return _phase5_evolution_stub()
     if "brand_guidelines" in system_lowered and "governance rules" in system_lowered:
-        return {
-            "brand_guidelines": [
-                "Always use the approved wordmark; never recreate it (dummy).",
-                "Lead every message with the customer outcome, not the feature (dummy).",
-                "All external assets require Brand Director sign-off before release (dummy).",
-                "Store approved assets only in the central DAM (dummy).",
-                "Review the brand system every two quarters (dummy).",
-            ],
-        }
+        return _phase5_brand_guidelines_stub()
     return None
 
 
@@ -1097,18 +1304,18 @@ def _branding_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
         ``system_lowered`` is the agent system prompt already lowercased (may be empty).
     Postconditions:
         Returns the first non-``None`` result from
-        ``_branding_phase3_structured_stub`` / ``_branding_phase4_structured_stub`` /
-        ``_branding_phase5_structured_stub``, or ``None`` when none match. Kept as
+        ``_branding_phase3_structured_stub`` / ``_branding_phase4_text_routed_stub`` /
+        ``_branding_phase5_text_routed_stub``, or ``None`` when none match. Kept as
         its own helper (rather than inlined in ``complete_json``) so that call
         site's branching stays unchanged and under the mccabe complexity ceiling.
     """
     stub = _branding_phase3_structured_stub(system_lowered)
     if stub is not None:
         return stub
-    stub = _branding_phase4_structured_stub(system_lowered)
+    stub = _branding_phase4_text_routed_stub(system_lowered)
     if stub is not None:
         return stub
-    return _branding_phase5_structured_stub(system_lowered)
+    return _branding_phase5_text_routed_stub(system_lowered)
 
 
 # Single source of truth for the six class names
@@ -1133,25 +1340,20 @@ def _branding_phase2_structured_output_stub(model_name: str) -> Optional[Dict[st
     """Deterministic Branding Phase 2 "Narrative & Messaging" payload for a known
     ``structured_output`` model class name.
 
-    This is the routing counterpart to the ``system_lowered`` text anchors the
-    six Phase 2 ``elif`` branches in ``complete_json`` use: those branches
-    delegate to the exact same functions below via a hardcoded class name, so
-    there is one payload per class regardless of which path reaches it. Takes
-    a name string rather than the class object itself because two of this
-    dispatcher's three callers (``chat()``'s and ``stream()``'s tool-call
-    detection) only ever see the Strands tool's ``name`` — which Strands sets
-    to ``model.__name__`` — never the Python class; ``complete_json`` derives
-    the same string from its own ``structured_output_model`` class parameter
-    so all three callers share one dispatch table. The recognized names are
-    also listed in ``_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES``, for callers that
-    need the name set without the payload.
+    Dispatches Phase 2 Narrative & Messaging stubs by Pydantic model class name
+    string. Callers are ``complete_json`` (via ``structured_output_model.__name__``)
+    and ``chat``/``stream`` (via the Strands StructuredOutputTool name, which Strands
+    sets to ``model.__name__``). Returns the stub dict for the six known Phase 2
+    class names listed in ``_PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES``; returns
+    ``None`` for unrecognized names so callers continue their non–Phase-2 routing
+    (e.g. Phase 1/3/4/5 text anchors or generic fallbacks).
 
     Preconditions:
         ``model_name`` is a string, typically a ``type.__name__``.
     Postconditions:
         Returns the fresh stub dict that the named model class should
         validate against, or ``None`` for any unrecognized name so callers
-        can fall back to prompt-text matching.
+        continue non–Phase-2 routing paths.
     """
     if model_name == "BrandStoryOutput":
         return _branding_phase2_narrative_base()
@@ -1181,11 +1383,11 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         ``description_lowered`` is already lowercased by the caller.
     Postconditions:
         Returns ``True`` if the stable-name check, either description
-        substring heuristic, or ``name`` is one of the six known Phase 2
-        classes — the last arm matches Strands' actual invariant (it names
-        the tool after the model's ``__name__``) independent of description
-        wording a future SDK version could change. Checks membership rather
-        than calling ``_branding_phase2_structured_output_stub`` so a pure
+        substring heuristic, or ``name`` is one of the known Phase 2, Phase 4,
+        or Phase 5 structured-output classes — the last arm matches Strands'
+        actual invariant (it names the tool after the model's ``__name__``)
+        independent of description wording a future SDK version could change.
+        Checks membership rather than calling the stub resolver so a pure
         boolean check doesn't also construct (and discard) a payload dict.
     """
     return (
@@ -1193,52 +1395,9 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
         or "structuredoutputtool" in description_lowered
         or "structured_output" in description_lowered
         or name in _PHASE2_STRUCTURED_OUTPUT_MODEL_NAMES
+        or name in _PHASE4_STRUCTURED_OUTPUT_MODEL_NAMES
+        or name in _PHASE5_STRUCTURED_OUTPUT_MODEL_NAMES
     )
-
-
-def _branding_phase2_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
-    """Text-anchor fallback for the Phase 2 "Narrative & Messaging" cluster.
-
-    Used by ``complete_json`` when the caller didn't supply a recognized
-    ``structured_output_model`` (see ``_branding_phase2_structured_output_stub``).
-    Kept as its own helper — like ``_branding_structured_stub`` for Phase 3/4 —
-    so that call site's branching stays flat and under the mccabe complexity
-    ceiling.
-
-    Preconditions:
-        ``system_lowered`` is the agent system prompt already lowercased (may be empty).
-    Postconditions:
-        Returns the first matching Phase 2 payload, or ``None`` when no
-        anchor combination matches. Cumulative carry-forward stubs: each
-        specialist repeats upstream fields so a linear Graph predecessor
-        exposes the full prior narrative — anchors are ordered least- to
-        most-specific; earlier branches carry negative guards so a later
-        specialist's prompt (which also contains earlier fields) does not
-        get caught by an earlier branch.
-    """
-    if (
-        "brand_story" in system_lowered
-        and "boilerplate_variants" in system_lowered
-        and (
-            "tagline_rationale" not in system_lowered
-            and "personality_traits" not in system_lowered
-            and "messaging_framework" not in system_lowered
-            and "jobs_to_be_done" not in system_lowered
-            and "writing_guidelines" not in system_lowered
-        )
-    ):
-        return _branding_phase2_narrative_base()
-    if "personality_traits" in system_lowered and "carry forward brand_story" in system_lowered:
-        return _branding_phase2_narrative_with_archetype()
-    if "tagline_rationale" in system_lowered and "elevator_pitches" in system_lowered:
-        return _branding_phase2_narrative_with_tagline()
-    if "messaging_framework" in system_lowered and "audience_message_maps" in system_lowered:
-        return _branding_phase2_narrative_with_messaging()
-    if "jobs_to_be_done" in system_lowered and "media_habits" in system_lowered:
-        return _branding_phase2_narrative_with_personas()
-    if "writing_guidelines" in system_lowered and "editorial_quality_bar" in system_lowered:
-        return _branding_phase2_narrative_with_writing_guidelines()
-    return None
 
 
 class DummyLLMClient(LLMClient):
@@ -1418,9 +1577,9 @@ class DummyLLMClient(LLMClient):
         When ``tool_specs`` contains a StructuredOutputTool (added by Strands
         when ``structured_output_model=...`` is used), yields a tool-use event
         invoking that tool with data from
-        ``_branding_phase2_structured_output_stub`` when the tool's name
-        resolves to a known Phase 2 model class, falling back to the
-        ``complete_json`` pattern matcher otherwise (mirrors ``chat()``, which
+        ``_branding_structured_output_stub_by_model_name`` when the tool's name
+        resolves to a known Phase 2, Phase 4, or Phase 5 model class, falling
+        back to the ``complete_json`` pattern matcher otherwise (mirrors ``chat()``, which
         is the method Strands actually calls for branding traffic via
         ``LLMClientModel``; this native ``stream()`` matters for a bare
         ``Agent(model=DummyLLMClient())``). Otherwise yields a plain text
@@ -1465,7 +1624,10 @@ class DummyLLMClient(LLMClient):
         # the other order would compute rich-response data that ignores the
         # tool identity entirely.
         deterministic = (
-            _branding_phase2_structured_output_stub(structured_tool_name)
+            _branding_structured_output_stub_by_model_name(
+                structured_tool_name,
+                (system_prompt or "").lower(),
+            )
             if structured_tool_name
             else None
         )
@@ -1568,12 +1730,14 @@ class DummyLLMClient(LLMClient):
     ) -> Dict[str, Any]:
         """Return a JSON-shaped stub for the given prompt.
 
-        Routes the Branding Phase 2 "Narrative & Messaging" cluster
-        deterministically by ``structured_output_model``'s class name when
-        provided (see ``_branding_phase2_structured_output_stub``); otherwise
-        — and for every other prompt shape this dummy stubs — pattern-matches
-        against ``prompt`` (and, for a few teams, ``system_prompt``) for
-        anchor tokens and returns the matching canned dict.
+        Routes Branding Phase 2, Phase 4, and Phase 5 structured-output classes
+        by model name when ``structured_output_model`` is provided (see
+        ``_branding_structured_output_stub_by_model_name``); Phase 2 prompts
+        without that parameter do not match system-prompt text anchors here — use
+        ``chat``/``stream`` Strands tool-name dispatch instead. For every other
+        prompt shape this dummy stubs, pattern-matches against ``prompt`` (and,
+        for a few teams, ``system_prompt``) for anchor tokens and returns the
+        matching canned dict.
 
         Preconditions:
             - ``prompt`` is a string (may be empty).
@@ -1602,18 +1766,16 @@ class DummyLLMClient(LLMClient):
         # other teams' prompts that happened to mention those words in persona
         # text.
         #
-        # Branding Phase 1 / Phase 3 branches are the exception: they anchor
-        # on ``system_prompt`` (via ``system_lowered`` later in this method)
-        # because every agent in those phases receives the same serialized
-        # mission/phase context as its user message, so only each agent's own
-        # system_prompt (its required output field names) can distinguish
-        # which one is asking. Those anchors are multi-token combinations
-        # unique to one agent's prompt. Phase 2 used the same system_prompt
-        # anchoring historically, but is now routed deterministically by the
-        # structured_output_model's class name below when a caller supplies
-        # it — see the fast path immediately after this comment block; the
-        # system_prompt anchors in ``_branding_phase2_text_routed_stub``
-        # remain only as a fallback for callers that don't.
+        # Branding Phase 1 / Phase 3 / Phase 4 / Phase 5 branches are the
+        # exception: they anchor on ``system_prompt`` (via ``system_lowered``
+        # later in this method) because every agent in those phases receives
+        # the same serialized mission/phase context as its user message, so
+        # only each agent's own system_prompt (its required output field names)
+        # can distinguish which one is asking. Those anchors are multi-token
+        # combinations unique to one agent's prompt. Phase 2 is routed only by
+        # ``structured_output_model``'s class name (fast path below) or by
+        # Strands StructuredOutputTool name in ``chat``/``stream`` — there is
+        # no system-prompt substring fallback for Phase 2.
         lowered = prompt.lower()
         # Shared across instances so sequential coding stubs can mint distinct
         # module/component names when the task hint alone is not enough.
@@ -1629,21 +1791,21 @@ class DummyLLMClient(LLMClient):
         # structured_output_model=X) caller (e.g. this suite's tests). chat()
         # and stream() do NOT reach this branch: they never call complete_json
         # with this parameter at all — their own dispatch blocks call
-        # _branding_phase2_structured_output_stub directly with just the tool's
-        # name string (the only identifier Strands' event loop ever gives them,
-        # per that helper's own docstring), bypassing this parameter entirely.
-        # Route by class *name* instead of the text-anchor scan below —
-        # sidesteps the exact fragility this scan is prone to (a prompt reword
-        # or an incidentally-mentioned field name silently returning the wrong
-        # shape). Only a known subset of classes are wired up; anything else
-        # falls through unchanged.
+        # _branding_structured_output_stub_by_model_name directly with just the
+        # tool's name string (the only identifier Strands' event loop ever gives
+        # them), bypassing this parameter entirely.
+        # Route by class *name* — sidesteps fragility from prompt rewording or
+        # incidentally-mentioned field names silently returning the wrong shape.
+        # Phase 2, Phase 4, and Phase 5 model classes are wired up; anything
+        # else falls through unchanged.
         if structured_output_model is not None:
             assert isinstance(structured_output_model, type), (
                 f"structured_output_model must be a Pydantic model class, "
                 f"got {structured_output_model!r}"
             )
-            deterministic = _branding_phase2_structured_output_stub(
-                structured_output_model.__name__
+            deterministic = _branding_structured_output_stub_by_model_name(
+                structured_output_model.__name__,
+                (system_prompt or "").lower(),
             )
             if deterministic is not None:
                 return deterministic
@@ -2241,13 +2403,6 @@ class DummyLLMClient(LLMClient):
                 ),
                 "brand_promise": "Every customer touchpoint will feel cohesive and intentional (dummy).",
             }
-        # Branding team — Phase 2 "Narrative & Messaging" Graph agents (built
-        # with structured_output=, see agents.py). Text-anchor fallback lives
-        # in _branding_phase2_text_routed_stub so this call site's branching
-        # stays flat and under the mccabe complexity ceiling (mirrors
-        # _branding_structured_stub for Phase 3/4/5 just below).
-        elif (phase2_stub := _branding_phase2_text_routed_stub(system_lowered)) is not None:
-            return phase2_stub
         # Branding Phase 3 / Phase 4 / Phase 5 stubs live in ``_branding_structured_stub``
         # so ``complete_json`` stays under the mccabe complexity ceiling. Only
         # ``None`` means "unmatched" — an intentional empty dict must not
@@ -2273,9 +2428,10 @@ class DummyLLMClient(LLMClient):
 
         1. **Strands structured output** (``tools`` contains a
            ``StructuredOutputTool``): return a single tool call invoking it
-           with data from ``_branding_phase2_structured_output_stub`` when the
-           tool's name resolves to a known Phase 2 model class (Strands names
-           the tool after ``output_model.__name__``), falling back to the
+           with data from ``_branding_structured_output_stub_by_model_name`` when
+           the tool's name resolves to a known Phase 2, Phase 4, or Phase 5
+           model class (Strands names the tool after ``output_model.__name__``),
+           falling back to the
            ``complete_json`` pattern matcher otherwise. This is the path real
            ``build_agent(structured_output=...)`` callers actually take —
            Strands drives ``structured_output_model=`` agents through the
@@ -2324,7 +2480,10 @@ class DummyLLMClient(LLMClient):
                 # structured_output= agents (Strands drives them through the
                 # tool-calling loop, not Model.structured_output()), so this
                 # check matters more than the one in complete_json itself.
-                data = _branding_phase2_structured_output_stub(structured_tool.get("name") or "")
+                data = _branding_structured_output_stub_by_model_name(
+                    structured_tool.get("name") or "",
+                    (system_prompt or "").lower(),
+                )
                 if data is None:
                     # Produce stub data via the pattern matcher and invoke the
                     # structured output tool with it. Strands will validate the
