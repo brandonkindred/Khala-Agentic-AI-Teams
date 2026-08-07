@@ -4,13 +4,15 @@ This module is the app-assembly hub. Extracted concerns live in:
 
 * ``api.routes.teams`` / ``api.services.teams`` — teams CRUD + roster
 * ``api.routes.conversations`` / ``api.services.conversations`` — conversations
+* ``api.routes.testing`` / ``api.services.testing`` — mode, test-chat, test-pipeline
 
-Remaining endpoint groups (processes, jobs, questions, assets, forms, mode,
-test-chat, test-pipeline) still live here pending later splits.
+Remaining endpoint groups (processes, jobs, questions, assets, forms) still
+live here pending later splits.
 
 This module remains the owning namespace for collaborators the test suite
 monkeypatches (``_store``, ``_agent``, ``_test_store``, ``_pipeline_runner``,
-``_save_agents_from_llm``, ``_roster_agent_from_manifest``, …). Route and
+``_save_agents_from_llm``, ``_roster_agent_from_manifest``, ``_build_test_agent``,
+``_call_test_agent``, …). Route and
 service modules dereference those names through ``main`` at call time.
 """
 
@@ -21,10 +23,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List
 from urllib.parse import quote
 
-from fastapi import HTTPException, Response, UploadFile
+from fastapi import HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import (
@@ -42,42 +44,27 @@ from agent_team_studio.agentic_team_provisioning.models import (
     AgentEnvProvisionSummary,
     AgenticTeam,
     AgenticTeamAgent,
-    AgentQualityScore,
     AssetInfo,
     CreateFormRecordRequest,
-    CreateTestChatSessionRequest,
     FormRecord,
     ProcessDefinition,
     ProcessOutput,
     ProcessStatus,
     ProcessTrigger,
-    RateMessageRequest,
     RecommendAgentsResponse,
     RecommendedAgent,
-    RenameTestChatSessionRequest,
-    SendTestChatMessageRequest,
-    SetTeamModeRequest,
-    StartPipelineRunRequest,
-    SubmitPipelineInputRequest,
     SubmitTeamAnswersRequest,
     TeamJobDetail,
     TeamJobSummary,
     TeamPendingQuestion,
-    TestChatMessage,
-    TestChatSession,
-    TestChatSessionDetail,
-    TestPipelineRun,
     UpdateFormRecordRequest,
 )
 from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
-    build_agent as _build_test_agent,
+    build_agent as _build_test_agent,  # noqa: F401 — hub alias: services.testing + tests
 )
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
-    call_agent as _call_test_agent,
-)
-from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
-    generate_starter_prompts,
+    call_agent as _call_test_agent,  # noqa: F401 — hub alias: services.testing + tests
 )
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
 from agent_team_studio.agentic_team_provisioning.testing.store import get_test_store
@@ -679,455 +666,6 @@ def delete_team_form_record(team_id: str, form_key: str, record_id: str):
         raise HTTPException(status_code=404, detail="Record not found")
 
 
-# ---------------------------------------------------------------------------
-# Interactive Testing Mode
-# ---------------------------------------------------------------------------
-
-
-@app.put("/teams/{team_id}/mode")
-def set_team_mode(team_id: str, req: SetTeamModeRequest):
-    """Toggle team between development and testing mode."""
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    _test_store.set_team_mode(team_id, req.mode.value)
-    return {"team_id": team_id, "mode": req.mode.value}
-
-
-# ---------------------------------------------------------------------------
-# Agent Chat Testing
-# ---------------------------------------------------------------------------
-
-
-def _find_agent_in_roster(team_id: str, agent_name: str) -> AgenticTeamAgent:
-    """Look up an agent by name in the team roster."""
-    agents = _store.list_team_agents(team_id)
-    for a in agents:
-        if a.agent_name == agent_name:
-            return a
-    raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found in team roster")
-
-
-@app.post("/teams/{team_id}/test-chat/sessions", response_model=TestChatSession, status_code=201)
-def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
-    """Create a new chat test session for an agent."""
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    _find_agent_in_roster(team_id, req.agent_name)
-    session_id = str(uuid.uuid4())
-    row = _test_store.create_chat_session(session_id, team_id, req.agent_name)
-    return TestChatSession(**row)
-
-
-@app.get("/teams/{team_id}/test-chat/sessions", response_model=List[TestChatSession])
-def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
-    """List chat test sessions for a team, optionally filtered by agent.
-
-    Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with a ``TestChatSession`` for each session belonging
-        to ``team_id`` (filtered to ``agent_name`` when given); ``404`` if
-        ``team_id`` is unknown, consistent with the sibling test-chat endpoints.
-    """
-    _get_team_or_404(team_id)
-    rows = _test_store.list_chat_sessions(team_id, agent_name=agent_name)
-    return [TestChatSession(**r) for r in rows]
-
-
-@app.get("/teams/{team_id}/test-chat/sessions/{session_id}", response_model=TestChatSessionDetail)
-def get_test_chat_session(team_id: str, session_id: str):
-    """Get a chat session with full message history and suggested prompts.
-
-    Preconditions: ``team_id`` and ``session_id`` are non-empty strings.
-    Postconditions: ``200`` with the session, its messages, and starter prompts
-        (only generated when the session has no messages yet); ``404`` if the
-        session doesn't exist or belongs to a different team. If starter-prompt
-        generation raises a 404 because the session's agent isn't on the
-        roster, the prompts list is empty rather than failing the request; any
-        other failure (e.g. a registry outage) propagates instead of being
-        swallowed.
-    """
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    messages = _test_store.list_chat_messages(session_id)
-    session = TestChatSession(**session_row)
-
-    # Generate suggested prompts if no messages yet
-    prompts: list[str] = []
-    if not messages:
-        try:
-            agent_def = _find_agent_in_roster(team_id, session.agent_name)
-            prompts = generate_starter_prompts(
-                agent_def.agent_name, agent_def.role, agent_def.skills, agent_def.expertise
-            )
-        except HTTPException as exc:
-            # Only the genuine "agent not on roster" case falls back to an empty
-            # prompt list. Anything else (e.g. a registry 500) is a real failure
-            # worth surfacing to the caller, not silently swallowing.
-            if exc.status_code != 404:
-                raise
-            logger.warning(
-                "Could not generate starter prompts for session %s (agent=%s): %s",
-                session_id,
-                session.agent_name,
-                exc.detail,
-            )
-
-    return TestChatSessionDetail(
-        session=session,
-        messages=[TestChatMessage(**m) for m in messages],
-        suggested_prompts=prompts,
-    )
-
-
-@app.put("/teams/{team_id}/test-chat/sessions/{session_id}/name")
-def rename_test_chat_session(team_id: str, session_id: str, req: RenameTestChatSessionRequest):
-    """Rename a chat test session."""
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-    _test_store.rename_chat_session(session_id, req.session_name)
-    return {"session_id": session_id, "session_name": req.session_name}
-
-
-@app.delete("/teams/{team_id}/test-chat/sessions/{session_id}", status_code=204)
-def delete_test_chat_session(team_id: str, session_id: str):
-    """Delete a chat test session and its messages."""
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-    _test_store.delete_chat_session(session_id)
-
-
-@app.post("/teams/{team_id}/test-chat/sessions/{session_id}/messages")
-def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessageRequest):
-    """Send a message to an agent and get a synchronous response.
-
-    The full conversation history is sent to the agent for multi-turn context.
-
-    Preconditions: ``team_id``/``session_id`` refer to an existing session;
-        ``req.content`` is non-empty (enforced by the request model).
-    Postconditions: ``200`` with the session and its full message list,
-        including the new user/assistant turn; ``404`` if the session is
-        unknown or belongs to a different team; ``502`` if the agent
-        invocation fails. The user and assistant messages are persisted
-        together as a single turn only after the agent call succeeds, so a
-        failed invocation leaves no orphaned user message for a retry to
-        duplicate.
-    """
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    agent_name = session_row["agent_name"]
-    agent_def = _find_agent_in_roster(team_id, agent_name)
-
-    # Build conversation context from history plus the pending message. The
-    # user message isn't persisted yet, so it's appended directly here rather
-    # than read back from the store.
-    history = _test_store.list_chat_messages(session_id)
-    context_parts = []
-    for msg in history:
-        prefix = "User" if msg["role"] == "user" else "Assistant"
-        context_parts.append(f"{prefix}: {msg['content']}")
-    context_parts.append(f"User: {req.content}")
-    full_context = "\n\n".join(context_parts)
-
-    # Build and invoke the agent. This local test-chat path has no cognition
-    # injector (no proxy / open side channel) and no idempotency ledger, so it
-    # uses the plain runtime rather than the cognition-aware wrapper — advisory
-    # rules + memory digest are rendered on the gated sandbox invoke path, where
-    # the shim opens the channel.
-    try:
-        agent_instance = _build_test_agent(
-            agent_def.agent_name,
-            agent_def.role,
-            agent_def.skills,
-            agent_def.capabilities,
-            agent_def.tools,
-            agent_def.expertise,
-        )
-        response_text = _call_test_agent(agent_instance, full_context)
-    except Exception as exc:
-        logger.exception("Agent invocation failed for test-chat session %s", session_id)
-        raise HTTPException(status_code=502, detail="Agent invocation failed") from exc
-
-    # Persist the user and assistant messages together as a complete turn.
-    user_msg_id = str(uuid.uuid4())
-    _test_store.create_chat_message(user_msg_id, session_id, "user", req.content)
-    asst_msg_id = str(uuid.uuid4())
-    _test_store.create_chat_message(asst_msg_id, session_id, "assistant", response_text)
-
-    # Return all messages
-    all_messages = _test_store.list_chat_messages(session_id)
-    return {
-        "session": TestChatSession(**session_row),
-        "messages": [TestChatMessage(**m) for m in all_messages],
-    }
-
-
-@app.get("/teams/{team_id}/test-chat/sessions/{session_id}/export")
-def export_test_chat_session(team_id: str, session_id: str):
-    """Export a chat session transcript as Markdown text."""
-    session_row = _test_store.get_chat_session(session_id)
-    if not session_row or session_row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    messages = _test_store.list_chat_messages(session_id)
-    agent_name = session_row["agent_name"]
-    session_name = session_row.get("session_name") or f"Chat with {agent_name}"
-
-    lines = [f"# {session_name}", f"Agent: {agent_name}", ""]
-    for msg in messages:
-        role_label = "**User**" if msg["role"] == "user" else f"**{agent_name}**"
-        rating_str = ""
-        if msg.get("rating"):
-            rating_str = " \u2705" if msg["rating"] == "thumbs_up" else " \u274c"
-        lines.append(f"{role_label}{rating_str}:")
-        lines.append(msg["content"])
-        lines.append("")
-
-    return Response(
-        content="\n".join(lines),
-        media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{session_id}.md"'},
-    )
-
-
-@app.put("/teams/{team_id}/test-chat/messages/{message_id}/rating")
-def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageRequest):
-    """Rate an assistant message (thumbs up/thumbs down)."""
-    if not _test_store.update_message_rating(team_id, message_id, req.rating.value):
-        raise HTTPException(status_code=404, detail="Message not found")
-    return {"message_id": message_id, "rating": req.rating.value}
-
-
-@app.get("/teams/{team_id}/test-chat/quality-scores", response_model=List[AgentQualityScore])
-def get_agent_quality_scores(team_id: str):
-    """Get aggregated quality scores per agent based on chat ratings."""
-    _get_team_or_404(team_id)
-    rows = _test_store.get_agent_quality_scores(team_id)
-    return [AgentQualityScore(**r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Pipeline Testing (End-to-End Walkthrough)
-# ---------------------------------------------------------------------------
-
-
-def _temporal_enabled() -> bool:
-    """Return whether Temporal dispatch is active (``TEMPORAL_ADDRESS`` set).
-
-    Preconditions: none.
-    Postconditions: ``True`` iff ``shared.temporal`` is importable and reports Temporal
-        enabled; ``False`` if Temporal is disabled or ``shared.temporal`` is absent (so
-        the daemon-thread path is always reachable).
-    """
-    try:
-        from shared.temporal import is_temporal_enabled
-    except ImportError:
-        return False
-    return is_temporal_enabled()
-
-
-def _dispatch_pipeline_run(
-    run_id: str,
-    team_agents: list[AgenticTeamAgent],
-    process_def: ProcessDefinition,
-    initial_input: Optional[str],
-    *,
-    temporal_owned: bool,
-) -> str:
-    """Dispatch a pipeline run via Temporal when enabled, else a daemon thread.
-
-    Preconditions:
-        - ``run_id`` refers to a run already created in the store with
-          ``temporal_owned`` set to the same value passed here.
-        - ``temporal_owned`` is the single ``_temporal_enabled()`` reading the caller
-          used for the run's stored flag — computed once and passed in, never
-          recomputed here, so the dispatch path can't diverge from what was persisted
-          if Temporal availability changes between the two checks.
-
-    Postconditions:
-        - Starts exactly one execution path, selected by ``temporal_owned``, and
-          returns its label ("Temporal" or "thread"). When true the run is started as
-          a durable ``AgenticPipelineWorkflow``; otherwise the legacy daemon-thread
-          path runs unchanged.
-        - Any failure while starting the workflow propagates to the caller, which marks
-          the run FAILED — a Temporal-enabled run is never silently downgraded.
-    """
-    if temporal_owned:
-        from agent_team_studio.agentic_team_provisioning.temporal.start_workflow import (
-            start_agentic_pipeline_workflow,
-        )
-
-        team_agents_json = [a.model_dump(mode="json") for a in team_agents]
-        process_json = process_def.model_dump(mode="json")
-        start_agentic_pipeline_workflow(run_id, team_agents_json, process_json, initial_input)
-        return "Temporal"
-
-    _pipeline_runner.start_run(run_id, team_agents, process_def)
-    return "thread"
-
-
-@app.post("/teams/{team_id}/test-pipeline/runs", response_model=TestPipelineRun, status_code=201)
-def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
-    """Start an end-to-end pipeline test run."""
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-
-    # Find the process
-    process = None
-    for p in team.processes:
-        if p.process_id == req.process_id:
-            process = p
-            break
-    if process is None:
-        raise HTTPException(status_code=404, detail="Process not found")
-
-    # Build ProcessDefinition from stored data
-    process_def = (
-        process if isinstance(process, ProcessDefinition) else ProcessDefinition(**process)
-    )
-
-    # Gather team agents
-    team_agents_raw = _store.list_team_agents(team_id)
-    team_agents = [
-        a if isinstance(a, AgenticTeamAgent) else AgenticTeamAgent(**a) for a in team_agents_raw
-    ]
-
-    temporal_owned = _temporal_enabled()
-    run_id = str(uuid.uuid4())
-    run_row = _test_store.create_pipeline_run(
-        run_id, team_id, req.process_id, req.initial_input, temporal_owned=temporal_owned
-    )
-
-    try:
-        dispatch_method = _dispatch_pipeline_run(
-            run_id, team_agents, process_def, req.initial_input, temporal_owned=temporal_owned
-        )
-    except Exception as exc:
-        logger.exception("Failed to dispatch agentic pipeline run %s", run_id)
-        _test_store.try_fail_pipeline_run(run_id, f"Dispatch failed: {exc}")
-        raise HTTPException(status_code=500, detail="Failed to start pipeline run.") from exc
-    logger.info("Agentic pipeline run %s dispatched via %s", run_id, dispatch_method)
-
-    return TestPipelineRun(**run_row)
-
-
-@app.get("/teams/{team_id}/test-pipeline/runs", response_model=List[TestPipelineRun])
-def list_pipeline_runs(team_id: str):
-    """List pipeline test runs for a team."""
-    _get_team_or_404(team_id)
-    rows = _test_store.list_pipeline_runs(team_id)
-    return [TestPipelineRun(**r) for r in rows]
-
-
-@app.get("/teams/{team_id}/test-pipeline/runs/{run_id}", response_model=TestPipelineRun)
-def get_pipeline_run(team_id: str, run_id: str):
-    """Get the current status and step results of a pipeline test run."""
-    row = _test_store.get_pipeline_run(run_id)
-    if not row or row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-    return TestPipelineRun(**row)
-
-
-@app.post("/teams/{team_id}/test-pipeline/runs/{run_id}/input")
-def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputRequest):
-    """Submit human input at a WAIT step to resume the pipeline."""
-    row = _test_store.get_pipeline_run(run_id)
-    if not row or row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-    if row["status"] != "waiting_for_input":
-        raise HTTPException(status_code=400, detail="Pipeline is not waiting for input")
-
-    if _test_store.is_pipeline_run_temporal_owned(run_id):
-        # Temporal-owned run. Do the authoritative resume transition synchronously here
-        # (mirroring the thread path's compare-and-swap) BEFORE waking the workflow, then
-        # deliver the answer as a signal:
-        #   * The CAS flips waiting_for_input -> running and persists the input, so the
-        #     /input contract holds — the response (and the caller's next poll) no longer
-        #     shows waiting_for_input, and the same WAIT question is not re-surfaced.
-        #   * Exactly one concurrent submit wins the CAS; a duplicate loses with a 409
-        #     instead of a second signal overwriting the first answer.
-        #   * A cancel that already moved the row terminal makes the CAS a no-op -> 409,
-        #     so a resume can never revive a cancelled run.
-        # The CAS durably records the resume; the workflow's wait_finalize_activity reads
-        # the outcome from the store, so the signal below is only a best-effort *wake* to
-        # resume promptly. If it fails (Temporal client down), the row is already
-        # ``running`` with the input persisted, and the workflow reconciles it at the WAIT
-        # timeout — so the run never gets stuck. We therefore do NOT 500 here (that would
-        # contradict the already-committed running row); we log and return the updated row.
-        from agent_team_studio.agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
-        from shared.temporal import signal_workflow_sync
-
-        if not _test_store.try_resume_pipeline_run_temporal(run_id, req.input):
-            raise HTTPException(
-                status_code=409,
-                detail="Pipeline run is no longer resumable (it timed out, was cancelled, "
-                "or was reaped). Start a new run.",
-            )
-        try:
-            signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}", "submit_input", req.input)
-        except Exception:
-            logger.warning(
-                "Failed to signal agentic pipeline run %s; the resume is durably recorded "
-                "and will be reconciled at the WAIT timeout",
-                run_id,
-                exc_info=True,
-            )
-        updated = _test_store.get_pipeline_run(run_id)
-        return TestPipelineRun(**(updated or row))
-
-    # The terminal transition is decided by a DB compare-and-swap, so this is race-free
-    # even if the run timed out or was reaped between the read above and here — and it
-    # works regardless of which worker owns the run's thread. A False return means the
-    # run left waiting_for_input first (lost the race): report a conflict.
-    if not _pipeline_runner.submit_human_input(run_id, req.input):
-        raise HTTPException(
-            status_code=409,
-            detail="Pipeline run is no longer resumable (it timed out, was cancelled, "
-            "or was reaped). Start a new run.",
-        )
-    updated = _test_store.get_pipeline_run(run_id)
-    return TestPipelineRun(**(updated or row))
-
-
-@app.post("/teams/{team_id}/test-pipeline/runs/{run_id}/cancel")
-def cancel_pipeline_run(team_id: str, run_id: str):
-    """Cancel a running or waiting pipeline test run."""
-    row = _test_store.get_pipeline_run(run_id)
-    if not row or row["team_id"] != team_id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-    if row["status"] not in ("running", "waiting_for_input"):
-        raise HTTPException(status_code=400, detail="Pipeline is not in a cancellable state")
-
-    if _test_store.is_pipeline_run_temporal_owned(run_id):
-        # Temporal-owned run: flip the store row first (immediate, consistent read for
-        # this response) then request workflow cancellation — its cancel_reconcile
-        # activity is then a CAS no-op. A cancel-signal failure is best-effort: the row
-        # is already cancelled and the workflow will observe it out-of-band.
-        from agent_team_studio.agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
-        from shared.temporal import cancel_workflow_sync
-
-        _test_store.try_cancel_pipeline_run(run_id)
-        try:
-            cancel_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}")
-        except Exception:
-            logger.warning(
-                "Failed to cancel agentic pipeline workflow for run %s", run_id, exc_info=True
-            )
-        updated = _test_store.get_pipeline_run(run_id)
-        return TestPipelineRun(**(updated or row))
-
-    _pipeline_runner.cancel_run(run_id)
-    updated = _test_store.get_pipeline_run(run_id)
-    return TestPipelineRun(**(updated or row))
-
-
 # --- Mount extracted routers last (hub + globals already defined) ---
 from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
     conversations as conversations_routes,
@@ -1135,11 +673,21 @@ from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E4
 from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
     teams as teams_routes,
 )
+from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
+    testing as testing_routes,
+)
 from agent_team_studio.agentic_team_provisioning.api.services.teams import (  # noqa: E402,F401
     _roster_agent_from_manifest,  # re-export: tests import + monkeypatch via main
+)
+from agent_team_studio.agentic_team_provisioning.api.services.testing import (  # noqa: E402,F401
+    _dispatch_pipeline_run,  # re-export: hub call surface
+    _find_agent_in_roster,  # re-export: tests monkeypatch via main
+    _temporal_enabled,  # re-export: tests monkeypatch via main
 )
 
 _teams_router = teams_routes.router
 _conversations_router = conversations_routes.router
+_testing_router = testing_routes.router
 app.include_router(_teams_router)
 app.include_router(_conversations_router)
+app.include_router(_testing_router)
