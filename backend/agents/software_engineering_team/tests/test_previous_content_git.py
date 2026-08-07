@@ -159,3 +159,22 @@ def test_git_oversize_skips_git_show(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "big.py" not in result.contents
     assert result.misses == frozenset({"big.py"})
     assert show_calls == []
+
+
+def test_directory_path_is_miss(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "src/a.py", "x\n")
+    result = read_previous_content_from_git(str(repo), "HEAD", ["src"])
+    assert result.contents == {}
+    assert result.misses == frozenset({"src"})
+
+
+def test_binary_blob_with_nul_is_miss(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    path = repo / "bin.dat"
+    path.write_bytes(b"a\x00b")
+    _git(repo, "add", "bin.dat")
+    _git(repo, "commit", "-m", "add bin.dat")
+    result = read_previous_content_from_git(str(repo), "HEAD", ["bin.dat"])
+    assert result.contents == {}
+    assert result.misses == frozenset({"bin.dat"})
