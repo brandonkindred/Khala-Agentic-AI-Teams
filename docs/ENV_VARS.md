@@ -304,11 +304,6 @@ thread mode. Only the
 code review agent's *default* is flipped on; every other team's thread-default
 dispatch decision is unchanged.
 
-### CODE_REVIEW_TEMPORAL_FORCE
-Test-only escape hatch (truthy: `1`/`true`/`yes`/`on`). Retained for tests that
-set the flag explicitly; enablement remains address-only (a disable-sentinel
-`TEMPORAL_ADDRESS` still yields thread mode). Not load-bearing outside tests.
-
 ### TEMPORAL_PAYLOAD_COMPRESSION
 Boolean (default `false` — opt-in). The shared Temporal client
 (`shared.temporal.client`, used by every team's client and worker) always

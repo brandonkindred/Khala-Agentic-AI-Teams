@@ -53,9 +53,6 @@ WORKFLOW_ID_PREFIX = "code-review-"
 # too.
 _DISABLE_SENTINELS = frozenset({"", "disabled", "none", "off", "0", "false", "no"})
 
-# Truthy spellings for the test-only force flag.
-_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-
 
 def resolve_code_review_temporal_address() -> Optional[str]:
     """Resolve the Temporal server address the code review agent should target.
@@ -81,15 +78,6 @@ def resolve_code_review_temporal_address() -> Optional[str]:
     return stripped
 
 
-def _force_enabled() -> bool:
-    """Test hook: ``CODE_REVIEW_TEMPORAL_FORCE`` in a truthy spelling.
-
-    Lets an integration test opt into Temporal mode when an address still
-    resolves. Never load-bearing outside tests.
-    """
-    return os.environ.get("CODE_REVIEW_TEMPORAL_FORCE", "").strip().lower() in _TRUE_VALUES
-
-
 def code_review_temporal_enabled() -> bool:
     """Whether ``CodeReviewAgent.run`` should dispatch to Temporal by default.
 
@@ -100,8 +88,6 @@ def code_review_temporal_enabled() -> bool:
         - Never raises.
         - Never inspects ``sys.modules`` or ``LLM_PROVIDER``.
     """
-    if _force_enabled():
-        return resolve_code_review_temporal_address() is not None
     return resolve_code_review_temporal_address() is not None
 
 
