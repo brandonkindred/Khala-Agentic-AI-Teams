@@ -1450,9 +1450,11 @@ map parallelism cannot open unbounded sockets from one process.
 `requirepass` from `REDIS_PASSWORD` (default `please-change-me`), written into a generated
 config file so the password is not on the `redis-server` process argv (healthcheck still uses
 `REDISCLI_AUTH`). Compose escapes `\`, `"`, newline, CR, and tab into redis.conf
-double-quoted escapes so those characters cannot split the `requirepass` line. Redis
-credentials are injected only into `se-service`, so other team containers on `stack`
-cannot read/write review or compaction namespaces without credentials. Host publish is
+double-quoted escapes via `docker/redis/escape_requirepass.sh` (BusyBox-safe
+`sed` for `\`; awk only joins newlines — BusyBox `awk gsub` does not double
+backslashes). Redis credentials are injected only into `se-service`, so other team
+containers on `stack` cannot read/write review or compaction namespaces without
+credentials. Host publish is
 IPv4 loopback only (`127.0.0.1:6379`) — from the host use `127.0.0.1:6379`, not
 `localhost` / `::1`. Production deployments must use a strong secret, ACL/`requirepass`,
 and keep Redis off public interfaces. Compose Redis is intentionally ephemeral (no volume) —

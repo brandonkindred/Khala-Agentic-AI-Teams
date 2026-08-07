@@ -184,26 +184,19 @@ services:
     # A restart is a cold cache, which shared.cache treats as misses (recompute).
     # requirepass lives in a generated conf file so the redis-server argv does
     # not include the password (process listings). Healthcheck still uses
-    # REDISCLI_AUTH from the service env. Password bytes are escaped for a
-    # redis.conf double-quoted string (\, ", newline, CR, tab) so exotic
-    # secrets cannot split the requirepass line.
+    # REDISCLI_AUTH from the service env. Password bytes are escaped via
+    # docker/redis/escape_requirepass.sh (BusyBox-safe sed for \, ", tab, CR;
+    # awk only joins newlines) so exotic secrets cannot split or mis-parse the
+    # requirepass line — BusyBox awk gsub does not double backslashes.
+    volumes:
+      - ./redis/escape_requirepass.sh:/escape_requirepass.sh:ro
     command:
       - /bin/sh
       - -c
       - |
         set -eu
         conf=/tmp/khala-redis.conf
-        # Encode for redis.conf double-quoted strings (Redis recognizes \n/\r/\t).
-        esc=$$(printf '%s' "$$REDIS_PASSWORD" | awk -v ORS= '
-        NR > 1 { printf "\\n" }
-        {
-          s = $$0
-          gsub(/\\/, "\\\\", s)
-          gsub(/"/, "\\\"", s)
-          gsub(/\t/, "\\t", s)
-          gsub(/\r/, "\\r", s)
-          printf "%s", s
-        }')
+        esc=$$(printf '%s' "$$REDIS_PASSWORD" | /bin/sh /escape_requirepass.sh)
         cat > "$$conf" <<EOF
         bind 0.0.0.0
         requirepass "$$esc"
