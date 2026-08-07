@@ -178,3 +178,43 @@ def test_binary_blob_with_nul_is_miss(tmp_path: Path) -> None:
     result = read_previous_content_from_git(str(repo), "HEAD", ["bin.dat"])
     assert result.contents == {}
     assert result.misses == frozenset({"bin.dat"})
+
+
+def test_nested_dotdot_path_is_miss(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "a.py", "x\n")
+    result = read_previous_content_from_git(str(repo), "HEAD", ["ok/../../evil.py"])
+    assert result.contents == {}
+    assert result.misses == frozenset({"ok/../../evil.py"})
+
+
+def test_flag_like_revision_is_all_misses(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "a.py", "x\n")
+    # Leading ``-`` must not be passed through to ``git rev-parse`` as an option.
+    result = read_previous_content_from_git(str(repo), "--output=/tmp/x", ["a.py"])
+    assert result.contents == {}
+    assert result.misses == frozenset({"a.py"})
+
+
+def test_path_list_beyond_spawn_cap_overflow_is_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(previous_content, "_MAX_GIT_BLOBS_READ", 1)
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "a.py", "a\n")
+    _commit_file(repo, "b.py", "b\n")
+    result = read_previous_content_from_git(str(repo), "HEAD", ["a.py", "b.py"])
+    assert result.contents == {"a.py": "a\n"}
+    assert result.misses == frozenset({"b.py"})
+
+
+def test_git_worktree_dot_git_file_layout(tmp_path: Path) -> None:
+    main = _init_repo(tmp_path)
+    _commit_file(main, "a.py", "from-wt\n")
+    wt = tmp_path / "linked"
+    _git(main, "worktree", "add", str(wt), "HEAD")
+    assert (wt / ".git").is_file()
+    result = read_previous_content_from_git(str(wt), "HEAD", ["a.py"])
+    assert result.contents == {"a.py": "from-wt\n"}
+    assert result.misses == frozenset()
