@@ -189,14 +189,25 @@ class UpdateAgentRequest(BaseModel):
     remain for OpenAPI compatibility only — they are not a supported write path.
     """
 
-    role: Optional[str] = Field(default=None, description="New role, if changed.")
-    skills: Optional[list[str]] = Field(default=None, description="New skills list, if changed.")
-    capabilities: Optional[list[str]] = Field(
-        default=None, description="New capabilities list, if changed."
+    role: Optional[str] = Field(
+        default=None,
+        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
     )
-    tools: Optional[list[str]] = Field(default=None, description="New tools list, if changed.")
+    skills: Optional[list[str]] = Field(
+        default=None,
+        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
+    )
+    capabilities: Optional[list[str]] = Field(
+        default=None,
+        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
+    )
+    tools: Optional[list[str]] = Field(
+        default=None,
+        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
+    )
     expertise: Optional[list[str]] = Field(
-        default=None, description="New expertise list, if changed."
+        default=None,
+        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
     )
 
 
