@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -31,6 +32,9 @@ import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from investment_team.strategy_lab.run_state import (
+    acquire_run_transition_lock as _acquire_run_transition_lock,
+)
 from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
 )
@@ -45,6 +49,7 @@ from shared.concurrency import parallel_map
 if TYPE_CHECKING:
     from investment_team.api.main import (
         StrategyLabCycleProgress,
+        RunStrategyLabRequest,
         StrategyLabRunStatusResponse,
         _compute_signal_brief_snapshot,
         _finalize_strategy_lab_cycle_record,
@@ -555,6 +560,246 @@ def _purge_strategy_lab_job_storage() -> dict[str, Optional[int]]:
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def _fail_strategy_lab_run(run_id: str, error: str) -> None:
+    """Mark a strategy-lab run "failed" (best-effort, idempotent).
+
+    Preconditions:
+        - ``run_id`` may or may not exist in ``_active_runs``.
+    Postconditions:
+        - If the run exists and isn't already in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
+          with ``error`` recorded, the new state persisted, and a delayed
+          cleanup of the ``_active_runs`` entry scheduled 900s out — so a
+          dispatch failure (e.g. a Temporal outage) doesn't leak the entry
+          forever. That cleanup is a no-op if
+          ``run_id`` gets resumed (and thus a new state object installed)
+          before the delay elapses, so it never tears down a live resumed
+          run. A missing run and an already-terminal run are both no-ops.
+          Never raises.
+    """
+    try:
+        with _lock:
+            state = _active_runs.get(run_id)
+            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            state["status"] = "failed"
+            state["error"] = error
+            state["current_cycle"] = None
+            # Snapshot for persistence outside the lock: _persist_run_state
+            # performs a synchronous job-service RPC, and _lock is the
+            # process-wide lock also used by run-status queries, dispatch,
+            # and reconciliation -- holding it across network I/O would
+            # block all of those for the RPC's duration. A shallow copy is
+            # enough (_persist_run_state only reads top-level keys) and
+            # protects the persisted snapshot from a concurrent mutator of
+            # this same dict object racing the now-unlocked persist call.
+            persisted_state = dict(state)
+        _persist_run_state(run_id, persisted_state)
+
+        from investment_team.api.job_event_bus import cleanup_job
+
+        def _cleanup() -> None:
+            # Runs on threading.Timer's own daemon thread, 900s after this
+            # function returns -- the outer try/except below has long since
+            # exited by then, so it can't catch anything raised in here. An
+            # uncaught cleanup_job failure would otherwise surface only as an
+            # unhandled exception trace on a background thread, with the
+            # rest of this callback silently skipped.
+            try:
+                with _lock:
+                    # resume/restart always replace the entry with a new dict
+                    # rather than mutate this one in place, so an identity check
+                    # reliably detects a run that got resumed within this delay
+                    # window — pop/cleanup would otherwise tear down a live,
+                    # freshly-resumed run's tracking state.
+                    if _active_runs.get(run_id) is not state:
+                        return
+                    _active_runs.pop(run_id, None)
+                cleanup_job(run_id)
+            except Exception:
+                logger.warning(
+                    "Failed to clean up strategy-lab run %s after failure timeout",
+                    run_id,
+                    exc_info=True,
+                )
+
+        timer = threading.Timer(900.0, _cleanup)
+        timer.daemon = True
+        timer.start()
+    except Exception:
+        logger.warning(
+            "Failed to mark strategy-lab run %s failed: %s", run_id, error, exc_info=True
+        )
+
+
+def _dispatch_strategy_lab_run(
+    run_id: str, request: "RunStrategyLabRequest", *, allow_already_started: bool = True
+) -> None:
+    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
+
+    Preconditions:
+        - ``run_id``'s state is already registered in ``_active_runs`` and
+          persisted (the activity reads its resume offset from that state).
+
+    Postconditions:
+        - The durable workflow is started. A collision with an already-running
+          workflow under this run_id's deterministic id (e.g. a resume issued
+          after an API-process restart, while the durable workflow itself kept
+          running) is handled per ``allow_already_started``:
+          - ``True`` (the default — used by the initial run and resume,
+            whose intent matches what's already running): treated as a
+            successful dispatch, a no-op; the run is NOT marked failed.
+          - ``False`` (used by restart, whose reset-to-cycle-0 intent does
+            NOT match a lingering old execution): raises
+            ``HTTPException(409)`` instead — also without marking the run
+            failed, since the old workflow may still be healthy and marking
+            it failed would cause that workflow to observe the status and
+            abort itself.
+          On any other failure (Temporal disabled/unavailable, or the start
+          RPC raising for any other reason), ``run_id`` is marked ``"failed"``
+          via ``_fail_strategy_lab_run`` (which schedules a delayed cleanup
+          timer), and then: if ``exc`` is already an ``HTTPException`` (e.g.
+          ``_require_temporal()``'s own 503, or one the dispatch RPC itself
+          raised), it is re-raised unchanged, preserving its original status
+          code and detail; otherwise it is wrapped in a fresh
+          ``HTTPException(503)``.
+    """
+    try:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+    except ImportError:  # pragma: no cover - temporalio always installed
+        # Import outside the dispatch try/except below (not inside its
+        # `except Exception`) so a hypothetical ImportError here can't mask
+        # the dispatch failure that block is meant to translate into a 503.
+        # `()` as an isinstance target always resolves False, so the
+        # WorkflowAlreadyStartedError branch below simply never matches --
+        # every dispatch failure then falls through to the generic 503 path.
+        WorkflowAlreadyStartedError = ()  # type: ignore[assignment]
+
+    try:
+        from investment_team.api import main as _api_main
+
+        _api_main._require_temporal()
+        from investment_team.strategy_lab.temporal.start_workflow import (
+            start_strategy_lab_batch_workflow,
+        )
+
+        start_strategy_lab_batch_workflow(run_id, request)
+    except Exception as exc:
+        if isinstance(exc, WorkflowAlreadyStartedError):
+            if allow_already_started:
+                # The durable workflow for this run_id is already running
+                # (most commonly: resume was called after an API-process
+                # restart wiped _active_runs, but the workflow itself
+                # survived). Marking the run "failed" here would be observed
+                # by that still-running workflow as an external stop signal
+                # (via strategy_lab_external_terminal_status) and abort a
+                # healthy run, so treat the collision as the dispatch
+                # already having succeeded.
+                logger.info(
+                    "Strategy-lab workflow for run %s is already running; "
+                    "treating dispatch as a no-op success.",
+                    run_id,
+                )
+                return
+            # Restart's reset-to-cycle-0 intent does NOT match a lingering
+            # old execution the way resume's does — silently succeeding
+            # would tell the caller "restarted from scratch" while the old
+            # execution (old input, old progress) is what's actually still
+            # running. Reject distinctly from a real Temporal-down 503 so
+            # callers can tell "retry shortly" from "Temporal is down", and
+            # don't mark the run failed — the old workflow may still be
+            # healthy, and failing it would cause it to observe that status
+            # and abort itself.
+            raise HTTPException(
+                status_code=409,
+                detail="A prior execution for this run is still winding down; retry shortly.",
+            ) from exc
+        _fail_strategy_lab_run(
+            run_id, "Failed to start the strategy-lab workflow (Temporal unavailable)."
+        )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to start the strategy-lab workflow; Temporal worker unavailable.",
+        ) from exc
+
+
+def _no_active_run_locked() -> None:
+    """Raise 409 if any strategy-lab run is currently running.
+
+    Lock-free core of ``_ensure_no_active_run``, factored out so a caller that
+    also needs to write ``_active_runs`` can run the check and the write
+    inside the *same* ``_lock`` acquisition — see ``resume_strategy_lab_run``,
+    which does exactly that so a concurrent transition for a *different*
+    run_id can't interleave between an isolated check and an isolated write
+    and slip past this guard.
+
+    Preconditions:
+        - Caller already holds ``_lock``.
+
+    Postconditions:
+        - Returns ``None`` when no entry in ``_active_runs`` has status
+          ``"running"``; otherwise raises ``HTTPException(409)``. Does not
+          mutate ``_active_runs`` and does not itself acquire or release
+          ``_lock``. An entry missing a ``"status"`` key is treated as not
+          running (``.get()`` default) rather than raising ``KeyError`` --
+          a malformed entry must not defeat this conflict guard.
+    """
+    if any(r.get("status") == "running" for r in _active_runs.values()):
+        raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+
+
+def _ensure_no_active_run() -> None:
+    """Raise 409 if any strategy-lab run is currently running.
+
+    Shared 409-guard for the run/resume/restart endpoints, which each allow at
+    most one concurrent strategy-lab run.
+
+    Preconditions:
+        - Caller does not already hold ``_lock`` (this acquires it itself).
+
+    Postconditions:
+        - Returns ``None`` when no entry in ``_active_runs`` has status
+          ``"running"``; otherwise raises ``HTTPException(409)``. Does not mutate
+          ``_active_runs``.
+    """
+    with _lock:
+        _no_active_run_locked()
+
+
+def _require_run_transition_lock(run_id: str) -> threading.Lock:
+    """Acquire run_id's transition lock, or raise 409 when another transition
+    for the same run_id is already in flight.
+
+    Shared guard for the run/resume/restart endpoints: serializes same-run_id
+    transitions so two concurrent calls (e.g. two restarts, or a resume
+    racing a restart) for the same run_id can't both pass the check-then-act
+    window between ``_ensure_no_active_run()`` and this run_id's state being
+    written.
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns the acquired ``threading.Lock`` — held by the caller, who
+          MUST release it (``try/finally: run_lock.release()``) — when no
+          other run/resume/restart transition for this ``run_id`` is
+          currently in flight.
+
+    Raises:
+        - ``HTTPException`` 409 when another transition for this ``run_id``
+          is already in flight. Never blocks; holds nothing in that case.
+    """
+    run_lock = _acquire_run_transition_lock(run_id)
+    if run_lock is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Another transition for this run is already in progress; retry shortly.",
+        )
+    return run_lock
+
+
 __all__ = [
     "STRATEGY_LAB_TERMINAL_STATUSES",
     "_STRATEGY_LAB_PROGRESS_FIELDS",
@@ -568,6 +813,11 @@ __all__ = [
     "_delete_jobs_concurrently",
     "_delete_paper_sessions_for_lab_record",
     "_purge_strategy_lab_job_storage",
+    "_fail_strategy_lab_run",
+    "_dispatch_strategy_lab_run",
+    "_no_active_run_locked",
+    "_ensure_no_active_run",
+    "_require_run_transition_lock",
     "_snapshot_prior_records",
     "_compute_signal_brief_snapshot",
     "_is_strategy_lab_run_externally_stopped",
