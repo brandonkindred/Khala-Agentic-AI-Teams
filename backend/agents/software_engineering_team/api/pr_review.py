@@ -18,16 +18,16 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
-from software_engineering_team.code_review_agent.change_surface import (
-    ChangeSurface,
-    build_change_surface_from_patches,
-)
 from software_engineering_team.api.advisory_lock import advisory_lock
 from software_engineering_team.api.coding_team_models import (
     ReviewPrRequest,
 )
 from software_engineering_team.api.coding_team_state import (
     _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
+)
+from software_engineering_team.code_review_agent.change_surface import (
+    ChangeSurface,
+    build_change_surface_from_patches,
 )
 from software_engineering_team.github_source import (
     GitHubAPIError,
