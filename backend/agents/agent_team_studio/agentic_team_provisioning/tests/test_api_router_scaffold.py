@@ -53,6 +53,19 @@ def test_teams_and_conversations_routers_importable() -> None:
     assert isinstance(conversations.router, APIRouter)
 
 
+def test_testing_router_importable() -> None:
+    from agent_team_studio.agentic_team_provisioning.api.routes import testing
+
+    assert isinstance(testing.router, APIRouter)
+
+
+def test_main_exposes_testing_router_marker() -> None:
+    from agent_team_studio.agentic_team_provisioning.api import main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.routes import testing
+
+    assert main_mod._testing_router is testing.router
+
+
 def test_main_exposes_mounted_router_markers() -> None:
     """main keeps explicit references so we can assert include_router ran."""
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod

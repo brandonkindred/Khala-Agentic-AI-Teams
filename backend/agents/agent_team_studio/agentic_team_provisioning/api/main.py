@@ -1135,11 +1135,16 @@ from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E4
 from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
     teams as teams_routes,
 )
+from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
+    testing as testing_routes,
+)
 from agent_team_studio.agentic_team_provisioning.api.services.teams import (  # noqa: E402,F401
     _roster_agent_from_manifest,  # re-export: tests import + monkeypatch via main
 )
 
 _teams_router = teams_routes.router
 _conversations_router = conversations_routes.router
+_testing_router = testing_routes.router
 app.include_router(_teams_router)
 app.include_router(_conversations_router)
+app.include_router(_testing_router)
