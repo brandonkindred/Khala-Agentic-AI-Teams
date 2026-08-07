@@ -22,6 +22,7 @@ import pytest
 import software_engineering_team.api.coding_team_main as main
 from software_engineering_team.api import pr_review
 from software_engineering_team.api.coding_team_state import _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S
+from software_engineering_team.code_review_agent.change_surface import ChangeSurface
 from software_engineering_team.github_source import PullRequestFile
 
 _STALE_S = pr_review._REVIEW_GUARD_HEARTBEAT_STALE_S
@@ -467,6 +468,7 @@ def _run_reviewer_kwargs(**overrides: Any) -> Dict[str, Any]:
         code="",
         head_files=None,
         repo_reader=None,
+        change_surface=None,
     )
     base.update(overrides)
     return base
@@ -624,6 +626,68 @@ class TestRunReviewerUnit:
 
         with pytest.raises(AssertionError):
             pr_review._run_reviewer(provider, **kwargs)
+
+    def test_nonempty_surface_primary_skips_whole_file(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "summary", "notes")
+        provider = _RecordingProvider([output])
+        surface = ChangeSurface(blocks={"mod.py": "1: def f():\n2:     return 1"})
+        kwargs = _run_reviewer_kwargs(
+            head_files={"mod.py": "def f():\n    return 1\n"},
+            code="",
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert result is output
+        assert len(provider.calls) == 1
+        call = provider.calls[0]
+        assert call["pre_numbered"] is True
+        assert call["code"] == surface.code
+        assert "files" not in call
+        assert call["task_requirements"] == pr_review._hunk_review_focus("PR body")
+        assert "pre_existing" in call["task_requirements"]
+
+    def test_empty_surface_keeps_whole_file(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "summary", "notes")
+        provider = _RecordingProvider([output])
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "content"},
+            code="",
+            change_surface=ChangeSurface(blocks={}),
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert result is output
+        assert len(provider.calls) == 1
+        assert provider.calls[0]["pre_numbered"] is False
+        assert provider.calls[0]["files"] == {"a.py": "content"}
+
+    def test_surface_plus_hunk_code_two_prenumbred_no_files(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        surface_out = _FakeOutput(["s"], "s", "")
+        hunk_out = _FakeOutput(["h"], "", "h")
+        provider = _RecordingProvider([surface_out, hunk_out])
+        surface = ChangeSurface(blocks={"a.py": "1: a"})
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "a\n"},
+            code="### b.py ###\n1: y = 2",
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        assert provider.calls[0]["pre_numbered"] is True
+        assert provider.calls[0]["code"] == surface.code
+        assert "files" not in provider.calls[0]
+        assert provider.calls[1]["pre_numbered"] is True
+        assert provider.calls[1]["code"] == "### b.py ###\n1: y = 2"
+        assert isinstance(result, pr_review._MergedReviewerOutput)
+        assert result.issues == ["s", "h"]
 
 
 # ---------------------------------------------------------------------------
