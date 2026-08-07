@@ -73,7 +73,7 @@ def _error_chain_text(exc: BaseException) -> str:
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("TEMPORAL_ADDRESS", "LLM_PROVIDER", "CODE_REVIEW_TEMPORAL_FORCE"):
+    for var in ("TEMPORAL_ADDRESS", "LLM_PROVIDER"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -107,24 +107,20 @@ def test_enabled_is_true_under_pytest_when_env_cleared(
     assert cfg.code_review_temporal_enabled() is True
 
 
-def test_force_flag_enables_under_pytest(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enabled_is_false_when_address_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "1")
-    assert cfg.code_review_temporal_enabled() is True
-
-
-def test_force_flag_still_requires_an_address(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "yes")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "none")
     assert cfg.code_review_temporal_enabled() is False
 
 
-def test_dummy_harness_disables(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dummy_provider_does_not_disable_temporal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LLM_PROVIDER=dummy selects the no-LLM harness only; it must not force
+    # the code-review Temporal gate off when an address resolves.
     _clear_env(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "")  # not forced
-    assert cfg.code_review_temporal_enabled() is False
+    assert cfg.code_review_temporal_enabled() is True
 
 
 @pytest.mark.parametrize(
@@ -906,10 +902,32 @@ def test_run_reraises_unrelated_workflow_failure(monkeypatch: pytest.MonkeyPatch
 # ---------------------------------------------------------------------------
 
 
-def test_run_uses_coordinator_when_temporal_disabled() -> None:
-    # Under pytest the gate is off, so run() must go through the coordinator.
+def test_run_uses_coordinator_when_force_in_process() -> None:
+    # force_in_process bypasses Temporal even when the gate would enable it.
+    out = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input())
+    assert isinstance(out, CodeReviewOutput)
+    assert out.approved is True
+
+
+def test_run_uses_coordinator_when_address_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A disable-sentinel TEMPORAL_ADDRESS turns the gate off so run() takes the
+    # in-process coordinator path without force_in_process.
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "none")
     assert _code_review_temporal_enabled() is False
+    temporal_calls: list[Any] = []
+
+    def _must_not_dispatch(payload, **kw):  # noqa: ANN001
+        temporal_calls.append(payload)
+        raise AssertionError("Temporal dispatch must not run when address is disabled")
+
+    monkeypatch.setattr(
+        "code_review_agent.temporal.start_workflow.execute_code_review_workflow_sync",
+        _must_not_dispatch,
+    )
     out = CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+    assert temporal_calls == []
     assert isinstance(out, CodeReviewOutput)
     assert out.approved is True
 
@@ -929,7 +947,7 @@ def test_run_rebuilds_reader_from_repo_root_when_no_live_reader(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input(repo_root=str(tmp_path)))
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input(repo_root=str(tmp_path)))
     assert isinstance(captured["repo_reader"], DiskRepoReader)
 
 
@@ -945,7 +963,7 @@ def test_run_prefers_live_reader_over_repo_root(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(
         _input(repo_root=str(tmp_path)),
         repo_reader=sentinel,  # type: ignore[arg-type]
     )
@@ -961,7 +979,7 @@ def test_run_passes_none_reader_without_repo_root(monkeypatch: pytest.MonkeyPatc
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input())
     assert captured["repo_reader"] is None
 
 

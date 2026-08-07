@@ -4,9 +4,15 @@ Disk reads return the literal current bytes under ``repo_path`` (often already
 post-execution *new* content). Git reads return blobs at a caller-supplied
 revision: each path is typed/sized with ``git cat-file`` (``-t`` / ``-s``)
 before ``git show`` so oversize or non-blob objects are never loaded as text.
-Neither path judges trustworthiness or aggregates sources — callers compose
-results. Per-path failures are misses; only blank ``repo_path`` / ``revision``
-raise.
+
+``merge_previous_content`` is a pure preferred/fallback merge for callers that
+already hold two partitions (for example a known pre-write disk snapshot).
+``resolve_previous_content`` is blank-revision → disk-only, or non-blank →
+git-only: it does **not** disk-fill git misses, because workspace bytes after
+execution are usually the *new* surface and would collapse diffs (old == new).
+Per-path failures are misses; only blank ``repo_path`` raises on disk reads,
+and blank ``repo_path`` / ``revision`` raise on leaf git reads (blank revision
+on ``resolve_previous_content`` is disk-only).
 """
 
 from __future__ import annotations
@@ -229,3 +235,72 @@ def read_previous_content_from_git(
         contents[path] = out.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
     return PreviousContentResult(contents=contents, misses=frozenset(misses))
+
+
+def merge_previous_content(
+    preferred: PreviousContentResult,
+    fallback: PreviousContentResult,
+) -> PreviousContentResult:
+    """Merge two previous-content partitions, preferring ``preferred`` hits.
+
+    Preconditions:
+        - ``preferred`` and ``fallback`` are ``PreviousContentResult`` values
+          (may be empty).
+
+    Postconditions:
+        - Hits start as ``preferred.contents``; each path in
+          ``fallback.contents`` not already preferred is taken from fallback.
+        - Path universe is the union of both results' ``contents`` keys and
+          ``misses``; final ``misses`` are universe minus final hit keys.
+        - Preferred wins on overlap. Pure: no I/O; never raises for empty or
+          partial inputs.
+    """
+    contents: Dict[str, str] = dict(preferred.contents)
+    for path, text in fallback.contents.items():
+        if path not in contents:
+            contents[path] = text
+    universe: Set[str] = set(preferred.contents)
+    universe.update(preferred.misses)
+    universe.update(fallback.contents)
+    universe.update(fallback.misses)
+    misses = frozenset(universe - contents.keys())
+    return PreviousContentResult(contents=contents, misses=misses)
+
+
+def resolve_previous_content(
+    repo_path: str,
+    paths: Iterable[str],
+    revision: str | None = None,
+) -> PreviousContentResult:
+    """Resolve previous content: disk-only without revision, else git-only.
+
+    Preconditions:
+        - ``repo_path`` is strip-nonempty; otherwise raise ``ValueError``.
+        - ``paths`` is an iterable of strings (may be empty).
+        - ``revision`` may be ``None``/blank (disk-only) or strip-nonempty
+          (git-only).
+
+    Postconditions:
+        - Empty ``paths`` → empty ``contents`` and empty ``misses``.
+        - Blank/missing ``revision`` → ``read_previous_content_from_disk``.
+        - Non-blank ``revision`` → ``read_previous_content_from_git`` only
+          (no disk fill). Git misses stay misses — including untracked paths
+          present on disk and unusable revisions (flag-like, unresolved, no
+          ``.git``) — so post-execution workspace bytes are never treated as
+          previous content. Callers that intentionally merge a safe disk
+          snapshot with git should use ``merge_previous_content``.
+        - Never raises for leaf/environment failures once ``repo_path`` is valid.
+    """
+    stripped_repo = (repo_path or "").strip()
+    if not stripped_repo:
+        raise ValueError("repo_path must be a non-empty path")
+
+    unique = _unique_paths(paths)
+    if not unique:
+        return PreviousContentResult(contents={}, misses=frozenset())
+
+    stripped_rev = (revision or "").strip()
+    if not stripped_rev:
+        return read_previous_content_from_disk(stripped_repo, unique)
+
+    return read_previous_content_from_git(stripped_repo, stripped_rev, unique)
