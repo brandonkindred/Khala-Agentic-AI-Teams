@@ -43,12 +43,13 @@ per-concern locks is out of scope for the API-orchestration extract.
 module under `strategy_lab/`) so both `api.main` and `orchestrator_api` import
 stores + `lock` from there. Do **not** have extracted helpers import stores
 back from `api.main` (circular-import trap once `main` imports
-`orchestrator_api`). Do **not** require a DI context object for the first
-body-move steps.
+`orchestrator_api`) — **except** the temporary lazy
+`api.main._strategy_lab_records` read inside `_snapshot_prior_records`, which
+must be removed when store extraction lands. Do **not** require a DI context
+object for body-move steps.
 
 `_PersistentDict` may move with the stores or remain a shared util that the
-store module imports — decide when the store extraction lands; not required
-for the façade step.
+store module imports — decide when the store extraction lands.
 
 ---
 
@@ -199,29 +200,39 @@ Temporal-hot helpers use lazy resolution (`__getattr__` → `api.main`):
 
 ---
 
-## Deferred extraction order (suggested)
+## Deferred extraction order (remaining)
 
-Order later body-move PRs to keep Temporal and HTTP sharing one
-implementation without circular imports:
+Cluster 1 persist/reconcile/progress and Cluster 5 purge/snapshot bodies are
+already in `orchestrator_api` (this extract). Remaining order:
 
 1. **Store extraction** — move lab `_PersistentDict` instances (and optionally
    `_PersistentDict` itself) behind `run_state` or `strategy_lab/stores.py`;
-   leave aliases on `api.main` if other teams still need them.
-2. **Move Temporal-hot clusters** (1 partial, 3, 4, 5 snapshot) into
-   `orchestrator_api` for real; drop re-export indirection.
-3. **Move dispatch/guards + purge** (clusters 2 and 5 remainder); routes become
-   thin callers.
+   leave aliases on `api.main` if other teams still need them. Until then,
+   `_snapshot_prior_records` keeps a **lazy** import of
+   `api.main._strategy_lab_records` (import outside the lock) as a temporary
+   exception to the "do not import stores from `api.main`" rule.
+2. **Move remaining Temporal-hot / cycle helpers** (Cluster 3 finalize + signal
+   brief; Cluster 4 external-terminal helpers) into `orchestrator_api` for real;
+   drop lazy `__getattr__` re-export indirection for those names.
+3. **Move dispatch/guards** (Cluster 2) and thin Strategy Lab routes to
+   delegation-only call sites.
 4. **Optional:** extract `_run_paper_trading_step` dependency cleanly if it
    still couples finalize to the paper-trading route module.
 
 Each step should stay behavior-preserving (verbatim move + import rewires),
 with the investment_team test suite as the gate.
 
+**Test-patch note:** helpers and constants owned by `orchestrator_api` /
+`run_state` must be monkeypatched on those modules (not on `api.main`
+re-export aliases). Implementations close over their defining module's
+globals, so alias-only patches silently miss.
+
 ---
 
-## Out of scope for the inventory / façade step
+## Out of scope (current extract and remaining steps)
 
-- Moving helper bodies out of `api.main`
 - Changing Strategy Lab runtime semantics
 - Splitting the shared `lock`
-- Re-exporting dispatch / purge / route-only helpers
+- FastAPI route/model ownership moves (routes stay in `api.main` until the
+  dispatch/thinning step)
+- Non-Strategy-Lab `api.main` restructuring

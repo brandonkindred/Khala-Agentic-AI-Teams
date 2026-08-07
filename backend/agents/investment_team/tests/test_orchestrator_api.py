@@ -61,3 +61,43 @@ def test_orchestrator_api_dir_includes_exports() -> None:
     names = dir(orchestrator_api)
     for export in orchestrator_api.__all__:
         assert export in names
+
+
+def test_orchestrator_api_importable_before_api_main() -> None:
+    """Worker-style import: ``orchestrator_api`` must load without ``api.main``.
+
+    Temporal activities import helpers from ``orchestrator_api`` at activity
+    runtime; owned implementations must not eagerly pull FastAPI ``api.main``.
+    Lazy ``api.main`` access for ``_snapshot_prior_records``' store is deferred
+    until that helper is called.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # Match pytest.ini ``pythonpath = agents .`` (shared lives under backend/).
+    backend_root = Path(__file__).resolve().parents[3]
+    agents_root = backend_root / "agents"
+    script = (
+        "import sys\n"
+        'assert "investment_team.api.main" not in sys.modules\n'
+        "from investment_team.strategy_lab import orchestrator_api as oa\n"
+        'assert "investment_team.api.main" not in sys.modules\n'
+        'assert "_persist_run_state" in oa.__dict__\n'
+        'assert "_snapshot_prior_records" in oa.__dict__\n'
+        'assert "_finalize_strategy_lab_cycle_record" not in oa.__dict__\n'
+        'print("ok")\n'
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join([str(agents_root), str(backend_root)])
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(backend_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
