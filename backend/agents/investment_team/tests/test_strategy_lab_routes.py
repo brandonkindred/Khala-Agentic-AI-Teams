@@ -114,7 +114,8 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     # the ``api.main`` alias and the source module attribute to the *same* object,
     # so direct reads/writes (routes) and ``_get_run_state`` (which closes over
     # ``run_state.active_runs``) observe one consistent store.
-    from investment_team.strategy_lab import orchestrator_api, run_state as _run_state
+    from investment_team.strategy_lab import orchestrator_api
+    from investment_team.strategy_lab import run_state as _run_state
 
     shared_runs: Dict[str, Any] = {}
     monkeypatch.setattr(api_main, "_active_runs", shared_runs)
