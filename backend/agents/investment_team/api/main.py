@@ -108,12 +108,6 @@ from investment_team.strategy_lab.config import (
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.run_state import (
-    DEFAULT_FENCING_GENERATION,
-)
-from investment_team.strategy_lab.run_state import (
-    acquire_run_transition_lock as _acquire_run_transition_lock,
-)
-from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
 )
 from investment_team.strategy_lab.run_state import (

@@ -848,10 +848,10 @@ def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         (paper-trading failures are already non-fatal inside the helper).
     """
     from investment_team.models import StrategyLabRecord
-    from investment_team.strategy_lab.run_state import DEFAULT_FENCING_GENERATION
     from investment_team.strategy_lab.orchestrator_api import (
         _finalize_strategy_lab_cycle_record,
     )
+    from investment_team.strategy_lab.run_state import DEFAULT_FENCING_GENERATION
 
     def _check_generation(
         run_id: str, *, retry_on_lookup_failure: bool, lookup_retry_delays: Tuple[float, ...] = ()

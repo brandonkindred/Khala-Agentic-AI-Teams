@@ -137,7 +137,16 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
     # Stub the persistence calls so they don't try to reach the job service.
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    # Patch both the ``api.main`` alias (used by run/resume/restart routes)
+    # and ``orchestrator_api`` (where ``_fail_strategy_lab_run`` / activities
+    # resolve ``_persist_run_state`` from module globals after the helper
+    # extract) — stubbing only the alias leaves fail-path writes hitting the
+    # real job-service client.
+    def _noop_persist(*a, **k):
+        return None
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _noop_persist)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _noop_persist)
     monkeypatch.setattr(
         orchestrator_api,
         "_get_lab_run_job_client",
@@ -424,7 +433,10 @@ def test_run_strategy_lab_cleans_up_active_runs_when_persist_fails(
     def _boom(*_a, **_k):
         raise RuntimeError("job service unreachable")
 
+    from investment_team.strategy_lab import orchestrator_api
+
     monkeypatch.setattr(api_main, "_persist_run_state", _boom)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _boom)
 
     with pytest.raises(RuntimeError, match="job service unreachable"):
         api_client.post(
@@ -441,7 +453,13 @@ def test_run_strategy_lab_cleans_up_active_runs_when_persist_fails(
     assert api_main._active_runs == {}
 
     # A subsequent request must be free to start a fresh run, not 409.
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    from investment_team.strategy_lab import orchestrator_api as _orch_api
+
+    def _noop_persist(*a, **k):
+        return None
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _noop_persist)
+    monkeypatch.setattr(_orch_api, "_persist_run_state", _noop_persist)
     resp = api_client.post(
         "/strategy-lab/run",
         json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
@@ -628,6 +646,7 @@ def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_re
     regressed the durable generation in between, since the post-write read
     would silently re-stamp it back to 5 regardless.)"""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     api_main._active_runs["run-race"] = _resumable_state("run-race", generation=1)
     stub = _StubLabClient(jobs=[{"job_id": "run-race", "generation": 1}])
@@ -636,6 +655,7 @@ def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_re
     # stub: this test needs the real durable-write behavior (including its
     # exclude_fields handling) to observe the regression it claims to catch.
     monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _real_persist_run_state)
 
     real_get_job = stub.get_job
     read_calls: List[str] = []
@@ -842,7 +862,10 @@ def test_resume_strategy_lab_run_revalidation_failure_does_not_regress_concurren
     # Override the api_client fixture's blanket _persist_run_state no-op
     # stub: this test needs the real durable-write behavior (including
     # _fail_strategy_lab_run's own persist call) to observe the regression.
+    from investment_team.strategy_lab import orchestrator_api
+
     monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _real_persist_run_state)
 
     resp = api_client.post("/strategy-lab/runs/run-revalidate-fail2/resume")
 
@@ -866,6 +889,7 @@ def test_fail_strategy_lab_run_does_not_clobber_concurrently_resumed_incarnation
     so the earlier durable-generation guard alone does not catch this --
     only re-checking the in-memory generation right before the write does."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-fail-race"
     api_main._active_runs[run_id] = _resumable_state(run_id, generation=1, status="running")
@@ -878,13 +902,19 @@ def test_fail_strategy_lab_run_does_not_clobber_concurrently_resumed_incarnation
         api_main._active_runs[run_id] = _resumable_state(run_id, generation=2, status="running")
         return 1
 
-    monkeypatch.setattr(api_main, "_get_run_generation_strict", _fake_get_run_generation_strict)
-    persisted_calls: List[Any] = []
+    # ``_fail_strategy_lab_run`` lives in ``orchestrator_api`` and resolves
+    # helpers from that module's globals — patch there, not only the
+    # ``api.main`` re-export aliases.
     monkeypatch.setattr(
-        api_main,
-        "_persist_run_state",
-        lambda rid, state, **kw: persisted_calls.append((rid, dict(state))),
+        orchestrator_api, "_get_run_generation_strict", _fake_get_run_generation_strict
     )
+    persisted_calls: List[Any] = []
+
+    def _capture_persist(rid, state, **kw):
+        persisted_calls.append((rid, dict(state)))
+
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _capture_persist)
+    monkeypatch.setattr(api_main, "_persist_run_state", _capture_persist)
 
     api_main._fail_strategy_lab_run(run_id, "boom")
 
@@ -1034,7 +1064,10 @@ def test_restart_strategy_lab_run_write_does_not_regress_concurrently_minted_gen
     # Override the api_client fixture's blanket _persist_run_state no-op
     # stub: this test needs the real durable-write behavior to observe the
     # regression.
+    from investment_team.strategy_lab import orchestrator_api
+
     monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _real_persist_run_state)
 
     resp = api_client.post("/strategy-lab/runs/run-race3/restart")
 
@@ -1217,6 +1250,7 @@ def test_restart_strategy_lab_run_returns_503_when_persisting_reset_state_fails(
     than leak a raw 500 or leave the run wedged "running" with no durably
     persisted/dispatched workflow."""
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
     api_main._active_runs["run-restart-persist-fail"] = {
         "run_id": "run-restart-persist-fail",
@@ -1231,6 +1265,7 @@ def test_restart_strategy_lab_run_returns_503_when_persisting_reset_state_fails(
         raise RuntimeError("job service down")
 
     monkeypatch.setattr(api_main, "_persist_run_state", _persist_raises)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _persist_raises)
 
     resp = api_client.post("/strategy-lab/runs/run-restart-persist-fail/restart")
 
@@ -1641,6 +1676,8 @@ def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
 
     # The route's own primary persist (before dispatch) must still succeed --
     # only the rollback persist (after the 409) is the one under test here.
+    from investment_team.strategy_lab import orchestrator_api
+
     persist_calls = {"n": 0}
 
     def _persist_fails_after_first_call(*args, **kwargs):
@@ -1649,6 +1686,7 @@ def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
             raise RuntimeError("job service down")
 
     monkeypatch.setattr(api_main, "_persist_run_state", _persist_fails_after_first_call)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _persist_fails_after_first_call)
 
     resp = api_client.post("/strategy-lab/runs/run-rollback/restart")
     assert resp.status_code == 409
