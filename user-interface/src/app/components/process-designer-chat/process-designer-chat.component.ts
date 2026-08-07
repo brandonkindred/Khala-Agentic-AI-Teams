@@ -42,17 +42,7 @@ import type {
   ProcessDefinition,
   ProcessStep,
   RosterValidationResult,
-  UpdateAgentRequest,
 } from '../../models';
-
-/** A roster agent's fields, editable via the inline "Edit" affordance. */
-interface AgentEditDraft {
-  role: string;
-  skills: string;
-  capabilities: string;
-  tools: string;
-  expertise: string;
-}
 
 @Component({
   selector: 'app-process-designer-chat',
@@ -113,15 +103,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   rosterLoading = signal(false);
   rosterActionError = signal<string | null>(null);
   expandedAgent = signal<string | null>(null);
-  /** Name of the roster agent currently in inline-edit mode (`null` if none). */
-  editingAgent = signal<string | null>(null);
-  editDraft = signal<AgentEditDraft>({ role: '', skills: '', capabilities: '', tools: '', expertise: '' });
-  /**
-   * Snapshot of the row's fields as the edit form opened, used to send only the
-   * fields the user actually changed on save (see `saveAgentEdits`). `null` when
-   * no edit is in progress.
-   */
-  private readonly editOriginal = signal<AgentEditDraft | null>(null);
   /** Monotonic stamp for `refreshRoster`; guards against out-of-order refresh results. */
   private rosterRefreshSeq = 0;
 
@@ -296,7 +277,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   // ---------------------------------------------------------------------------
-  // Roster mutation: add from registry / suggest via chat / delete / inline edit
+  // Roster mutation: add from registry / suggest via chat / delete
   // (spec §3, Stage 3 "Roster panel")
   // ---------------------------------------------------------------------------
 
@@ -305,8 +286,8 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.rosterActionError.set(null);
     const data: AddAgentFromRegistryDialogData = {
       existingManifestIds: this.rosterAgents()
-        .map((a) => a.manifest_id)
-        .filter((id): id is string => !!id),
+        .filter((a) => a.source === 'registry')
+        .map((a) => a.manifest_id),
     };
     const ref = this.dialog.open<
       AddAgentFromRegistryDialogComponent,
@@ -359,84 +340,11 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     if (!confirmed) return;
     this.rosterActionError.set(null);
     this.api.removeTeamAgent(this.team.team_id, agent.agent_name).subscribe({
-      next: () => {
-        if (this.editingAgent() === agent.agent_name) this.editingAgent.set(null);
-        this.refreshRoster();
-      },
+      next: () => this.refreshRoster(),
       error: (err) => {
         this.rosterActionError.set(err?.error?.detail ?? 'Failed to remove agent');
       },
     });
-  }
-
-  startEditAgent(agent: AgenticTeamAgent, event: Event): void {
-    event.stopPropagation();
-    this.rosterActionError.set(null);
-    const snapshot: AgentEditDraft = {
-      role: agent.role,
-      skills: agent.skills.join(', '),
-      capabilities: agent.capabilities.join(', '),
-      tools: agent.tools.join(', '),
-      expertise: agent.expertise.join(', '),
-    };
-    this.editDraft.set({ ...snapshot });
-    this.editOriginal.set(snapshot);
-    this.editingAgent.set(agent.agent_name);
-  }
-
-  cancelEditAgent(event: Event): void {
-    event.stopPropagation();
-    this.editingAgent.set(null);
-    this.editOriginal.set(null);
-  }
-
-  /** Update a single field of the in-progress edit draft (template can't spread). */
-  updateEditDraftField(field: keyof AgentEditDraft, value: string): void {
-    this.editDraft.update((draft) => ({ ...draft, [field]: value }));
-  }
-
-  saveAgentEdits(agent: AgenticTeamAgent, event: Event): void {
-    event.stopPropagation();
-    const draft = this.editDraft();
-    const original = this.editOriginal();
-    const toList = (s: string) =>
-      s.split(',').map((v) => v.trim()).filter((v) => v.length > 0);
-
-    // Send ONLY the fields the user actually changed vs. what the form opened
-    // with. The backend PUT is a partial update (exclude_unset), so omitting an
-    // untouched field preserves whatever newer value the chat or another roster
-    // mutation wrote for it while this form was open — a full-object save would
-    // clobber those with the stale draft. Raw-string compare suffices: an
-    // untouched field is byte-identical to its `startEditAgent` snapshot. With no
-    // baseline (a save racing the form close) fall back to sending the field so a
-    // real edit isn't silently dropped.
-    const changed = (field: keyof AgentEditDraft) => !original || draft[field] !== original[field];
-    const updates: UpdateAgentRequest = {};
-    if (changed('role')) updates.role = draft.role.trim();
-    if (changed('skills')) updates.skills = toList(draft.skills);
-    if (changed('capabilities')) updates.capabilities = toList(draft.capabilities);
-    if (changed('tools')) updates.tools = toList(draft.tools);
-    if (changed('expertise')) updates.expertise = toList(draft.expertise);
-
-    // Nothing changed → close the form without a redundant write.
-    if (Object.keys(updates).length === 0) {
-      this.editingAgent.set(null);
-      this.editOriginal.set(null);
-      return;
-    }
-    this.rosterActionError.set(null);
-    this.api
-      .updateTeamAgent(this.team.team_id, agent.agent_name, updates)
-      .subscribe({
-        next: () => {
-          this.editingAgent.set(null);
-          this.editOriginal.set(null);
-          this.refreshRoster();
-        },
-        error: (err) => {
-          this.rosterActionError.set(err?.error?.detail ?? 'Failed to update agent');
-        },
-      });
   }
 
   onSubmit(): void {

@@ -38,13 +38,13 @@ const team = (overrides: Partial<AgenticTeam> = {}): AgenticTeam => ({
 
 const agent = (overrides: Partial<AgenticTeamAgent> = {}): AgenticTeamAgent => ({
   agent_name: 'Writer',
+  source: 'generated',
+  manifest_id: 'agentic_team_provisioning.t-1.writer',
   role: 'Writes',
   skills: ['seo'],
   capabilities: [],
   tools: [],
   expertise: [],
-  source: 'generated',
-  manifest_id: null,
   ...overrides,
 });
 
@@ -89,7 +89,6 @@ describe('ProcessDesignerChatComponent', () => {
     validateRoster: ReturnType<typeof vi.fn>;
     addAgentFromRegistry: ReturnType<typeof vi.fn>;
     removeTeamAgent: ReturnType<typeof vi.fn>;
-    updateTeamAgent: ReturnType<typeof vi.fn>;
     createProcess: ReturnType<typeof vi.fn>;
     updateProcess: ReturnType<typeof vi.fn>;
     setConversationProcess: ReturnType<typeof vi.fn>;
@@ -107,7 +106,6 @@ describe('ProcessDesignerChatComponent', () => {
       validateRoster: vi.fn().mockReturnValue(of(validation())),
       addAgentFromRegistry: vi.fn().mockReturnValue(of(agent({ agent_name: 'blogging.planner', source: 'registry', manifest_id: 'blogging.planner' }))),
       removeTeamAgent: vi.fn().mockReturnValue(of(undefined)),
-      updateTeamAgent: vi.fn().mockReturnValue(of(agent())),
       createProcess: vi.fn().mockReturnValue(of({})),
       updateProcess: vi.fn().mockReturnValue(of({})),
       setConversationProcess: vi.fn().mockReturnValue(of({})),
@@ -310,7 +308,7 @@ describe('ProcessDesignerChatComponent', () => {
   it('openAddFromRegistry opens the dialog with the roster registry manifest ids', () => {
     component.rosterAgents.set([
       agent({ agent_name: 'a', source: 'registry', manifest_id: 'reg.a' }),
-      agent({ agent_name: 'b', source: 'generated', manifest_id: null }),
+      agent({ agent_name: 'b', source: 'generated', manifest_id: 'agentic_team_provisioning.t-1.b' }),
     ]);
     // Spy on the component's OWN injected MatDialog: standalone components that
     // import MatDialogModule register it at their environment injector, so it's a
@@ -374,91 +372,6 @@ describe('ProcessDesignerChatComponent', () => {
     api.removeTeamAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'cannot remove' } })));
     component.onDeleteAgentConfirmed(agent({ agent_name: 'Writer' }), true);
     expect(component.rosterActionError()).toBe('cannot remove');
-  });
-
-  it('onDeleteAgentConfirmed clears an in-progress edit on the deleted agent', () => {
-    component.editingAgent.set('Writer');
-    component.onDeleteAgentConfirmed(agent({ agent_name: 'Writer' }), true);
-    expect(component.editingAgent()).toBeNull();
-  });
-
-  // ── Inline edit ───────────────────────────────────────────────────────────
-
-  it('startEditAgent seeds the draft from the agent and enters edit mode', () => {
-    component.startEditAgent(
-      agent({ agent_name: 'Writer', role: 'Writes', skills: ['seo', 'copy'] }),
-      new Event('click'),
-    );
-    expect(component.editingAgent()).toBe('Writer');
-    expect(component.editDraft()).toEqual({
-      role: 'Writes',
-      skills: 'seo, copy',
-      capabilities: '',
-      tools: '',
-      expertise: '',
-    });
-  });
-
-  it('cancelEditAgent exits edit mode without saving', () => {
-    component.editingAgent.set('Writer');
-    component.cancelEditAgent(new Event('click'));
-    expect(component.editingAgent()).toBeNull();
-    expect(api.updateTeamAgent).not.toHaveBeenCalled();
-  });
-
-  it('saveAgentEdits parses comma-separated fields and calls updateTeamAgent', () => {
-    component.editDraft.set({
-      role: ' New role ',
-      skills: 'seo,  copy ,',
-      capabilities: '',
-      tools: 'Slack API',
-      expertise: '',
-    });
-    component.saveAgentEdits(agent({ agent_name: 'Writer' }), new Event('click'));
-    expect(api.updateTeamAgent).toHaveBeenCalledWith('t-1', 'Writer', {
-      role: 'New role',
-      skills: ['seo', 'copy'],
-      capabilities: [],
-      tools: ['Slack API'],
-      expertise: [],
-    });
-    expect(component.editingAgent()).toBeNull();
-  });
-
-  it('saveAgentEdits sends only the fields changed since the edit form opened', () => {
-    const a = agent({
-      agent_name: 'Writer',
-      role: 'Writes',
-      skills: ['seo'],
-      capabilities: ['gen'],
-      tools: ['Git'],
-      expertise: ['x'],
-    });
-    component.startEditAgent(a, new Event('click'));
-    // The user edits only the role; every other field is left as the form opened.
-    // A full-object save would clobber skills/etc. the chat may have refreshed
-    // meanwhile, so only the touched field must be sent (backend PUT is partial).
-    component.updateEditDraftField('role', 'Lead writer');
-    component.saveAgentEdits(a, new Event('click'));
-    expect(api.updateTeamAgent).toHaveBeenCalledWith('t-1', 'Writer', { role: 'Lead writer' });
-    expect(component.editingAgent()).toBeNull();
-  });
-
-  it('saveAgentEdits skips the request entirely when nothing changed', () => {
-    const a = agent({ agent_name: 'Writer', role: 'Writes', skills: ['seo'] });
-    component.startEditAgent(a, new Event('click'));
-    component.saveAgentEdits(a, new Event('click'));
-    expect(api.updateTeamAgent).not.toHaveBeenCalled();
-    expect(component.editingAgent()).toBeNull();
-  });
-
-  it('saveAgentEdits surfaces an error and stays in edit mode', () => {
-    api.updateTeamAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'bad edit' } })));
-    component.editingAgent.set('Writer');
-    component.editDraft.set({ role: 'x', skills: '', capabilities: '', tools: '', expertise: '' });
-    component.saveAgentEdits(agent({ agent_name: 'Writer' }), new Event('click'));
-    expect(component.rosterActionError()).toBe('bad edit');
-    expect(component.editingAgent()).toBe('Writer');
   });
 
   // ── createNewProcess: create + link to the active conversation ─────────────
