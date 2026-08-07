@@ -5,11 +5,12 @@ post-execution *new* content). Git reads return blobs at a caller-supplied
 revision: each path is typed/sized with ``git cat-file`` (``-t`` / ``-s``)
 before ``git show`` so oversize or non-blob objects are never loaded as text.
 ``merge_previous_content`` and ``resolve_previous_content`` aggregate disk/git
-partitions (git-first). Per-path failures are misses; only blank ``repo_path``
-raises on disk reads, and blank ``repo_path`` / ``revision`` raise on leaf git
-reads (blank revision on ``resolve_previous_content`` is disk-only).
+partitions (git-first). Paths beyond ``_MAX_GIT_BLOBS_READ`` stay git misses and
+are never disk-filled (spawn-cap overflow is not a true absence). Per-path
+failures are misses; only blank ``repo_path`` raises on disk reads, and blank
+``repo_path`` / ``revision`` raise on leaf git reads (blank revision on
+``resolve_previous_content`` is disk-only).
 """
-
 from __future__ import annotations
 
 import dataclasses
@@ -262,19 +263,23 @@ def resolve_previous_content(
     paths: Iterable[str],
     revision: str | None = None,
 ) -> PreviousContentResult:
-    """Resolve previous content git-first, falling back to disk for misses.
+    """Resolve previous content: disk-only without revision, else git-only.
 
     Preconditions:
         - ``repo_path`` is strip-nonempty; otherwise raise ``ValueError``.
         - ``paths`` is an iterable of strings (may be empty).
         - ``revision`` may be ``None``/blank (disk-only) or strip-nonempty
-          (git-first).
+          (git-only).
 
     Postconditions:
         - Empty ``paths`` → empty ``contents`` and empty ``misses``.
         - Blank/missing ``revision`` → ``read_previous_content_from_disk``.
-        - Non-blank ``revision`` → git for all paths; disk only for git
-          misses; merge with git preferred. If git has no misses, return git.
+        - Non-blank ``revision`` → ``read_previous_content_from_git`` only
+          (no disk fill). Git misses stay misses — including untracked paths
+          present on disk and unusable revisions (flag-like, unresolved, no
+          ``.git``) — so post-execution workspace bytes are never treated as
+          previous content. Callers that intentionally merge a safe disk
+          snapshot with git should use ``merge_previous_content``.
         - Never raises for leaf/environment failures once ``repo_path`` is valid.
     """
     stripped_repo = (repo_path or "").strip()
@@ -289,8 +294,4 @@ def resolve_previous_content(
     if not stripped_rev:
         return read_previous_content_from_disk(stripped_repo, unique)
 
-    git = read_previous_content_from_git(stripped_repo, stripped_rev, unique)
-    if not git.misses:
-        return git
-    disk = read_previous_content_from_disk(stripped_repo, git.misses)
-    return merge_previous_content(git, disk)
+    return read_previous_content_from_git(stripped_repo, stripped_rev, unique)
