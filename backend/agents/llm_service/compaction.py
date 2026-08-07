@@ -249,15 +249,15 @@ def compact_text(
     repeated call with the same inputs reuses the earlier compaction instead of
     re-invoking the LLM. Concurrent callers for the same key share one compute
     via ``shared.cache.single_flight`` (Redis NX lock + waiter poll when Redis
-    is configured; in-process lock otherwise). Capacity is the SharedCache
-    ``max_entries`` argument (read from ``LLM_COMPACTION_CACHE_SIZE`` each call
-    so env changes apply without restart). Value TTL / Redis ``maxmemory`` LRU
-    come from ``REDIS_CACHE_TTL_S`` and the Redis service config — not a
-    separate compaction TTL. Compaction is deterministic given those inputs,
-    so a cache hit is byte-identical to what a fresh call would return. Only
-    genuine full compactions are cached — every fallback path (LLM failure,
-    empty result, or a chunked run with any degraded chunk) is retried on the
-    next call rather than frozen.
+    is configured; in-process lock otherwise). Capacity is passed as
+    ``max_entries`` on each ``single_flight`` call (read from
+    ``LLM_COMPACTION_CACHE_SIZE`` each invocation so env changes apply without
+    restart). Value TTL / Redis ``maxmemory`` LRU come from ``REDIS_CACHE_TTL_S``
+    and the Redis service config — not a separate compaction TTL. Compaction is
+    deterministic given those inputs, so a cache hit is byte-identical to what a
+    fresh call would return. Only genuine full compactions are cached — every
+    fallback path (LLM failure, empty result, or a chunked run with any
+    degraded chunk) is retried on the next call rather than frozen.
     """
     if not text or len(text) <= max_chars:
         return text or ""
@@ -279,8 +279,6 @@ def compact_text(
     # returns only the payload bytes (durable-stores when cacheable is True).
     raw = cache.single_flight(key, _compute, max_entries=capacity)
     try:
-        if isinstance(raw, str):
-            return raw
         return raw.decode("utf-8")
     except (UnicodeDecodeError, AttributeError):
         logger.warning(
@@ -288,7 +286,14 @@ def compact_text(
             key,
             exc_info=True,
         )
-        cache.delete(key)
+        try:
+            cache.delete(key)
+        except Exception:
+            logger.warning(
+                "Failed to evict corrupt compaction cache entry for %s",
+                key,
+                exc_info=True,
+            )
         return _compact_uncached(text, max_chars, llm, content_description)[0]
 
 

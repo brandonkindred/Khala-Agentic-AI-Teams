@@ -689,9 +689,11 @@ jobs:
           -v --tb=short -n 4
         env:
           PYTHONPATH: ..
-      # Live Redis only: dedicated cross-backend hit/fail-open checks. Do not
-      # re-run the consumer unit suites here — they assume process-local caches
-      # and break under a shared Redis DB (cross-test hits / different SF semantics).
+      # Live Redis only: dedicated cross-backend hit/fail-open checks, plus the
+      # one consumer test marked for live Redis
+      # (test_live_redis_chunk_hit_and_outage_fail_open). Do not re-run the rest
+      # of the consumer unit suites here — they assume process-local caches and
+      # break under a shared Redis DB (cross-test hits / different SF semantics).
       - name: Live Redis integration
         run: >-
           pytest ../shared/cache/tests/test_live_redis.py

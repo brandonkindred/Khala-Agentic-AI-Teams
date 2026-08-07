@@ -364,8 +364,8 @@ def test_ollama_429_classifies_session_and_weekly_bodies(
         with pytest.raises(LLMRateLimitError) as exc_info:
             client.complete_json("hello", objective="test", temperature=0)
     assert exc_info.value.limit_kind == expected_kind
-    assert expected_kind in str(exc_info.value)
-    assert "usage limit" in str(exc_info.value).lower() or "weekly" in body or "session" in body
+    assert expected_kind in str(exc_info.value).lower()
+    assert "usage limit" in str(exc_info.value).lower()
 
 
 def test_ollama_httpstatuserror_429_classifies_session_body(
