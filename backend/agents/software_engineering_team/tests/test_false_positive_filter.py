@@ -583,7 +583,24 @@ def test_find_references_empty_and_blank_symbol() -> None:
     assert idx.find_references("zzz-not-there") == (
         f"No references for 'zzz-not-there'.\n\n{_NO_REPO}"
     )
-    assert idx.find_references("   ") == f"No references for '   '.\n\n{_NO_REPO}"
+    blank = idx.find_references("   ")
+    assert blank.startswith("No references for '   '.")
+    assert _NO_REPO in blank
+    assert "not searched" not in blank  # no-reader path uses the access note only
+
+
+def test_find_references_blank_symbol_with_reader_does_not_imply_complete_scan() -> None:
+    """Blank symbol with a reader must not look like a finished empty repo search."""
+    idx = CodebaseIndex(
+        files={"a.py": "def foo():\n    pass\n"},
+        repo_reader=_FakeReader({"other.py": "foo()\n"}),
+    )
+    result = idx.find_references("   ")
+    assert "No references for '   '." in result
+    assert "not searched" in result
+    assert "does NOT prove" in result
+    assert "other.py" not in result
+    assert _NO_REPO not in result
 
 
 def test_find_references_respects_max_matches() -> None:
@@ -644,7 +661,8 @@ def test_find_references_skips_submission_paths_in_repo_half() -> None:
             }
         ),
     )
-    lines = idx.find_references("needle", max_matches=10).splitlines()
+    result = idx.find_references("needle", max_matches=10)
+    lines = result.split("\n\n", 1)[0].splitlines()
     assert lines.count("shared.py:1") == 1
     assert "shared.py:2" not in lines
     assert "only_repo.py:1" in lines
@@ -701,6 +719,18 @@ def test_find_references_truncated_empty_message(monkeypatch) -> None:
     idx = CodebaseIndex(
         files={"sub.py": "other\n"},
         repo_reader=_FakeReader({f"f{i}.py": "zzz\n" for i in range(5)}),
+    )
+    result = idx.find_references("needle")
+    assert "No references for 'needle'" in result
+    assert "truncated" in result
+    assert "does NOT prove" in result
+
+
+def test_find_references_list_files_failure_is_empty_truncated() -> None:
+    """Reader list_files failure must surface as empty-truncated, not a complete miss."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_BoomReader(),
     )
     result = idx.find_references("needle")
     assert "No references for 'needle'" in result

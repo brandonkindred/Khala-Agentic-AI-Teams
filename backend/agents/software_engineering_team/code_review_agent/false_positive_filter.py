@@ -720,9 +720,22 @@ class CodebaseIndex:
               ``max_matches`` so the repo half was skipped): append a truncated
               banner (hits) or an empty-truncated message (no hits).
             - When no ``repo_reader``: always append the no-repository-access note.
+            - Blank/whitespace-only ``symbol`` is not searched; the response must
+              not read as a complete empty scan of submission or repository.
             - Never raises for missing symbols or reader failures; raises
               ``ValueError`` when ``max_matches`` is non-positive (via ``search``).
         """
+        if not (symbol or "").strip():
+            body = f"No references for {symbol!r}."
+            if self.repo_reader is None:
+                return (
+                    f"{body}\n\nNo repository access is available beyond this submission."
+                )
+            return (
+                f"{body} Blank/whitespace symbols are not searched -- this does NOT prove "
+                "the symbol is absent from the submission or repository."
+            )
+
         hits = list(self.search(symbol, max_matches=max_matches))
         truncated = False
         if self.repo_reader is None:
