@@ -233,10 +233,12 @@ def test_stub_lab_client_get_job_returns_copy_for_known_id() -> None:
 
 def test_no_active_run_locked_noop_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """No entries at all -- must not raise."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(api_main, "_active_runs", {})
-    api_main._no_active_run_locked()  # must not raise
+    shared = {}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
+    orchestrator_api._no_active_run_locked()  # must not raise
+    assert shared == {}
 
 
 def test_no_active_run_locked_raises_409_when_running_entry_present(
@@ -244,15 +246,15 @@ def test_no_active_run_locked_raises_409_when_running_entry_present(
 ) -> None:
     from fastapi import HTTPException
 
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(
-        api_main, "_active_runs", {"run-1": {"run_id": "run-1", "status": "running"}}
-    )
+    shared = {"run-1": {"run_id": "run-1", "status": "running"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
 
     with pytest.raises(HTTPException) as exc_info:
-        api_main._no_active_run_locked()
+        orchestrator_api._no_active_run_locked()
     assert exc_info.value.status_code == 409
+    assert shared["run-1"]["status"] == "running"
 
 
 def test_no_active_run_locked_tolerates_entry_missing_status_key(
@@ -261,11 +263,13 @@ def test_no_active_run_locked_tolerates_entry_missing_status_key(
     """An _active_runs entry lacking the "status" key entirely must not raise
     KeyError -- it's treated as not-running (via .get()'s default), so this
     conflict guard still works instead of itself crashing into a 500."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(api_main, "_active_runs", {"malformed": {"run_id": "malformed"}})
+    shared = {"malformed": {"run_id": "malformed"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
 
-    api_main._no_active_run_locked()  # must not raise KeyError
+    orchestrator_api._no_active_run_locked()  # must not raise KeyError
+    assert shared == {"malformed": {"run_id": "malformed"}}
 
 
 def test_no_active_run_locked_detects_running_entry_alongside_malformed_one(
@@ -275,20 +279,18 @@ def test_no_active_run_locked_detects_running_entry_alongside_malformed_one(
     running entry -- the guard still correctly raises 409 for it."""
     from fastapi import HTTPException
 
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(
-        api_main,
-        "_active_runs",
-        {
-            "malformed": {"run_id": "malformed"},
-            "run-1": {"run_id": "run-1", "status": "running"},
-        },
-    )
+    shared = {
+        "malformed": {"run_id": "malformed"},
+        "run-1": {"run_id": "run-1", "status": "running"},
+    }
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
 
     with pytest.raises(HTTPException) as exc_info:
-        api_main._no_active_run_locked()
+        orchestrator_api._no_active_run_locked()
     assert exc_info.value.status_code == 409
+    assert shared["run-1"]["status"] == "running"
 
 
 # ---------------------------------------------------------------------------
