@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 
+from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
 from agent_team_studio.agentic_team_provisioning.roster_resolve import (
+    migrate_roster_row,
     persona_from_manifest,
     resolve_persona,
 )
@@ -66,3 +68,87 @@ def test_resolve_persona_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None
     )
     with pytest.raises(LookupError):
         resolve_persona("missing.id")
+
+
+def test_migrate_generated_stamps_manifest_id_and_strips_fat(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-1"
+    raw = {
+        "agent_name": "Writer",
+        "role": "Writes docs",
+        "skills": ["seo"],
+        "capabilities": [],
+        "tools": [],
+        "expertise": [],
+        "source": "generated",
+        "manifest_id": None,
+    }
+    expected_id = manifest_agent_id(team_id, "Writer")
+
+    class _Reg:
+        def __init__(self) -> None:
+            self._m: dict = {}
+
+        def get(self, agent_id: str):
+            return self._m.get(agent_id)
+
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            self._m[manifest.id] = manifest
+
+    reg = _Reg()
+    monkeypatch.setattr(
+        "agent_team_studio.agentic_team_provisioning.roster_resolve.get_registry",
+        lambda: reg,
+    )
+    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+
+    agent, changed = migrate_roster_row(team_id, raw)
+    assert changed is True
+    assert agent.agent_name == "Writer"
+    assert agent.source == "generated"
+    assert agent.manifest_id == expected_id
+    assert reg.get(expected_id) is not None
+
+
+def test_migrate_registry_without_manifest_id_raises() -> None:
+    with pytest.raises(ValueError, match="manifest_id"):
+        migrate_roster_row(
+            "team-1",
+            {"agent_name": "X", "source": "registry", "manifest_id": None, "role": "r"},
+        )
+
+
+def test_migrate_already_thin_unchanged() -> None:
+    raw = {
+        "agent_name": "Writer",
+        "source": "generated",
+        "manifest_id": "agentic_team_provisioning.abc.writer-1",
+    }
+    agent, changed = migrate_roster_row("team-1", raw)
+    assert changed is False
+    assert agent.manifest_id == raw["manifest_id"]
+
+
+def test_migrate_with_manifest_id_and_fat_keys_changed(monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest_id = "agentic_team_provisioning.abc.writer-1"
+    raw = {
+        "agent_name": "Writer",
+        "source": "generated",
+        "manifest_id": manifest_id,
+        "role": "Writes docs",
+        "skills": ["seo"],
+    }
+
+    class _Reg:
+        def get(self, agent_id: str):
+            return object() if agent_id == manifest_id else None
+
+    monkeypatch.setattr(
+        "agent_team_studio.agentic_team_provisioning.roster_resolve.get_registry",
+        lambda: _Reg(),
+    )
+
+    agent, changed = migrate_roster_row("team-1", raw)
+    assert changed is True
+    assert agent.agent_name == "Writer"
+    assert agent.source == "generated"
+    assert agent.manifest_id == manifest_id

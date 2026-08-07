@@ -334,7 +334,7 @@ def test_delete_generated_agent_unregisters_its_manifest(
         agent_name="Writer Agent", role="Writes", skills=["seo"], source="generated"
     )
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    manifest = build_agent_manifest(team_id, gen)
+    manifest = build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None)
     registry.register(manifest)  # simulate the LLM save path's install
     assert registry.get(manifest.id) is not None
 
@@ -357,7 +357,7 @@ def test_from_registry_replacing_generated_unregisters_old_manifest(
         agent_name="blogging.planner", role="old", skills=["x"], source="generated"
     )
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    old_manifest = build_agent_manifest(team_id, gen)
+    old_manifest = build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None)
     registry.register(old_manifest)
     assert registry.get(old_manifest.id) is not None
 
@@ -389,7 +389,7 @@ def test_from_registry_rejects_own_generated_manifest_409(
         agent_name="Planner", role="Plans things", skills=["x"], source="generated"
     )
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    gen_manifest = build_agent_manifest(team_id, gen)
+    gen_manifest = build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None)
     registry.register(gen_manifest)
 
     resp = client.post(
@@ -423,7 +423,7 @@ def test_from_registry_rejects_another_teams_generated_manifest_409(
     other_gen = AgenticTeamAgent(
         agent_name="Scout", role="Researches", skills=["x"], source="generated"
     )
-    other_manifest = build_agent_manifest(other_team_id, other_gen)
+    other_manifest = build_agent_manifest(other_team_id, other_gen.agent_name, summary=other_gen.role or None)
     registry.register(other_manifest)
 
     team_id = _new_team()  # a distinct team with a different id prefix
@@ -479,9 +479,7 @@ def test_register_team_manifests_skips_registry_agents(
     team_id = _new_team()
     # A stale generated wrapper from a prior roster (agent no longer present) must be
     # unregistered by the prefix-scoped stale-cleanup.
-    stale = build_agent_manifest(
-        team_id, AgenticTeamAgent(agent_name="OldGen", role="o", skills=["x"], source="generated")
-    )
+    stale = build_agent_manifest(team_id, "OldGen", summary="o")
     registry.register(stale)
     assert registry.get(stale.id) is not None
 
@@ -544,7 +542,7 @@ def test_delete_unregister_failure_still_returns_204(
     team_id = _new_team()
     gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    registry.register(build_agent_manifest(team_id, gen))
+    registry.register(build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None))
     registry.unregister = _raise  # cleanup blows up
 
     resp = client.delete(f"/teams/{team_id}/agents/Writer")
@@ -666,7 +664,7 @@ def test_update_generated_agent_reregisters_manifest_with_new_summary(
         agent_name="Writer", role="Writes drafts", skills=["seo"], source="generated"
     )
     AgenticTeamStore().save_team_agents(team_id, [gen])
-    manifest = build_agent_manifest(team_id, gen)
+    manifest = build_agent_manifest(team_id, gen.agent_name, summary=gen.role or None)
     registry.register(manifest)  # simulate the LLM save path's install
     assert registry.get(manifest.id).summary == "Writes drafts"
 

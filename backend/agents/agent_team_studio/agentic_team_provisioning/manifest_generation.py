@@ -123,12 +123,12 @@ def default_cognition_block() -> CognitionSpec:
     )
 
 
-def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest:
+def build_agent_manifest(team_id: str, agent_name: str, *, summary: str | None = None) -> AgentManifest:
     """Build a validated ``agent_registry`` manifest for one roster agent.
 
     Preconditions:
         * ``team_id`` is a non-empty string.
-        * ``agent.agent_name`` is non-empty (guaranteed by ``AgenticTeamAgent``).
+        * ``agent_name`` is non-empty.
     Postconditions:
         * Returns a fully validated :class:`AgentManifest` whose ``cognition``
           equals :func:`default_cognition_block` (``rule_packs ==
@@ -141,17 +141,17 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
     # build an id from an empty key and could mis-scope the stale-cleanup prefix.
     if not team_id:
         raise ValueError("build_agent_manifest: team_id must be non-empty")
-    if not agent.agent_name:
-        raise ValueError("build_agent_manifest: agent.agent_name must be non-empty")
+    if not agent_name:
+        raise ValueError("build_agent_manifest: agent_name must be non-empty")
 
-    manifest_id = manifest_agent_id(team_id, agent.agent_name)
-    summary = agent.role or f"Generated agent {agent.agent_name}"
+    manifest_id = manifest_agent_id(team_id, agent_name)
+    summary_text = summary or f"Generated agent {agent_name}"
 
     manifest = AgentManifest(
         id=manifest_id,
         team=_TEAM_KEY,
-        name=agent.agent_name,
-        summary=summary,
+        name=agent_name,
+        summary=summary_text,
         tags=["generated", _TEAM_KEY],
         inputs=IOSchema(
             schema_ref=_INPUT_SCHEMA_REF,
@@ -257,7 +257,7 @@ def register_team_manifests(
     # recovery path, which passes the whole roster. The stale-cleanup below then also
     # drops any such wrapper left behind by an older build.
     agents = [a for a in agents if a.source == SOURCE_GENERATED]
-    manifests = [build_agent_manifest(team_id, a) for a in agents]
+    manifests = [build_agent_manifest(team_id, a.agent_name, summary=a.role or None) for a in agents]
     new_ids = {m.id for m in manifests}
     from agent_registry import get_registry
 

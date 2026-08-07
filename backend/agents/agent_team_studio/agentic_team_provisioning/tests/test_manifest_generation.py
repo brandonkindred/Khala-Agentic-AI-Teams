@@ -28,13 +28,7 @@ def test_default_cognition_block_is_batteries_included():
 
 
 def test_build_agent_manifest_validates_and_stamps_cognition():
-    agent = AgenticTeamAgent(
-        agent_name="Triage Agent",
-        role="Classifies tickets by urgency",
-        skills=["text classification"],
-        tools=["Ticket API"],
-    )
-    manifest = build_agent_manifest("team-uuid-123", agent)
+    manifest = build_agent_manifest("team-uuid-123", "Triage Agent", summary="Classifies tickets by urgency")
 
     assert isinstance(manifest, AgentManifest)
     assert manifest.team == "agentic_team_provisioning"
@@ -58,24 +52,19 @@ def test_build_agent_manifest_validates_and_stamps_cognition():
 
 
 def test_build_agent_manifest_summary_falls_back_without_role():
-    agent = AgenticTeamAgent(agent_name="Nameless", role="")
-    manifest = build_agent_manifest("t", agent)
+    manifest = build_agent_manifest("t", "Nameless", summary="")
     assert manifest.summary == "Generated agent Nameless"
 
 
 def test_build_agent_manifest_rejects_empty_team_id():
     # Explicit ValueError (not assert) so the precondition survives ``python -O``.
-    agent = AgenticTeamAgent(agent_name="Triage", role="r")
     with pytest.raises(ValueError, match="team_id must be non-empty"):
-        build_agent_manifest("", agent)
+        build_agent_manifest("", "Triage")
 
 
 def test_build_agent_manifest_rejects_empty_agent_name():
-    # ``model_construct`` bypasses the model's min_length to exercise the projection
-    # boundary guard directly (a hand-built/degenerate agent must still fail loud).
-    agent = AgenticTeamAgent.model_construct(agent_name="", role="r")
     with pytest.raises(ValueError, match="agent_name must be non-empty"):
-        build_agent_manifest("team-1", agent)
+        build_agent_manifest("team-1", "")
 
 
 def test_register_team_manifests_rejects_empty_team_id():
@@ -84,12 +73,9 @@ def test_register_team_manifests_rejects_empty_team_id():
 
 
 def test_build_agent_manifest_id_stable_and_unique():
-    a = AgenticTeamAgent(agent_name="Router Agent", role="r")
-    b = AgenticTeamAgent(agent_name="Resolution Agent", role="r")
-
-    id_a1 = build_agent_manifest("team-1", a).id
-    id_a2 = build_agent_manifest("team-1", a).id
-    id_b = build_agent_manifest("team-1", b).id
+    id_a1 = build_agent_manifest("team-1", "Router Agent", summary="r").id
+    id_a2 = build_agent_manifest("team-1", "Router Agent", summary="r").id
+    id_b = build_agent_manifest("team-1", "Resolution Agent", summary="r").id
 
     assert id_a1 == id_a2  # stable for the same (team_id, agent_name)
     assert id_a1 != id_b  # distinct agents → distinct ids
@@ -98,8 +84,8 @@ def test_build_agent_manifest_id_stable_and_unique():
 
 def test_manifest_id_disambiguates_normalized_slug_clashes():
     # Distinct roster names that normalize to the same slug must stay distinct.
-    id_1 = build_agent_manifest("t", AgenticTeamAgent(agent_name="QA Agent", role="r")).id
-    id_2 = build_agent_manifest("t", AgenticTeamAgent(agent_name="qa-agent", role="r")).id
+    id_1 = build_agent_manifest("t", "QA Agent", summary="r").id
+    id_2 = build_agent_manifest("t", "qa-agent", summary="r").id
     assert id_1 != id_2
     # The id helper is the single source of truth used by the builder.
     assert id_1 == manifest_agent_id("t", "QA Agent")
@@ -116,8 +102,7 @@ def test_manifest_schema_refs_resolve_to_real_models():
 
     from pydantic import BaseModel
 
-    agent = AgenticTeamAgent(agent_name="A", role="r")
-    manifest = build_agent_manifest("t", agent)
+    manifest = build_agent_manifest("t", "A", summary="r")
     for ref in (manifest.inputs.schema_ref, manifest.outputs.schema_ref):
         module_path, cls_name = ref.split(":")
         model = getattr(importlib.import_module(module_path), cls_name)
@@ -125,10 +110,7 @@ def test_manifest_schema_refs_resolve_to_real_models():
 
 
 def test_free_text_tools_are_not_mapped_into_cognition():
-    agent = AgenticTeamAgent(
-        agent_name="Tooled", role="r", tools=["Git", "PostgreSQL", "Slack API"]
-    )
-    manifest = build_agent_manifest("t", agent)
+    manifest = build_agent_manifest("t", "Tooled", summary="r")
     assert manifest.cognition is not None
     assert manifest.cognition.tools == []
 
