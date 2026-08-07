@@ -276,7 +276,7 @@ def release_resume_claim(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR)
 
     Best-effort and never raises: a job-store transport error while clearing the stamp is logged and
     swallowed, not propagated. Release is cleanup, not a result — if it fails, the lease simply
-    self-heals when its TTL expires. Crucially, callers rely on this: ``_try_auto_resume`` documents
+    self-heals when its TTL expires. Crucially, callers rely on this: resume paths document
     "never raises", and ``resume_job`` calls this inside an ``except`` block that re-raises the
     original error — a release failure must never mask either.
     """

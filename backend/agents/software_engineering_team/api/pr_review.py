@@ -499,8 +499,7 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
 def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """Spawn the PR-review hook in a background thread.
 
-    Indirection so tests can monkey-patch this to invoke the hook synchronously
-    (mirrors ``_start_hook_thread``).
+    Indirection so tests can monkey-patch this to invoke the hook synchronously.
     """
     t = threading.Thread(
         target=_run_pr_review,

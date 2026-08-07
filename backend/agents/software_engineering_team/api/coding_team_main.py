@@ -6,7 +6,7 @@ the actual logic:
 * ``models`` — Pydantic request/response schemas.
 * ``state`` — run-thread registry, timing constants, answer/progress helpers.
 * ``lifecycle`` — ASGI startup probe.
-* ``orchestration`` — orchestrator-thread lifecycle and auto-resume.
+* ``orchestration`` — orchestrator wiring and the github-hook run flow.
 * ``pr_review`` — PR-review execution machinery.
 * ``git_ops`` — git/branch machinery and the github-hook run flow.
 * ``routes/*`` — APIRouter modules grouped by concern.
@@ -106,8 +106,6 @@ from software_engineering_team.api.git_ops import (  # noqa: F401
     _write_active_issue,
 )
 from software_engineering_team.api.orchestration import (  # noqa: F401
-    _RESUME_RECHECK_DELAY_S,
-    _claim_and_spawn_resume,
     _defer_terminal_success,
     _failed_tasks,
     _format_failed_tasks,
@@ -118,12 +116,7 @@ from software_engineering_team.api.orchestration import (  # noqa: F401
     _resolve_github_job_token,
     _run_with_github_hooks,
     _running_job_for_issue,
-    _schedule_resume_recheck,
-    _start_github_resume_thread,
-    _start_hook_thread,
-    _start_orchestrator_thread,
     _truncate_title,
-    _try_auto_resume,
     plan_from_input,
     run_orchestrator_wired,
 )
