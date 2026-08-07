@@ -115,9 +115,7 @@ def test_phase45_structured_output_model_wins_over_channel_guide_prompt() -> Non
     from branding_team.models import OwnershipOutput
 
     c = DummyLLMClient()
-    misleading_system_prompt = (
-        "Define content_types and frequency_guidance for channel: 'website'."
-    )
+    misleading_system_prompt = "Define content_types and frequency_guidance for channel: 'website'."
     j = c.complete_json(
         "go",
         system_prompt=misleading_system_prompt,
