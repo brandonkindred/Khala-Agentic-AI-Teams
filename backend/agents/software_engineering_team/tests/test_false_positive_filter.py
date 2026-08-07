@@ -413,6 +413,25 @@ def test_read_function_by_name_ambiguous_errors() -> None:
     assert "twin" in msg
 
 
+def test_read_function_by_name_ambiguous_pre_numbered_shows_original_lines() -> None:
+    """Pre-numbered twin defs → ambiguous error uses original line numbers, not physical."""
+    src = (
+        "100: def twin():\n"
+        "101:     return 1\n"
+        "\n"
+        "102: def twin():\n"
+        "103:     return 2\n"
+    )
+    idx = CodebaseIndex(files={"app/mod.py": src})
+    msg = idx.read_function_by_name("app/mod.py", "twin")
+    assert msg.startswith("Error:")
+    assert "ambiguous" in msg
+    assert "100–101" in msg
+    assert "102–103" in msg
+    assert "lines 1–" not in msg
+    assert "lines 2–" not in msg
+
+
 def test_read_function_tool_dispatches_line_and_name() -> None:
     src = "def f():\n    return 1\n"
     idx = CodebaseIndex(files={"app/mod.py": src})

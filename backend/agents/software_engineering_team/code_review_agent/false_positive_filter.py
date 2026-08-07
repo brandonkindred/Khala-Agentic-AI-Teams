@@ -638,8 +638,12 @@ class CodebaseIndex:
         if not matches:
             return f"Error: no function/class named {needle!r} in {display}."
         if len(matches) > 1:
+
+            def _disp(n: int) -> int:
+                return mapper(n) if mapper is not None else n
+
             detail = ", ".join(
-                f"{c.name} (lines {c.start_line}–{c.end_line})" for c in matches
+                f"{c.name} (lines {_disp(c.start_line)}–{_disp(c.end_line)})" for c in matches
             )
             return f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}."
         return _format_construct_slice(

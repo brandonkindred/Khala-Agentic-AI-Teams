@@ -5,6 +5,7 @@ from __future__ import annotations
 from code_review_agent.function_boundaries import (
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
 )
@@ -287,9 +288,6 @@ def test_strip_numbered_prefixes_empty_content() -> None:
 
 
 # --------------------------------------------------------------------------- iter_constructs
-
-
-from code_review_agent.function_boundaries import iter_constructs
 
 
 def test_iter_constructs_qualifies_methods_and_lists_all() -> None:
