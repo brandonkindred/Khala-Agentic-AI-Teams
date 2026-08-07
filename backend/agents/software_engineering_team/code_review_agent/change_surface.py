@@ -9,8 +9,9 @@ headers).
 This module locks types, signatures, and empty/no-op builder contracts.
 ``expand_touched_ranges`` expands touched lines via Python AST when possible,
 otherwise a heuristic start or capped context window. ``extract_touched_lines``
-wraps GitHub unified-patch helpers for added-only touched lines. Surface
-assembly is owned by follow-on work.
+wraps GitHub unified-patch helpers for added-only touched lines.
+``render_patch_hunks`` wraps annotated hunk rendering for the same patch text.
+Surface assembly is owned by follow-on work.
 
 Pure helpers: no I/O, no LLM clients, no package-level side effects.
 """
@@ -24,6 +25,7 @@ from typing import Collection, Mapping, Optional, Sequence
 
 from software_engineering_team.github_source.pr_review_mapping import (
     parse_valid_lines,
+    render_annotated_hunks,
 )
 
 from .function_boundaries import (
@@ -40,6 +42,7 @@ __all__ = [
     "expand_touched_ranges",
     "extract_touched_lines",
     "format_change_surface_code",
+    "render_patch_hunks",
 ]
 
 # Max inclusive line span for heuristic / centered fallback ranges. AST hits
@@ -168,6 +171,22 @@ def extract_touched_lines(patch: str) -> frozenset[int]:
         - Never raises.
     """
     return frozenset(parse_valid_lines(patch or "", added_only=True))
+
+
+def render_patch_hunks(patch: str) -> str:
+    """Render annotated hunk text for one file's unified / PR patch.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub ``files[].patch``
+          style), or empty / blank for binary / oversized / unchanged files.
+
+    Postconditions:
+        - Return value is identical to ``render_annotated_hunks(patch)`` for
+          every input (string equality).
+        - Empty or blank ``patch`` → ``""``.
+        - Never raises.
+    """
+    return render_annotated_hunks(patch or "")
 
 
 def build_change_surface_from_patches(
