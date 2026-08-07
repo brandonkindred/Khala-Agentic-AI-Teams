@@ -8,8 +8,9 @@ headers).
 
 This module locks types, signatures, and empty/no-op builder contracts.
 ``expand_touched_ranges`` expands touched lines via Python AST when possible,
-otherwise a heuristic start or capped context window. Surface assembly is
-owned by follow-on work.
+otherwise a heuristic start or capped context window. ``extract_touched_lines``
+wraps GitHub unified-patch helpers for added-only touched lines. Surface
+assembly is owned by follow-on work.
 
 Pure helpers: no I/O, no LLM clients, no package-level side effects.
 """
@@ -20,6 +21,10 @@ import ast
 import os
 from dataclasses import dataclass, field
 from typing import Collection, Mapping, Optional, Sequence
+
+from software_engineering_team.github_source.pr_review_mapping import (
+    parse_valid_lines,
+)
 
 from .function_boundaries import (
     enclosing_construct,
@@ -33,6 +38,7 @@ __all__ = [
     "build_change_surface_from_pairs",
     "build_change_surface_from_patches",
     "expand_touched_ranges",
+    "extract_touched_lines",
     "format_change_surface_code",
 ]
 
@@ -144,6 +150,24 @@ def _mapping_has_nonblank_value(mapping: Mapping[str, str]) -> bool:
         - Returns False for ``{}`` and for mappings whose values are all blank.
     """
     return any((value or "").strip() for value in mapping.values())
+
+
+def extract_touched_lines(patch: str) -> frozenset[int]:
+    """Return added-only new-file line numbers from one file's unified patch.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub ``files[].patch``
+          style), or empty / blank for binary / oversized / unchanged files.
+
+    Postconditions:
+        - Returns a frozenset of 1-based new-file line numbers that appear as
+          added (``+``) lines in the patch.
+        - Context (`` ``), removed (``-``), and ``\\ No newline at end of file``
+          markers are never included.
+        - Empty or blank ``patch`` → empty frozenset.
+        - Never raises.
+    """
+    return frozenset(parse_valid_lines(patch or "", added_only=True))
 
 
 def build_change_surface_from_patches(
