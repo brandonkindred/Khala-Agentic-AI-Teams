@@ -789,6 +789,32 @@ def test_cap_open_questions_preserves_order_and_limit() -> None:
     assert cap_open_questions(questions[:3]) == questions[:3]
 
 
+def test_question_processing_module_doc_states_full_text_logging_and_item_count_caps() -> None:
+    """Module docstring locks full-text logging and item-count (not char) caps."""
+    import product_requirements_analysis_agent.question_processing as qp
+
+    doc = " ".join((qp.__doc__ or "").split()).lower()
+    assert "logged in full" in doc
+    assert "no character truncation" in doc
+    assert "item-count ux caps" in doc
+    assert "not character limits on text fields" in doc
+
+
+def test_question_processing_max_constants_comment_states_item_count_not_character_limits() -> None:
+    """Source comment above MAX_* states item-count caps, not character limits."""
+    import product_requirements_analysis_agent.question_processing as qp
+
+    source = Path(qp.__file__).read_text(encoding="utf-8")
+    # Narrow to the block that introduces MAX_ISSUES so unrelated later
+    # mentions of "character" (e.g. stem helpers) cannot satisfy the assert.
+    marker = "MAX_ISSUES = 10"
+    idx = source.index(marker)
+    preamble = source[max(0, idx - 400) : idx]
+    comment = " ".join(preamble.split()).lower()
+    assert "item-count ux caps" in comment
+    assert "not character limits on text fields" in comment
+
+
 def test_cap_open_questions_rejects_negative_limit() -> None:
     """A negative limit is a precondition violation (caller bug), not malformed
     LLM input: it must raise AssertionError rather than silently returning a
