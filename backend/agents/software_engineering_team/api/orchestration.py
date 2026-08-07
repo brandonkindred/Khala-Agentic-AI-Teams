@@ -61,13 +61,16 @@ def run_orchestrator_wired(
     *,
     pause_strategy: str = "block",
     acknowledged_resume_token: Optional[str] = None,
+    update_job_fn: Optional[Callable[..., None]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Run the coding-team orchestrator for *job_id* with the standard job-store wiring.
 
     Single source of the ``(update_job_fn, get_job_fn, cache_dir)`` wiring shared
     by the POST /run background thread, the resume path, and the Temporal
-    activity, so it cannot drift between them. The github-source path wires a
-    custom ``update_job_fn`` (+ ``on_pause``) and deliberately does not use this.
+    activity, so it cannot drift between them. The github-source thread path
+    wires a custom ``update_job_fn`` (+ ``on_pause``) and deliberately does not
+    use this; the Temporal GitHub path passes ``_defer_terminal_success(job_id)``
+    via ``update_job_fn`` so publish still sees a non-terminal job.
 
     ``pause_strategy``/``acknowledged_resume_token`` are forwarded unchanged into
     ``run_coding_team_orchestrator`` — see that function's docstring for the full
@@ -79,6 +82,8 @@ def run_orchestrator_wired(
     Preconditions:
         - ``job_id`` names an existing job in the process job store; ``plan`` is a
           validated ``CodingTeamPlanInput`` whose ``repo_path`` equals *repo_path*.
+        - ``update_job_fn``, when supplied, is a callable accepting keyword job
+          field updates (same contract as ``update_job`` for ``job_id``).
     Postconditions:
         - ``pause_strategy="block"``: returns ``None``, unchanged from every caller's
           behavior before this parameter existed. The orchestrator has run to
@@ -88,12 +93,14 @@ def run_orchestrator_wired(
         - ``pause_strategy="return"``: returns the orchestrator's
           ``{"outcome": "paused", ...}`` dict when a HITL gate paused, or ``None`` when
           the pipeline instead reached a terminal state.
+        - Uses ``update_job_fn`` when provided; otherwise the default
+          ``lambda **kw: update_job(job_id, **kw)`` wiring.
     """
     return _main.run_coding_team_orchestrator(
         job_id,
         repo_path,
         plan,
-        update_job_fn=lambda **kw: _main.update_job(job_id, **kw),
+        update_job_fn=update_job_fn or (lambda **kw: _main.update_job(job_id, **kw)),
         get_job_fn=_main.get_job,
         cache_dir=DEFAULT_CACHE_DIR,
         pause_strategy=pause_strategy,
