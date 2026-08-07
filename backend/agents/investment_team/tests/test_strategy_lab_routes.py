@@ -1301,6 +1301,31 @@ def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
     assert stub.by_id["run-legacy"]["generation"] == 2
 
 
+@pytest.mark.parametrize("uninitialized_generation", [None, 0, ""])
+def test_restart_strategy_lab_run_bootstraps_uninitialized_generation_above_one(
+    monkeypatch: pytest.MonkeyPatch, api_client, uninitialized_generation
+) -> None:
+    """A durable record with generation null/0/empty must bootstrap to 2 on
+    first restart, same as a missing key -- job-service increment coerces
+    those to 0, so a plain +1 would mint 1 and reopen the equal-token hole."""
+    from investment_team.api import main as api_main
+
+    run_id = f"run-uninit-{uninitialized_generation!r}"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    stub = _StubLabClient(jobs=[{"job_id": run_id, "generation": uninitialized_generation}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs[run_id]["generation"] == 2
+    assert stub.by_id[run_id]["generation"] == 2
+
+
 def test_restart_strategy_lab_run_bootstrap_check_read_failure_still_succeeds(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

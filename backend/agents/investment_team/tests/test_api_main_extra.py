@@ -606,10 +606,34 @@ def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() 
     )
 
 
+@pytest.mark.parametrize(
+    "uninitialized_generation",
+    [None, "", 0, -1, True, False, 1.5, "not-an-int", [], {}],
+)
+def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_uninitialized(
+    uninitialized_generation,
+) -> None:
+    """A present but uninitialized/corrupt generation must use the same +2
+    bootstrap as a missing key -- get_run_generation_strict already treats
+    None/empty/<=0 as DEFAULT_FENCING_GENERATION, and job-service increment
+    coerces non-ints to 0, so +1 would mint generation 1 and reopen the
+    equal-token fencing hole the bootstrap exists to close."""
+    from investment_team.api.main import (
+        GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    assert (
+        _legacy_generation_bootstrap_increment({"generation": uninitialized_generation})
+        == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    )
+
+
 def test_legacy_generation_bootstrap_increment_normal_when_field_present() -> None:
-    """A run that already has a persisted "generation" field (created after
-    fencing shipped, or a legacy run past its first post-upgrade restart)
-    increments by the ordinary amount rather than re-bootstrapping."""
+    """A run that already has a persisted positive integer "generation" field
+    (created after fencing shipped, or a legacy run past its first
+    post-upgrade restart) increments by the ordinary amount rather than
+    re-bootstrapping."""
     from investment_team.api.main import (
         GENERATION_INCREMENT_NORMAL,
         _legacy_generation_bootstrap_increment,
@@ -2897,3 +2921,33 @@ def test_run_state_to_response_tolerates_missing_run_id() -> None:
 
     assert resp.run_id == ""
     assert resp.status == "running"
+
+
+@pytest.mark.parametrize("bad_generation", [None, "", 0, -3, True, 2.5, "x", [], {}])
+def test_run_state_to_response_coerces_uninitialized_generation(bad_generation) -> None:
+    """An explicit null/empty/non-positive/unparseable generation must degrade
+    to DEFAULT_FENCING_GENERATION rather than raising ValidationError --
+    status/list routes feed job-service-shaped state through this helper and
+    must keep their always-200 contract when a persisted record carries a
+    null generation field."""
+    from investment_team.api.main import _run_state_to_response
+    from investment_team.strategy_lab.run_state import DEFAULT_FENCING_GENERATION
+
+    resp = _run_state_to_response(
+        {
+            "run_id": "run-null-gen",
+            "status": "running",
+            "generation": bad_generation,
+        }
+    )
+
+    assert resp.generation == DEFAULT_FENCING_GENERATION
+
+
+def test_run_state_to_response_preserves_positive_generation() -> None:
+    """A positive integer generation must pass through unchanged."""
+    from investment_team.api.main import _run_state_to_response
+
+    resp = _run_state_to_response({"run_id": "run-g", "status": "running", "generation": 4})
+
+    assert resp.generation == 4

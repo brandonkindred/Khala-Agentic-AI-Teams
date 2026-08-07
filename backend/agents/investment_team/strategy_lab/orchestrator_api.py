@@ -92,7 +92,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
         Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
         field, defaulting each absent field to its response default
         (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
-        lists — including ``tracker_merge_error_count`` (``0`` when absent) and ``generation`` (``1`` when absent, matching a pre-fencing legacy record's implicit generation)) —
+        lists — including ``tracker_merge_error_count`` (``0`` when absent) and ``generation`` (``DEFAULT_FENCING_GENERATION`` when absent, null, empty, non-positive, or unparseable — matching ``get_run_generation_strict``'s uninitialized contract)) —
         and mapping a present ``current_cycle`` dict to a
         ``StrategyLabCycleProgress`` (``None`` when absent). ``batch_size`` is
         the one field that deliberately does NOT fall back to the model's
@@ -105,6 +105,10 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
         validation, degrades to ``None`` instead of raising -- ``state`` can
         be job-service data reconciled with no shape check (see
         ``_reconcile_run_progress``), so it is not assumed well-formed.
+        ``generation`` follows the same uninitialized contract as
+        ``get_run_generation_strict``: absent / ``None`` / empty / non-positive
+        / unparseable values degrade to ``DEFAULT_FENCING_GENERATION`` rather
+        than raising ``ValidationError`` out of a status/list route.
     """
     from investment_team.api.main import StrategyLabCycleProgress, StrategyLabRunStatusResponse
 
@@ -115,6 +119,18 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
             current_cycle = StrategyLabCycleProgress(**cc)
         except ValidationError:
             current_cycle = None
+
+    raw_generation = state.get("generation", DEFAULT_FENCING_GENERATION)
+    if raw_generation is None or raw_generation == "":
+        generation = DEFAULT_FENCING_GENERATION
+    elif isinstance(raw_generation, bool) or isinstance(raw_generation, float):
+        generation = DEFAULT_FENCING_GENERATION
+    else:
+        try:
+            generation = max(DEFAULT_FENCING_GENERATION, int(raw_generation))
+        except (TypeError, ValueError):
+            generation = DEFAULT_FENCING_GENERATION
+
     return StrategyLabRunStatusResponse(
         run_id=state.get("run_id", ""),
         status=state.get("status", "unknown"),
@@ -132,7 +148,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
         batch_count=state.get("batch_count", 1),
         completed_batches=state.get("completed_batches", 0),
         current_batch=state.get("current_batch"),
-        generation=state.get("generation", DEFAULT_FENCING_GENERATION),
+        generation=generation,
     )
 
 

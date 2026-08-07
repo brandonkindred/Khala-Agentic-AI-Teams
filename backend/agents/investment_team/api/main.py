@@ -108,6 +108,9 @@ from investment_team.strategy_lab.config import (
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.run_state import (
+    DEFAULT_FENCING_GENERATION,
+)
+from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
 )
 from investment_team.strategy_lab.run_state import (
@@ -540,9 +543,17 @@ def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
     equal tokens -- so that stale activity would pass fencing again. Jumping
     straight to ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` in that one case
     makes the minted value strictly exceed the legacy default; a run that
-    already has an explicit "generation" field (every run created after this
-    change, and any legacy run past its first post-upgrade restart)
-    increments by the ordinary ``GENERATION_INCREMENT_NORMAL`` instead.
+    already has an explicit positive integer "generation" field (every run
+    created after this change, and any legacy run past its first
+    post-upgrade restart) increments by the ordinary
+    ``GENERATION_INCREMENT_NORMAL`` instead.
+
+    The same +2 bootstrap applies when the key is present but still
+    uninitialized in the sense ``get_run_generation_strict`` already uses:
+    ``None``, ``""``, a non-int / bool, or an int below
+    ``DEFAULT_FENCING_GENERATION``. Job-service increment coerces those to
+    ``0`` before adding the delta, so a plain +1 would again land on
+    generation 1 and reopen the equal-token hole.
 
     Preconditions:
         - ``durable_data`` is the run's durable job record (its ``"data"``
@@ -561,19 +572,27 @@ def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
 
     Postconditions:
         - Returns ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` when
-          ``durable_data`` has no "generation" key, else
-          ``GENERATION_INCREMENT_NORMAL``. A durable read that failed (and
-          was passed here as ``{}`` by the caller) is treated the same as a
-          genuinely legacy/fieldless record: incrementing one extra is
+          ``durable_data`` has no usable positive integer "generation"
+          (absent, ``None``/empty, non-int/bool, or ``< DEFAULT_FENCING_GENERATION``),
+          else ``GENERATION_INCREMENT_NORMAL``. A durable read that failed
+          (and was passed here as ``{}`` by the caller) is treated the same
+          as a genuinely legacy/fieldless record: incrementing one extra is
           harmless (fencing only needs strict monotonic increase), while
-          defaulting to +1 when the record really was legacy would reopen
-          the bug above.
+          defaulting to +1 when the record really was uninitialized would
+          reopen the bug above.
     """
-    return (
-        GENERATION_INCREMENT_LEGACY_BOOTSTRAP
-        if "generation" not in durable_data
-        else GENERATION_INCREMENT_NORMAL
-    )
+    if "generation" not in durable_data:
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    raw = durable_data["generation"]
+    if raw is None or raw == "":
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    # bool is an int subclass; reject it explicitly. Non-ints are coerced to
+    # 0 by job-service increment, so +1 would mint generation 1.
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    if raw < DEFAULT_FENCING_GENERATION:
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    return GENERATION_INCREMENT_NORMAL
 
 
 class StrategyLabRunStartResponse(BaseModel):
