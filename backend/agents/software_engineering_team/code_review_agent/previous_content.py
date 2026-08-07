@@ -121,7 +121,10 @@ def read_previous_content_from_git(
     revision: str,
     paths: Iterable[str],
 ) -> PreviousContentResult:
-    """Read file blobs at ``revision`` under ``repo_path`` via ``git show``.
+    """Read file blobs at ``revision`` under ``repo_path``.
+
+    Each path is typed/sized with ``git cat-file`` (``-t`` / ``-s``) before
+    ``git show`` so oversize or non-blob objects are never loaded as text.
 
     Preconditions:
         - ``repo_path`` is strip-nonempty; otherwise raise ``ValueError``.
@@ -131,8 +134,9 @@ def read_previous_content_from_git(
     Postconditions:
         - Returns ``PreviousContentResult`` for the unique path strings.
         - If the path is not a usable git repo, ``revision`` starts with ``-``
-          (flag-like), or ``revision`` does not resolve to a commit, every
-          unique path is a miss (no raise).
+          (flag-like), ``revision`` contains ``:`` (ambiguous with
+          ``rev:path`` object syntax), or ``revision`` does not resolve to a
+          commit, every unique path is a miss (no raise).
         - Per-path: unsafe/blank path, missing/non-blob object (tree/dir),
           non-zero ``git cat-file`` / ``git show``, oversize blob (size via
           ``git cat-file -s`` before ``git show``), or binary (NUL) blob → miss;
@@ -161,7 +165,8 @@ def read_previous_content_from_git(
     # Leading ``-`` would be parsed as a git option by ``rev-parse --verify``;
     # ``--`` after ``--verify`` is not portable (breaks normal HEAD peels on
     # common git builds), so reject flag-like revisions as all-miss.
-    if stripped_rev.startswith("-"):
+    # A ``:`` in the revision would make ``rev:path`` object names ambiguous.
+    if stripped_rev.startswith("-") or ":" in stripped_rev:
         return _all_misses(unique)
     verify_rc, _ = _run_git(
         root,
