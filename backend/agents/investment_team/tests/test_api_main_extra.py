@@ -608,16 +608,16 @@ def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_absent() 
 
 @pytest.mark.parametrize(
     "uninitialized_generation",
-    [None, "", 0, -1, True, False, 1.5, "not-an-int", [], {}],
+    [None, "", 0, -1, "0", "-3", "not-an-int", [], {}],
 )
 def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_uninitialized(
     uninitialized_generation,
 ) -> None:
-    """A present but uninitialized/corrupt generation must use the same +2
+    """A present but uninitialized/unparseable generation must use the same +2
     bootstrap as a missing key -- get_run_generation_strict already treats
     None/empty/<=0 as DEFAULT_FENCING_GENERATION, and job-service increment
-    coerces non-ints to 0, so +1 would mint generation 1 and reopen the
-    equal-token fencing hole the bootstrap exists to close."""
+    coerces unparseable non-ints to 0, so +2 lands safely above the legacy
+    activity default of 1."""
     from investment_team.api.main import (
         GENERATION_INCREMENT_LEGACY_BOOTSTRAP,
         _legacy_generation_bootstrap_increment,
@@ -627,6 +627,24 @@ def test_legacy_generation_bootstrap_increment_jumps_to_two_when_field_uninitial
         _legacy_generation_bootstrap_increment({"generation": uninitialized_generation})
         == GENERATION_INCREMENT_LEGACY_BOOTSTRAP
     )
+
+
+@pytest.mark.parametrize("unsafe_generation", ["5", "1", "42", True, False, 1.5, 2.0])
+def test_legacy_generation_bootstrap_increment_fails_closed_on_non_native_positive_token(
+    unsafe_generation,
+) -> None:
+    """A durable generation that parses as a positive fencing token but is not
+    a native int (numeric string) — or is a bool/float get_run_generation_strict
+    rejects — must raise rather than return +2: job-service increment would
+    zero a string first and mint 2, regressing e.g. conceptual generation 5
+    and letting in-flight activities that present 5 pass check_fencing_token."""
+    from investment_team.api.main import (
+        UnsafeDurableGenerationError,
+        _legacy_generation_bootstrap_increment,
+    )
+
+    with pytest.raises(UnsafeDurableGenerationError):
+        _legacy_generation_bootstrap_increment({"generation": unsafe_generation})
 
 
 def test_legacy_generation_bootstrap_increment_normal_when_field_present() -> None:

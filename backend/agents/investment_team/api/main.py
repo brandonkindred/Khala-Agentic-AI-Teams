@@ -529,6 +529,16 @@ GENERATION_INCREMENT_LEGACY_BOOTSTRAP = 2
 _GENERATION_EXCLUDE_FIELDS = frozenset({"generation"})
 
 
+class UnsafeDurableGenerationError(ValueError):
+    """Durable ``generation`` cannot be advanced safely via job-service increment.
+
+    Raised when the persisted value is a representation ``get_run_generation_strict``
+    would accept as a positive fencing token (e.g. the numeric string ``\"5\"``) but
+    job-service ``apply`` would coerce to ``0`` before adding the delta — so a plain
+    increment would *regress* the conceptual generation and reopen fencing.
+    """
+
+
 def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
     """Return the fencing-generation increment ``restart_strategy_lab_run``
     should atomically apply for this run's durable record.
@@ -549,11 +559,15 @@ def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
     ``GENERATION_INCREMENT_NORMAL`` instead.
 
     The same +2 bootstrap applies when the key is present but still
-    uninitialized in the sense ``get_run_generation_strict`` already uses:
-    ``None``, ``""``, a non-int / bool, or an int below
-    ``DEFAULT_FENCING_GENERATION``. Job-service increment coerces those to
-    ``0`` before adding the delta, so a plain +1 would again land on
-    generation 1 and reopen the equal-token hole.
+    uninitialized in the sense ``get_run_generation_strict`` already uses for
+    soft defaults: ``None``, ``""``, an int below ``DEFAULT_FENCING_GENERATION``,
+    or a non-int that cannot be parsed as an int (job-service increment
+    coerces those to ``0``, so +2 lands on generation 2). Bools and floats are
+    rejected instead (``get_run_generation_strict`` raises on them). A
+    non-int that *parses* as a positive int (e.g. ``\"5\"``) also fails closed:
+    increment would zero the field first and mint ``2``, regressing the
+    conceptual token and letting in-flight activities that present ``5``
+    pass ``check_fencing_token``.
 
     Preconditions:
         - ``durable_data`` is the run's durable job record (its ``"data"``
@@ -572,27 +586,48 @@ def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
 
     Postconditions:
         - Returns ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` when
-          ``durable_data`` has no usable positive integer "generation"
-          (absent, ``None``/empty, non-int/bool, or ``< DEFAULT_FENCING_GENERATION``),
-          else ``GENERATION_INCREMENT_NORMAL``. A durable read that failed
-          (and was passed here as ``{}`` by the caller) is treated the same
-          as a genuinely legacy/fieldless record: incrementing one extra is
-          harmless (fencing only needs strict monotonic increase), while
-          defaulting to +1 when the record really was uninitialized would
-          reopen the bug above.
+          ``durable_data`` has no usable positive native-int "generation"
+          (absent, ``None``/empty, unparseable non-int, or native int
+          ``< DEFAULT_FENCING_GENERATION``).
+        - Returns ``GENERATION_INCREMENT_NORMAL`` for a native ``int``
+          ``>= DEFAULT_FENCING_GENERATION``.
+        - Raises ``UnsafeDurableGenerationError`` when the durable value is a
+          bool/float, or a non-int that parses to an int
+          ``>= DEFAULT_FENCING_GENERATION`` (increment would regress the
+          token). Callers must translate that into a fail-closed response
+          rather than minting.
+        - A durable read that failed (and was passed here as ``{}``) is
+          treated the same as a genuinely legacy/fieldless record.
     """
     if "generation" not in durable_data:
         return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
     raw = durable_data["generation"]
     if raw is None or raw == "":
         return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
-    # bool is an int subclass; reject it explicitly. Non-ints are coerced to
-    # 0 by job-service increment, so +1 would mint generation 1.
-    if isinstance(raw, bool) or not isinstance(raw, int):
+    # bool is an int subclass; float is accepted by job-service increment but
+    # rejected by get_run_generation_strict — fail closed rather than minting
+    # a float/bool-derived token that fencing reads cannot round-trip.
+    if isinstance(raw, bool) or isinstance(raw, float):
+        raise UnsafeDurableGenerationError(
+            f"durable generation {raw!r} is not a native int fencing token"
+        )
+    if isinstance(raw, int):
+        if raw < DEFAULT_FENCING_GENERATION:
+            return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+        return GENERATION_INCREMENT_NORMAL
+    # Non-int: unparseable garbage zeros under job-service increment → +2 is
+    # safe. A parseable positive value (e.g. "5") must NOT use increment: the
+    # service would zero it first and regress the conceptual generation.
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
         return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
-    if raw < DEFAULT_FENCING_GENERATION:
+    if parsed < DEFAULT_FENCING_GENERATION:
         return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
-    return GENERATION_INCREMENT_NORMAL
+    raise UnsafeDurableGenerationError(
+        f"durable generation {raw!r} parses to {parsed} but is not a native int; "
+        "job-service increment would zero it and regress the fencing token"
+    )
 
 
 class StrategyLabRunStartResponse(BaseModel):
@@ -3538,7 +3573,21 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # _row_to_dict), never returned as a separate nested key. `or {}`
         # normalizes only the "no job" case; no further shape-guessing needed.
         durable_data = durable_job or {}
-        generation_increment = _legacy_generation_bootstrap_increment(durable_data)
+        try:
+            generation_increment = _legacy_generation_bootstrap_increment(durable_data)
+        except UnsafeDurableGenerationError as exc:
+            # A parseable-but-non-native generation (e.g. "5") cannot be
+            # advanced via increment without job-service zeroing it first and
+            # regressing the fencing token. Fail closed rather than mint a
+            # weaker generation that in-flight activities presenting the
+            # conceptual value would still pass.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; durable "
+                    "generation is not a native integer and cannot be advanced safely."
+                ),
+            ) from exc
         try:
             updated_generation_record = client.apply_and_get(
                 run_id, increment={"generation": generation_increment}

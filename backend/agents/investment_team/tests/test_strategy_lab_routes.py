@@ -199,11 +199,16 @@ class _StubLabClient:
         no-op instead); update_job is implemented separately below.
         """
         record = self.by_id.setdefault(jid, {"job_id": jid})
-        if increment:
-            for key, delta in increment.items():
-                record[key] = (record.get(key) or 0) + delta
+        # Match job_service.db.apply_patch order: merge_fields first, then
+        # increment with the same non-(int|float) → 0 coercion production uses.
         if merge_fields:
             record.update(merge_fields)
+        if increment:
+            for key, delta in increment.items():
+                current = record.get(key, 0)
+                if not isinstance(current, (int, float)) or isinstance(current, bool):
+                    current = 0
+                record[key] = current + delta
         self.jobs = list(self.by_id.values())
         return dict(record)
 
@@ -1324,6 +1329,30 @@ def test_restart_strategy_lab_run_bootstraps_uninitialized_generation_above_one(
     assert resp.status_code == 200
     assert api_main._active_runs[run_id]["generation"] == 2
     assert stub.by_id[run_id]["generation"] == 2
+
+
+def test_restart_strategy_lab_run_fails_closed_on_numeric_string_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a durable generation of \"5\" must not restart-mint via
+    increment (which would zero the string and land on 2, regressing the
+    conceptual token so in-flight activities presenting 5 still pass
+    fencing). Fail closed with 503 and leave the durable value untouched."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-str-gen"] = {
+        "run_id": "run-str-gen",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-str-gen", "generation": "5"}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-str-gen/restart")
+
+    assert resp.status_code == 503
+    assert "native integer" in resp.json()["detail"].lower()
+    assert stub.by_id["run-str-gen"]["generation"] == "5"
 
 
 def test_restart_strategy_lab_run_bootstrap_check_read_failure_still_succeeds(
