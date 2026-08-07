@@ -1768,3 +1768,15 @@ def cancel_pipeline_run(team_id: str, run_id: str):
     _pipeline_runner.cancel_run(run_id)
     updated = _test_store.get_pipeline_run(run_id)
     return TestPipelineRun(**(updated or row))
+
+
+# --- Mount extracted routers last (hub + globals already defined) ---
+from agent_team_studio.agentic_team_provisioning.api.routes import (  # noqa: E402
+    conversations as conversations_routes,
+    teams as teams_routes,
+)
+
+_teams_router = teams_routes.router
+_conversations_router = conversations_routes.router
+app.include_router(_teams_router)
+app.include_router(_conversations_router)
