@@ -36,9 +36,7 @@ _MOVED = (
     "_require_run_transition_lock",
 )
 
-_MOVED_CALLABLES = tuple(
-    name for name in _MOVED if name != "STRATEGY_LAB_TERMINAL_STATUSES"
-)
+_MOVED_CALLABLES = tuple(name for name in _MOVED if name != "STRATEGY_LAB_TERMINAL_STATUSES")
 
 _DEFERRED = (
     "_snapshot_prior_records",
@@ -90,9 +88,7 @@ def test_api_main_has_no_moved_helper_function_bodies() -> None:
     source = inspect.getsource(api_main)
     tree = ast.parse(source)
     defined = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     leaked = sorted(defined & set(_MOVED_CALLABLES))
     assert leaked == [], (
