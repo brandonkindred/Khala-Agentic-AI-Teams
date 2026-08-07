@@ -1376,9 +1376,9 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         - ``HTTPException(400)`` if the strategy has no validation report.
         - ``HTTPException(500)`` if the advisory result is missing a
           ``decision`` field, has a non-list/non-string ``audit_log_appended``,
-          or names an unknown ``escalation_enqueued`` queue.
-        - ``HTTPException(422)`` if the ``decision`` field fails
-          ``PromotionDecision`` validation.
+          has a malformed ``escalation_enqueued`` payload (non-dict, missing
+          ``queue``/``payload_id``/``priority``, or unknown queue name), or
+          whose ``decision`` fails ``PromotionDecision`` validation.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1410,7 +1410,7 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     )
 
     # Validate the entire result up front — decision, audit-log shape, and
-    # escalation queue name — before mutating any shared _workflow_state, so
+    # escalation queue item — before mutating any shared _workflow_state, so
     # a malformed activity result never leaves the audit log or queues
     # partially updated.
     decision_data = result.get("decision")
@@ -1421,7 +1421,9 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     try:
         decision = PromotionDecision.model_validate(decision_data)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid decision payload: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Invalid decision payload: {exc}"
+        ) from exc
 
     audit_entries = result.get("audit_log_appended") or []
     if not isinstance(audit_entries, list) or not all(isinstance(e, str) for e in audit_entries):
@@ -1431,20 +1433,39 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         )
 
     escalation = result.get("escalation_enqueued")
-    queue_name = escalation.get("queue") if escalation else None
-    if escalation and queue_name not in _workflow_state.queues:
-        raise HTTPException(status_code=500, detail=f"Unknown escalation queue '{queue_name}'")
+    queue_item: QueueItem | None = None
+    if escalation is not None:
+        if not isinstance(escalation, dict):
+            raise HTTPException(
+                status_code=500,
+                detail="Promotion decision result has invalid 'escalation_enqueued' payload",
+            )
+        queue_name = escalation.get("queue")
+        payload_id = escalation.get("payload_id")
+        priority = escalation.get("priority")
+        if not isinstance(queue_name, str) or not queue_name:
+            raise HTTPException(
+                status_code=500,
+                detail="Promotion decision result has invalid escalation queue name",
+            )
+        if queue_name not in _workflow_state.queues:
+            raise HTTPException(status_code=500, detail=f"Unknown escalation queue '{queue_name}'")
+        if not isinstance(payload_id, str) or not payload_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Promotion decision result has invalid escalation payload_id",
+            )
+        if not isinstance(priority, str) or not priority:
+            raise HTTPException(
+                status_code=500,
+                detail="Promotion decision result has invalid escalation priority",
+            )
+        queue_item = QueueItem(queue=queue_name, payload_id=payload_id, priority=priority)
 
     with _lock:
         _workflow_state.audit_log.extend(audit_entries)
-        if escalation:
-            _workflow_state.queues[queue_name].append(
-                QueueItem(
-                    queue=queue_name,
-                    payload_id=escalation["payload_id"],
-                    priority=escalation["priority"],
-                )
-            )
+        if queue_item is not None:
+            _workflow_state.queues[queue_item.queue].append(queue_item)
     return PromotionDecisionResponse(
         strategy_id=request.strategy_id,
         decision=decision,
@@ -1516,7 +1537,7 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
           ``_translate_advisory_failure`` maps it to.
         - ``HTTPException(502)`` when the advisory result lacks a ``memo``
           payload.
-        - ``HTTPException(422)`` if the ``memo`` field fails
+        - ``HTTPException(500)`` if the ``memo`` field fails
           ``InvestmentCommitteeMemo`` validation.
     """
     result = _execute_advisory(
@@ -1536,7 +1557,7 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
     try:
         memo = InvestmentCommitteeMemo.model_validate(memo_data)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid memo payload: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Invalid memo payload: {exc}") from exc
     return CreateMemoResponse(memo=memo)
 
 

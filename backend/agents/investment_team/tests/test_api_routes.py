@@ -565,8 +565,9 @@ def test_promotion_decision_missing_decision_field_returns_500(api_client, monke
     assert "decision" in resp.json()["detail"]
 
 
-def test_promotion_decision_invalid_decision_payload_returns_422(api_client, monkeypatch) -> None:
-    """A present but schema-invalid 'decision' triggers a 422, not an unhandled ValidationError."""
+def test_promotion_decision_invalid_decision_payload_returns_500(api_client, monkeypatch) -> None:
+    """A present but schema-invalid 'decision' is a server/integration fault → 500,
+    matching advisor routes' handling of malformed Temporal payloads."""
     from investment_team.api import main as api_main
 
     sid = _promotion_decide_setup(api_client)
@@ -582,7 +583,8 @@ def test_promotion_decision_invalid_decision_payload_returns_422(api_client, mon
             "approver_agent_id": "a1",
         },
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 500
+    assert "decision" in resp.json()["detail"].lower() or "invalid" in resp.json()["detail"].lower()
 
 
 def test_promotion_decision_unknown_escalation_queue_returns_500(api_client, monkeypatch) -> None:
@@ -615,6 +617,73 @@ def test_promotion_decision_unknown_escalation_queue_returns_500(api_client, mon
     )
     assert resp.status_code == 500
     assert "queue" in resp.json()["detail"].lower()
+    assert api_main._workflow_state.audit_log == []
+    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+
+
+def test_promotion_decision_escalation_missing_payload_id_does_not_mutate_audit_log(
+    api_client, monkeypatch
+) -> None:
+    """A known-queue escalation missing payload_id must 500 before any shared-state
+    mutation — not extend audit_log then raise KeyError inside the lock."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "audit_log_appended": [f"promotion:{sid}:paper"],
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
+    assert "escalation" in resp.json()["detail"].lower()
+    assert api_main._workflow_state.audit_log == []
+    assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
+
+
+def test_promotion_decision_non_dict_escalation_does_not_mutate_audit_log(
+    api_client, monkeypatch
+) -> None:
+    """A truthy non-dict escalation_enqueued must 500 before mutating shared state."""
+    from investment_team.api import main as api_main
+
+    sid = _promotion_decide_setup(api_client)
+    decision = {"strategy_id": sid, "decided_by": "a1", "outcome": "paper", "rationale": "ok"}
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": decision,
+            "audit_log_appended": [f"promotion:{sid}:paper"],
+            "escalation_enqueued": "not-a-dict",
+        },
+    )
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "a1",
+        },
+    )
+    assert resp.status_code == 500
     assert api_main._workflow_state.audit_log == []
     assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
 
@@ -696,8 +765,9 @@ def test_create_memo_502_when_advisory_result_missing_memo(api_client, monkeypat
     assert resp.json()["detail"] == "Memo generation result is missing"
 
 
-def test_create_memo_invalid_memo_payload_returns_422(api_client, monkeypatch) -> None:
-    """A present but schema-invalid 'memo' triggers a 422, not an unhandled ValidationError."""
+def test_create_memo_invalid_memo_payload_returns_500(api_client, monkeypatch) -> None:
+    """A present but schema-invalid 'memo' is a server/integration fault → 500,
+    matching advisor routes' handling of malformed Temporal payloads."""
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(
@@ -712,7 +782,8 @@ def test_create_memo_invalid_memo_payload_returns_422(api_client, monkeypatch) -
             "dissenting_views": [],
         },
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 500
+    assert resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
