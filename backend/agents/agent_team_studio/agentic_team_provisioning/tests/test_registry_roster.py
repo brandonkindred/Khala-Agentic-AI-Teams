@@ -528,8 +528,7 @@ def test_llm_save_maps_skills_to_manifest_tags(
     )
 
     roster = client.get(f"/teams/{team_id}/agents").json()
-    assert "seo" in roster[0]["skills"]
-    assert "headline-writing" in roster[0]["skills"]
+    assert roster[0]["skills"] == ["seo", "headline-writing"]
     mid = manifest_agent_id(team_id, "Writer")
     manifest = registry.get(mid)
     assert manifest is not None
@@ -561,6 +560,31 @@ def test_llm_save_whitespace_only_skills_preserve_prior_tags(
     assert "seo" in registry.get(mid).tags
     roster = client.get(f"/teams/{team_id}/agents").json()
     assert "seo" in roster[0]["skills"]
+    assert "generated" not in roster[0]["skills"]
+
+
+def test_llm_save_whitespace_only_role_preserves_prior_summary(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Whitespace-only LLM role must omit summaries so a prior Manifest summary survives."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["seo"]}],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert registry.get(mid).summary == "Writes copy"
+
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "   \t  ", "skills": ["seo"]}],
+    )
+    assert registry.get(mid).summary == "Writes copy"
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert roster[0]["role"] == "Writes copy"
 
 
 def test_register_team_manifests_skips_registry_agents(

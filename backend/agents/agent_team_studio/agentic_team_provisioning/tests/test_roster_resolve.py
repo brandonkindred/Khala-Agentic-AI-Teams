@@ -55,6 +55,17 @@ def test_persona_from_manifest_whitespace_summary_falls_back_to_name() -> None:
     assert view.role == "Planner"
 
 
+def test_persona_from_manifest_strips_generated_marker_tags() -> None:
+    """Infrastructure tags on generated Manifests must not surface as persona skills."""
+    manifest = build_agent_manifest(
+        "team-1", "Writer", summary="Writes", skill_tags=["seo", "copy"]
+    )
+    view = persona_from_manifest(manifest)
+    assert view.skills == ["seo", "copy"]
+    assert "generated" not in view.skills
+    assert "agentic_team_provisioning" not in view.skills
+
+
 def test_coerce_roster_agent_accepts_fat_history_with_null_manifest_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

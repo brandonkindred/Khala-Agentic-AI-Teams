@@ -42,7 +42,9 @@ def persona_from_manifest(manifest: AgentManifest) -> RosterPersonaView:
 
     Preconditions: ``manifest`` is a validated ``AgentManifest``.
     Postconditions: ``role`` is ``summary`` (or ``name`` if summary blank);
-        ``skills`` ← ``tags``; ``tools`` ← ``cognition.tools`` or ``[]``;
+        ``skills`` ← non-marker Manifest tags (excludes ``"generated"`` / team-key
+        stamps — same filter as :func:`skill_tags_from_manifest`);
+        ``tools`` ← ``cognition.tools`` or ``[]``;
         ``expertise`` ← ``[team]`` when team non-empty; ``capabilities`` always ``[]``.
     """
     tools: list[str] = []
@@ -52,7 +54,7 @@ def persona_from_manifest(manifest: AgentManifest) -> RosterPersonaView:
     name = (manifest.name or "").strip()
     return RosterPersonaView(
         role=summary or name,
-        skills=list(manifest.tags or []),
+        skills=skill_tags_from_manifest(manifest),
         capabilities=[],
         tools=tools,
         expertise=[manifest.team] if manifest.team else [],

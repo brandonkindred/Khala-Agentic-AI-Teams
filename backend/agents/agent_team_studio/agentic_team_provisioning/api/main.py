@@ -266,7 +266,7 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         name = a.get("agent_name", "")
         if not name:
             continue
-        role = a.get("role", "")
+        role = str(a.get("role") or "").strip()
         if role:
             summaries[name] = role
         skills = a.get("skills") or []
