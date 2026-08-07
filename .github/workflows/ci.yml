@@ -679,8 +679,16 @@ jobs:
           cache: pip
           cache-dependency-path: backend/agents/requirements.txt
       - run: pip install -r requirements.txt
+      # BusyBox requirepass escape + AUTH smoke (test_escape_requirepass.py) use
+      # ``docker run redis:7.4-alpine`` — same tag as compose. The job's Redis
+      # *service* is unauthenticated redis:7-alpine for live FakeRedis-free
+      # integration; pull 7.4 explicitly so Alpine tests cannot skip in CI.
+      - name: Pull Alpine Redis for requirepass escape tests
+        run: docker pull redis:7.4-alpine
+        working-directory: ${{ github.workspace }}
       # Unit/FakeRedis suite — deliberately no REDIS_URL so factory tests that
       # expect MemoryBackend stay deterministic. Live Redis is the next step.
+      # CI=true makes Alpine escape/AUTH tests hard-fail if the image is missing.
       - run: >-
           pytest ../shared/cache/tests/ -v --tb=short -n 4
           --cov=shared.cache
@@ -689,6 +697,7 @@ jobs:
           --cov-fail-under=90
         env:
           PYTHONPATH: ..
+          CI: "true"
       # Migrated consumers against the in-process / FakeRedis path (no REDIS_URL).
       # These suites assert MemoryBackend / in-process single-flight semantics and
       # must not share a live Redis namespace across tests.

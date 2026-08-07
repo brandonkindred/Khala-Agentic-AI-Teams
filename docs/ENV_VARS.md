@@ -1474,9 +1474,11 @@ at their static stems (local-dev default). When set to a safe token
 (`[A-Za-z0-9._@+/-]+`, no `:`), the effective namespace becomes
 `{stem}:{build_id}` so a deploy that changes the id is inherently a cold cache
 — prompt/logic changes cannot keep serving pre-deploy verdicts until TTL expiry.
-Compose wires both onto `se-service` from the host env (blank by default). CI /
-image builds should set `KHALA_BUILD_ID` (e.g. git SHA) for production-like
-stacks.
+An unsafe non-blank value is ignored (namespaces stay at the stem) and
+`shared.cache` logs a warning so operators are not left thinking cold-cache is
+active. Compose wires both onto `se-service` from the host env (blank by
+default). CI / image builds should set `KHALA_BUILD_ID` (e.g. git SHA) for
+production-like stacks.
 
 ### REDIS_CACHE_TTL_S / REDIS_LOCK_TTL_S / REDIS_WAITER_POLL_S / REDIS_WAITER_TIMEOUT_S / REDIS_RESULT_TTL_S
 Redis backend tuning for `shared.cache`: value-key TTL (default `3600` s — short enough that a

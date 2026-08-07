@@ -29,10 +29,18 @@ def test_cache_build_id_falls_back_to_build_id(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.parametrize("bad", ["has:colon", "has space", "has$dollar", ""])
-def test_cache_build_id_rejects_unsafe(monkeypatch: pytest.MonkeyPatch, bad: str) -> None:
+def test_cache_build_id_rejects_unsafe(
+    monkeypatch: pytest.MonkeyPatch, bad: str, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setenv("KHALA_BUILD_ID", bad if bad else "   ")
-    assert cache_build_id() == ""
+    monkeypatch.delenv("KHALA_CACHE_BUILD_ID", raising=False)
+    with caplog.at_level("WARNING", logger="shared.cache.build_id"):
+        assert cache_build_id() == ""
     assert with_cache_build_id("cr:sub:v1") == "cr:sub:v1"
+    if bad:  # blank/whitespace is unset, not an unsafe reject
+        assert any("ignoring unsafe" in r.message for r in caplog.records)
+    else:
+        assert not any("ignoring unsafe" in r.message for r in caplog.records)
 
 
 def test_with_cache_build_id_rejects_empty_base() -> None:

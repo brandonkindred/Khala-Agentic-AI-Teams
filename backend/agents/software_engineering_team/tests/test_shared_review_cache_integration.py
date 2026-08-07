@@ -5,8 +5,8 @@ worker processes) prove cache hits survive across "process" boundaries and that
 a Redis outage fails open to a miss rather than raising.
 
 These tests intentionally import private namespace / serialization helpers
-from the owning modules (``_CHUNK_CACHE_NAMESPACE``, etc.) — those symbols
-are the stable contract between production code and this suite.
+from the owning modules (``_chunk_cache_namespace()``, etc.) — those helpers
+are the production path (including optional ``KHALA_BUILD_ID`` suffixing).
 """
 
 from __future__ import annotations
@@ -24,7 +24,10 @@ TEST_MAX_ENTRIES = 8
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch: pytest.MonkeyPatch):
+    # Keep namespaces at static stems unless a test sets a build id explicitly.
+    monkeypatch.delenv("KHALA_BUILD_ID", raising=False)
+    monkeypatch.delenv("KHALA_CACHE_BUILD_ID", raising=False)
     reset_shared_cache_state()
     yield
     reset_shared_cache_state()
@@ -33,7 +36,7 @@ def _reset():
 def test_chunk_outcome_cache_hit_across_two_backends():
     """Identical chunk keys hit across two RedisBackend instances (two workers)."""
     from code_review_agent.mapping import (
-        _CHUNK_CACHE_NAMESPACE,
+        _chunk_cache_namespace,
         _chunk_outcome_from_bytes,
         _chunk_outcome_to_bytes,
         _ChunkOutcome,
@@ -41,8 +44,9 @@ def test_chunk_outcome_cache_hit_across_two_backends():
     from code_review_agent.models import CodeReviewIssue
 
     client = FakeRedis()
-    writer = RedisBackend(client, _CHUNK_CACHE_NAMESPACE)
-    reader = RedisBackend(client, _CHUNK_CACHE_NAMESPACE)
+    ns = _chunk_cache_namespace()
+    writer = RedisBackend(client, ns)
+    reader = RedisBackend(client, ns)
 
     outcome = _ChunkOutcome(
         issues=[CodeReviewIssue(severity="low", file_path="a.py", description="nits")],
@@ -62,12 +66,13 @@ def test_chunk_outcome_cache_hit_across_two_backends():
 
 def test_submission_cache_hit_across_two_backends():
     """Submission outputs round-trip across two RedisBackend instances."""
-    from code_review_agent.coordinator import _SUBMISSION_CACHE_NAMESPACE
+    from code_review_agent.coordinator import _submission_cache_namespace
     from code_review_agent.models import CodeReviewOutput
 
     client = FakeRedis()
-    writer = RedisBackend(client, _SUBMISSION_CACHE_NAMESPACE)
-    reader = RedisBackend(client, _SUBMISSION_CACHE_NAMESPACE)
+    ns = _submission_cache_namespace()
+    writer = RedisBackend(client, ns)
+    reader = RedisBackend(client, ns)
 
     output = CodeReviewOutput(approved=True, issues=[], summary="clean")
     key = "sub-key-1"
@@ -82,11 +87,12 @@ def test_submission_cache_hit_across_two_backends():
 
 def test_compaction_cache_hit_across_two_backends():
     """Compaction memo bytes are readable from a second RedisBackend."""
-    from llm_service.compaction import _COMPACTION_CACHE_NAMESPACE
+    from llm_service.compaction import _compaction_cache_namespace
 
     client = FakeRedis()
-    writer = RedisBackend(client, _COMPACTION_CACHE_NAMESPACE)
-    reader = RedisBackend(client, _COMPACTION_CACHE_NAMESPACE)
+    ns = _compaction_cache_namespace()
+    writer = RedisBackend(client, ns)
+    reader = RedisBackend(client, ns)
 
     key = "compact-key-1"
     writer.set(key, b"compacted text", max_entries=TEST_MAX_ENTRIES)

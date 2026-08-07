@@ -13,8 +13,11 @@ Env vars (first non-blank wins):
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+
+logger = logging.getLogger(__name__)
 
 _ENV_KEYS = ("KHALA_CACHE_BUILD_ID", "KHALA_BUILD_ID")
 # Namespace segments must not contain ``:`` (``shared.cache`` uses ``:`` as a
@@ -29,14 +32,23 @@ def cache_build_id() -> str:
         - Returns a non-empty string with no ``:`` when a recognized env var is
           set to a non-blank, safe value.
         - Returns ``\"\"`` when unset/blank, or when the value contains ``:`` /
-          other unsafe characters (logged by callers that care; here we fail
-          closed to the empty suffix so a hostile env cannot break key layout).
+          other unsafe characters (fail closed so a hostile env cannot break
+          key layout). Unsafe non-blank values log a warning so operators are
+          not left thinking deploy cold-cache is active when it is not.
     """
     for key in _ENV_KEYS:
         raw = os.getenv(key, "").strip()
         if not raw:
             continue
         if ":" in raw or not _SAFE_BUILD_ID.fullmatch(raw):
+            logger.warning(
+                "shared.cache: ignoring unsafe %s=%r "
+                "(must match [A-Za-z0-9._@+/-]+ and must not contain ':'); "
+                "cache namespaces stay at their static stems until a safe "
+                "build id is set",
+                key,
+                raw,
+            )
             return ""
         return raw
     return ""

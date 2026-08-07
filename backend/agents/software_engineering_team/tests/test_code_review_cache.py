@@ -644,7 +644,7 @@ def test_leader_review_failure_releases_slot_and_reraises() -> None:
         mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
 
     assert reviewer.calls == 1
-    assert get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE).get(key) is None
+    assert get_shared_cache(mapping._chunk_cache_namespace()).get(key) is None
     with pytest.raises(CodeReviewUnavailableError):
         mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
     assert reviewer.calls == 2
@@ -771,7 +771,7 @@ def test_clear_chunk_outcome_cache_empties_registries() -> None:
     chunk = _single_chunk()
     context_fp = "fp"
     key = mapping._chunk_cache_key(chunk, context_fp, "")
-    cache = get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE)
+    cache = get_shared_cache(mapping._chunk_cache_namespace())
     cache.set(key, mapping._chunk_outcome_to_bytes(_simple_outcome()), max_entries=8)
     assert cache.get(key) is not None
 
@@ -819,7 +819,7 @@ def test_clear_mid_flight_does_not_prevent_leader_from_caching() -> None:
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
     key = mapping._chunk_cache_key(chunk, context_fp, "")
-    cache = get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE)
+    cache = get_shared_cache(mapping._chunk_cache_namespace())
 
     entered = threading.Event()
     release = threading.Event()
@@ -858,7 +858,7 @@ def test_corrupt_chunk_cache_entry_is_evicted_and_recomputed() -> None:
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
     key = mapping._chunk_cache_key(chunk, context_fp, "")
-    cache = get_shared_cache(mapping._CHUNK_CACHE_NAMESPACE)
+    cache = get_shared_cache(mapping._chunk_cache_namespace())
     cache.set(key, b"not-valid-chunk-outcome-json", max_entries=8)
 
     class _ApproveOnce:
@@ -1062,7 +1062,7 @@ def test_non_approved_cached_submission_treated_as_miss(
     data = _one_file_input()
     key = "poisoned-submission-key"
     reject = CodeReviewOutput.model_validate(_REJECTED)
-    get_shared_cache(coord._SUBMISSION_CACHE_NAMESPACE).set(
+    get_shared_cache(coord._submission_cache_namespace()).set(
         key, reject.model_dump_json().encode("utf-8"), max_entries=8
     )
     monkeypatch.setattr(coord, "_submission_fingerprint", lambda *_a, **_k: key)
@@ -1088,7 +1088,7 @@ def test_cached_submission_with_unreviewed_ranges_treated_as_miss(
         summary="OK but incomplete",
         not_reviewed_ranges=["src/a.py:1-10"],
     )
-    get_shared_cache(coord._SUBMISSION_CACHE_NAMESPACE).set(
+    get_shared_cache(coord._submission_cache_namespace()).set(
         key, partial.model_dump_json().encode("utf-8"), max_entries=8
     )
     monkeypatch.setattr(coord, "_submission_fingerprint", lambda *_a, **_k: key)
@@ -1193,3 +1193,19 @@ def test_submission_cache_bypassed_when_repo_reader_given(
     # A repo_reader-backed run must not poison the cache for reader-free reruns either.
     run_coordinator(client, data)
     assert spy["n"] == 2
+
+
+def test_consumer_cache_namespaces_include_build_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Production namespace helpers must suffix stems when KHALA_BUILD_ID is set."""
+    monkeypatch.delenv("KHALA_CACHE_BUILD_ID", raising=False)
+    monkeypatch.setenv("KHALA_BUILD_ID", "sha-deadbeef")
+    assert mapping._chunk_cache_namespace() == "cr:chunk:v2:sha-deadbeef"
+    assert coord._submission_cache_namespace() == "cr:sub:v1:sha-deadbeef"
+    # get_shared_cache must address the suffixed namespace (not the bare stem).
+    from shared.cache import get_shared_cache, reset_shared_cache_state
+
+    reset_shared_cache_state()
+    cache = get_shared_cache(mapping._chunk_cache_namespace())
+    cache.set("k", b"v", max_entries=4)
+    assert get_shared_cache("cr:chunk:v2").get("k") is None
+    assert get_shared_cache(mapping._chunk_cache_namespace()).get("k") == b"v"

@@ -6,6 +6,7 @@ userland round-trip the same value (including backslash and trailing newline).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,11 +15,12 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _SCRIPT = _REPO_ROOT / "docker" / "redis" / "escape_requirepass.sh"
+# Keep in sync with compose Redis image and the CI pull step in test-shared-cache.
 _ALPINE_IMAGE = "redis:7.4-alpine"
 
 
 def _alpine_ready() -> str | None:
-    """Return a skip reason when Docker + the Alpine image are unavailable."""
+    """Return a skip/fail reason when Docker + the Alpine image are unavailable."""
     if shutil.which("docker") is None:
         return "docker not available"
     try:
@@ -41,6 +43,25 @@ def _alpine_ready() -> str | None:
     if probe.returncode != 0:
         return f"docker daemon not usable: {(probe.stderr or probe.stdout or '').strip()}"
     return None
+
+
+def _require_alpine() -> None:
+    """Skip locally when Alpine Redis is unavailable; fail hard under CI.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns when Docker can run ``_ALPINE_IMAGE``.
+        - Under ``CI`` (truthy), missing image/daemon is a hard failure so the
+          BusyBox encode + AUTH smoke paths cannot silently skip in CI.
+        - Outside CI, missing Docker/image skips (developer laptops).
+    """
+    reason = _alpine_ready()
+    if reason is None:
+        return
+    if os.getenv("CI", "").strip():
+        pytest.fail(f"Alpine Redis required in CI for requirepass escape tests: {reason}")
+    pytest.skip(reason)
 
 
 def _escape(password: bytes, *, via: str = "host") -> bytes:
@@ -106,17 +127,13 @@ def test_escape_requirepass_host(raw: bytes) -> None:
 )
 def test_escape_requirepass_busybox_alpine(raw: bytes) -> None:
     """BusyBox in redis:7.4-alpine must match the host hex encoding."""
-    skip = _alpine_ready()
-    if skip:
-        pytest.skip(skip)
+    _require_alpine()
     assert _escape(raw, via="alpine") == _hex_escape(raw)
 
 
 def test_escape_requirepass_alpine_auth_smoke() -> None:
     """End-to-end: escaped conf + redis-server AUTH with a backslash password."""
-    skip = _alpine_ready()
-    if skip:
-        pytest.skip(skip)
+    _require_alpine()
     password = r"p\ass\"word"
     # Build conf inside Alpine the same way compose does, then AUTH.
     script = r"""
