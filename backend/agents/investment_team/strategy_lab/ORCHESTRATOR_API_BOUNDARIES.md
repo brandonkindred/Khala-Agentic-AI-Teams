@@ -167,7 +167,7 @@ activities.finalize_cycle_record_activity
        → lock + strategy_lab_records / strategies / backtests / paper_trading_sessions
 ```
 
-### HTTP route edges (documented; moved helpers resolve via `api.main` aliases)
+### HTTP route edges (documented; real bodies in `orchestrator_api`, called via `api.main` aliases)
 
 `run` / `resume` / `restart`
   → `_ensure_no_active_run` / `_no_active_run_locked`, `_require_run_transition_lock`,

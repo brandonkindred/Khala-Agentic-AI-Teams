@@ -359,6 +359,17 @@ def api_client(monkeypatch):
     monkeypatch.setattr(_run_state, "active_runs", active_runs)
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: None)
+    # Dispatch-failure paths call ``_fail_strategy_lab_run``, which schedules a
+    # 900s daemon ``threading.Timer``. Stub it so 503 route tests do not leave
+    # real timers running for the suite process.
+    class _NoopTimer:
+        def __init__(self, delay, callback):
+            self.daemon = None
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(orchestrator_api.threading, "Timer", _NoopTimer)
     return TestClient(api_main.app)
 
 
