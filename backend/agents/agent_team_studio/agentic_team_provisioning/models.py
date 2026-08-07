@@ -147,6 +147,26 @@ class AgenticTeamAgent(BaseModel):
     manifest_id: str = Field(..., min_length=1, description="AgentManifest id (SoT join key)")
 
 
+class EnrichedRosterAgent(BaseModel):
+    """Thin roster ref plus flattened persona fields for API responses.
+
+    Preconditions: ``manifest_id`` resolves in the agent registry when building
+        from a persisted row (see ``enrich_roster_agent`` in ``api.main``).
+    Postconditions: exposes ``agent_name``, ``source``, ``manifest_id``, and the
+        persona view fields projected from the linked ``AgentManifest``.
+    Invariants: persona fields are never persisted on ``agentic_team_agents``.
+    """
+
+    agent_name: str
+    source: Literal[SOURCE_GENERATED, SOURCE_REGISTRY]
+    manifest_id: str
+    role: str = ""
+    skills: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    expertise: list[str] = Field(default_factory=list)
+
+
 class AddAgentFromRegistryRequest(BaseModel):
     """Request body for ``POST /teams/{team_id}/agents/from-registry``.
 

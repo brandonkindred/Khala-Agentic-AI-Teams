@@ -28,8 +28,10 @@ from agent_team_studio.agentic_team_provisioning.infrastructure import (
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     is_generated_manifest,
+    manifest_agent_id,
     register_team_manifests,
 )
+from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_persona
 from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_GENERATED,
     SOURCE_REGISTRY,
@@ -38,6 +40,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     AgenticTeam,
     AgenticTeamAgent,
     AgentQualityScore,
+    EnrichedRosterAgent,
     AssetInfo,
     ConversationStateResponse,
     ConversationSummaryResponse,
@@ -189,6 +192,22 @@ DEFAULT_SUGGESTIONS = [
 ]
 
 
+def enrich_roster_agent(agent: AgenticTeamAgent) -> EnrichedRosterAgent:
+    """Flatten a thin roster ref with persona fields from its linked manifest.
+
+    Preconditions: ``agent.manifest_id`` is non-empty.
+    Postconditions: returns an ``EnrichedRosterAgent`` whose persona fields equal
+        ``resolve_persona(agent.manifest_id)``.
+    """
+    persona = resolve_persona(agent.manifest_id)
+    return EnrichedRosterAgent(
+        agent_name=agent.agent_name,
+        source=agent.source,
+        manifest_id=agent.manifest_id,
+        **persona.model_dump(),
+    )
+
+
 def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None) -> None:
     """Persist the LLM ``agents`` block, preserving any registry-source roster entries.
 
@@ -198,6 +217,10 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     the LLM's generated agents are layered on top — a generated agent that collides
     by name with a preserved registry agent is dropped, so the explicitly-added
     registry agent wins.
+
+    Each LLM agent is stored as a thin ref (``manifest_id`` stamped) while its
+    persona is written to the registry via ``register_team_manifests`` (summary from
+    the LLM ``role`` field).
 
     Concurrency: the read-merge-write is delegated to ``merge_generated_agents``,
     which runs it in a single transaction under a ``SELECT ... FOR UPDATE`` lock on
@@ -211,18 +234,19 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     if not agents_data:
         return
     generated: list[AgenticTeamAgent] = []
+    summaries: dict[str, str] = {}
     for a in agents_data:
         name = a.get("agent_name", "")
         if not name:
             continue
+        role = a.get("role", "")
+        if role:
+            summaries[name] = role
         generated.append(
             AgenticTeamAgent(
                 agent_name=name,
-                role=a.get("role", ""),
-                skills=a.get("skills", []),
-                capabilities=a.get("capabilities", []),
-                tools=a.get("tools", []),
-                expertise=a.get("expertise", []),
+                source=SOURCE_GENERATED,
+                manifest_id=manifest_agent_id(team_id, name),
             )
         )
     if not generated:
@@ -237,7 +261,7 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         # roster + registry back together. Raises on registry failure so
         # merge_generated_agents rolls back the roster write and keeps both
         # stores consistent.
-        register_team_manifests(team_id, merged, conn=conn)
+        register_team_manifests(team_id, merged, summaries=summaries, conn=conn)
 
     # Merge under a team-row lock so the read (preserve registry agents), the write,
     # and the registry register all happen in one atomic, serialized transaction.
@@ -343,20 +367,21 @@ def get_team(team_id: str):
 # ---------------------------------------------------------------------------
 
 
-@app.get("/teams/{team_id}/agents", response_model=list[AgenticTeamAgent])
+@app.get("/teams/{team_id}/agents", response_model=list[EnrichedRosterAgent])
 def list_team_agents(team_id: str):
     """Named agents pool (roster) for this team.
 
     Preconditions: ``team_id`` is a non-empty string.
     Postconditions: ``200`` with the team's roster as a list of
-        ``AgenticTeamAgent`` (empty if no agents have been added yet); ``404``
+        ``EnrichedRosterAgent`` (thin refs plus persona fields resolved from each
+        agent's ``manifest_id``; empty if no agents have been added yet); ``404``
         if the team is not found.
     Invariants: none.
     """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    return team.agents
+    return [enrich_roster_agent(a) for a in team.agents]
 
 
 @app.get("/teams/{team_id}/agents/manifests", response_model=GeneratedManifestsResponse)
@@ -429,48 +454,21 @@ def validate_team_roster(team_id: str):
 
 
 def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
-    """Project a registry ``AgentManifest`` into a roster agent (Agent Studio §5.3).
+    """Project a registry ``AgentManifest`` into a thin roster ref (Agent Studio §5.3).
 
-    Preconditions: ``manifest`` is a registered manifest.
-    Postconditions: returns an ``AgenticTeamAgent`` with ``source == "registry"``
-        and ``manifest_id == manifest.id``. To satisfy ``roster_validation``'s depth
-        check (which flags an agent missing ≥3 of skills/capabilities/tools/expertise
-        as ``sparse_profile``), the projection fills **two** persona fields that don't
-        both depend on the optional ``cognition.tools``: ``skills`` from the manifest
-        tags and ``expertise`` from the home ``team`` (always present). So a tagged
-        manifest with no cognition tools — the common catalog shape — still passes.
-        ``tools`` carries ``cognition.tools`` when present.
-
-    v1 scope boundary: the manifest's typed ``inputs`` / ``outputs`` schema_refs are intentionally
-    **not** projected here. In v1 a registry roster entry runs as a free-text LLM persona (built from
-    the projected ``role`` / ``skills`` / ``tools`` fields), so its declared typed IO is dropped at
-    this boundary rather than marshalled through the DAG. Executing a registry agent through its typed
-    contract is deferred — see
-    ``system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md``. Do not add a
-    schema-preserving branch here without first resolving that spike.
+    Preconditions: ``manifest`` is a registered manifest with non-empty ``id`` and
+        ``name``.
+    Postconditions: returns an ``AgenticTeamAgent`` with only ``agent_name``,
+        ``source == "registry"``, and ``manifest_id == manifest.id``. Persona
+        fields are resolved at read time via ``enrich_roster_agent`` /
+        ``resolve_persona``.
     """
-    # Enforce the precondition with explicit validation rather than ``assert`` (which
-    # ``python -O`` strips): ``AgentManifest.id``/``name`` are required but not
-    # length-constrained, so an empty string passes Pydantic — fail fast here rather
-    # than project a malformed manifest into the roster.
     if not (manifest.name and manifest.name.strip()):
         raise ValueError("manifest.name must be non-empty")
     if not manifest.id:
         raise ValueError("manifest.id must be set")
     return AgenticTeamAgent(
         agent_name=manifest.name,
-        role=manifest.summary or manifest.name,
-        # ``tags``/``cognition.tools`` are non-Optional ``list[str]`` on a validated
-        # manifest, but guard ``or []`` / ``and`` defensively at this projection
-        # boundary so a degenerate (e.g. ``model_construct``-built) manifest can't
-        # pass ``None`` into ``list(...)`` or the model field.
-        skills=manifest.tags or [],
-        tools=list(manifest.cognition.tools)
-        if manifest.cognition and manifest.cognition.tools
-        else [],
-        # ``team`` is a required, non-empty str on AgentManifest; the guard is
-        # belt-and-suspenders so a degenerate empty team can never inject ``[""]``.
-        expertise=[manifest.team] if manifest.team else [],
         source=SOURCE_REGISTRY,
         manifest_id=manifest.id,
     )
@@ -565,7 +563,9 @@ def _generated_manifest_cleanup(team_id: str) -> Callable[[Optional[AgenticTeamA
     return _cleanup
 
 
-@app.post("/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201)
+@app.post(
+    "/teams/{team_id}/agents/from-registry", response_model=EnrichedRosterAgent, status_code=201
+)
 def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     """Add a registered agent to the team roster, projected from its manifest (§5.3).
 
@@ -628,7 +628,7 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     _store.add_or_replace_team_agent(
         team_id, agent, on_replaced=_generated_manifest_cleanup(team_id)
     )
-    return agent
+    return enrich_roster_agent(agent)
 
 
 @app.delete("/teams/{team_id}/agents/{agent_name:path}", status_code=204)
@@ -659,61 +659,33 @@ def remove_agent_from_roster(team_id: str, agent_name: str):
     return Response(status_code=204)
 
 
-@app.put("/teams/{team_id}/agents/{agent_name:path}", response_model=AgenticTeamAgent)
+@app.put("/teams/{team_id}/agents/{agent_name:path}", response_model=EnrichedRosterAgent)
 def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
-    """Inline-edit a roster agent's projected fields for this team (spec §3, Stage 3).
+    """Inline roster edit endpoint (legacy contract).
 
-    Every field on ``req`` is optional; only the ones supplied overwrite the
-    existing row (unset fields keep their current value). Works for either
-    ``source`` — a ``generated`` agent's fields are its only definition, and a
-    ``registry`` agent's fields may be overridden per-team without touching the
-    catalog manifest it was projected from; ``source``/``manifest_id`` themselves
-    are never changed by this route.
+    Persona fields now live on ``AgentManifest``; roster rows are thin refs only.
+    Any request that supplies persona fields is rejected. An empty body is a no-op
+    that returns the current enriched agent.
 
     Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
-    Postconditions: ``200`` with the updated agent persisted in place (all other
-        roster rows unchanged), and — for a ``generated`` agent — its in-process
-        registry manifest refreshed so the catalog/invoke surfaces reflect the edit;
-        ``404`` if the team is unknown or no roster entry has that name (roster
-        unchanged); ``422`` if the merged row would violate the ``AgenticTeamAgent``
-        contract (e.g. an explicit ``role: null``), so a malformed edit can't persist
-        a row that later fails to deserialize (roster unchanged).
-
-    Concurrency: the read-merge-write is delegated to ``update_team_agent``, which
-        runs ``_merge`` on the current row **under the team lock** — so a concurrent
-        roster write for the same agent (e.g. a chat-save filling ``skills`` while
-        this saves a ``role`` edit) can't be clobbered by a merge over a pre-lock
-        snapshot, and stale ``source``/``manifest_id`` provenance can't be resurrected.
+    Postconditions: ``200`` with the enriched agent when the body is empty;
+        ``400`` when any persona field is supplied; ``404`` if the team or agent
+        is unknown (roster unchanged).
     """
-    if not _store.get_team(team_id):
+    team = _store.get_team(team_id)
+    if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
-    def _merge(current: AgenticTeamAgent) -> AgenticTeamAgent:
-        # Re-validate the merged row rather than ``model_copy(update=...)`` (which
-        # skips validation): ``UpdateAgentRequest`` fields are ``Optional`` for
-        # partial-update semantics, so an explicit ``{"role": null}`` would otherwise
-        # write a row whose required ``role`` is ``None`` and 500 every later
-        # ``model_validate`` of the roster. Merging over the lock-read ``current``
-        # preserves ``source``/``manifest_id`` (never in the request model), so a
-        # per-team field override can't change provenance. Raises ``ValidationError``
-        # on a bad patch — caught below and surfaced as ``422`` (the store rolls back).
-        updates = req.model_dump(exclude_unset=True)
-        return AgenticTeamAgent.model_validate({**current.model_dump(), **updates})
+    if req.model_dump(exclude_unset=True):
+        raise HTTPException(
+            status_code=400,
+            detail="Roster persona edits are not supported; AgentManifest is the source of truth",
+        )
 
-    def _reregister(updated: AgenticTeamAgent) -> None:
-        # Keep the live registry in lockstep for a generated agent whose projected
-        # summary (its role) may have changed — mirrors the from-registry/DELETE
-        # routes' registry reconciliation, run under the same lock as the write.
-        if updated.source == SOURCE_GENERATED:
-            _reregister_generated_manifest(team_id, updated)
-
-    try:
-        updated = _store.update_team_agent(team_id, agent_name, _merge, on_updated=_reregister)
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Invalid agent update: {e.errors()}")
-    if updated is None:
+    current = next((a for a in team.agents if a.agent_name == agent_name), None)
+    if current is None:
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
-    return updated
+    return enrich_roster_agent(current)
 
 
 # ---------------------------------------------------------------------------

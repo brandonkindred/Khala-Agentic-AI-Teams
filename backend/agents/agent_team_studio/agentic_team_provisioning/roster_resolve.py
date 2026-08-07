@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from agent_registry import get_registry
 from agent_registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
@@ -60,6 +59,8 @@ def resolve_persona(manifest_id: str) -> RosterPersonaView:
     Postconditions: returns ``persona_from_manifest`` for the registry entry.
     Raises: ``LookupError`` if the Manifest is not in the registry.
     """
+    from agent_registry import get_registry
+
     if not manifest_id or not str(manifest_id).strip():
         raise LookupError("manifest_id must be non-empty")
     manifest = get_registry().get(manifest_id)
@@ -121,6 +122,8 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
         )
 
     mid = manifest_agent_id(team_id, agent_name)
+    from agent_registry import get_registry
+
     registry = get_registry()
     if registry.get(mid) is None:
         summary = raw.get("role") or None

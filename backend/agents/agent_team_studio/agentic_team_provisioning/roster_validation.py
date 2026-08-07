@@ -18,6 +18,7 @@ from .models import (
     RosterGap,
     RosterValidationResult,
 )
+from .roster_resolve import resolve_persona
 
 
 def validate_roster(team: AgenticTeam) -> RosterValidationResult:
@@ -117,14 +118,15 @@ def _check_roster_depth(agents: list[AgenticTeamAgent]) -> list[RosterGap]:
     """Flag agents that lack detail — they need at least one of skills/capabilities/tools/expertise."""
     gaps: list[RosterGap] = []
     for a in agents:
+        persona = resolve_persona(a.manifest_id)
         missing: list[str] = []
-        if not a.skills:
+        if not persona.skills:
             missing.append("skills")
-        if not a.capabilities:
+        if not persona.capabilities:
             missing.append("capabilities")
-        if not a.tools:
+        if not persona.tools:
             missing.append("tools")
-        if not a.expertise:
+        if not persona.expertise:
             missing.append("expertise")
         if len(missing) == 4:
             gaps.append(
