@@ -60,7 +60,6 @@ from agent_team_studio.agent_studio.models import (
     StartConversationRequest,
 )
 from agent_team_studio.agent_studio.temporal import dispatch
-from user_profile.store import DEFAULT_USER_ID
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +72,13 @@ def get_current_user_id() -> str:
     Postconditions:
         * Returns a non-empty user id. Default is ``DEFAULT_USER_ID`` until real
           auth is wired; tests override via ``app.dependency_overrides``.
+
+    Note:
+        ``DEFAULT_USER_ID`` is imported lazily so ``user_profile`` stays out of
+        ``sys.modules`` when that team is disabled at import time.
     """
+    from user_profile.store import DEFAULT_USER_ID
+
     return DEFAULT_USER_ID
 
 
