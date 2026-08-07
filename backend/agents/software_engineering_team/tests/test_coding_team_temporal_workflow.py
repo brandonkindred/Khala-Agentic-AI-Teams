@@ -371,12 +371,15 @@ def test_github_pipeline_exception_calls_failure_notice(monkeypatch: pytest.Monk
 def test_github_failure_notice_failure_still_reraises_pipeline_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If failure-notice itself raises, the original pipeline exception must still propagate."""
+    """If failure-notice itself raises, mark-failed then the original pipeline error propagates."""
     from software_engineering_team.temporal.coding_team_github_activities import (
         github_branch_prep_activity,
         github_failure_notice_activity,
     )
-    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+        run_pipeline_activity,
+    )
 
     workflow_obj = CodingTeamWorkflow()
     calls: list = []
@@ -389,6 +392,8 @@ def test_github_failure_notice_failure_still_reraises_pipeline_error(
             raise RuntimeError("orchestrator boom")
         if fn is github_failure_notice_activity:
             raise RuntimeError("notice boom")
+        if fn is mark_coding_team_job_failed_activity:
+            return {"job_id": "job-1", "status": "failed", "error": request["error"]}
         raise AssertionError(f"unexpected activity {fn}")
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
@@ -404,6 +409,7 @@ def test_github_failure_notice_failure_still_reraises_pipeline_error(
         github_branch_prep_activity,
         run_pipeline_activity,
         github_failure_notice_activity,
+        mark_coding_team_job_failed_activity,
     ]
 
 
@@ -618,6 +624,188 @@ def test_github_prep_exception_notice_failure_falls_back_to_mark_failed(
 
     assert calls == [
         github_branch_prep_activity,
+        github_failure_notice_activity,
+        mark_coding_team_job_failed_activity,
+    ]
+
+
+def test_github_prep_exception_preserves_original_when_mark_failed_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prep error must win even when both notice and local mark-failed raise."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+    )
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            raise RuntimeError("prep boom")
+        if fn is github_failure_notice_activity:
+            raise RuntimeError("notice boom")
+        if fn is mark_coding_team_job_failed_activity:
+            raise RuntimeError("mark-failed boom")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="prep boom"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+        mark_coding_team_job_failed_activity,
+    ]
+
+
+def test_github_pipeline_exception_preserves_original_when_mark_failed_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipeline error must win even when both notice and local mark-failed raise."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+        run_pipeline_activity,
+    )
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            raise RuntimeError("orchestrator boom")
+        if fn is github_failure_notice_activity:
+            raise RuntimeError("notice boom")
+        if fn is mark_coding_team_job_failed_activity:
+            raise RuntimeError("mark-failed boom")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="orchestrator boom"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_failure_notice_activity,
+        mark_coding_team_job_failed_activity,
+    ]
+
+
+def test_github_publish_exception_notices_and_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publish failures must best-effort notice then re-raise the publish error."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+        github_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+    notice_requests: list[dict] = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            return {"job_id": "job-1", "status": "running", "phase": "publishing"}
+        if fn is github_publish_activity:
+            raise RuntimeError("push rejected")
+        if fn is github_failure_notice_activity:
+            notice_requests.append(dict(request))
+            return {"job_id": "job-1", "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="push rejected"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_publish_activity,
+        github_failure_notice_activity,
+    ]
+    assert notice_requests[0]["kind"] == "failure"
+    assert "push rejected" in notice_requests[0]["message"]
+
+
+def test_github_publish_exception_preserves_original_when_terminalize_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publish error must win even when notice and local mark-failed both raise."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+        github_publish_activity,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_failed_activity,
+        run_pipeline_activity,
+    )
+
+    workflow_obj = CodingTeamWorkflow()
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append(fn)
+        if fn is github_branch_prep_activity:
+            return {"ok": True, "error": None, "notes": []}
+        if fn is run_pipeline_activity:
+            return {"job_id": "job-1", "status": "running", "phase": "publishing"}
+        if fn is github_publish_activity:
+            raise RuntimeError("push rejected")
+        if fn is github_failure_notice_activity:
+            raise RuntimeError("notice boom")
+        if fn is mark_coding_team_job_failed_activity:
+            raise RuntimeError("mark-failed boom")
+        raise AssertionError(f"unexpected activity {fn}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        "temporalio.workflow.wait_condition",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no wait")),
+    )
+
+    with pytest.raises(RuntimeError, match="push rejected"):
+        asyncio.run(workflow_obj.run(_github_request()))
+
+    assert calls == [
+        github_branch_prep_activity,
+        run_pipeline_activity,
+        github_publish_activity,
         github_failure_notice_activity,
         mark_coding_team_job_failed_activity,
     ]

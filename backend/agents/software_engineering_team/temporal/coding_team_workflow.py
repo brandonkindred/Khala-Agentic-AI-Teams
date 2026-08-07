@@ -268,8 +268,10 @@ class CodingTeamWorkflow:
         Postconditions:
             - Attempts ``github_failure_notice_activity`` (bounded retries).
             - On notice failure, runs ``mark_coding_team_job_failed_activity`` so
-              the Khala job is not left ``pending``.
+              the Khala job is not left ``pending`` when the local write succeeds.
             - Returns the resulting job snapshot from whichever activity succeeded.
+            - Propagates only when both notice and local mark-failed fail (callers
+              that must preserve an earlier exception wrap this in try/except).
         """
         try:
             return await workflow.execute_activity(
@@ -296,6 +298,39 @@ class CodingTeamWorkflow:
                 retry_policy=_GITHUB_ACTIVITY_RETRY,
             )
 
+    async def _best_effort_terminalize_then_reraise(
+        self,
+        *,
+        job_id: str,
+        github: dict[str, Any],
+        message: str,
+        github_timeout: timedelta,
+        original: BaseException,
+    ) -> None:
+        """Best-effort notice/mark-failed, then re-raise *original*.
+
+        Preconditions:
+            - ``original`` is the exception the caller must surface (prep /
+              pipeline / publish failure).
+            - ``github`` / ``message`` match ``_best_effort_github_failure_notice``.
+        Postconditions:
+            - Attempts terminalization via ``_best_effort_github_failure_notice``.
+            - Notice/mark-failed failures are logged only; always re-raises
+              ``original`` (never a notice/mark-failed error).
+        """
+        try:
+            await self._best_effort_github_failure_notice(
+                job_id=job_id,
+                github=github,
+                message=message,
+                github_timeout=github_timeout,
+            )
+        except Exception:
+            _log_github_side_effect_failure(
+                "best-effort GitHub failure terminalize failed; re-raising original"
+            )
+        raise original
+
     @workflow.run
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:
         """Run the coding-team pipeline, looping while the activity reports a pause.
@@ -318,12 +353,13 @@ class CodingTeamWorkflow:
             - Without GitHub metadata, returns the activity's result dict.
               With GitHub metadata, prepares the integration branch before
               running the pipeline, posts a failure notice (and marks the job
-              failed) when branch prep reports ``ok=False`` or raises, posts a
-              failure notice and re-raises when the pipeline activity raises,
-              returns failed/cancelled/waiting-for-user pipeline results
-              unchanged, and publishes the integration branch after successful
-              terminal pipeline results (including deferred ``running``/
-              ``publishing`` success).
+              failed) when branch prep reports ``ok=False`` or raises, best-
+              effort notices/mark-failed then re-raises the original error when
+              prep, the pipeline activity, or publish raises, returns
+              failed/cancelled/waiting-for-user pipeline results unchanged, and
+              publishes the integration branch after successful terminal
+              pipeline results (including deferred ``running``/``publishing``
+              success).
             - ``run_pipeline_activity`` now always requests
               ``pause_strategy="return"`` and emits
               ``{"outcome": "paused", ...}`` whenever a HITL gate pauses, or
@@ -391,13 +427,13 @@ class CodingTeamWorkflow:
                 prep_message = (
                     f"branch prep failed: {prep_exc}" if str(prep_exc) else "branch prep failed"
                 )
-                await self._best_effort_github_failure_notice(
+                await self._best_effort_terminalize_then_reraise(
                     job_id=request["job_id"],
                     github=github,
                     message=prep_message,
                     github_timeout=github_timeout,
+                    original=prep_exc,
                 )
-                raise
             if not prep.get("ok"):
                 return await self._best_effort_github_failure_notice(
                     job_id=request["job_id"],
@@ -444,50 +480,50 @@ class CodingTeamWorkflow:
                 raise
             if isinstance(github, dict) and github:
                 notice_message = f"pipeline failed: {exc}" if str(exc) else "pipeline failed"
-                try:
-                    await workflow.execute_activity(
-                        github_failure_notice_activity,
-                        {
-                            "job_id": request["job_id"],
-                            "owner": github["owner"],
-                            "repo": github["repo"],
-                            "number": github["issue_number"],
-                            "message": notice_message,
-                            "kind": "failure",
-                        },
-                        start_to_close_timeout=github_timeout,
-                        retry_policy=_GITHUB_ACTIVITY_RETRY,
-                    )
-                except Exception:
-                    # Never let a notice failure mask the original pipeline exception
-                    # or hang the workflow via unbounded activity retries.
-                    _log_github_side_effect_failure(
-                        "github_failure_notice_activity failed after pipeline error; "
-                        "re-raising original"
-                    )
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=notice_message,
+                    github_timeout=github_timeout,
+                    original=exc,
+                )
             raise
 
         if isinstance(github, dict) and github:
             status = result.get("status")
             if status in ("failed", "cancelled", "waiting_for_user"):
                 return result
-            return await workflow.execute_activity(
-                github_publish_activity,
-                {
-                    "job_id": request["job_id"],
-                    "owner": github["owner"],
-                    "repo": github["repo"],
-                    "repo_path": request["repo_path"],
-                    "issue_number": github["issue_number"],
-                    "issue_title": github["issue_title"],
-                    "base": github["base"],
-                    "integration_branch": github["integration_branch"],
-                    "remote": github.get("remote") or "origin",
-                    "cleanup_checkout_on_success": bool(github.get("cleanup_checkout_on_success")),
-                },
-                start_to_close_timeout=github_timeout,
-                retry_policy=_GITHUB_ACTIVITY_RETRY,
-            )
+            try:
+                return await workflow.execute_activity(
+                    github_publish_activity,
+                    {
+                        "job_id": request["job_id"],
+                        "owner": github["owner"],
+                        "repo": github["repo"],
+                        "repo_path": request["repo_path"],
+                        "issue_number": github["issue_number"],
+                        "issue_title": github["issue_title"],
+                        "base": github["base"],
+                        "integration_branch": github["integration_branch"],
+                        "remote": github.get("remote") or "origin",
+                        "cleanup_checkout_on_success": bool(
+                            github.get("cleanup_checkout_on_success")
+                        ),
+                    },
+                    start_to_close_timeout=github_timeout,
+                    retry_policy=_GITHUB_ACTIVITY_RETRY,
+                )
+            except Exception as publish_exc:
+                publish_message = (
+                    f"publish failed: {publish_exc}" if str(publish_exc) else "publish failed"
+                )
+                await self._best_effort_terminalize_then_reraise(
+                    job_id=request["job_id"],
+                    github=github,
+                    message=publish_message,
+                    github_timeout=github_timeout,
+                    original=publish_exc,
+                )
         return result
 
 
