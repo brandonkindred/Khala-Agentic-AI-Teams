@@ -2,9 +2,11 @@
 
 Disk reads return the literal current bytes under ``repo_path`` (often already
 post-execution *new* content). Git reads return blobs at a caller-supplied
-revision via ``git show``. Neither path judges trustworthiness or aggregates
-sources — callers compose results. Per-path failures are misses; only blank
-``repo_path`` / ``revision`` raise.
+revision: each path is typed/sized with ``git cat-file`` (``-t`` / ``-s``)
+before ``git show`` so oversize or non-blob objects are never loaded as text.
+Neither path judges trustworthiness or aggregates sources — callers compose
+results. Per-path failures are misses; only blank ``repo_path`` / ``revision``
+raise.
 """
 
 from __future__ import annotations
@@ -16,6 +18,10 @@ from typing import Dict, FrozenSet, Iterable, List, Optional, Set
 from code_review_agent.repo_reader import DEFAULT_MAX_FILE_BYTES, DiskRepoReader
 
 from shared.git.git_utils import _run_git
+
+# Cap per-call git blob fetches (type + size + show spawns each). Paths beyond
+# the cap are misses so a huge path list cannot fan out into unbounded subprocesses.
+_MAX_GIT_BLOBS_READ = 50
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,7 +121,10 @@ def read_previous_content_from_git(
     revision: str,
     paths: Iterable[str],
 ) -> PreviousContentResult:
-    """Read file blobs at ``revision`` under ``repo_path`` via ``git show``.
+    """Read file blobs at ``revision`` under ``repo_path``.
+
+    Each path is typed/sized with ``git cat-file`` (``-t`` / ``-s``) before
+    ``git show`` so oversize or non-blob objects are never loaded as text.
 
     Preconditions:
         - ``repo_path`` is strip-nonempty; otherwise raise ``ValueError``.
@@ -124,12 +133,16 @@ def read_previous_content_from_git(
 
     Postconditions:
         - Returns ``PreviousContentResult`` for the unique path strings.
-        - If the path is not a usable git repo or ``revision`` does not
-          resolve to a commit, every unique path is a miss (no raise).
+        - If the path is not a usable git repo, ``revision`` starts with ``-``
+          (flag-like), ``revision`` contains ``:`` (ambiguous with
+          ``rev:path`` object syntax), or ``revision`` does not resolve to a
+          commit, every unique path is a miss (no raise).
         - Per-path: unsafe/blank path, missing/non-blob object (tree/dir),
           non-zero ``git cat-file`` / ``git show``, oversize blob (size via
           ``git cat-file -s`` before ``git show``), or binary (NUL) blob → miss;
           success → hit with UTF-8-safe stdout text.
+        - At most ``_MAX_GIT_BLOBS_READ`` unique paths are fetched; any additional
+          unique paths are misses (spawn bound).
         - Duplicate identical path strings are read once.
         - Empty ``paths`` yields empty ``contents`` and empty ``misses``.
         - Never raises for git/environment failures once preconditions hold.
@@ -149,6 +162,12 @@ def read_previous_content_from_git(
     # Preflight: usable .git and resolvable commit.
     if not (root / ".git").exists():
         return _all_misses(unique)
+    # Leading ``-`` would be parsed as a git option by ``rev-parse --verify``;
+    # ``--`` after ``--verify`` is not portable (breaks normal HEAD peels on
+    # common git builds), so reject flag-like revisions as all-miss.
+    # A ``:`` in the revision would make ``rev:path`` object names ambiguous.
+    if stripped_rev.startswith("-") or ":" in stripped_rev:
+        return _all_misses(unique)
     verify_rc, _ = _run_git(
         root,
         ["git", "rev-parse", "--verify", f"{stripped_rev}^{{commit}}"],
@@ -157,9 +176,12 @@ def read_previous_content_from_git(
     if verify_rc != 0:
         return _all_misses(unique)
 
+    to_fetch = unique[:_MAX_GIT_BLOBS_READ]
+    overflow = unique[_MAX_GIT_BLOBS_READ:]
+
     contents: Dict[str, str] = {}
-    misses: Set[str] = set()
-    for path in unique:
+    misses: Set[str] = set(overflow)
+    for path in to_fetch:
         normalized = _normalize_git_path(path)
         if normalized is None:
             misses.add(path)
