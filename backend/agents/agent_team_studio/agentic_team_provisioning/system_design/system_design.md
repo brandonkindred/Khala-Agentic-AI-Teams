@@ -218,7 +218,7 @@ Domain models (`models.py`):
 | Model | Lines | Purpose |
 |---|---|---|
 | `AgenticTeam` | 161-173 | Top-level team: roster + processes + mode |
-| `AgenticTeamAgent` | 128-153 | Roster entry: `agent_name`, `role`, `skills`, `capabilities`, `tools`, `expertise` |
+| `AgenticTeamAgent` | 136-147 | Thin roster ref: `agent_name`, `source`, `manifest_id` (persona joined at read via `EnrichedRosterAgent`) |
 | `ProcessDefinition` | 111-120 | Process: `trigger`, `steps`, `output`, `status` |
 | `ProcessStep` | 79-94 | Step: `step_type`, `agents`, `next_steps`, `condition` |
 | `ProcessStepAgent` | 72-77 | Agent assignment to a specific step |

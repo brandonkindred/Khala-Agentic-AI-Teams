@@ -170,8 +170,9 @@ class EnrichedRosterAgent(BaseModel):
 class AddAgentFromRegistryRequest(BaseModel):
     """Request body for ``POST /teams/{team_id}/agents/from-registry``.
 
-    Adds a registered agent (by manifest id) to the team roster, projecting the
-    manifest's name/summary/tags/tools into the roster fields (Agent Studio §5.3).
+    Adds a registered agent to the team roster as a thin ref (``agent_name``,
+    ``source="registry"``, ``manifest_id``). Persona is not persisted on the roster;
+    API responses join it from the linked ``AgentManifest`` via ``enrich_roster_agent``.
     """
 
     manifest_id: str = Field(
@@ -180,14 +181,12 @@ class AddAgentFromRegistryRequest(BaseModel):
 
 
 class UpdateAgentRequest(BaseModel):
-    """Request body for ``PUT /teams/{team_id}/agents/{agent_name}`` (Agent Studio §3,
-    Stage 3 roster inline edit).
+    """Request body for ``PUT /teams/{team_id}/agents/{agent_name}`` (legacy contract).
 
-    Every field is optional: only the fields present in the request overwrite the
-    existing roster row's corresponding fields, so a caller can edit e.g. just
-    ``skills`` without resending the rest. ``source`` and ``manifest_id`` are never
-    accepted here — they are fixed at add time (from-registry vs. LLM-generated)
-    and are not part of this "edit for this team" contract.
+    Roster rows are thin refs only; persona lives on ``AgentManifest``. The PUT
+    handler rejects any body that supplies persona fields with ``400``. An empty
+    body is a no-op that returns the current enriched agent. Fields on this model
+    remain for OpenAPI compatibility only — they are not a supported write path.
     """
 
     role: Optional[str] = Field(default=None, description="New role, if changed.")

@@ -13,7 +13,7 @@ See [AGENTIC_TEAM_ARCHITECTURE.md](AGENTIC_TEAM_ARCHITECTURE.md) for the require
 
 ## Roster and staffing validation
 
-Each team has a **roster** (`AgenticTeamAgent`): `agent_name`, `role`, `skills`, `capabilities`, `tools`, `expertise`. The process designer LLM emits roster JSON alongside process JSON.
+Each team has a **roster** of thin refs (`AgenticTeamAgent`: `agent_name`, `source`, `manifest_id`). Persona fields (`role`, `skills`, `capabilities`, `tools`, `expertise`) live on the linked `AgentManifest` and are joined at read time via `roster_resolve.resolve_persona`. The process designer LLM emits roster JSON alongside process JSON; generated agents are stamped with `manifest_id` and registered via `register_team_manifests`.
 
 - **`GET /teams/{team_id}/agents`** — roster
 - **`GET /teams/{team_id}/roster/validation`** — `RosterValidationResult` (gaps: unrostered agents, unused roster entries, unstaffed steps, incomplete profiles)

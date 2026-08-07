@@ -525,44 +525,6 @@ def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
         )
 
 
-def _reregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> None:
-    """Best-effort: refresh a generated agent's in-process manifest after an in-place edit.
-
-    The inline-edit route (``update_roster_agent``) keeps the same ``agent_name`` — so
-    the manifest ``id`` (keyed on ``team_id + agent_name``) is stable — but changes
-    ``role``, which ``build_agent_manifest`` projects into the manifest ``summary``.
-    Re-registering the rebuilt manifest overwrites the entry in place so the Agent
-    Console catalog / ``/api/agents/{id}/invoke`` route reflect the edit, instead of
-    serving the stale pre-edit summary until an unrelated chat-save re-registers the
-    whole roster. Registry-source agents are never re-registered here (their manifest
-    is owned by the catalog, not this team).
-
-    Preconditions: ``agent.source == SOURCE_GENERATED`` (caller checks).
-    Postconditions: the agent's manifest is (re)registered if the registry is
-        reachable. A registry failure is logged, **never raised** — so this
-        best-effort refresh can neither 500 the request nor roll back the committed
-        roster edit. (Unlike chat-save ``register_team_manifests``, which raises
-        so the roster write rolls back; an in-place role edit still commits even
-        if the catalog refresh fails — a later chat-save re-registers the roster.)
-    """
-    try:
-        from agent_registry import get_registry
-
-        registry = get_registry()
-        existing = registry.get(agent.manifest_id)
-        if existing is not None:
-            registry.register(existing)
-        else:
-            registry.register(build_agent_manifest(team_id, agent.agent_name))
-    except Exception:
-        logger.warning(
-            "Failed to re-register edited generated manifest for agent %s in team %s",
-            agent.agent_name,
-            team_id,
-            exc_info=True,
-        )
-
-
 def _generated_manifest_cleanup(team_id: str) -> Callable[[Optional[AgenticTeamAgent]], None]:
     """Build the registry-cleanup hook shared by the add (``on_replaced``) and delete
     (``on_deleted``) routes.
@@ -585,7 +547,7 @@ def _generated_manifest_cleanup(team_id: str) -> Callable[[Optional[AgenticTeamA
     "/teams/{team_id}/agents/from-registry", response_model=EnrichedRosterAgent, status_code=201
 )
 def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
-    """Add a registered agent to the team roster, projected from its manifest (§5.3).
+    """Add a registered agent to the team roster as a thin ref linked to its manifest.
 
     Re-adding the same manifest updates that roster entry in place. If this replaces a
     *generated* agent of the same name, that generated agent's stale in-process
@@ -594,7 +556,8 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     replaced, so it can't race a concurrent chat-save's register.
 
     Preconditions: ``req.manifest_id`` is non-empty (enforced by the request model).
-    Postconditions: ``201`` with the projected roster agent persisted on the roster;
+    Postconditions: ``201`` with the thin roster ref persisted and an enriched response
+        (persona joined from the manifest at read time);
         ``404`` if the team or the manifest id is unknown (roster unchanged); ``409``
         if the manifest is a *generated* roster agent (any team's — see below; roster
         unchanged); ``422`` if the resolved manifest is too malformed to project (e.g.
@@ -622,8 +585,7 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     # ``manifest_id`` the owning team can later unregister — leaving a roster entry
     # whose manifest no longer resolves for the catalog / invoke route. This is true
     # both for *this* team's own generated agent (already on the roster in generated
-    # form; the manifest-id-only "already on roster" guards on the callers miss it
-    # because a generated row carries ``manifest_id=None``) AND for another team's
+    # form with the same deterministic ``manifest_id``) AND for another team's
     # generated agent (it would dangle the moment that team drops the agent). Classify
     # on the ``"generated"`` tag — the same marker ``register_team_manifests`` uses — so
     # a hand-authored registry agent (real catalog entry, e.g. the same-name swap flow)
