@@ -4397,10 +4397,11 @@ class ClearStrategyLabStorageResponse(BaseModel):
 class DeleteStrategyLabRecordResponse(BaseModel):
     """Returned by ``DELETE /strategy-lab/records/{lab_record_id}``.
 
-    ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless the
-    corresponding linked entity actually existed (and was deleted) — not a
-    placeholder for "unknown." ``deleted_paper_trading_sessions`` is a count
-    of linked paper-trading sessions removed, not an id.
+    ``lab_record_id`` echoes the deleted record's id. ``deleted_strategy_id``/
+    ``deleted_backtest_id`` are ``None`` unless the corresponding linked
+    entity actually existed (and was deleted) — not a placeholder for
+    "unknown." ``deleted_paper_trading_sessions`` is a count of linked
+    paper-trading sessions removed, not an id.
     """
 
     lab_record_id: str
