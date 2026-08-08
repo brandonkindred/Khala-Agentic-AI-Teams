@@ -3682,6 +3682,68 @@ def test_stream_strategy_lab_run_terminal_short_circuit_completed_with_errors(
     assert "done" in body
 
 
+def test_stream_strategy_lab_run_terminal_snapshot_immune_to_post_check_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for the terminal SSE snapshot race (parent finding: a
+    pre-existing bug flagged against PR #4535 in ``stream_strategy_lab_run``).
+
+    The ``state`` dict handed to the terminal branch is the *same* object
+    stored in ``_active_runs[run_id]`` -- not a copy. A background thread
+    (e.g. ``_reconcile_run_progress`` running for a different request, or a
+    concurrent cancel/resume/reset handler) can mutate that dict in place
+    between this coroutine returning its ``StreamingResponse`` and Starlette
+    actually draining the one-shot terminal generator. Before the fix,
+    ``_terminal_gen`` read ``_run_state_to_response(state)`` lazily at
+    drain-time, so such a mutation leaked into the emitted snapshot. The fix
+    captures ``_run_state_to_response(state).model_dump(...)`` eagerly,
+    before the generator is even defined, pinning the snapshot to the state
+    observed at the terminal check.
+
+    Preconditions:
+        - A terminal run exists in ``_active_runs``.
+
+    Postconditions:
+        - Mutating the same ``_active_runs[run_id]`` dict object in place
+          after ``stream_strategy_lab_run`` returns but before its body is
+          drained does not change the emitted snapshot: it still reflects
+          ``completed_cycles=7`` / ``status=completed`` (the values at the
+          terminal check), not the post-check ``completed_cycles=999`` /
+          ``status=running`` values written afterward.
+    """
+    import asyncio
+
+    from investment_team.api import main as api_main
+
+    run_id = "terminal-race-snapshot"
+    state = {
+        "run_id": run_id,
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 7,
+    }
+    monkeypatch.setitem(api_main._active_runs, run_id, state)
+    monkeypatch.setattr(api_main, "_reconcile_run_progress", lambda rid: None)
+
+    async def _consume() -> str:
+        resp = await api_main.stream_strategy_lab_run(run_id)
+        # Simulate a background thread racing the response by mutating the
+        # exact same dict object in place before the generator is drained.
+        api_main._active_runs[run_id]["completed_cycles"] = 999
+        api_main._active_runs[run_id]["status"] = "running"
+        chunks: List[str] = []
+        async for chunk in resp.body_iterator:
+            chunks.append(chunk if isinstance(chunk, str) else chunk.decode())
+        return "".join(chunks)
+
+    body = asyncio.run(_consume())
+    assert '"completed_cycles": 7' in body
+    assert '"status": "completed"' in body
+    assert '"completed_cycles": 999' not in body
+    assert '"status": "running"' not in body
+
+
 def test_stream_strategy_lab_run_source_uses_async_lock() -> None:
     """Guard the three ``_active_runs`` sites against regressing to ``with _lock:``.
 
