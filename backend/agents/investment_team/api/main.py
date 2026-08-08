@@ -4636,12 +4636,19 @@ def _run_paper_trading_background(
           signal also failed to reach.
 
     Raises:
-        - None. All failures, including import errors for the two lazily-imported
-          dependencies, are caught and logged; the session is marked FAILED instead.
-          This includes a failure to re-parse the persisted session record while
-          handling a crash: that secondary failure is itself caught and logged,
-          so an unparseable record is left as-is (logged, not updated) rather
-          than letting the parse error escape in place of the original crash.
+        - None, for ``Exception`` and its subclasses: import errors for the two
+          lazily-imported dependencies, provider/network failures, and this
+          function's own postcondition guards are all caught and logged; the
+          session is marked FAILED instead. This includes a failure to re-parse
+          the persisted session record while handling a crash: that secondary
+          failure is itself caught and logged, so an unparseable record is left
+          as-is (logged, not updated) rather than letting the parse error escape
+          in place of the original crash.
+        - ``KeyboardInterrupt`` / ``SystemExit`` / ``GeneratorExit`` (``BaseException``
+          but not ``Exception``) are deliberately NOT caught here and propagate to
+          the caller — silently converting a worker-thread interrupt or interpreter
+          shutdown signal into a FAILED session would mask it instead of letting it
+          terminate the worker.
     """
     try:
         # Validate the documented precondition — a missing, unparseable, or
@@ -4749,7 +4756,18 @@ def _run_paper_trading_background(
                     result_session.verdict,
                     len(result_session.trades),
                 )
-    except Exception as exc:
+    except BaseException as exc:
+        # Deliberately narrower than a bare `except BaseException`: KeyboardInterrupt /
+        # SystemExit / GeneratorExit are BaseException but not Exception and must
+        # propagate rather than being converted into a FAILED session — same
+        # distinction shared.concurrency.parallel_map draws for worker exceptions.
+        # Everything else (import failures, provider/network errors, programming
+        # bugs) is still folded into a FAILED session below: nothing downstream
+        # (run_paper_trading_activity) marks this session terminal if this worker
+        # raises, so surfacing a non-interrupt exception here would leave the
+        # session stuck RUNNING forever instead of failing cleanly.
+        if not isinstance(exc, Exception):
+            raise
         logger.exception("Paper trade %s: background worker crashed", session_id)
         # Nested try/except: parse_persisted() below can itself raise (e.g. a
         # corrupt persisted record) — that secondary exception is not caught by
