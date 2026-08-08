@@ -2990,9 +2990,13 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     or ``GET /strategy-lab/runs/{run_id}/status`` for polling.
 
     Raises ``HTTPException(409)`` when another run is already active, or
-    (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
-    when another transition for this freshly-minted run_id is already in
-    flight. An early, unlocked check runs before minting a run_id/acquiring
+    (defense-in-depth: when two concurrent requests happen to mint the
+    identical 8-hex-char run_id -- a 32-bit-entropy collision, not the full
+    uuid4 entropy the truncation forfeits -- the losing request's
+    ``_require_run_transition_lock`` call raises this 409; the active-run
+    check above does not itself guard against run_id collisions) when
+    another transition for this freshly-minted run_id is already in flight.
+    An early, unlocked check runs before minting a run_id/acquiring
     its transition lock, so a rejected request never allocates a registry
     entry that would otherwise never be looked up again -- but that check
     alone can't stop two concurrent requests from both minting a run_id and
