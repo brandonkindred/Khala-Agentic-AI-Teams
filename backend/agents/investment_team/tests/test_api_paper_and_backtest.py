@@ -496,6 +496,98 @@ def test_run_paper_trading_background_crashes_into_failed(
     assert "Paper trading crashed" in (updated.error or "")
 
 
+@pytest.mark.parametrize("interrupt_cls", [KeyboardInterrupt, SystemExit])
+def test_run_paper_trading_background_lets_interrupts_propagate(
+    interrupt_cls: type[BaseException], monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``KeyboardInterrupt``/``SystemExit`` are ``BaseException``, not ``Exception`` —
+    the worker's crash handler must not swallow them into a FAILED session; they
+    must propagate to the caller, and the RUNNING session must be left untouched
+    for a caller/orphan-sweep to reconcile."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        PaperTradingSession,
+        PaperTradingStatus,
+        StrategySpec,
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=BacktestResult(
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        ),
+        trades=[],
+    )
+    running = PaperTradingSession(
+        session_id="pt-interrupt",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-interrupt"] = running
+
+    import investment_team.market_data_service as mds
+
+    class _Interrupted:
+        def resolve_strategy_symbols(self, s):
+            raise interrupt_cls()
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _Interrupted())
+
+    with pytest.raises(interrupt_cls):
+        api_main._run_paper_trading_background(
+            "pt-interrupt",
+            "lab-w",
+            strategy,
+            "def x(): pass",
+            bt,
+            lookback_days=30,
+            initial_capital=100_000.0,
+            transaction_cost_bps=5.0,
+            slippage_bps=2.0,
+        )
+
+    untouched = api_main._paper_trading_sessions.get("pt-interrupt")
+    assert untouched.status == PaperTradingStatus.RUNNING
+    assert untouched is running
+
+
 def test_run_paper_trading_background_unparseable_record_does_not_escape_crash_handler(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
