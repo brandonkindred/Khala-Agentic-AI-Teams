@@ -30,6 +30,13 @@ def create_team(req: CreateTeamRequest):
 
 @router.get("/teams", response_model=list[TeamSummary])
 def list_teams():
+    """List every persisted agentic team.
+
+    Preconditions: none.
+    Postconditions: returns ``200`` with a ``TeamSummary`` for each team row,
+        delegating directly to ``teams_svc.list_teams`` (store's default
+        order); an empty list if no teams exist.
+    """
     return teams_svc.list_teams()
 
 
