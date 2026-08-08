@@ -5487,7 +5487,18 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
         raise HTTPException(
             status_code=404, detail=f"Paper trading session '{session_id}' not found."
         )
-    session = PaperTradingSession.parse_persisted(raw)
+    try:
+        session = PaperTradingSession.parse_persisted(raw)
+    except Exception as exc:
+        logger.warning(
+            "Stop request for paper-trading session %s: persisted record could not be parsed.",
+            session_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Paper trading session '{session_id}' not found or is corrupted.",
+        ) from exc
 
     # Idempotent: a terminal session's workflow is already closed, and Temporal
     # rejects signals to closed executions — so only signal an in-flight session
