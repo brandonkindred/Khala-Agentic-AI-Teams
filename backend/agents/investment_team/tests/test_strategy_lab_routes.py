@@ -1948,6 +1948,42 @@ def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_befo
     assert api_main._active_runs[run_id]["contiguous_cycles"] == 5
 
 
+def test_resume_strategy_lab_run_404_when_state_deleted_between_reads(
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
+) -> None:
+    """Regression: a run deleted in the window between the pre-lock existence
+    check and the lock-acquired re-read must 404 cleanly with the same
+    message as the early check, not raise or fall through to a different
+    404 shape.
+
+    Simulated via a stateful ``_get_run_state`` stub keyed on call count (the
+    same technique as
+    ``test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_before``),
+    except the second call simulates the run vanishing rather than being
+    overwritten.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-deleted-mid-resume"
+    api_main._active_runs[run_id] = _resumable_state(run_id)
+
+    call_count = {"n": 0}
+
+    def _stateful_get_run_state(rid: str):
+        call_count["n"] += 1
+        if call_count["n"] > 1:
+            api_main._active_runs.pop(rid, None)
+            return None
+        return api_main._active_runs.get(rid)
+
+    monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == f"Strategy lab run '{run_id}' not found."
+    assert call_count["n"] >= 2
+
+
 def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
     monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
