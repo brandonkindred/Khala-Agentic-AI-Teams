@@ -23,6 +23,7 @@ Preconditions:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -35,6 +36,7 @@ from software_engineering_team.shared.v2_review import (
     ReviewConfig,
     _lint_passed,
     _maybe_build_change_surface_from_pairs,
+    _resolve_change_surface_for_review,
     run_microtask_review,
     run_review,
 )
@@ -1081,3 +1083,140 @@ def _real_build_change_surface_from_pairs():
     )
 
     return build_change_surface_from_pairs
+
+
+# ---------------------------------------------------------------------------
+# _resolve_change_surface_for_review / _code_review_step surface-vs-fallback
+# wiring (no-base and empty-diff fallback triggers, GitHub issue #5400)
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _init_repo(repo_path: Path) -> None:
+    """Initialize ``repo_path`` in place as a git repo (mirrors
+    ``test_previous_content_git.py``'s ``_init_repo``, but initializes the
+    caller's own directory rather than creating a ``repo`` subdirectory, so
+    the same ``tmp_path`` doubles as both ``repo_path`` and the git root)."""
+    _git(repo_path, "init")
+    _git(repo_path, "config", "user.email", "test@test.com")
+    _git(repo_path, "config", "user.name", "Test")
+    _git(repo_path, "config", "commit.gpgsign", "false")
+
+
+def _commit_file(repo_path: Path, rel_path: str, content: str) -> None:
+    target = repo_path / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    _git(repo_path, "add", rel_path)
+    _git(repo_path, "commit", "-m", f"add {rel_path}")
+
+
+def test_code_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
+    """No ``.git`` under ``repo_path`` -> no base resolves for any path -> the
+    external agent still runs, submitted ``files`` as-is (unchanged from
+    pre-#5400 behavior). Also pins that every existing test using a plain
+    ``tmp_path`` (no git) keeps getting the same ``files=`` submission."""
+    config = _build_config()
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == {"x.py": "code"}
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+def test_code_review_empty_diff_falls_back_to_files(tmp_path: Path) -> None:
+    """A real git base exists, but it's identical to the new content -> no
+    surface is built (nothing changed); the agent still runs, submitted
+    ``files`` as-is rather than a degenerate empty surface."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "x.py", "code")
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == {"x.py": "code"}
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+def test_code_review_meaningful_diff_uses_change_surface(tmp_path: Path) -> None:
+    """A real git base exists and differs from the new content -> the agent is
+    submitted the diff-derived change surface (``code=``, ``pre_numbered=True``)
+    instead of ``files=``."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "x.py", "old content\n")
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "new content\n"},
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files is None
+    assert cr_input.pre_numbered is True
+    assert "### x.py ###" in cr_input.code
+    assert "new content" in cr_input.code
+
+
+def test_resolve_change_surface_for_review_no_files_returns_none(tmp_path: Path) -> None:
+    assert _resolve_change_surface_for_review({}, tmp_path) is None
+
+
+def test_resolve_change_surface_for_review_new_file_no_base_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A real git repo exists (HEAD is resolvable), but the given path was
+    never committed -> a pure miss for every path -> no base at all, so the
+    caller must fall back to ``files=`` rather than treating the file as a
+    from-scratch surface."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "unrelated.py", "unrelated\n")
+
+    result = _resolve_change_surface_for_review({"new.py": "brand new\n"}, tmp_path)
+
+    assert result is None

@@ -67,6 +67,9 @@ from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_pairs,
 )
+from software_engineering_team.code_review_agent.previous_content import (
+    resolve_previous_content,
+)
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.models import ReviewContext, Task
@@ -284,6 +287,49 @@ def _maybe_build_change_surface_from_pairs(
     return surface
 
 
+def _resolve_change_surface_for_review(
+    files: Mapping[str, str],
+    repo_path: Path,
+) -> Optional[ChangeSurface]:
+    """Best-effort change surface for ``files`` against ``repo_path``'s pre-task HEAD.
+
+    The SE task engine commits the workspace exactly once, at Deliver (see
+    ``shared/deliver_utils.py``) -- never during Execution or Review -- so at
+    every point this is called, ``HEAD`` in ``repo_path`` still points at the
+    commit that preceded this task's in-flight edits. ``revision="HEAD"``
+    therefore resolves genuine prior content for any path that existed before
+    this task touched it.
+
+    Preconditions:
+        - ``files`` maps path -> new content (may be empty).
+        - ``repo_path`` is the task's workspace checkout.
+
+    Postconditions:
+        - Returns ``None`` ("no base") when ``files`` is empty, or when
+          ``resolve_previous_content`` resolves previous content for NONE of
+          the given paths (no ``.git``, git unavailable, or every path is new
+          relative to HEAD) -- the caller must then submit ``files`` as-is.
+        - Returns ``None`` ("empty diff") when a base for at least one path
+          was resolved but the resulting surface has nothing to show (every
+          resolved path is identical to its new content), via
+          ``_maybe_build_change_surface_from_pairs``.
+        - Otherwise returns the built ``ChangeSurface``.
+        - Never raises: ``resolve_previous_content`` already degrades
+          git/disk failures to misses; the only raise it documents is a blank
+          ``repo_path``, guarded here by the empty-``files`` check plus a
+          defensive ``except ValueError``.
+    """
+    if not files:
+        return None
+    try:
+        old = resolve_previous_content(str(repo_path), files.keys(), revision="HEAD")
+    except ValueError:
+        return None
+    if not old.contents:
+        return None
+    return _maybe_build_change_surface_from_pairs(files, old.contents)
+
+
 def _code_review_step(
     *,
     llm: LLMClient,
@@ -330,6 +376,13 @@ def _code_review_step(
         - Returns a :class:`_ReviewStepResult`: ``issues`` from the agent or LLM fallback,
           and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
           external agent succeeded or a bare-list stub reported no count).
+        - When ``repo_path``'s pre-task ``HEAD`` resolves previous content for at least one
+          file in ``files`` and the resulting diff is non-trivial (see
+          ``_resolve_change_surface_for_review``), the external agent is submitted a
+          diff-derived change surface (``code=``, ``pre_numbered=True``). Otherwise -- no git
+          base resolvable for any path, or every resolved path is identical to its new
+          content -- it falls back to submitting ``files`` as-is, exactly as before. Code
+          review runs identically either way; a missing or empty base never skips it.
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
           to the LLM reviewer, matching this step's long-standing solo behavior. The LLM fallback
           itself (used both here and when ``code_review_agent`` is None) is also guarded — any
@@ -353,18 +406,15 @@ def _code_review_step(
             )
         try:
             from software_engineering_team.code_review_agent.models import (
-                CodeReviewInput as _CRInput,
+                build_code_review_input as _build_cr_input,
             )
 
             ctx = review_context or ReviewContext()
-            # files= keeps per-file attribution and lets the coordinator bound
-            # its own prompts — no header parsing, no upstream truncation.
             # repo_root carries the workspace path as a serializable field so a
             # durable Temporal review can rebuild the whole-repo reader worker-side
             # (a live repo_reader object cannot cross that boundary); the live
             # reader below still drives the in-process/thread-mode path.
-            cr_input = _CRInput(
-                files=files,
+            common_kwargs: Dict[str, Any] = dict(
                 task_description=task_description,
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
@@ -373,6 +423,15 @@ def _code_review_step(
                 spec_content=ctx.spec_content,
                 repo_root=str(repo_path),
             )
+            # code= (pre-numbered diff surface) when a meaningful base diff
+            # resolves; otherwise files= (per-file attribution, no header
+            # parsing, no upstream truncation) — see
+            # _resolve_change_surface_for_review for the fallback contract.
+            surface = _resolve_change_surface_for_review(files, repo_path)
+            if surface is not None:
+                cr_input = _build_cr_input(code=surface.code, pre_numbered=True, **common_kwargs)
+            else:
+                cr_input = _build_cr_input(files=files, **common_kwargs)
             cr_result = call_code_review_agent(
                 code_review_agent,
                 cr_input,
