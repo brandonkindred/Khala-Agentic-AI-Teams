@@ -53,7 +53,11 @@ from shared.temporal.runner import (
     terminate_and_await_workflow_sync,
 )
 from shared.temporal.teams_registry import TEAM_TEMPORAL_MODULES, start_all_team_workers
-from shared.temporal.worker import start_team_worker
+from shared.temporal.worker import (
+    is_team_worker_alive,
+    start_team_worker,
+    wait_for_team_worker_ready,
+)
 
 __all__ = [
     "TEAM_TEMPORAL_MODULES",
@@ -73,6 +77,7 @@ __all__ = [
     "is_cancelled",
     "is_final_attempt",
     "is_last_attempt",
+    "is_team_worker_alive",
     "is_temporal_enabled",
     "json_safe",
     "load_checkpoint",
@@ -88,4 +93,5 @@ __all__ = [
     "terminate_and_await_workflow_sync",
     "translate_workflow_failure",
     "wait_for_input",
+    "wait_for_team_worker_ready",
 ]

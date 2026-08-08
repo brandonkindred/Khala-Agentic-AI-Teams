@@ -344,12 +344,12 @@ def test_create_ollama_cloud_without_key_is_400_even_with_env_key(app_client, mo
 def test_ollama_models_live_listing(app_client, monkeypatch):
     """A non-empty live listing from /api/tags is returned verbatim with source=live."""
     client, _state = app_client
-    monkeypatch.setattr(route, "list_ollama_models", lambda: ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"])
+    monkeypatch.setattr(route, "list_ollama_models", lambda: ["llama3.2", "qwen3-coder:480b-cloud"])
     resp = client.get("/api/llm-config/ollama-models")
     assert resp.status_code == 200
     body = resp.json()
     assert body["source"] == "live"
-    assert body["models"] == ["deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"]
+    assert body["models"] == ["llama3.2", "qwen3-coder:480b-cloud"]
     # base_url reflects the resolved effective endpoint (cloud default with no env).
     assert body["base_url"] == "https://ollama.com"
 

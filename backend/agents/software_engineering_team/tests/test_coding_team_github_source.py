@@ -1322,12 +1322,6 @@ class TestEndpointHappyPath:
     def test_run_from_github_starts_coding_team_workflow(self, patched_app, monkeypatch) -> None:
         import software_engineering_team.api.routes.github as gh_routes
 
-        monkeypatch.setattr(
-            patched_app["api"],
-            "_start_hook_thread",
-            lambda *a, **k: (_ for _ in ()).throw(AssertionError("hook thread must not run")),
-        )
-
         started: dict[str, Any] = {}
 
         def _capture(job_id: str, repo_path: str, plan_input: dict[str, Any], github=None) -> None:

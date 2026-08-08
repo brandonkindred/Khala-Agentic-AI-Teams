@@ -110,7 +110,7 @@ TERMINAL_SUCCESS_STATUSES = frozenset(
 # Job statuses that mean "this job will never resume on its own"; the wait loop must stop polling.
 # The terminal SUCCESS statuses plus the two terminal FAILURE statuses: ``already_complete`` is a
 # terminal success, so a finished already-complete job must not look resumable to is_terminal()
-# consumers (the /resume endpoint and the auto-resume guard).
+# consumers (including the /resume endpoint).
 _TERMINAL_STATUSES = TERMINAL_SUCCESS_STATUSES | frozenset(
     {JobStatus.FAILED.value, JobStatus.CANCELLED.value}
 )
@@ -517,18 +517,16 @@ def wait_for_answers(
           its own — the only True path is an explicit answer submission clearing the flag.
         - When ``heartbeat_fn`` is provided, it is invoked with a current UTC ISO timestamp once per
           poll iteration — both while waiting and when a poll read fails transiently — so other
-          processes can distinguish a live (but blocked or read-stalled) wait loop from a dead one
-          and never auto-resume the job elsewhere while this loop is still alive. Heartbeat failures
-          are swallowed — proving liveness must never break the wait itself.
+          processes can distinguish a live (but blocked or read-stalled) wait loop from a dead one.
+          Heartbeat failures are swallowed — proving liveness must never break the wait itself.
     """
     timeout = timeout_s if timeout_s is not None else answer_wait_timeout_s()
     start = now()
 
     def _renew_heartbeat() -> None:
-        # Prove this wait loop is still alive so a second worker doesn't treat it as
-        # dead (heartbeat older than the answer endpoint's staleness window) and
-        # auto-resume the job elsewhere. Heartbeat failures are swallowed — proving
-        # liveness must never break the wait itself.
+        # Prove this wait loop is still alive so observers can tell a live blocked loop apart
+        # from a dead one (e.g. after a process crash). Heartbeat failures are swallowed —
+        # proving liveness must never break the wait itself.
         if heartbeat_fn is None:
             return
         try:
@@ -542,10 +540,9 @@ def wait_for_answers(
         except _TRANSIENT_JOB_READ_ERRORS:
             # A transient job-service transport failure (e.g. a connection reset that
             # outlived the client's own retry budget) must not kill the wait — treat
-            # it like a missed poll: log, keep the liveness heartbeat fresh so another
-            # worker doesn't treat this still-alive loop as dead and auto-resume the
-            # job elsewhere, then back off and re-read. The ``timeout`` bound still
-            # caps the total wait, so a sustained outage ends the loop the same way a
+            # it like a missed poll: log, keep the liveness heartbeat fresh so observers
+            # still see this loop as alive, then back off and re-read. The ``timeout`` bound
+            # still caps the total wait, so a sustained outage ends the loop the same way a
             # timeout does. Only the transient transport failures the client itself
             # retries are swallowed (see ``_TRANSIENT_JOB_READ_ERRORS``); permanent
             # transport faults (UnsupportedProtocol, LocalProtocolError), HTTP status

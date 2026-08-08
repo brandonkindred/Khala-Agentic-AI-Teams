@@ -38,29 +38,6 @@ def test_run_dispatches_via_temporal_when_enabled(monkeypatch):
     assert len(created) == 1  # exactly one row, created by the API
 
 
-def test_run_dispatches_via_temporal_even_when_disabled(monkeypatch):
-    """No thread fallback: start_coding_team_workflow is called regardless of is_temporal_enabled()."""
-    created: list = []
-    monkeypatch.setattr(api, "create_job", lambda **kw: created.append(kw), raising=True)
-    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
-
-    dispatched: dict = {}
-    monkeypatch.setattr(
-        sw,
-        "start_coding_team_workflow",
-        lambda job_id, repo_path, plan_input: dispatched.update(
-            job_id=job_id, repo_path=repo_path, plan_input=plan_input
-        ),
-    )
-
-    r = client.post("/run", json={"repo_path": "/repo", "plan_input": {"objective": "x"}})
-
-    assert r.status_code == 200
-    assert r.json()["status"] == "running"
-    assert dispatched["job_id"] == r.json()["job_id"]
-    assert len(created) == 1
-
-
 def test_run_marks_job_failed_and_503_when_temporal_dispatch_raises(monkeypatch):
     """When the worker isn't reachable, dispatch raises. The route must mark the
     freshly-created row failed (not leave it orphaned in 'pending') and return a

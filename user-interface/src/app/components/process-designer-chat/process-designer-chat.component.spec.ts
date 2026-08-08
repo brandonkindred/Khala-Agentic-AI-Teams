@@ -461,6 +461,70 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.editingAgent()).toBe('Writer');
   });
 
+  // ── sendMessage: optimistic append must reconcile with backend atomicity ────
+  //
+  // The backend (agentic_team_provisioning's send_message) persists a turn's
+  // messages only after the LLM call and roster/process save succeed; on
+  // failure nothing is saved. The UI optimistically appends the user's message
+  // before the API call, so a failed send must roll that optimistic message
+  // back — otherwise it stays visible until a refresh silently drops it.
+
+  it('appends the user message and the assistant reply on a successful send', () => {
+    api.sendMessage.mockReturnValueOnce(
+      of({
+        conversation_id: 'c-1',
+        messages: [
+          { role: 'user', content: 'hi', timestamp: '2024-01-01T00:00:00Z' },
+          { role: 'assistant', content: 'hello', timestamp: '2024-01-01T00:00:01Z' },
+        ],
+        current_process: null,
+        suggested_questions: [],
+      }),
+    );
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit();
+
+    expect(api.sendMessage).toHaveBeenCalledWith('c-1', 'hi');
+    expect(component.messages().map((m) => m.content)).toEqual(['hi', 'hello']);
+    expect(component.error()).toBeNull();
+  });
+
+  it('rolls back the optimistic user message when the send fails', () => {
+    const send$ = new Subject<unknown>();
+    api.sendMessage.mockReturnValueOnce(send$.asObservable() as never);
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit();
+
+    // Before the API responds, the optimistic message must already be visible —
+    // otherwise the later empty-array assertion can't distinguish a real rollback
+    // from an implementation that never appended anything in the first place.
+    expect(component.messages().map((m) => m.content)).toEqual(['hi']);
+
+    send$.error({
+      error: { detail: 'Failed to update the team roster or process; please try again.' },
+    });
+
+    expect(component.messages()).toHaveLength(0);
+    expect(component.error()).toBe(
+      'Failed to update the team roster or process; please try again.',
+    );
+  });
+
+  it('ignores a suggested-question click while a send is already in flight', () => {
+    const send$ = new Subject<unknown>();
+    api.sendMessage.mockReturnValueOnce(send$.asObservable() as never);
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit(); // first send now in flight
+
+    component.onSuggestedQuestion('another question'); // must be ignored
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(component.messages().map((m) => m.content)).toEqual(['hi']);
+  });
+
   // ── createNewProcess: create + link to the active conversation ─────────────
 
   it('createNewProcess creates the process and links it to the active conversation', () => {

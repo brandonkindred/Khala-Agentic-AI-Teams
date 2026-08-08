@@ -51,15 +51,17 @@ from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .function_boundaries import (
+    EnclosingConstruct,
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
 )
 from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
-from .repo_reader import RepoReader
+from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,14 @@ _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 # Cap on substring matches returned by ``search_codebase`` so a common token
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
+
+# Cap on how many repository files one find_references repo half will scan when
+# the reader's per-fetch cost is unknown/expensive (e.g. GitHub-backed readers).
+_REPO_SEARCH_FILE_SCAN_LIMIT = 40
+
+# Cap used instead for DiskRepoReader (no per-file fetch cost) — match the
+# reader's own listing bound so alphabetical prefixes are not silently missed.
+_DISK_REPO_SEARCH_FILE_SCAN_LIMIT = DEFAULT_MAX_LISTED_FILES
 
 # Hard cap on inclusive line span returned by ``read_lines`` so a tool call
 # cannot pull an unbounded slice into the verifier context.
@@ -597,23 +607,65 @@ class CodebaseIndex:
                 f"Error: no enclosing function/class for line {line} of {display}."
             )
 
-        display_start = (
-            mapper(construct.start_line) if mapper is not None else construct.start_line
+        return _format_construct_slice(
+            display, construct, stripped.splitlines(), mapper=mapper
         )
-        display_end = (
-            mapper(construct.end_line) if mapper is not None else construct.end_line
+
+    def read_function_by_name(self, path: str, name: str) -> str:
+        """Return the construct body for an exact name match, or an error.
+
+        Preconditions:
+            - ``name`` should be a non-empty string matching ``EnclosingConstruct.name``
+              exactly (bare or ``Class.method``).
+
+        Postconditions:
+            - Returns ``Error: ...`` for bad name, unreadable/non-Python paths,
+              zero matches, or multiple matches — never raises on those cases.
+            - On a unique match, returns the same success format as ``read_function``.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return f"Error: name must be a non-empty string, got {name!r}."
+        needle = name.strip()
+
+        content, error = self._read(path)
+        if content is None:
+            return error if error is not None else f"Error: file not found: {path}."
+
+        display = self.resolve_path(path) or path
+        if display == self.EXISTING_CODEBASE_PATH:
+            display = path
+        _, ext = os.path.splitext(display)
+        if ext.lower() not in (".py", ".pyi"):
+            return (
+                f"Error: read_function by name requires a Python file (.py/.pyi); "
+                f"got {display}."
+            )
+
+        stripped, _, mapper = strip_numbered_prefixes(content, 1)
+        # Pre-numbered hunk excerpts use annotated_hunks so a sibling
+        # unparseable continuation does not hide constructs in other hunks.
+        matches = [
+            c
+            for c in iter_constructs(stripped, annotated_hunks=mapper is not None)
+            if c.name == needle
+        ]
+        if not matches:
+            return f"Error: no function/class named {needle!r} in {display}."
+        if len(matches) > 1:
+
+            def _disp(n: int) -> int:
+                return mapper(n) if mapper is not None else n
+
+            detail = ", ".join(
+                f"{c.name} (lines {_disp(c.start_line)}–{_disp(c.end_line)})" for c in matches
+            )
+            return (
+                f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}. "
+                f"Call read_function with a line number from one of those ranges."
+            )
+        return _format_construct_slice(
+            display, matches[0], stripped.splitlines(), mapper=mapper
         )
-        body_lines = stripped.splitlines()
-        n = construct.end_line - construct.start_line + 1
-        header = (
-            f"{display} {construct.kind} {construct.name} "
-            f"lines {display_start}–{display_end} ({n} lines):"
-        )
-        body = "\n".join(
-            f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
-            for i in range(construct.start_line, construct.end_line + 1)
-        )
-        return f"{header}\n{body}"
 
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
@@ -650,6 +702,155 @@ class CodebaseIndex:
                         return results
         return results
 
+    def find_references(
+        self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT
+    ) -> str:
+        """Search submission (and repo_reader when present) for capped path:line hits.
+
+        Submission matches come from :meth:`search` first. When a ``repo_reader``
+        is attached and slots remain under ``max_matches``, fills them from the
+        repository (skipping submission paths) via ``_search_repo_references``.
+
+        Preconditions:
+            - ``max_matches`` > 0.
+
+        Postconditions:
+            - On complete hits with a reader: newline-joined hit blocks; each block
+              starts with ``path:line`` and may append an enclosing-construct
+              excerpt for readable ``.py``/``.pyi`` files (same shape as
+              ``read_function``).
+            - When truncated (repo scan incomplete, or submission filled
+              ``max_matches`` so the repo half was skipped): append a truncated
+              banner (hits) or an empty-truncated message (no hits).
+            - When no ``repo_reader``: always append the no-repository-access note.
+            - Blank/whitespace-only ``symbol`` is not searched; the response must
+              not read as a complete empty scan of submission or repository.
+            - Never raises for missing symbols or reader failures; raises
+              ``ValueError`` when ``max_matches`` is non-positive (via ``search``).
+        """
+        if not (symbol or "").strip():
+            body = f"No references for {symbol!r}."
+            if self.repo_reader is None:
+                return (
+                    f"{body}\n\nNo repository access is available beyond this submission."
+                )
+            return (
+                f"{body} Blank/whitespace symbols are not searched -- this does NOT prove "
+                "the symbol is absent from the submission or repository."
+            )
+
+        hits = list(self.search(symbol, max_matches=max_matches))
+        truncated = False
+        if self.repo_reader is None:
+            body = (
+                "\n\n".join(
+                    _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
+                )
+                if hits
+                else f"No references for {symbol!r}."
+            )
+            return f"{body}\n\nNo repository access is available beyond this submission."
+
+        remaining = max_matches - len(hits)
+        if remaining == 0:
+            truncated = True
+        elif remaining > 0:
+            repo_hits, repo_truncated = _search_repo_references(
+                self, symbol, max_matches=remaining
+            )
+            hits.extend(repo_hits)
+            truncated = repo_truncated
+
+        if not hits:
+            if truncated:
+                return (
+                    f"No references for {symbol!r} in the files scanned, but the scan was "
+                    "truncated before covering the whole repository -- this does NOT prove "
+                    "the symbol is absent elsewhere. Use list_files()/read_file() for a "
+                    "more targeted follow-up if this matters."
+                )
+            return f"No references for {symbol!r}."
+
+        result = "\n\n".join(
+            _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
+        )
+        if truncated:
+            result += (
+                f"\n\n(Scan truncated before covering the whole repository -- there may be "
+                f"more matches for {symbol!r} beyond what's shown above.)"
+            )
+        return result
+
+
+def _search_repo_references(
+    index: CodebaseIndex,
+    query: str,
+    max_matches: int,
+    max_files_scanned: Optional[int] = None,
+) -> Tuple[List[Tuple[str, int, str]], bool]:
+    """Find case-insensitive substring hits via ``index.repo_reader`` only.
+
+    Preconditions:
+        - ``max_matches`` > 0 and, when given, ``max_files_scanned`` > 0.
+
+    Postconditions:
+        - Returns ``([], False)`` when ``repo_reader`` is None or ``query`` is blank.
+        - When ``max_files_scanned`` is None, uses ``_DISK_REPO_SEARCH_FILE_SCAN_LIMIT``
+          for ``DiskRepoReader`` else ``_REPO_SEARCH_FILE_SCAN_LIMIT``.
+        - Skips paths already keys of ``index.files``; returns up to ``max_matches``
+          ``(path, 1-based-line, line-text)`` tuples alongside a ``truncated`` flag.
+        - ``truncated`` is ``True`` whenever the scan did not inspect every candidate
+          path (file-scan cap, match cap, reader listing truncation, or read failures).
+        - Never raises on reader errors.
+    """
+    if max_matches <= 0:
+        raise ValueError("max_matches must be positive")
+    if max_files_scanned is not None and max_files_scanned <= 0:
+        raise ValueError("max_files_scanned must be positive")
+    if index.repo_reader is None:
+        return [], False
+    if max_files_scanned is None:
+        max_files_scanned = (
+            _DISK_REPO_SEARCH_FILE_SCAN_LIMIT
+            if isinstance(index.repo_reader, DiskRepoReader)
+            else _REPO_SEARCH_FILE_SCAN_LIMIT
+        )
+    needle = (query or "").strip().lower()
+    if not needle:
+        return [], False
+    try:
+        paths = index.repo_reader.list_files()
+    except Exception as exc:  # noqa: BLE001 - fail-safe
+        logger.debug("find_references: repo_reader.list_files() failed: %s", exc)
+        return [], True
+
+    results: List[Tuple[str, int, str]] = []
+    scanned = 0
+    incomplete = (
+        isinstance(index.repo_reader, DiskRepoReader) and index.repo_reader.listing_truncated()
+    )
+    for path in paths:
+        if path in index.files:
+            continue
+        if scanned >= max_files_scanned:
+            return results, True
+        scanned += 1
+        try:
+            content = index.repo_reader.read_file(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("find_references: repo_reader.read_file(%r) failed: %s", path, exc)
+            incomplete = True
+            continue
+        if content is None:
+            incomplete = True
+            continue
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            if needle in line.lower():
+                results.append((path, lineno, line.rstrip()))
+                if len(results) >= max_matches:
+                    return results, True
+    return results, incomplete
+
 
 def _strip_numbered_prefixes(
     content: str, line_number: int
@@ -660,6 +861,84 @@ def _strip_numbered_prefixes(
     kept under this name for existing call sites/tests in this module.
     """
     return strip_numbered_prefixes(content, line_number)
+
+
+def _format_construct_slice(
+    display: str,
+    construct: EnclosingConstruct,
+    body_lines: List[str],
+    *,
+    mapper: Optional[Callable[[int], int]] = None,
+) -> str:
+    """Format one construct span as a header plus ``N| content`` body lines.
+
+    Preconditions:
+        - ``body_lines`` contains at least ``construct.end_line`` entries
+          (1-based indexing into ``body_lines``).
+
+    Postconditions:
+        - Returns the shared success format used by ``read_function`` and
+          ``read_function_by_name``.
+    """
+    display_start = mapper(construct.start_line) if mapper is not None else construct.start_line
+    display_end = mapper(construct.end_line) if mapper is not None else construct.end_line
+    n = construct.end_line - construct.start_line + 1
+    header = (
+        f"{display} {construct.kind} {construct.name} "
+        f"lines {display_start}–{display_end} ({n} lines):"
+    )
+    body = "\n".join(
+        f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
+        for i in range(construct.start_line, construct.end_line + 1)
+    )
+    return f"{header}\n{body}"
+
+
+def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
+    """Format one find_references hit as path:line plus optional construct excerpt.
+
+    Preconditions:
+        - ``lineno`` >= 1 and is a 1-based storage index from ``search`` /
+          ``_search_repo_references`` (physical line in the stored blob).
+
+    Postconditions:
+        - Always starts with ``{path}:{display_line}`` where ``display_line`` is
+          the original ``N:`` file line when content is pre-numbered, else
+          ``lineno``.
+        - When readable ``.py``/``.pyi`` content has an enclosing construct at
+          the physical hit line, appends a construct slice from
+          ``_format_construct_slice`` (same shape as ``read_function``).
+        - Otherwise returns only the locator (no fallback window).
+        - Never raises.
+    """
+    loc = f"{path}:{lineno}"
+    content, _error = index._read(path)
+    if content is None:
+        return loc
+    display = index.resolve_path(path) or path
+    if display == index.EXISTING_CODEBASE_PATH:
+        display = path
+    _, ext = os.path.splitext(display)
+    if ext.lower() not in (".py", ".pyi"):
+        return loc
+    try:
+        # ``lineno`` from search is a storage/physical index. ``strip_numbered_prefixes``
+        # remaps an *original* file line; pass a dummy original and keep ``lineno``
+        # as the physical index (same pattern as ``read_function_by_name``).
+        stripped, _, mapper = strip_numbered_prefixes(content, 1)
+        if mapper is not None:
+            loc = f"{path}:{mapper(lineno)}"
+        construct = enclosing_construct(
+            stripped, lineno, annotated_hunks=mapper is not None
+        )
+    except Exception:  # noqa: BLE001 - excerpt failure must not abort find_references
+        return loc
+    if construct is None:
+        return loc
+    excerpt = _format_construct_slice(
+        display, construct, stripped.splitlines(), mapper=mapper
+    )
+    return f"{loc}\n{excerpt}"
 
 
 def _find_python_function_at_line(
@@ -822,11 +1101,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns five tools (``read_file``, ``read_lines``, ``list_files``,
-          ``search_codebase``, ``find_function_at_line``) that delegate to
-          ``index``; each returns a string and never raises, so a bad
-          model-supplied argument becomes a tool message rather than an error
-          that aborts the agent loop.
+        - Returns six tools (``read_file``, ``read_lines``, ``read_function``,
+          ``list_files``, ``search_codebase``, ``find_function_at_line``) that
+          delegate to ``index``; each returns a string and never raises, so a
+          bad model-supplied argument becomes a tool message rather than an
+          error that aborts the agent loop.
     """
 
     @tool
@@ -871,6 +1150,45 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return (
                 f"Error: could not read_lines {path!r} [{start}:{end}]: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    @tool
+    def read_function(path: str, name_or_line) -> str:
+        """Read one function/method/class body by line number or exact name.
+
+        Pass a positive integer for line-based lookup, or a name such as
+        ``foo`` / ``Class.method`` for exact name lookup. A string of only
+        digits (e.g. ``"12"``) is treated as a line number, not a name —
+        prefer an int when you mean a line.
+
+        Args:
+            path: File path (same paths accepted by read_file).
+            name_or_line: 1-based line number (int or digit-only string) or
+                exact construct name (any other non-empty string).
+
+        Returns:
+            Header plus ``N| content`` lines, or an ``Error: ...`` message.
+        """
+        try:
+            if isinstance(name_or_line, bool):
+                return (
+                    f"Error: name_or_line must be a line number or name, "
+                    f"got {name_or_line!r}."
+                )
+            if isinstance(name_or_line, int):
+                return index.read_function(path, name_or_line)
+            if isinstance(name_or_line, str) and name_or_line.strip().isdigit():
+                return index.read_function(path, int(name_or_line.strip()))
+            if isinstance(name_or_line, str):
+                return index.read_function_by_name(path, name_or_line)
+            return (
+                f"Error: name_or_line must be a line number or name, "
+                f"got {name_or_line!r}."
+            )
+        except Exception as exc:
+            return (
+                f"Error: could not read_function {path!r} ({name_or_line!r}): "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -959,7 +1277,7 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, read_lines, list_files, search_codebase, find_function_at_line]
+    return [read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line]
 
 
 @dataclass
