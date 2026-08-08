@@ -828,6 +828,168 @@ def test_code_review_input_carries_repo_root_for_durable_reader(tmp_path: Path) 
     assert cr_input.repo_root == str(tmp_path)
 
 
+# ---------------------------------------------------------------------------
+# _code_review_step / CodeReviewInput code= + pre_numbered= surface wiring
+# ---------------------------------------------------------------------------
+
+
+def test_run_review_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
+    """When ``old_contents`` yields a meaningful diff, the external agent's
+    ``CodeReviewInput`` carries ``code=<surface>``/``pre_numbered=True`` instead of
+    ``files=``."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+    old_contents = {"a.py": "def f():\n    return 0\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+        old_contents=old_contents,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    expected_surface = _maybe_build_change_surface_from_pairs(files, old_contents)
+    assert expected_surface is not None
+    assert cr_input.code == expected_surface.code
+    assert cr_input.pre_numbered is True
+    assert cr_input.files is None
+
+
+def test_run_review_old_contents_none_default_keeps_files_behavior(tmp_path: Path) -> None:
+    """``old_contents`` defaults to ``None`` -- every existing caller that does not
+    pass it keeps today's ``files=`` construction unchanged (no surface attempted)."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.code == ""
+    assert cr_input.pre_numbered is False
+
+
+def test_run_review_old_contents_identical_to_files_keeps_files_behavior(tmp_path: Path) -> None:
+    """``old_contents`` supplied but identical to ``files`` (no meaningful diff) still
+    falls back to ``files=`` -- an empty/no-op diff never masquerades as a surface."""
+    config = _build_config()
+    files = {"a.py": "unchanged\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+        old_contents=dict(files),
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.code == ""
+    assert cr_input.pre_numbered is False
+
+
+def test_microtask_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
+    """``run_microtask_review`` threads ``old_contents`` through to the same
+    ``_code_review_step`` surface wiring as ``run_review``."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+    old_contents = {"a.py": "def f():\n    return 0\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+        old_contents=old_contents,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    expected_surface = _maybe_build_change_surface_from_pairs(files, old_contents)
+    assert expected_surface is not None
+    assert cr_input.code == expected_surface.code
+    assert cr_input.pre_numbered is True
+    assert cr_input.files is None
+
+
+def test_microtask_old_contents_none_default_keeps_files_behavior(tmp_path: Path) -> None:
+    """``run_microtask_review`` without ``old_contents`` keeps today's ``files=``
+    construction unchanged."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.code == ""
+    assert cr_input.pre_numbered is False
+
+
 def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
     """The microtask QA/security branches emit their detail-callback messages."""
     config = _build_config()
