@@ -352,6 +352,20 @@ def test_bisected_recovery_outcome_is_not_cached(monkeypatch: pytest.MonkeyPatch
     assert second.approved is True
 
 
+def test_chunk_outcome_cache_size_default_override_and_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default is 512; env override applies; negative values clamp to 0."""
+    monkeypatch.delenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", raising=False)
+    assert mapping._chunk_outcome_cache_size() == mapping.DEFAULT_CHUNK_OUTCOME_CACHE_SIZE
+
+    monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "10")
+    assert mapping._chunk_outcome_cache_size() == 10
+
+    monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "-5")
+    assert mapping._chunk_outcome_cache_size() == 0
+
+
 def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Size 0 disables the cache: every run re-invokes the model, as before."""
     monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "0")

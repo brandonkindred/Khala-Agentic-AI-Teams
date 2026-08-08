@@ -248,6 +248,21 @@ def test_create_profile_duplicate_user_id_returns_409(api_client) -> None:
     assert got.json()["ips"] == first_ips
 
 
+def test_create_profile_docstring_documents_errors_not_preconditions() -> None:
+    """DbC: enum-validity/profile-existence are handled with specific HTTP
+    responses (422/409), not undefined-behavior-on-violation preconditions —
+    they belong under Raises:, not Preconditions:."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.create_profile.__doc__
+    assert doc
+    assert "Preconditions:" not in doc
+    assert "Raises:" in doc
+    assert "HTTPException(422)" in doc
+    assert "HTTPException(409)" in doc
+    assert "already exists" in doc
+
+
 def test_create_profile_non_dict_goal_rejected(api_client) -> None:
     # ``CreateProfileRequest.goals`` is typed ``List[Dict[str, Any]]``, so a
     # non-dict element should already be rejected by FastAPI/Pydantic request
@@ -1615,6 +1630,23 @@ def test_delete_strategy_lab_record_404(api_client) -> None:
     assert resp.status_code == 404
 
 
+def test_delete_strategy_lab_record_response_has_documented_contract() -> None:
+    """Regression guard: DeleteStrategyLabRecordResponse's docstring must
+    define lab_record_id and the None-vs-present semantics of the linked
+    strategy/backtest ids, not just restate the field names."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.DeleteStrategyLabRecordResponse.__doc__
+    assert doc, "DeleteStrategyLabRecordResponse is missing a docstring"
+    for snippet in (
+        "lab_record_id",
+        "deleted_strategy_id",
+        "deleted_backtest_id",
+        "deleted_paper_trading_sessions",
+    ):
+        assert snippet in doc, f"DeleteStrategyLabRecordResponse docstring missing {snippet!r}"
+
+
 def test_run_paper_trading_404_when_lab_record_missing(api_client) -> None:
     resp = api_client.post(
         "/strategy-lab/paper-trade",
@@ -1709,6 +1741,29 @@ def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client
     assert resp.json()["deleted"] is True
 
 
+@pytest.mark.parametrize(
+    ("handler_name", "required_snippets"),
+    [
+        ("get_backtest_job_status", ["Preconditions:", "Postconditions:", "404"]),
+        ("list_backtest_jobs", ["Postconditions:", "running_only"]),
+        ("cancel_backtest_job", ["Preconditions:", "Postconditions:", "404", "409"]),
+        ("delete_backtest_job", ["Preconditions:", "Postconditions:", "404"]),
+    ],
+)
+def test_backtest_job_handler_has_documented_contract(
+    handler_name: str, required_snippets: List[str]
+) -> None:
+    """Regression guard for #5141: these handlers must document their
+    purpose, preconditions, and the status codes they can return — a bare
+    or missing docstring here is the exact defect that issue reported."""
+    from investment_team.api import main as api_main
+
+    doc = getattr(api_main, handler_name).__doc__
+    assert doc, f"{handler_name} is missing a docstring"
+    for snippet in required_snippets:
+        assert snippet in doc, f"{handler_name} docstring missing {snippet!r}"
+
+
 def test_list_backtests_empty(api_client) -> None:
     resp = api_client.get("/backtests")
     assert resp.status_code == 200
@@ -1773,9 +1828,25 @@ def test_advisor_session_404_for_missing_ids(api_client) -> None:
 
 
 def test_get_advisor_session_returns_found_false_for_missing(api_client) -> None:
+    """An unknown session_id is tolerated, not a 404: found=False pairs with
+    session=None per the endpoint's documented postconditions."""
     resp = api_client.get("/advisor/sessions/missing")
     assert resp.status_code == 200
-    assert resp.json()["found"] is False
+    body = resp.json()
+    assert body["found"] is False
+    assert body["session"] is None
+
+
+def test_get_advisor_session_docstring_documents_tolerant_precondition() -> None:
+    """The docstring must state explicitly that unknown session ids are a
+    tolerated precondition, not imply that session_id must already
+    identify a started session."""
+    from investment_team.api.main import get_advisor_session
+
+    doc = get_advisor_session.__doc__
+    assert "Preconditions:" in doc
+    assert "None. Unknown session IDs are tolerated." in doc
+    assert "must identify a previously started advisor session" not in doc
 
 
 def test_start_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:

@@ -279,6 +279,37 @@ def test_run_session_zero_trades_marks_not_performant(patched_run_backtest) -> N
     assert "zero trades" in (session.divergence_analysis or "")
 
 
+def test_run_session_session_id_has_sufficient_entropy(patched_run_backtest) -> None:
+    """session_id must carry the full UUID hex, not a truncated 8-char prefix.
+
+    A truncated `hex[:8]` id has only 32 bits of entropy, making collisions
+    likely after ~65k sessions and risking a silent overwrite in
+    `_paper_trading_sessions`. Require at least 16 hex characters (64 bits).
+    """
+    patched_run_backtest.append(
+        _FakeRunResult(trades=[], result=None, error=None, lookahead_violation=False)
+    )
+
+    agent = PaperTradingAgent(llm_client=_StubLLM([]))
+    strategy = _make_strategy()
+    backtest = _make_backtest_record(strategy, trade_count=5)
+    session = agent.run_session(
+        strategy=strategy,
+        strategy_code=strategy.strategy_code or "",
+        backtest_record=backtest,
+        market_data={"AAA": _bars()},
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    assert session.session_id.startswith("pt-")
+    hex_suffix = session.session_id[len("pt-") :]
+    assert len(hex_suffix) >= 16, (
+        f"session_id hex suffix too short for adequate entropy: {session.session_id!r}"
+    )
+
+
 def test_run_session_ready_for_live_when_aligned(patched_run_backtest) -> None:
     """Aligned metrics + ≥30 trades → READY_FOR_LIVE."""
     pt_result = _result()

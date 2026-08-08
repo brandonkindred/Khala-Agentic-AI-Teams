@@ -170,11 +170,14 @@ def test_dbc_run_rejects_invalid_insertion_without_corrupting() -> None:
     assert "does_not_exist" in out.rejected_insertions[0]
 
 
-def test_dbc_run_merge_exception_fails_open(monkeypatch) -> None:
+def test_dbc_run_merge_exception_fails_loud(monkeypatch) -> None:
     """An unexpected exception from the deterministic merge step must not
-    propagate out of run() -- it fails open (unlike a persistent LLM
-    failure), honoring run()'s documented 'Raises: Nothing' contract.
-    merge.py is pure/LLM-free, so there is nothing for a retry to fix here."""
+    propagate out of run() -- it is caught and surfaced as a failed,
+    non-compliant result (like an exhausted LLM-call failure), honoring
+    run()'s documented 'Raises: Nothing' contract without silently claiming
+    compliance. merge.py is pure/LLM-free, so there is nothing for a retry
+    to fix here -- reaching this path means an unexpected bug, not a
+    transient condition."""
     client = _StubClient(
         canned={
             "insertions": [{"file": "a.py", "symbol": "f", "comment": "c"}],
@@ -193,7 +196,7 @@ def test_dbc_run_merge_exception_fails_open(monkeypatch) -> None:
         DbcCommentsInput(code="def f():\n    pass\n", language="python"),
         on_status=lambda s, d: statuses.append((s, d)),
     )
-    assert out.already_compliant is True
+    assert out.already_compliant is False
     assert "merge error" in out.summary
     assert any(s == DbcCommentsStatus.FAILED for s, _ in statuses)
 

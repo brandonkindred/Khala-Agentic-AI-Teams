@@ -1323,7 +1323,15 @@ async def health() -> UnifiedHealthResponse:
 
 @app.get("/teams", tags=["root"])
 async def list_teams() -> dict[str, Any]:
-    """List all available teams with their proxy status."""
+    """List all configured teams with their mount/proxy status.
+
+    Preconditions: none.
+    Postconditions: returns ``200`` with a ``teams`` dict keyed by team key;
+        each entry reports ``name``, ``prefix``, ``description``, whether the
+        team is currently ``mounted``, its configured ``enabled`` flag, and a
+        ``docs_url`` (``None`` when the team isn't mounted or is in-process,
+        since those don't expose a per-team ``/docs`` endpoint).
+    """
     teams = {}
     for key, config in TEAM_CONFIGS.items():
         mounted = _registered_teams.get(key, False)

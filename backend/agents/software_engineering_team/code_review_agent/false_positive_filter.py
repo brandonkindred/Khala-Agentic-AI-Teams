@@ -86,6 +86,16 @@ _DISK_REPO_SEARCH_FILE_SCAN_LIMIT = DEFAULT_MAX_LISTED_FILES
 # cannot pull an unbounded slice into the verifier context.
 _READ_LINES_MAX_SPAN = 400
 
+# Hard cap on the enclosing-construct excerpt size for one find_references hit.
+# Above this, _format_reference_hit shows a bounded line-window around the hit
+# instead of the whole construct so one oversized function can't flood the result.
+_EXCERPT_MAX_LINES = 60
+
+# Size of the fallback line-window shown when no enclosing construct is found
+# (module-level hit, non-Python file, or unparsable content) or when a found
+# construct exceeds _EXCERPT_MAX_LINES.
+_EXCERPT_WINDOW_LINES = 12
+
 # Cap on file paths listed inline in the verification prompt's manifest, so a
 # submission touching a large repo can't by itself blow the prompt past the
 # model's context window; the rest remains reachable via list_files()/
@@ -716,9 +726,11 @@ class CodebaseIndex:
 
         Postconditions:
             - On complete hits with a reader: newline-joined hit blocks; each block
-              starts with ``path:line`` and may append an enclosing-construct
-              excerpt for readable ``.py``/``.pyi`` files (same shape as
-              ``read_function``).
+              starts with ``path:line`` and appends a bounded excerpt: a full
+              enclosing-construct slice (same shape as ``read_function``) for
+              readable ``.py``/``.pyi`` files when the construct is at most
+              ``_EXCERPT_MAX_LINES``, else an ``_EXCERPT_WINDOW_LINES``-line
+              window around the hit (also used when no construct is found).
             - When truncated (repo scan incomplete, or submission filled
               ``max_matches`` so the repo half was skipped): append a truncated
               banner (hits) or an empty-truncated message (no hits).
@@ -894,8 +906,51 @@ def _format_construct_slice(
     return f"{header}\n{body}"
 
 
+def _format_line_window(
+    display: str,
+    body_lines: List[str],
+    lineno: int,
+    *,
+    mapper: Optional[Callable[[int], int]] = None,
+    lo: int = 1,
+    hi: Optional[int] = None,
+) -> str:
+    """Format a bounded window of raw lines around ``lineno`` (no/oversized construct).
+
+    Preconditions:
+        - ``lineno`` is a 1-based index into ``body_lines``.
+        - When given, ``1 <= lo <= lineno <= hi``.
+
+    Postconditions:
+        - Returns a header plus ``N| content`` body lines for up to
+          ``_EXCERPT_WINDOW_LINES`` lines centered on ``lineno``, clamped to
+          ``[lo, hi or len(body_lines)]`` so a window inside an oversized
+          construct never spills past that construct's own span.
+        - Header reports the shown range and the total lines in ``[lo, hi]``
+          so the window reads as bounded/partial, not a complete excerpt.
+    """
+    total_hi = hi if hi is not None else len(body_lines)
+    span = total_hi - lo + 1
+    half = _EXCERPT_WINDOW_LINES // 2
+    start = max(lo, lineno - half)
+    end = min(total_hi, start + _EXCERPT_WINDOW_LINES - 1)
+    start = max(lo, end - _EXCERPT_WINDOW_LINES + 1)
+    display_start = mapper(start) if mapper is not None else start
+    display_end = mapper(end) if mapper is not None else end
+    shown = end - start + 1
+    header = (
+        f"{display} lines {display_start}–{display_end} "
+        f"(window, {shown} of {span} lines):"
+    )
+    body = "\n".join(
+        f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
+        for i in range(start, end + 1)
+    )
+    return f"{header}\n{body}"
+
+
 def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
-    """Format one find_references hit as path:line plus optional construct excerpt.
+    """Format one find_references hit as path:line plus a bounded excerpt.
 
     Preconditions:
         - ``lineno`` >= 1 and is a 1-based storage index from ``search`` /
@@ -906,9 +961,16 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
           the original ``N:`` file line when content is pre-numbered, else
           ``lineno``.
         - When readable ``.py``/``.pyi`` content has an enclosing construct at
-          the physical hit line, appends a construct slice from
-          ``_format_construct_slice`` (same shape as ``read_function``).
-        - Otherwise returns only the locator (no fallback window).
+          the physical hit line spanning at most ``_EXCERPT_MAX_LINES``,
+          appends a full construct slice from ``_format_construct_slice``
+          (same shape as ``read_function``).
+        - When the construct exceeds ``_EXCERPT_MAX_LINES``, or no construct
+          is found (module-level hit, non-Python file, unparsable content),
+          appends a bounded ``_EXCERPT_WINDOW_LINES``-line window around the
+          hit instead, via ``_format_line_window`` -- excerpt payloads stay
+          bounded even when no construct can be resolved.
+        - Returns only the locator when the file content itself is
+          unreadable.
         - Never raises.
     """
     loc = f"{path}:{lineno}"
@@ -919,8 +981,6 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
     if display == index.EXISTING_CODEBASE_PATH:
         display = path
     _, ext = os.path.splitext(display)
-    if ext.lower() not in (".py", ".pyi"):
-        return loc
     try:
         # ``lineno`` from search is a storage/physical index. ``strip_numbered_prefixes``
         # remaps an *original* file line; pass a dummy original and keep ``lineno``
@@ -928,16 +988,29 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         stripped, _, mapper = strip_numbered_prefixes(content, 1)
         if mapper is not None:
             loc = f"{path}:{mapper(lineno)}"
-        construct = enclosing_construct(
-            stripped, lineno, annotated_hunks=mapper is not None
+        construct = (
+            enclosing_construct(stripped, lineno, annotated_hunks=mapper is not None)
+            if ext.lower() in (".py", ".pyi")
+            else None
         )
     except Exception:  # noqa: BLE001 - excerpt failure must not abort find_references
         return loc
-    if construct is None:
-        return loc
-    excerpt = _format_construct_slice(
-        display, construct, stripped.splitlines(), mapper=mapper
-    )
+    body_lines = stripped.splitlines()
+    if construct is not None:
+        n = construct.end_line - construct.start_line + 1
+        if n <= _EXCERPT_MAX_LINES:
+            excerpt = _format_construct_slice(display, construct, body_lines, mapper=mapper)
+            return f"{loc}\n{excerpt}"
+        excerpt = _format_line_window(
+            display,
+            body_lines,
+            lineno,
+            mapper=mapper,
+            lo=construct.start_line,
+            hi=construct.end_line,
+        )
+        return f"{loc}\n{excerpt}"
+    excerpt = _format_line_window(display, body_lines, lineno, mapper=mapper)
     return f"{loc}\n{excerpt}"
 
 

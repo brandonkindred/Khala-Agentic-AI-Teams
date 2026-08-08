@@ -62,6 +62,7 @@ from investment_team.models import (
     UserPreferences,
     ValidationReport,
     WorkflowMode,
+    get_fee_defaults,
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
 from investment_team.shared.job_store import (
@@ -1020,21 +1021,18 @@ def health() -> dict:
 def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
-    Preconditions:
-        - ``request.risk_tolerance``/``request.default_mode`` are already
-          guaranteed to be valid ``RiskTolerance``/``WorkflowMode`` members —
-          FastAPI/Pydantic rejects any other value with a 422 before this
-          handler runs, since both fields are typed as the enum itself.
-        - No profile may already exist for ``request.user_id`` — this endpoint
-          creates; it does not upsert.
-
     Postconditions:
-        - On success: a new IPS is persisted under ``_profiles[request.user_id]``
-          and returned; no prior profile is overwritten.
-        - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
+        On success: a new IPS is persisted under ``_profiles[request.user_id]``
+        and returned; no prior profile is overwritten.
+
+    Raises:
+        - ``HTTPException(422)`` if ``request.risk_tolerance``/``request.default_mode``
+          are not valid ``RiskTolerance``/``WorkflowMode`` members — rejected by
+          FastAPI/Pydantic before this handler runs, since both fields are typed
+          as the enum itself — or if constructing the nested ``UserGoal``,
           ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
-        - Raises ``HTTPException`` 409 if a profile already exists for
-          ``request.user_id``.
+        - ``HTTPException(409)`` if a profile already exists for
+          ``request.user_id`` — this endpoint creates; it does not upsert.
     """
     risk_tol = request.risk_tolerance
     workflow_mode = request.default_mode
@@ -1425,10 +1423,12 @@ def _run_backtest_background(
           Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
           ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
-          cancelled status visible at that check is preserved. Updates use
-          unconditional ``_bt_update_job``, so a cancel that lands between a
-          check and the next update can still be overwritten with RUNNING,
-          COMPLETED, or FAILED.
+          cancelled status visible at that check is preserved. Every
+          status-changing ``_bt_update_job`` call (RUNNING, COMPLETED, FAILED)
+          is immediately preceded by its own cancellation check — including a
+          re-check taken right before the COMPLETED write, after the backtest
+          record is built and stored — so no application-level work sits
+          between a check and the update it guards.
     """
     try:
         if _bt_is_job_cancelled(job_id):
@@ -1456,6 +1456,8 @@ def _run_backtest_background(
         )
         with _lock:
             _backtests[backtest_id] = record
+        if _bt_is_job_cancelled(job_id):
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(
             job_id,
             status=_BT_JOB_STATUS_COMPLETED,
@@ -2506,7 +2508,7 @@ def _finalize_strategy_lab_cycle_record(
             record.paper_trading_skipped_reason = "no_market_data"
             _emit("paper_trading_skipped", {"reason": "no_market_data", "detail": str(exc)})
         except Exception as exc:
-            logger.warning("Paper trading step failed (non-fatal): %s", exc)
+            logger.exception("Paper trading step failed (non-fatal)")
             record.paper_trading_status = "failed"
             record.paper_trading_error = str(exc)[:_MAX_PAPER_TRADING_ERROR_LENGTH]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
@@ -3341,9 +3343,15 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
+          Can also fire from the post-lock re-read if the run was deleted in
+          the window between the pre-lock existence check and this request
+          acquiring the transition lock (a concurrent delete winning that
+          race), not just when ``run_id`` never existed at all.
         - ``HTTPException`` 400: the run's status is not in
-          ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
-          dict.
+          ``RESUMABLE_STATUSES``; its ``request_payload`` is missing/not a
+          dict; or the stored ``request_payload`` fails
+          ``RunStrategyLabRequest`` validation (e.g. a corrupted or
+          schema-stale persisted payload).
         - ``HTTPException`` 409: another transition for this run_id is
           already in flight, or another run is already ``"running"``.
         - ``HTTPException`` 503: reading the current durable generation —
@@ -3369,6 +3377,13 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # Preconditions for why reading it beforehand risks a stale-snapshot
         # duplicate dispatch.
         state = _get_run_state(run_id)
+        if state is None:
+            # The cheap pre-lock check above saw the run exist, but it was
+            # deleted before this request acquired the transition lock.
+            # Mirror the early check's exact 404 rather than falling through
+            # to `validate_job_for_action`'s generic "Job ... not found" text
+            # so both races produce the same response shape.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
             validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
         except JobNotFoundError as exc:
@@ -3680,6 +3695,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # RESTARTABLE_STATUSES, so status is only trustworthy once no other
         # transition for this run_id can be concurrently rewriting it.
         state = _get_run_state(run_id)
+        if state is None:
+            # A concurrent delete_strategy_lab_run completed in the window between
+            # the pre-lock existence check above and this re-read; validate_job_for_action
+            # below would also 404 via JobNotFoundError, but this mirrors the
+            # pre-lock check's message for a consistent 404 body.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
             validate_job_for_action(state, run_id, STRATEGY_LAB_RESTARTABLE_STATUSES, "restarted")
         except JobNotFoundError as exc:
@@ -4142,7 +4163,10 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
           in-memory-only snapshot; this endpoint always returns 200. An
           ``_active_runs`` entry missing a truthy ``run_id`` (malformed or
           partially-constructed) is skipped and logged rather than raising
-          ``KeyError``.
+          ``KeyError``. An entry whose response construction
+          (``_run_state_to_response``) fails -- e.g. a field that cannot be
+          coerced to its response type -- is likewise skipped and logged
+          (``logger.warning``) rather than raising out of this endpoint.
     """
 
     def _in_memory_runs_by_id() -> Dict[str, Dict[str, Any]]:
@@ -4192,7 +4216,14 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         in_memory = _in_memory_runs_by_id()
 
-    runs = [_run_state_to_response(r) for r in in_memory.values()]
+    runs: List[StrategyLabRunStatusResponse] = []
+    for rid, r in in_memory.items():
+        try:
+            runs.append(_run_state_to_response(r))
+        except Exception:
+            logger.warning(
+                "Skipping run %r in listing; _run_state_to_response failed", rid, exc_info=True
+            )
     return ActiveRunsResponse(runs=runs)
 
 
@@ -4255,6 +4286,30 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     window. In-memory ``_active_runs`` lookups use ``_async_lock`` (not the
     threading ``_lock``) for the same reason. The streaming generator itself
     remains async so it doesn't block Uvicorn worker threads once connected.
+
+    Preconditions:
+        - ``run_id`` is a string (path param). It need not resolve to a known
+          run -- a miss is normal input this function itself handles (see
+          ``Raises``), not a caller obligation.
+
+    Postconditions:
+        - Returns a ``StreamingResponse`` (``media_type="text/event-stream"``).
+        - If ``run_id`` is found in ``_active_runs``, its state is refreshed
+          via ``_reconcile_run_progress`` (offloaded to the threadpool)
+          before use; otherwise state is loaded via
+          ``_load_run_from_job_service`` (also offloaded).
+        - If the (possibly just-reconciled) status is in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, the response body is a one-shot
+          generator that yields a ``snapshot`` event followed by ``done`` and
+          returns immediately, without subscribing to the live event bus.
+        - Otherwise the response subscribes to the per-job event bus and
+          streams ``snapshot``/``progress``/``cycle_complete``/
+          ``cycle_skipped`` events, terminating on ``complete``/``error``/
+          ``cancelled`` followed by a final ``done``.
+
+    Raises:
+        - ``HTTPException`` 404: ``run_id`` resolves to no state in either
+          ``_active_runs`` or the job-service fallback.
     """
     # Deliberately local (not module-level): tests substitute a fake
     # subscribe/unsubscribe by monkeypatching them directly on the
@@ -4288,11 +4343,14 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+        # Captured eagerly (not read lazily inside the generator) so the
+        # terminal snapshot reflects exactly the state checked as terminal
+        # above, even if `_active_runs[run_id]` is mutated in place by a
+        # background thread before Starlette drains this generator.
+        snapshot = _run_state_to_response(state).model_dump(mode="json")
 
         async def _terminal_gen():
-            yield sse_line(
-                {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
-            )
+            yield sse_line({"type": "snapshot", **snapshot})
             yield sse_line({"type": "done"})
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
@@ -4336,10 +4394,11 @@ class ClearStrategyLabStorageResponse(BaseModel):
 class DeleteStrategyLabRecordResponse(BaseModel):
     """Returned by ``DELETE /strategy-lab/records/{lab_record_id}``.
 
-    ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless the
-    corresponding linked entity actually existed (and was deleted) — not a
-    placeholder for "unknown." ``deleted_paper_trading_sessions`` is a count
-    of linked paper-trading sessions removed, not an id.
+    ``lab_record_id`` echoes the deleted record's id. ``deleted_strategy_id``/
+    ``deleted_backtest_id`` are ``None`` unless the corresponding linked
+    entity actually existed (and was deleted) — not a placeholder for
+    "unknown." ``deleted_paper_trading_sessions`` is a count of linked
+    paper-trading sessions removed, not an id.
     """
 
     lab_record_id: str
@@ -4616,12 +4675,19 @@ def _run_paper_trading_background(
           signal also failed to reach.
 
     Raises:
-        - None. All failures, including import errors for the two lazily-imported
-          dependencies, are caught and logged; the session is marked FAILED instead.
-          This includes a failure to re-parse the persisted session record while
-          handling a crash: that secondary failure is itself caught and logged,
-          so an unparseable record is left as-is (logged, not updated) rather
-          than letting the parse error escape in place of the original crash.
+        - None, for ``Exception`` and its subclasses: import errors for the two
+          lazily-imported dependencies, provider/network failures, and this
+          function's own postcondition guards are all caught and logged; the
+          session is marked FAILED instead. This includes a failure to re-parse
+          the persisted session record while handling a crash: that secondary
+          failure is itself caught and logged, so an unparseable record is left
+          as-is (logged, not updated) rather than letting the parse error escape
+          in place of the original crash.
+        - ``KeyboardInterrupt`` / ``SystemExit`` / ``GeneratorExit`` (``BaseException``
+          but not ``Exception``) are deliberately NOT caught here and propagate to
+          the caller — silently converting a worker-thread interrupt or interpreter
+          shutdown signal into a FAILED session would mask it instead of letting it
+          terminate the worker.
     """
     try:
         # Validate the documented precondition — a missing, unparseable, or
@@ -4676,23 +4742,9 @@ def _run_paper_trading_background(
         )
 
         if not market_data:
-            with _lock:
-                if _paper_trading_session_already_terminal(session_id):
-                    logger.warning(
-                        "Paper trade %s: session already terminal when the "
-                        "empty-market-data write was about to run; leaving it "
-                        "untouched (a concurrent writer already finalized it).",
-                        session_id,
-                    )
-                    return
-                raw = _paper_trading_sessions.get(session_id)
-                if raw is not None:
-                    session = PaperTradingSession.parse_persisted(raw)
-                    session.status = PaperTradingStatus.FAILED
-                    session.error = "Failed to fetch market data from external sources."
-                    session.divergence_analysis = session.error
-                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                    _paper_trading_sessions[session_id] = session
+            _fail_paper_trading_session(
+                session_id, "Failed to fetch market data from external sources."
+            )
             return
 
         agent = PaperTradingAgent()
@@ -4743,7 +4795,18 @@ def _run_paper_trading_background(
                     result_session.verdict,
                     len(result_session.trades),
                 )
-    except Exception as exc:
+    except BaseException as exc:
+        # Deliberately narrower than a bare `except BaseException`: KeyboardInterrupt /
+        # SystemExit / GeneratorExit are BaseException but not Exception and must
+        # propagate rather than being converted into a FAILED session — same
+        # distinction shared.concurrency.parallel_map draws for worker exceptions.
+        # Everything else (import failures, provider/network errors, programming
+        # bugs) is still folded into a FAILED session below: nothing downstream
+        # (run_paper_trading_activity) marks this session terminal if this worker
+        # raises, so surfacing a non-interrupt exception here would leave the
+        # session stuck RUNNING forever instead of failing cleanly.
+        if not isinstance(exc, Exception):
+            raise
         logger.exception("Paper trade %s: background worker crashed", session_id)
         # Nested try/except: parse_persisted() below can itself raise (e.g. a
         # corrupt persisted record) — that secondary exception is not caught by
@@ -4984,6 +5047,18 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                 session_id,
                 exc_info=True,
             )
+        # Only the documented Temporal dispatch/worker failure modes get the
+        # 503 below: HTTPException (raised by _require_temporal when Temporal
+        # is disabled), RuntimeError (the worker client never became ready),
+        # and TimeoutError/RPCError (the start ack timed out, or the RPC
+        # itself failed) -- the exact set start_workflow_sync's docstring and
+        # _await_client document. Anything else is a genuine bug (a bad
+        # payload, a programming error) and must surface as its own 500
+        # instead of being misreported as "Temporal worker unavailable."
+        from temporalio.service import RPCError
+
+        is_dispatch_failure = isinstance(exc, (HTTPException, RuntimeError, TimeoutError, RPCError))
+
         # Best-effort failure recording must not mask the original dispatch
         # error (especially an HTTPException with the intended status/detail).
         # If the session was concurrently removed or is unparseable,
@@ -4992,7 +5067,9 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         try:
             _fail_paper_trading_session(
                 session_id,
-                "Failed to start the paper-trading workflow (Temporal unavailable).",
+                "Failed to start the paper-trading workflow (Temporal unavailable)."
+                if is_dispatch_failure
+                else "Unexpected error starting the paper-trading workflow.",
             )
         except Exception:
             logger.exception(
@@ -5001,9 +5078,17 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             )
         if isinstance(exc, HTTPException):
             raise
+        if is_dispatch_failure:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            ) from exc
+        logger.exception(
+            "Unexpected error starting paper-trading workflow for session %s", session_id
+        )
         raise HTTPException(
-            status_code=503,
-            detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            status_code=500,
+            detail="Unexpected error starting the paper-trading workflow.",
         ) from exc
 
     return PaperTradingResponse(
@@ -5081,6 +5166,40 @@ def _paper_trading_session_already_terminal(session_id: str) -> bool:
     return session.status not in _ACTIVE_PT_STATES
 
 
+def _apply_paper_trading_failure(
+    session: PaperTradingSession,
+    error: str,
+    *,
+    completed_at: Optional[str] = None,
+    terminated_reason: Optional[str] = None,
+    set_legacy_divergence_analysis: bool = False,
+) -> None:
+    """Mutate ``session`` in place to record a terminal failure.
+
+    Shared by ``_fail_paper_trading_session`` (single-session, self-locking) and
+    ``_recover_orphaned_paper_trading_sessions`` (whole-batch, caller-locked) so
+    the terminal-write fields live in one place.
+
+    Preconditions:
+        - Caller holds ``_lock`` and has already decided ``session`` should be
+          failed (e.g. confirmed it isn't already COMPLETED/FAILED).
+    Postconditions:
+        - session.status == FAILED and session.error == error.
+        - session.completed_at is set to ``completed_at`` if given, else the
+          current UTC time.
+        - If ``terminated_reason`` is not None, session.terminated_reason is set.
+        - If ``set_legacy_divergence_analysis``, session.divergence_analysis is
+          mirrored from session.error.
+    """
+    session.status = PaperTradingStatus.FAILED
+    session.error = error
+    session.completed_at = completed_at or datetime.now(tz=timezone.utc).isoformat()
+    if terminated_reason is not None:
+        session.terminated_reason = terminated_reason
+    if set_legacy_divergence_analysis:
+        session.divergence_analysis = session.error
+
+
 def _fail_paper_trading_session(session_id: str, error: str) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
@@ -5112,9 +5231,7 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             # deciding to mark it failed).
             return
         try:
-            session.status = PaperTradingStatus.FAILED
-            session.error = error
-            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            _apply_paper_trading_failure(session, error)
             _paper_trading_sessions[session_id] = session
         except Exception:
             # The mutations above and the dict write (which round-trips
@@ -5162,19 +5279,32 @@ def _default_slippage_bps() -> float:
     )
 
 
-def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
+def _resolve_fee_overrides(
+    request: "RunPaperTradingRequest", asset_class: Optional[str] = None
+) -> tuple[float, float]:
     """Return ``(transaction_cost_bps, slippage_bps)`` for the live config.
 
     Uses explicit ``None`` checks instead of ``or`` so a caller asking for
     zero-fee / zero-slippage experiments isn't silently bumped to the
     defaults — ``0.0`` is falsy but semantically meaningful here.
+
+    When ``asset_class`` is given, an omitted override falls back to
+    ``get_fee_defaults(asset_class)`` so non-stock strategies (crypto,
+    forex, ...) get correct per-asset-class fees instead of the flat
+    stock-tier default. Callers that don't have an asset class in scope
+    keep the operator-tunable env-var default.
     """
+    fee_defaults = get_fee_defaults(asset_class) if asset_class is not None else None
     tx = (
         request.transaction_cost_bps
         if request.transaction_cost_bps is not None
-        else _default_tx_cost_bps()
+        else (fee_defaults["transaction_cost_bps"] if fee_defaults else _default_tx_cost_bps())
     )
-    slip = request.slippage_bps if request.slippage_bps is not None else _default_slippage_bps()
+    slip = (
+        request.slippage_bps
+        if request.slippage_bps is not None
+        else (fee_defaults["slippage_bps"] if fee_defaults else _default_slippage_bps())
+    )
     return tx, slip
 
 
@@ -5229,7 +5359,7 @@ def _run_live_paper_trading_background(
 
         strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
 
-        tx_cost, slip = _resolve_fee_overrides(request)
+        tx_cost, slip = _resolve_fee_overrides(request, asset_class=strategy.asset_class)
         # Captured once: two separate datetime.now() calls could straddle
         # midnight and produce a start/end date that spans two days for a
         # config meant to represent a single live trading day.
@@ -5262,6 +5392,11 @@ def _run_live_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is None:
+                logger.warning(
+                    "Live paper trade %s: session removed before results could "
+                    "be persisted; discarding run result.",
+                    session_id,
+                )
                 return
             session = PaperTradingSession.parse_persisted(raw)
             if session.status not in _ACTIVE_PT_STATES:
@@ -5707,16 +5842,18 @@ def _recover_orphaned_paper_trading_sessions() -> None:
                     continue
                 if session.status not in _ACTIVE_PT_STATES:
                     continue
-                session.status = PaperTradingStatus.FAILED
-                session.completed_at = now_iso
-                session.terminated_reason = "process_exit"
-                session.error = (
-                    "Paper trading did not complete — the worker process exited before "
-                    "finalizing the session. Re-run the paper trade from the Strategy Lab."
-                )
-                # Preserve the legacy free-form field too so older clients still read a message.
-                session.divergence_analysis = session.error
                 try:
+                    _apply_paper_trading_failure(
+                        session,
+                        (
+                            "Paper trading did not complete — the worker process exited "
+                            "before finalizing the session. Re-run the paper trade from "
+                            "the Strategy Lab."
+                        ),
+                        completed_at=now_iso,
+                        terminated_reason="process_exit",
+                        set_legacy_divergence_analysis=True,
+                    )
                     _paper_trading_sessions[session.session_id] = session
                     recovered += 1
                 except Exception:
@@ -5895,6 +6032,9 @@ def send_advisor_message(
 @app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
+
+    Preconditions:
+        - None. Unknown session IDs are tolerated.
 
     Postconditions:
         - Returns the session with `found=True` if `session_id` matches a

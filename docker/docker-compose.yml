@@ -16,8 +16,8 @@ x-team-env-base: &team-env-base
   OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
   PYTHONUNBUFFERED: "1"
   POSTGRES_HOST: postgres
-  POSTGRES_USER: ${POSTGRES_USER:-postgres}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
   POSTGRES_DB: ${POSTGRES_DB:-postgres}
   TEMPORAL_ADDRESS: temporal:7233
   JOB_SERVICE_URL: http://job-service:8085
@@ -105,8 +105,8 @@ services:
       - -c
       - max_connections=500
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       # Per-team sandbox roles (issue #257). Consumed by
       # postgres/init/04-create-sandbox-team-roles.sh on first boot. Unset
@@ -126,7 +126,7 @@ services:
       - postgres_data_v18:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -318,23 +318,15 @@ services:
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
-      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-      PYTHONUNBUFFERED: "1"
-      POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
-      TEMPORAL_ADDRESS: temporal:7233
-      JOB_SERVICE_URL: http://job-service:8085
+      # Postgres creds (and the rest of the shared team env) come from
+      # *team-env-base — do not re-declare POSTGRES_* here, it would be a
+      # second, independently-drifting copy of the same credential wiring.
+      <<: *team-env-base
       # No OTEL_EXPORTER_OTLP_ENDPOINT: spans stay in-process. Only se-service,
       # investment-service, and branding-service export to the in-stack Tempo.
       BLOG_PLANNING_MAX_ITERATIONS: ${BLOG_PLANNING_MAX_ITERATIONS:-5}
       BLOG_PLANNING_MAX_PARSE_RETRIES: ${BLOG_PLANNING_MAX_PARSE_RETRIES:-3}
       BLOG_PLANNING_MODEL: ${BLOG_PLANNING_MODEL:-}
-      AGENT_CACHE: /data/agents
       BLOGGING_RUN_ARTIFACTS_ROOT: /data/agents/blogging_team/runs
       BLOGGING_MEDIUM_STATS_ROOT: ${BLOGGING_MEDIUM_STATS_ROOT:-/data/agents/blogging_team/medium_stats}
       INTEGRATIONS_BROWSER_SESSION_ROOT: ${INTEGRATIONS_BROWSER_SESSION_ROOT:-/data/agents/blogging_team/sessions}
@@ -989,20 +981,12 @@ services:
     mem_limit: 1g
     mem_reservation: 512m
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
-      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-      PYTHONUNBUFFERED: "1"
-      POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # Postgres creds (and the rest of the shared team env) come from
+      # *team-env-base — do not re-declare POSTGRES_* here, it would be a
+      # second, independently-drifting copy of the same credential wiring.
+      <<: *team-env-base
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
       UNIFIED_API_TEAM_ASSISTANTS_ENABLED: ${UNIFIED_API_TEAM_ASSISTANTS_ENABLED:-true}
-      TEMPORAL_ADDRESS: temporal:7233
-      JOB_SERVICE_URL: http://job-service:8085
-      AGENT_CACHE: /data/agents
       # No OTEL_EXPORTER_OTLP_ENDPOINT: the unified API is a thin proxy. Trace
       # export is limited to se-service / investment-service / branding-service.
       # Knowledge-graph layer (Graphiti + Neo4j). NEO4J_BOLT_URL is the enablement

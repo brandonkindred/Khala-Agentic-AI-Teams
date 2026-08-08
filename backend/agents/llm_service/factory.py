@@ -665,8 +665,10 @@ def clear_client_cache() -> None:
     stale). The provider-list (failover) cache is dropped too so a list edit takes
     effect immediately in this process. Safe to call when nothing is cached.
 
-    Postconditions: the factory, provider-list, and Strands model caches are empty
-        afterward.
+    Postconditions: the factory and provider-list caches are empty afterward.
+        The Strands model cache is cleared on a best-effort basis; if the
+        clear fails, a warning is logged and the cache may retain stale
+        entries.
     """
     with _cache_lock:
         _client_cache.clear()

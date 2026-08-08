@@ -37,7 +37,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import MutableMapping
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 
 import httpx
 import pytest
@@ -64,6 +64,43 @@ def _clear_job_client_cache():
 
 if TYPE_CHECKING:
     from investment_team.models import StrategyLabRecord
+
+
+def test_api_main_has_no_module_level_logging_basic_config_call() -> None:
+    """A top-level ``logging.basicConfig(...)`` statement in this module would
+    mutate the global root logger as a side effect of merely importing it,
+    overriding the application entrypoint's (or a test runner's) intended
+    logging setup depending on import order.
+
+    Statically inspects the module's top-level statements (rather than
+    reimporting it) because ``investment_team.api.main`` has real import-time
+    side effects of its own (``create_team_app(...)``, module-level
+    singletons) that a forced reimport would re-trigger and that other
+    modules alias by identity (see ``test_orchestrator_api``'s
+    ``_DEFERRED``-symbol aliasing checks) — reloading would silently break
+    those instead of testing this module's logging behavior.
+    """
+    import ast
+    import inspect
+
+    from investment_team.api import main as api_main
+
+    tree = ast.parse(inspect.getsource(api_main))
+    offending = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "basicConfig"
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "logging"
+    ]
+    assert not offending, (
+        "Module-level logging.basicConfig call reintroduced in "
+        "investment_team.api.main — this mutates the global root logger "
+        "as a side effect of import."
+    )
 
 
 def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
@@ -1378,6 +1415,63 @@ def test_run_backtest_background_mid_run_cancellation(
     assert "backtest_id" not in state
 
 
+def test_run_backtest_background_cancel_before_completed_write(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, False, True])
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background(
+        "job-cancel-before-completed", strategy, config, "tester", []
+    )
+
+    # Cancelled at the checkpoint immediately before the COMPLETED write.
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    # Only the earlier RUNNING write happened — COMPLETED must never land.
+    assert state.get("status") == "running"
+    assert "backtest_id" not in state
+    # But the backtest record was already persisted before that checkpoint —
+    # the fix skips the status write, not the record write.
+    assert len(api_main._backtests) == 1
+
+
 def test_run_backtest_background_cancel_during_backtest_execution_error(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -1870,6 +1964,94 @@ def test_delete_strategy_lab_record_success(monkeypatch: pytest.MonkeyPatch, api
     assert api_main._strategy_lab_records.get("lab-X") is None
     assert api_main._strategies.get("strat-lab-X") is None
     assert api_main._backtests.get("bt-lab-X") is None
+
+
+def test_delete_strategy_lab_record_deletes_job_service_rows(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The linked strategy/backtest deletes must reach the job service, not
+    just an in-memory cache.
+
+    ``api_client`` normally swaps ``_strategies``/``_backtests`` for a plain
+    ``_InMemoryDict``, so ``test_delete_strategy_lab_record_success`` alone
+    can't tell a real ``JobServiceClient.delete_job`` call apart from a
+    no-op. This test wires ``_strategies``/``_backtests`` back to real
+    ``_PersistentDict`` instances backed by fake job-service clients, so a
+    regression to "only clears the in-memory entry" would leave the fake
+    clients' rows in place and fail the assertions below.
+    """
+    import job_service_client as jsc_mod
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    fake_strategies_client = _FakeJobClient(team="investment_strategies")
+    fake_backtests_client = _FakeJobClient(team="investment_backtests")
+    monkeypatch.setitem(jsc_mod._client_cache, "investment_strategies", fake_strategies_client)
+    monkeypatch.setitem(jsc_mod._client_cache, "investment_backtests", fake_backtests_client)
+    monkeypatch.setattr(api_main, "_strategies", api_main._PersistentDict("strategies"))
+    monkeypatch.setattr(api_main, "_backtests", api_main._PersistentDict("backtests"))
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Z",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Z",
+        strategy_id="strat-lab-Z",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Z",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Z"] = record
+    api_main._strategies["strat-lab-Z"] = strat
+    api_main._backtests["bt-lab-Z"] = bt
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", lambda lab_id: 0)
+
+    resp = api_client.delete("/strategy-lab/records/lab-Z")
+    body = resp.json()
+    assert body["deleted_strategy_id"] == "strat-lab-Z"
+    assert body["deleted_backtest_id"] == "bt-lab-Z"
+    # The regression this test guards against: the rows must be gone from
+    # the fake job-service clients, not merely absent from a local dict.
+    assert fake_strategies_client.get_job("strat-lab-Z") is None
+    assert fake_backtests_client.get_job("bt-lab-Z") is None
 
 
 def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backtest(
@@ -2869,7 +3051,13 @@ def test_shutdown_hook_logs_event_bus_teardown_failure_at_warning(
 # ---------------------------------------------------------------------------
 
 
-def _make_finalize_test_record(lab_record_id: str) -> Any:
+def _make_finalize_test_record(
+    lab_record_id: str,
+    *,
+    is_winning: bool = False,
+    is_publishable: bool = False,
+    strategy_code: Optional[str] = None,
+) -> Any:
     from investment_team.models import (
         BacktestConfig,
         BacktestRecord,
@@ -2914,10 +3102,14 @@ def _make_finalize_test_record(lab_record_id: str) -> Any:
         lab_record_id=lab_record_id,
         strategy=strat,
         backtest=bt,
-        # is_winning=False takes the earliest skip branch, so the finalize
-        # call only needs to exercise the on_phase callback + persistence —
-        # no paper-trading infra required.
-        is_winning=False,
+        # is_winning=False takes the earliest skip branch, so the default
+        # finalize call only needs to exercise the on_phase callback +
+        # persistence — no paper-trading infra required. Callers that need
+        # to reach the paper-trading try/except (e.g. is_winning=True,
+        # is_publishable=True, strategy_code set) opt in explicitly.
+        is_winning=is_winning,
+        is_publishable=is_publishable,
+        strategy_code=strategy_code,
         strategy_rationale="r",
         analysis_narrative="n",
         created_at="2024-01-01T01:00:00Z",
@@ -2948,6 +3140,63 @@ def test_finalize_strategy_lab_cycle_record_isolates_raising_on_phase_callback(
     assert result.paper_trading_skipped_reason == "not_winning"
     # Persistence must have run despite the callback raising.
     assert api_main._strategy_lab_records["lab-finalize-callback-boom"] is record
+
+
+def test_finalize_strategy_lab_cycle_record_logs_full_traceback_on_paper_trading_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression test for a non-fatal paper-trading failure's log record:
+    it must be logged with ``logger.exception`` (ERROR level + attached
+    traceback), not ``logger.warning(..., exc)`` (WARNING level, exception
+    text folded into the message, no traceback). The latter made non-fatal
+    paper-trading crashes hard to debug from logs alone."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    def _boom_paper_trading_step(**kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_main, "_run_paper_trading_step", _boom_paper_trading_step)
+
+    record = _make_finalize_test_record(
+        "lab-finalize-paper-trading-boom",
+        is_winning=True,
+        is_publishable=True,
+        strategy_code="def strategy(): pass",
+    )
+
+    events: List[tuple[str, Dict[str, Any]]] = []
+
+    def _record_on_phase(phase: str, data: Dict[str, Any]) -> None:
+        events.append((phase, data))
+
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        result = api_main._finalize_strategy_lab_cycle_record(record, on_phase=_record_on_phase)
+
+    assert result.paper_trading_status == "failed"
+    assert result.paper_trading_error == "boom"
+    assert ("paper_trading_failed", {"detail": "boom"}) in events
+
+    matching = [
+        r for r in caplog.records if "Paper trading step failed (non-fatal)" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    log_record = matching[0]
+    # Level must be ERROR (logger.exception), not WARNING (the old logger.warning call).
+    assert log_record.levelno == logging.ERROR
+    # The message itself must not have the exception text interpolated in —
+    # the old call was `logger.warning("...: %s", exc)`.
+    assert log_record.getMessage() == "Paper trading step failed (non-fatal)"
+    # The traceback must be attached — the old call passed no exc_info.
+    assert log_record.exc_info is not None
+    assert log_record.exc_info[1] is not None
+    assert "RuntimeError" in (log_record.exc_text or "")
+    assert "boom" in (log_record.exc_text or "")
 
 
 def test_normalize_persisted_job_uses_dict_data_field() -> None:

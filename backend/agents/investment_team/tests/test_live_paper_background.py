@@ -292,6 +292,38 @@ def test_live_paper_background_raises_when_no_symbols(
     assert session.status == PaperTradingStatus.FAILED
 
 
+def test_live_paper_background_logs_when_session_removed_before_success_write(
+    monkeypatch: pytest.MonkeyPatch, api_state, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If the session is removed from ``_paper_trading_sessions`` (e.g.
+    deleted) while this worker is still running, the success-path persist
+    must not silently discard the completed run's results — it should log a
+    warning identifying the session before returning."""
+    strategy = _winning_strategy()
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(monkeypatch, _FakeRunResult(
+        trades=[], fill_count=5, provider_id="binance",
+        terminated_reason="min_fills_reached", error=None,
+    ))
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+    with caplog.at_level("WARNING"):
+        _run_live_paper_trading_background("pt-removed", "lab-w", strategy, req)
+
+    # No session entry was (re)created for a session that no longer exists.
+    assert "pt-removed" not in api_state._paper_trading_sessions
+    assert "pt-removed" not in api_state._live_paper_stop_controllers
+    assert any(
+        "pt-removed" in record.message and "discarding" in record.message.lower()
+        for record in caplog.records
+    )
+
+
 def test_live_paper_background_does_not_clobber_already_terminal_session_on_success(
     monkeypatch: pytest.MonkeyPatch, api_state
 ) -> None:
