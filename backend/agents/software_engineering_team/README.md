@@ -52,6 +52,11 @@ context-formatting scaffolding; see
 [`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
 for the before/after line-count report from that migration.
 
+Work removing the legacy stack-alias repair and legacy HITL reason parsing
+from routing, the Tech Lead, and `swarm_review` must follow the resume
+policy in
+[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md).
+
 ## Sub-teams and SDLC
 
 Agents are grouped by **SDLC phase** and **who consumes whose output**. Execution is driven by **task assignee** (`backend`, `frontend`, `devops`, `git_setup`). QA and Security are **not** task assignees; they are invoked **inside** backend and frontend workflows (per task) and in a final full-codebase security pass.
