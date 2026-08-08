@@ -321,7 +321,7 @@ def test_run_threads_directives_budget_and_gate_results_across_reentries():
 
 
 def test_run_increments_trial_count_on_each_phase_back():
-    """Every phase-back advances the DSR trial counter by one (run_cycle:1057)."""
+    """Every phase-back advances the DSR trial counter by one, per run_cycle's re-entry handling."""
 
     def _attempt(args):
         # Echo back the tracker state we were handed, unchanged, so the only
