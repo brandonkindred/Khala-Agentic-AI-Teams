@@ -4308,11 +4308,14 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+        # Captured eagerly (not read lazily inside the generator) so the
+        # terminal snapshot reflects exactly the state checked as terminal
+        # above, even if `_active_runs[run_id]` is mutated in place by a
+        # background thread before Starlette drains this generator.
+        snapshot = _run_state_to_response(state).model_dump(mode="json")
 
         async def _terminal_gen():
-            yield sse_line(
-                {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
-            )
+            yield sse_line({"type": "snapshot", **snapshot})
             yield sse_line({"type": "done"})
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
