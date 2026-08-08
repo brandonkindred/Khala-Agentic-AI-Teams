@@ -537,6 +537,21 @@ def test_resume_strategy_lab_run_400_when_payload_missing(lab_job_client, api_cl
     assert resp.status_code == 400
 
 
+def test_resume_strategy_lab_run_400_when_payload_fails_validation(lab_job_client, api_client) -> None:
+    """A resumable run whose stored payload is a dict but fails
+    ``RunStrategyLabRequest`` validation (corrupted/schema-stale data)
+    returns a clean 400 rather than an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    state = _resumable_state("run-invalid-schema")
+    state["request_payload"]["batch_size"] = 0  # violates Field(ge=1)
+    api_main._active_runs["run-invalid-schema"] = state
+
+    resp = api_client.post("/strategy-lab/runs/run-invalid-schema/resume")
+    assert resp.status_code == 400
+    assert "Invalid stored request payload" in resp.json()["detail"]
+
+
 def test_resume_strategy_lab_run_409_when_another_active(lab_job_client, api_client) -> None:
     """Resuming is rejected with 409 while a different run_id is already active."""
     from investment_team.api import main as api_main
