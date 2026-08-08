@@ -3683,6 +3683,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # RESTARTABLE_STATUSES, so status is only trustworthy once no other
         # transition for this run_id can be concurrently rewriting it.
         state = _get_run_state(run_id)
+        if state is None:
+            # A concurrent delete_strategy_lab_run completed in the window between
+            # the pre-lock existence check above and this re-read; validate_job_for_action
+            # below would also 404 via JobNotFoundError, but this mirrors the
+            # pre-lock check's message for a consistent 404 body.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
             validate_job_for_action(state, run_id, STRATEGY_LAB_RESTARTABLE_STATUSES, "restarted")
         except JobNotFoundError as exc:
