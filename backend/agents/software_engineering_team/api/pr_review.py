@@ -7,6 +7,7 @@ split; models are imported directly.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import itertools
 import logging
@@ -15,6 +16,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional
+
+from temporal.client import connect_temporal_client
 
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
@@ -462,18 +465,22 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
         yield
 
 
-def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
-    """Spawn the PR-review hook in a background thread.
+async def _start_pr_review_temporal(job_id: str, request: ReviewPrRequest, token: str) -> None:
+    """Spawn the PR-review hook as a Temporal workflow.
 
-    Indirection so tests can monkey-patch this to invoke the hook synchronously
-    (mirrors ``_start_hook_thread``).
+    Replaces the legacy threading.Thread implementation. Indirection allows 
+    tests to monkey-patch this dispatch.
     """
-    t = threading.Thread(
-        target=_run_pr_review,
-        args=(job_id, request, token),
-        daemon=True,
+    # Initialize or retrieve your Temporal client
+    # client = await Client.connect("localhost:7233") or get_temporal_client()
+    client = await connect_temporal_client()
+
+    await client.execute_workflow(
+        "PrReviewWorkflow",  # Replace with your actual Workflow class or string name
+        args=[job_id, request, token],
+        id=f"pr-review-{job_id}",
+        task_queue="code-review",  # Replace with your actual task queue name
     )
-    t.start()
 
 
 def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:

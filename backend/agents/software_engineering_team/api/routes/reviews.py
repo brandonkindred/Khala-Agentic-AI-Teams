@@ -26,7 +26,7 @@ router = APIRouter()
 
 
 @router.post("/review-pr", response_model=ReviewPrResponse)
-def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
+async def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     """Start a code-reviewer-agent review of an open GitHub pull request.
 
     Reads the PR diff via the GitHub API (no checkout), runs the SE code-review
@@ -83,7 +83,7 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     created_at = _main.record_review_start(
         job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main._review_author()
     )
-    _main._start_pr_review_thread(job_id, request, token)
+    await _main._start_pr_review_temporal(job_id, request, token)
     return ReviewPrResponse(
         job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url, created_at=created_at
     )

@@ -142,7 +142,7 @@ from software_engineering_team.api.pr_review import (  # noqa: F401
     _running_review_for_pr,
     _running_sibling_on_checkout,
     _safe_comment,
-    _start_pr_review_thread,
+    _start_pr_review_temporal,
 )
 from software_engineering_team.api.pr_review_issues import (  # noqa: F401
     MultipleIssueCreationErrors,

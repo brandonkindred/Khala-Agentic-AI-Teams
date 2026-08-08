@@ -170,42 +170,38 @@ Quality gate agents (code review, QA, security, accessibility, acceptance verifi
 
 ## 4. Task Execution Model
 
-After planning, the Tech Lead produces a `TaskAssignment` with an ordered list of tasks. The orchestrator partitions tasks by assignee into three queues, then runs them in the sequence shown below. Tasks with dependency edges (`blocks`/`blocked_by`) are scheduled so blocked tasks wait until their prerequisites complete.
+After planning, the Tech Lead produces a `TaskAssignment` with an ordered list of tasks and their dependencies (`blocks`/`blocked_by`). The orchestrator (e.g., `CodingTeamSwarm`) manages execution using a round-based coordinator model rather than static, per-assignee queues.
 
 ```mermaid
 flowchart TB
-    ExecOrder["TaskAssignment.execution_order"]
+    ExecOrder["TaskAssignment\n(Tasks & Dependency Edges)"]
 
-    subgraph partition [Partition by Assignee]
-        PrefixQ["Prefix Queue\n(git_setup + devops tasks)"]
-        BackendQ["Backend Queue"]
-        BV2Q["Backend-Code-V2 Queue"]
-        FrontendQ["Frontend Queue"]
+    subgraph Coordinator ["Round-Based Coordinator"]
+        Eval["Evaluate Dependency Graph"]
+        Ready["Identify Ready Tasks\n(Dependencies Met)"]
+        Eval --> Ready
     end
 
-    ExecOrder -->|"split by type/assignee"| partition
+    ExecOrder --> Coordinator
 
-    PrefixQ -->|"sequential, one at a time"| PrefixRun["Run Prefix Tasks\n(Git Setup Agent, DevOps Team)"]
-
-    PrefixRun --> parallelBlock
-
-    subgraph parallelBlock ["Parallel Worker Threads"]
-        BThread["Backend Worker\npops from Backend Queue\n1 task at a time"]
-        BV2Thread["Backend-Code-V2 Worker\npops from BV2 Queue\n1 task at a time"]
-        FThread["Frontend Worker\npops from Frontend Queue\n1 task at a time"]
+    subgraph ExecutionPool ["shared.concurrency.parallel_map\n(concurrent.futures.ThreadPoolExecutor)"]
+        Worker1["Dynamic Worker"]
+        Worker2["Dynamic Worker"]
+        WorkerN["Dynamic Worker"]
     end
 
-    BThread --> BWorkflow["BackendExpertAgent\n.run_workflow()"]
-    BV2Thread --> BV2Workflow["BackendCodeV2TeamLead\n.run_workflow()"]
-    FThread --> FWorkflow["FrontendExpertAgent\n.run_workflow()"]
+    Ready -->|"Fan-out ready tasks"| ExecutionPool
 
-    BWorkflow --> TaskDone["Task Completed / Failed"]
-    BV2Workflow --> TaskDone
-    FWorkflow --> TaskDone
+    Worker1 --> Agent1["Backend / Frontend / V2\n.run_workflow()"]
+    Worker2 --> Agent2["Backend / Frontend / V2\n.run_workflow()"]
+    WorkerN --> AgentN["Backend / Frontend / V2\n.run_workflow()"]
+
+    Agent1 --> TaskDone["Update Task State"]
+    Agent2 --> TaskDone
+    AgentN --> TaskDone
+    
+    TaskDone -->|"Next Round"| Eval
 ```
-
-Backend and frontend workers run as concurrent threads (`threading.Thread`). Each worker processes one task at a time from its queue. On task failure, the orchestrator may attempt repair (agent crash) or contract repair (incomplete task metadata) before re-queuing.
-
 ---
 
 ## 5. Backend Worker Workflow

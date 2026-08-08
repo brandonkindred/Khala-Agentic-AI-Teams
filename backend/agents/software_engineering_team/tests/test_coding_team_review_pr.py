@@ -806,10 +806,12 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     holder: dict[str, Any] = {"client": _FakeReviewClient()}
     monkeypatch.setattr(api_main, "GitHubClient", lambda **_kw: holder["client"])
+    async def mock_start_temporal(*args, **kwargs):
+        api_main._run_pr_review(*args, **kwargs)
     monkeypatch.setattr(
         api_main,
-        "_start_pr_review_thread",
-        lambda *a, **kw: api_main._run_pr_review(*a, **kw),
+        "_start_pr_review_temporal",
+        mock_start_temporal,
     )
 
     # Install a fake engine provider so no LLM stack loads. The PR-review path
