@@ -1372,6 +1372,106 @@ def test_run_backtest_background_early_cancellation(
     assert status == api_main._BT_JOB_STATUS_CANCELLED
 
 
+def test_bt_terminal_status_for_write_tri_state(api_client) -> None:
+    """True -> continue (None); False -> cancelled; None (row gone) -> missing."""
+    from investment_team.api import main as api_main
+
+    assert api_main._bt_terminal_status_for_write(True) is None
+    assert api_main._bt_terminal_status_for_write(False) == api_main._BT_JOB_STATUS_CANCELLED
+    assert api_main._bt_terminal_status_for_write(None) == api_main._BT_JOB_STATUS_MISSING
+
+
+def test_run_backtest_background_job_missing_before_start(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """RUNNING write reports the row is gone (e.g. deleted via DELETE /backtests/jobs/{id})
+    before the backtest ever starts — must be reported as missing, not cancelled."""
+    from investment_team.api import main as api_main
+    from investment_team.models import BacktestConfig, StrategySpec
+
+    # Row already deleted: `update_job_if_not_cancelled` returns None, not False.
+    monkeypatch.setattr(api_main, "_bt_update_job_if_not_cancelled", lambda jid, **kw: None)
+
+    def _should_not_run(strategy, config):
+        raise AssertionError("backtest must not run when the job row is gone")
+
+    monkeypatch.setattr(api_main, "_run_real_data_backtest", _should_not_run)
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+    status = api_main._run_backtest_background("job-missing", strategy, config, "tester", None)
+    assert status == api_main._BT_JOB_STATUS_MISSING
+
+
+def test_run_backtest_background_job_deleted_mid_run(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The COMPLETED write races a concurrent DELETE that removed the job row
+    after the backtest ran to completion — must be reported as missing, not
+    cancelled (no cancellation actually happened)."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    calls: List[Dict[str, Any]] = []
+
+    def _fake_update_if_not_cancelled(jid, **kw):
+        calls.append(kw)
+        # RUNNING write succeeds; COMPLETED write finds the row gone.
+        return True if kw.get("status") == api_main._BT_JOB_STATUS_RUNNING else None
+
+    monkeypatch.setattr(api_main, "_bt_update_job_if_not_cancelled", _fake_update_if_not_cancelled)
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+    status = api_main._run_backtest_background(
+        "job-deleted-mid-run", strategy, config, "tester", []
+    )
+    assert status == api_main._BT_JOB_STATUS_MISSING
+    assert [c.get("status") for c in calls] == [
+        api_main._BT_JOB_STATUS_RUNNING,
+        api_main._BT_JOB_STATUS_COMPLETED,
+    ]
+
+
 def test_run_backtest_background_mid_run_cancellation(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

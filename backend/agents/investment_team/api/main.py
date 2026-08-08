@@ -168,6 +168,12 @@ from shared.sse import sse_job_stream_async, sse_line
 
 logger = logging.getLogger(__name__)
 
+# Not a persisted job-store status — a local sentinel `_run_backtest_background`
+# returns when `_bt_update_job_if_not_cancelled` reports the job row itself is
+# gone (e.g. deleted mid-run via `DELETE /backtests/jobs/{job_id}`), so callers
+# can tell that apart from an actual user-initiated cancellation.
+_BT_JOB_STATUS_MISSING = "missing"
+
 STRATEGY_LAB_TERMINAL_STATUSES = _strategy_lab_orchestrator_api.STRATEGY_LAB_TERMINAL_STATUSES
 _STRATEGY_LAB_PROGRESS_FIELDS = _strategy_lab_orchestrator_api._STRATEGY_LAB_PROGRESS_FIELDS
 _PURGE_MAX_WORKERS = _strategy_lab_orchestrator_api._PURGE_MAX_WORKERS
@@ -1392,6 +1398,29 @@ class DeleteBacktestJobResponse(BaseModel):
     deleted: bool
 
 
+def _bt_terminal_status_for_write(write_result: Optional[bool]) -> Optional[str]:
+    """Translate a ``_bt_update_job_if_not_cancelled`` tri-state result into a verdict.
+
+    Preconditions:
+        - ``write_result`` is the direct return value of a
+          ``_bt_update_job_if_not_cancelled`` call (``True``/``False``/``None``).
+
+    Postconditions:
+        - Returns ``None`` when the write succeeded (``True``) — the caller should
+          proceed to the next step.
+        - Returns ``_BT_JOB_STATUS_CANCELLED`` when the job exists but is already
+          cancelled (``False``).
+        - Returns ``_BT_JOB_STATUS_MISSING`` when the job row no longer exists at
+          all (``None`` — e.g. deleted mid-run via ``DELETE /backtests/jobs/{job_id}``),
+          which is distinct from an actual cancellation.
+    """
+    if write_result is True:
+        return None
+    if write_result is False:
+        return _BT_JOB_STATUS_CANCELLED
+    return _BT_JOB_STATUS_MISSING
+
+
 def _run_backtest_background(
     job_id: str,
     strategy: StrategySpec,
@@ -1430,11 +1459,18 @@ def _run_backtest_background(
           lands between a cancel check and the next status write can never be
           silently overwritten: the write itself either no-ops or the function
           returns ``_BT_JOB_STATUS_CANCELLED`` instead of persisting RUNNING,
-          COMPLETED, or FAILED over a cancelled job.
+          COMPLETED, or FAILED over a cancelled job. If instead the job row has
+          been deleted outright (``DELETE /backtests/jobs/{job_id}`` racing this
+          worker), the write reports ``None`` rather than ``False`` and this
+          function returns ``_BT_JOB_STATUS_MISSING`` — a deleted job is not the
+          same outcome as a cancelled one and must not be reported as such.
     """
     try:
-        if _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_RUNNING) is not True:
-            return _BT_JOB_STATUS_CANCELLED
+        terminal = _bt_terminal_status_for_write(
+            _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_RUNNING)
+        )
+        if terminal is not None:
+            return terminal
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
             return _BT_JOB_STATUS_CANCELLED
@@ -1457,32 +1493,32 @@ def _run_backtest_background(
         )
         with _lock:
             _backtests[backtest_id] = record
-        if (
+        terminal = _bt_terminal_status_for_write(
             _bt_update_job_if_not_cancelled(
                 job_id,
                 status=_BT_JOB_STATUS_COMPLETED,
                 result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
                 backtest_id=backtest_id,
             )
-            is not True
-        ):
-            return _BT_JOB_STATUS_CANCELLED
+        )
+        if terminal is not None:
+            return terminal
         return _BT_JOB_STATUS_COMPLETED
     except InvestmentBacktestError as exc:
         logger.error("Backtest job %s failed with domain error: %s", job_id, exc)
-        if (
+        terminal = _bt_terminal_status_for_write(
             _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
-            is not True
-        ):
-            return _BT_JOB_STATUS_CANCELLED
+        )
+        if terminal is not None:
+            return terminal
         return _BT_JOB_STATUS_FAILED
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
-        if (
+        terminal = _bt_terminal_status_for_write(
             _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
-            is not True
-        ):
-            return _BT_JOB_STATUS_CANCELLED
+        )
+        if terminal is not None:
+            return terminal
         return _BT_JOB_STATUS_FAILED
 
 
