@@ -1426,10 +1426,12 @@ def _run_backtest_background(
           Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
           ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
-          cancelled status visible at that check is preserved. Updates use
-          unconditional ``_bt_update_job``, so a cancel that lands between a
-          check and the next update can still be overwritten with RUNNING,
-          COMPLETED, or FAILED.
+          cancelled status visible at that check is preserved. Every
+          status-changing ``_bt_update_job`` call (RUNNING, COMPLETED, FAILED)
+          is immediately preceded by its own cancellation check — including a
+          re-check taken right before the COMPLETED write, after the backtest
+          record is built and stored — so no application-level work sits
+          between a check and the update it guards.
     """
     try:
         if _bt_is_job_cancelled(job_id):
@@ -1457,6 +1459,8 @@ def _run_backtest_background(
         )
         with _lock:
             _backtests[backtest_id] = record
+        if _bt_is_job_cancelled(job_id):
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(
             job_id,
             status=_BT_JOB_STATUS_COMPLETED,
