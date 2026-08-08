@@ -21,13 +21,13 @@ from strands import Agent
 
 from llm_service import LLMClient
 from llm_service.strands_model import resolve_text_mode_strands_model
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.shared.agent_review import (
     AgentReviewCache,
     run_qa_agent,
     run_security_agent,
 )
 from software_engineering_team.shared.llm_review import LlmReviewOutput, run_team_llm_review
-from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.phases.review import (
     run_code_review_phase_impl,
     run_qa_testing_phase_impl,

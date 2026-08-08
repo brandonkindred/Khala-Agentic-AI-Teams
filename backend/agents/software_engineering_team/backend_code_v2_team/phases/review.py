@@ -23,6 +23,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from llm_service.strands_model import resolve_text_mode_strands_model
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.code_review_agent.coordinator import run_coordinator
 from software_engineering_team.code_review_agent.models import CodeReviewInput
 from software_engineering_team.shared.agent_review import (
@@ -31,7 +32,6 @@ from software_engineering_team.shared.agent_review import (
     run_security_agent,
 )
 from software_engineering_team.shared.llm_review import LlmReviewOutput
-from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.phases.review import (
     run_code_review_phase_impl,
     run_qa_testing_phase_impl,

@@ -20,7 +20,7 @@ from llm_service.strands_model import (
     LlmRunner,
     resolve_text_mode_strands_model,
 )
-from software_engineering_team.shared.models import Task
+from shared.dev_models.models import Task
 from software_engineering_team.shared.phases.problem_solving import (
     MAX_ITERATIONS_PER_ISSUE,
     _format_all_code,

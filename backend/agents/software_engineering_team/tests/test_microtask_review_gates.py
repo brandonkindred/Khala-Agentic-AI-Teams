@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.models import Task
+    from shared.dev_models.models import Task
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
@@ -97,7 +97,7 @@ class _CallableTextClient(DummyLLMClient):
 
 def _create_test_task(task_type: str = "frontend") -> "Task":
     """Create a valid Task object for testing."""
-    from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+    from shared.dev_models.models import Task, TaskStatus, TaskType
 
     return Task(
         id="task-1",

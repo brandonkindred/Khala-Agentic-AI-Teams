@@ -21,7 +21,7 @@ from llm_service.strands_model import (
     LlmRunner,
     resolve_text_mode_strands_model,
 )
-from software_engineering_team.shared.models import SystemArchitecture, Task
+from shared.dev_models.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.planning import (
     parse_planning_output,
     plan_fixes_impl,

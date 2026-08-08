@@ -31,8 +31,8 @@ from llm_service.strands_model import (
     LlmRunner,
     resolve_text_mode_strands_model,
 )
+from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
-from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
     GateOutcome,

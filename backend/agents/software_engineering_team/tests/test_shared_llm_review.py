@@ -14,7 +14,7 @@ from software_engineering_team.shared.llm_review import run_llm_review, run_team
 
 
 def _task(**overrides):
-    from software_engineering_team.shared.models import Task, TaskType
+    from shared.dev_models.models import Task, TaskType
 
     base = dict(
         id="t1",
@@ -293,7 +293,7 @@ def test_run_team_llm_review_forwards_architecture_and_spec_content():
     """``review_context`` is rendered and bounded into ``architecture_context``/
     ``spec_content`` before delegating to ``run_llm_review``."""
     from llm_service.clients.dummy import DummyLLMClient
-    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
+    from shared.dev_models.models import ReviewContext, SystemArchitecture
 
     prompts: list[str] = []
 
