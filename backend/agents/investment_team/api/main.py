@@ -1426,10 +1426,12 @@ def _run_backtest_background(
           Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
           ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
-          cancelled status visible at that check is preserved. Updates use
-          unconditional ``_bt_update_job``, so a cancel that lands between a
-          check and the next update can still be overwritten with RUNNING,
-          COMPLETED, or FAILED.
+          cancelled status visible at that check is preserved. Every
+          status-changing ``_bt_update_job`` call (RUNNING, COMPLETED, FAILED)
+          is immediately preceded by its own cancellation check — including a
+          re-check taken right before the COMPLETED write, after the backtest
+          record is built and stored — so no application-level work sits
+          between a check and the update it guards.
     """
     try:
         if _bt_is_job_cancelled(job_id):
@@ -1457,6 +1459,8 @@ def _run_backtest_background(
         )
         with _lock:
             _backtests[backtest_id] = record
+        if _bt_is_job_cancelled(job_id):
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(
             job_id,
             status=_BT_JOB_STATUS_COMPLETED,
@@ -4275,6 +4279,30 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     window. In-memory ``_active_runs`` lookups use ``_async_lock`` (not the
     threading ``_lock``) for the same reason. The streaming generator itself
     remains async so it doesn't block Uvicorn worker threads once connected.
+
+    Preconditions:
+        - ``run_id`` is a string (path param). It need not resolve to a known
+          run -- a miss is normal input this function itself handles (see
+          ``Raises``), not a caller obligation.
+
+    Postconditions:
+        - Returns a ``StreamingResponse`` (``media_type="text/event-stream"``).
+        - If ``run_id`` is found in ``_active_runs``, its state is refreshed
+          via ``_reconcile_run_progress`` (offloaded to the threadpool)
+          before use; otherwise state is loaded via
+          ``_load_run_from_job_service`` (also offloaded).
+        - If the (possibly just-reconciled) status is in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, the response body is a one-shot
+          generator that yields a ``snapshot`` event followed by ``done`` and
+          returns immediately, without subscribing to the live event bus.
+        - Otherwise the response subscribes to the per-job event bus and
+          streams ``snapshot``/``progress``/``cycle_complete``/
+          ``cycle_skipped`` events, terminating on ``complete``/``error``/
+          ``cancelled`` followed by a final ``done``.
+
+    Raises:
+        - ``HTTPException`` 404: ``run_id`` resolves to no state in either
+          ``_active_runs`` or the job-service fallback.
     """
     # Deliberately local (not module-level): tests substitute a fake
     # subscribe/unsubscribe by monkeypatching them directly on the
@@ -4308,11 +4336,14 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+        # Captured eagerly (not read lazily inside the generator) so the
+        # terminal snapshot reflects exactly the state checked as terminal
+        # above, even if `_active_runs[run_id]` is mutated in place by a
+        # background thread before Starlette drains this generator.
+        snapshot = _run_state_to_response(state).model_dump(mode="json")
 
         async def _terminal_gen():
-            yield sse_line(
-                {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
-            )
+            yield sse_line({"type": "snapshot", **snapshot})
             yield sse_line({"type": "done"})
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
@@ -5971,6 +6002,9 @@ def send_advisor_message(
 @app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
+
+    Preconditions:
+        - None. Unknown session IDs are tolerated.
 
     Postconditions:
         - Returns the session with `found=True` if `session_id` matches a

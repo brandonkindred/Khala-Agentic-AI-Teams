@@ -137,6 +137,29 @@ def test_upsert_and_insert_team_agent_are_mutually_exclusive():
     assert upsert(insert_sql) is False
 
 
+def test_delete_team_agent_and_prune_are_mutually_exclusive():
+    """Single-row delete (RETURNING) and full-roster prune must not both match.
+
+    Preconditions: ``_dispatch()`` exposes ``handle_delete_team_agent`` and
+        ``handle_prune_team_agents`` matchers.
+    Postconditions: the single-row delete SQL matches only the single-row
+        matcher; the prune SQL matches only the prune matcher.
+    """
+    matchers = _matchers()
+    delete_one = matchers["handle_delete_team_agent"]
+    prune = matchers["handle_prune_team_agents"]
+
+    delete_sql = (
+        "delete from agentic_team_agents where team_id = %s and agent_name = %s returning data_json"
+    )
+    prune_sql = "delete from agentic_team_agents where team_id = %s and agent_name <> all(%s)"
+
+    assert delete_one(delete_sql) is True
+    assert prune(delete_sql) is False
+    assert prune(prune_sql) is True
+    assert delete_one(prune_sql) is False
+
+
 # -- rowcount fidelity ----------------------------------------------------------
 
 

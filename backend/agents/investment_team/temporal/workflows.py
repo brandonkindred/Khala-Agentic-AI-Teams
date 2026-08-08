@@ -101,7 +101,11 @@ def run_backtest_activity(
           If the worker returned ``cancelled`` (a user-initiated cancel during
           the run, including one driven by Temporal cancellation via the
           heartbeat above), returns a status dict reporting ``cancelled`` rather
-          than ``completed``. Returns a ``completed`` status dict otherwise.
+          than ``completed``. Returns a ``completed`` status dict when the
+          worker returned ``completed``. Any other (non-terminal) return value
+          is a postcondition violation of ``_run_backtest_background`` and
+          raises ``ApplicationError`` rather than being silently reported as
+          ``completed``.
     """
     from investment_team.api.main import (
         _BT_JOB_STATUS_CANCELLED,
@@ -142,7 +146,12 @@ def run_backtest_activity(
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
     if final_status == _BT_JOB_STATUS_CANCELLED:
         return {"job_id": job_id, "status": "cancelled"}
-    return {"job_id": job_id, "status": "completed"}
+    if final_status == _BT_JOB_STATUS_COMPLETED:
+        return {"job_id": job_id, "status": "completed"}
+    raise ApplicationError(
+        f"Backtest {job_id} ended in unexpected non-terminal status {final_status!r}",
+        type="BacktestNonTerminal",
+    )
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")
