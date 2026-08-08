@@ -129,6 +129,71 @@ def test_temporal_package_init_does_not_call_os_getenv() -> None:
         )
 
 
+def test_temporal_workflows_import_does_not_call_os_getenv() -> None:
+    """Companion to test_temporal_package_init_does_not_call_os_getenv: the
+    workflows submodule import chain (which also executes the parent
+    package's __init__) must independently stay getenv-free at import time.
+    Spied on its own -- not chained onto another import's spy -- so this
+    can't reintroduce the reset-then-reuse vacuousness fixed for #5137."""
+    import os
+
+    _purge("investment_team.temporal")
+    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+        importlib.import_module("investment_team.temporal.workflows")
+        assert spy.call_count == 0, (
+            f"investment_team.temporal.workflows import chain called os.getenv "
+            f"{spy.call_count} time(s) — this trips the temporalio workflow sandbox."
+        )
+
+
+def _write_getenv_probe_package(tmp_path, monkeypatch) -> str:
+    """Create an importable throwaway package whose __init__ calls os.getenv
+    once, plus an empty submodule -- for proving the import-time spy
+    patterns below actually work, independent of investment_team.temporal."""
+    pkg_name = "_getenv_probe_pkg"
+    pkg_dir = tmp_path / pkg_name
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("import os\nos.getenv('PROBE_VAR')\n")
+    (pkg_dir / "submodule.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return pkg_name
+
+
+def test_reset_and_reimport_pattern_is_vacuous_against_getenv_in_init(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression test for the #5137 bug: the old pattern (import a
+    submodule to trigger __init__, reset_mock, then re-import the
+    already-cached package) must NOT detect an os.getenv call in __init__ --
+    proving why that pattern was wrong to use, even though it looks like a
+    real assertion."""
+    import os
+
+    pkg_name = _write_getenv_probe_package(tmp_path, monkeypatch)
+
+    _purge(pkg_name)
+    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+        importlib.import_module(f"{pkg_name}.submodule")  # executes __init__ once
+        spy.reset_mock()
+        importlib.import_module(pkg_name)  # cached -- does NOT re-execute __init__
+        assert spy.call_count == 0  # vacuously "clean" despite the getenv call above
+
+
+def test_purge_and_direct_import_pattern_detects_getenv_in_init(tmp_path, monkeypatch) -> None:
+    """The corrected pattern used by
+    test_temporal_package_init_does_not_call_os_getenv (purge, then import
+    the package directly under the spy, no reset_mock) must detect an
+    os.getenv call in __init__ -- the fix for the #5137 vacuousness bug."""
+    import os
+
+    pkg_name = _write_getenv_probe_package(tmp_path, monkeypatch)
+
+    _purge(pkg_name)
+    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+        importlib.import_module(pkg_name)
+        assert spy.call_count == 1
+
+
 def test_worker_module_exposes_team_service_entrypoint() -> None:
     """team_service/entrypoint.py looks up ``TEAM_TEMPORAL_WORKER_FUNC`` on
     ``TEAM_TEMPORAL_WORKER_MODULE``. Keep the contract pinned so a rename can't
@@ -338,6 +403,31 @@ def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
     result = run_backtest_activity("job-cancelled", {}, {}, "agent", [])
 
     assert result == {"job_id": "job-cancelled", "status": "cancelled"}
+
+
+def test_run_backtest_activity_raises_on_non_terminal_status(monkeypatch) -> None:
+    """A worker return value that is none of the three known terminal statuses
+    (e.g. a stuck/non-terminal ``pending``/``running`` status — the modern
+    equivalent of a polling timeout) is a postcondition violation of
+    ``_run_backtest_background`` and must raise ``ApplicationError``, not be
+    silently reported as ``completed``."""
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_PENDING,
+    )
+
+    from temporalio.exceptions import ApplicationError
+
+    with pytest.raises(ApplicationError, match="non-terminal"):
+        run_backtest_activity("job-stuck", {}, {}, "agent", [])
 
 
 # ---------------------------------------------------------------------------

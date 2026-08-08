@@ -1021,21 +1021,18 @@ def health() -> dict:
 def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
-    Preconditions:
-        - ``request.risk_tolerance``/``request.default_mode`` are already
-          guaranteed to be valid ``RiskTolerance``/``WorkflowMode`` members —
-          FastAPI/Pydantic rejects any other value with a 422 before this
-          handler runs, since both fields are typed as the enum itself.
-        - No profile may already exist for ``request.user_id`` — this endpoint
-          creates; it does not upsert.
-
     Postconditions:
-        - On success: a new IPS is persisted under ``_profiles[request.user_id]``
-          and returned; no prior profile is overwritten.
-        - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
+        On success: a new IPS is persisted under ``_profiles[request.user_id]``
+        and returned; no prior profile is overwritten.
+
+    Raises:
+        - ``HTTPException(422)`` if ``request.risk_tolerance``/``request.default_mode``
+          are not valid ``RiskTolerance``/``WorkflowMode`` members — rejected by
+          FastAPI/Pydantic before this handler runs, since both fields are typed
+          as the enum itself — or if constructing the nested ``UserGoal``,
           ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
-        - Raises ``HTTPException`` 409 if a profile already exists for
-          ``request.user_id``.
+        - ``HTTPException(409)`` if a profile already exists for
+          ``request.user_id`` — this endpoint creates; it does not upsert.
     """
     risk_tol = request.risk_tolerance
     workflow_mode = request.default_mode
@@ -1426,10 +1423,12 @@ def _run_backtest_background(
           Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
           ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
-          cancelled status visible at that check is preserved. Updates use
-          unconditional ``_bt_update_job``, so a cancel that lands between a
-          check and the next update can still be overwritten with RUNNING,
-          COMPLETED, or FAILED.
+          cancelled status visible at that check is preserved. Every
+          status-changing ``_bt_update_job`` call (RUNNING, COMPLETED, FAILED)
+          is immediately preceded by its own cancellation check — including a
+          re-check taken right before the COMPLETED write, after the backtest
+          record is built and stored — so no application-level work sits
+          between a check and the update it guards.
     """
     try:
         if _bt_is_job_cancelled(job_id):
@@ -1457,6 +1456,8 @@ def _run_backtest_background(
         )
         with _lock:
             _backtests[backtest_id] = record
+        if _bt_is_job_cancelled(job_id):
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(
             job_id,
             status=_BT_JOB_STATUS_COMPLETED,
@@ -2507,7 +2508,7 @@ def _finalize_strategy_lab_cycle_record(
             record.paper_trading_skipped_reason = "no_market_data"
             _emit("paper_trading_skipped", {"reason": "no_market_data", "detail": str(exc)})
         except Exception as exc:
-            logger.warning("Paper trading step failed (non-fatal): %s", exc)
+            logger.exception("Paper trading step failed (non-fatal)")
             record.paper_trading_status = "failed"
             record.paper_trading_error = str(exc)[:_MAX_PAPER_TRADING_ERROR_LENGTH]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
@@ -4162,7 +4163,10 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
           in-memory-only snapshot; this endpoint always returns 200. An
           ``_active_runs`` entry missing a truthy ``run_id`` (malformed or
           partially-constructed) is skipped and logged rather than raising
-          ``KeyError``.
+          ``KeyError``. An entry whose response construction
+          (``_run_state_to_response``) fails -- e.g. a field that cannot be
+          coerced to its response type -- is likewise skipped and logged
+          (``logger.warning``) rather than raising out of this endpoint.
     """
 
     def _in_memory_runs_by_id() -> Dict[str, Dict[str, Any]]:
@@ -4212,7 +4216,14 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         in_memory = _in_memory_runs_by_id()
 
-    runs = [_run_state_to_response(r) for r in in_memory.values()]
+    runs: List[StrategyLabRunStatusResponse] = []
+    for rid, r in in_memory.items():
+        try:
+            runs.append(_run_state_to_response(r))
+        except Exception:
+            logger.warning(
+                "Skipping run %r in listing; _run_state_to_response failed", rid, exc_info=True
+            )
     return ActiveRunsResponse(runs=runs)
 
 
@@ -4275,6 +4286,30 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     window. In-memory ``_active_runs`` lookups use ``_async_lock`` (not the
     threading ``_lock``) for the same reason. The streaming generator itself
     remains async so it doesn't block Uvicorn worker threads once connected.
+
+    Preconditions:
+        - ``run_id`` is a string (path param). It need not resolve to a known
+          run -- a miss is normal input this function itself handles (see
+          ``Raises``), not a caller obligation.
+
+    Postconditions:
+        - Returns a ``StreamingResponse`` (``media_type="text/event-stream"``).
+        - If ``run_id`` is found in ``_active_runs``, its state is refreshed
+          via ``_reconcile_run_progress`` (offloaded to the threadpool)
+          before use; otherwise state is loaded via
+          ``_load_run_from_job_service`` (also offloaded).
+        - If the (possibly just-reconciled) status is in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, the response body is a one-shot
+          generator that yields a ``snapshot`` event followed by ``done`` and
+          returns immediately, without subscribing to the live event bus.
+        - Otherwise the response subscribes to the per-job event bus and
+          streams ``snapshot``/``progress``/``cycle_complete``/
+          ``cycle_skipped`` events, terminating on ``complete``/``error``/
+          ``cancelled`` followed by a final ``done``.
+
+    Raises:
+        - ``HTTPException`` 404: ``run_id`` resolves to no state in either
+          ``_active_runs`` or the job-service fallback.
     """
     # Deliberately local (not module-level): tests substitute a fake
     # subscribe/unsubscribe by monkeypatching them directly on the
@@ -4308,11 +4343,14 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+        # Captured eagerly (not read lazily inside the generator) so the
+        # terminal snapshot reflects exactly the state checked as terminal
+        # above, even if `_active_runs[run_id]` is mutated in place by a
+        # background thread before Starlette drains this generator.
+        snapshot = _run_state_to_response(state).model_dump(mode="json")
 
         async def _terminal_gen():
-            yield sse_line(
-                {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
-            )
+            yield sse_line({"type": "snapshot", **snapshot})
             yield sse_line({"type": "done"})
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
@@ -4356,10 +4394,11 @@ class ClearStrategyLabStorageResponse(BaseModel):
 class DeleteStrategyLabRecordResponse(BaseModel):
     """Returned by ``DELETE /strategy-lab/records/{lab_record_id}``.
 
-    ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless the
-    corresponding linked entity actually existed (and was deleted) — not a
-    placeholder for "unknown." ``deleted_paper_trading_sessions`` is a count
-    of linked paper-trading sessions removed, not an id.
+    ``lab_record_id`` echoes the deleted record's id. ``deleted_strategy_id``/
+    ``deleted_backtest_id`` are ``None`` unless the corresponding linked
+    entity actually existed (and was deleted) — not a placeholder for
+    "unknown." ``deleted_paper_trading_sessions`` is a count of linked
+    paper-trading sessions removed, not an id.
     """
 
     lab_record_id: str
@@ -5008,6 +5047,18 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                 session_id,
                 exc_info=True,
             )
+        # Only the documented Temporal dispatch/worker failure modes get the
+        # 503 below: HTTPException (raised by _require_temporal when Temporal
+        # is disabled), RuntimeError (the worker client never became ready),
+        # and TimeoutError/RPCError (the start ack timed out, or the RPC
+        # itself failed) -- the exact set start_workflow_sync's docstring and
+        # _await_client document. Anything else is a genuine bug (a bad
+        # payload, a programming error) and must surface as its own 500
+        # instead of being misreported as "Temporal worker unavailable."
+        from temporalio.service import RPCError
+
+        is_dispatch_failure = isinstance(exc, (HTTPException, RuntimeError, TimeoutError, RPCError))
+
         # Best-effort failure recording must not mask the original dispatch
         # error (especially an HTTPException with the intended status/detail).
         # If the session was concurrently removed or is unparseable,
@@ -5016,7 +5067,9 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         try:
             _fail_paper_trading_session(
                 session_id,
-                "Failed to start the paper-trading workflow (Temporal unavailable).",
+                "Failed to start the paper-trading workflow (Temporal unavailable)."
+                if is_dispatch_failure
+                else "Unexpected error starting the paper-trading workflow.",
             )
         except Exception:
             logger.exception(
@@ -5025,9 +5078,17 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             )
         if isinstance(exc, HTTPException):
             raise
+        if is_dispatch_failure:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            ) from exc
+        logger.exception(
+            "Unexpected error starting paper-trading workflow for session %s", session_id
+        )
         raise HTTPException(
-            status_code=503,
-            detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            status_code=500,
+            detail="Unexpected error starting the paper-trading workflow.",
         ) from exc
 
     return PaperTradingResponse(
@@ -5971,6 +6032,9 @@ def send_advisor_message(
 @app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
+
+    Preconditions:
+        - None. Unknown session IDs are tolerated.
 
     Postconditions:
         - Returns the session with `found=True` if `session_id` matches a

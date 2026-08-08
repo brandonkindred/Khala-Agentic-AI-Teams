@@ -9,6 +9,7 @@ behind whenever provisioning raised.
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
@@ -90,6 +91,31 @@ def test_create_team_returns_500_when_rollback_delete_also_fails(
     resp = client.post("/teams", json={"name": "Growth Pod", "description": ""})
 
     assert resp.status_code == 500
+
+
+def test_create_team_propagates_httpexception_from_provisioning_unchanged(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """An ``HTTPException`` raised by provisioning must propagate with its own status.
+
+    Preconditions: ``provision_team`` is patched to raise
+        ``HTTPException(409, ...)`` — an intentional status, not an outage.
+    Postconditions: the response status and detail match what provisioning
+        raised (409), not the generic 500 used for non-``HTTPException``
+        provisioning failures; the team row is left in place (no rollback),
+        since an intentional status is not treated as an infra failure.
+    """
+    import agent_team_studio.agentic_team_provisioning.api.main as main_mod
+
+    def _conflict(team_id: str):
+        raise HTTPException(status_code=409, detail="team slug conflict")
+
+    monkeypatch.setattr(main_mod, "provision_team", _conflict)
+
+    resp = client.post("/teams", json={"name": "Growth Pod", "description": ""})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "team slug conflict"
 
 
 def test_create_team_persists_on_provisioning_success(

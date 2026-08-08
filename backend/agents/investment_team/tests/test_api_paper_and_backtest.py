@@ -286,6 +286,9 @@ def test_run_paper_trading_background_marks_failed_on_empty_market_data(
     updated = api_main._paper_trading_sessions.get("pt-empty")
     assert updated.status == PaperTradingStatus.FAILED
     assert "Failed to fetch market data" in (updated.error or "")
+    # _fail_paper_trading_session() never sets divergence_analysis (unlike
+    # the old inline branch, which mirrored the error message into it).
+    assert updated.divergence_analysis is None
 
 
 def _tripwire_market_data_service(monkeypatch: pytest.MonkeyPatch) -> List[bool]:
