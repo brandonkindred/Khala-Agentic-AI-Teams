@@ -102,7 +102,7 @@ from investment_team.shared.job_store import (
     mark_all_running_jobs_failed as _bt_mark_all_running_jobs_failed,
 )
 from investment_team.shared.job_store import (
-    update_job as _bt_update_job,
+    update_job_if_not_cancelled as _bt_update_job_if_not_cancelled,
 )
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
@@ -1422,19 +1422,19 @@ def _run_backtest_background(
           crash left the job at RUNNING) therefore overwrites the same record
           instead of orphaning a duplicate. Returns ``_BT_JOB_STATUS_COMPLETED``.
         - On ``InvestmentBacktestError`` or other exceptions: job status becomes
-          FAILED with an error string, unless a cancel check already returned.
+          FAILED with an error string, unless the job was already cancelled.
           Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
-        - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
-          ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
-          cancelled status visible at that check is preserved. Updates use
-          unconditional ``_bt_update_job``, so a cancel that lands between a
-          check and the next update can still be overwritten with RUNNING,
-          COMPLETED, or FAILED.
+        - Every RUNNING/COMPLETED/FAILED transition is written via
+          ``_bt_update_job_if_not_cancelled``, an atomic compare-and-set that
+          rejects the write when the job is already CANCELLED. So a cancel that
+          lands between a cancel check and the next status write can never be
+          silently overwritten: the write itself either no-ops or the function
+          returns ``_BT_JOB_STATUS_CANCELLED`` instead of persisting RUNNING,
+          COMPLETED, or FAILED over a cancelled job.
     """
     try:
-        if _bt_is_job_cancelled(job_id):
+        if _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_RUNNING) is not True:
             return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
             return _BT_JOB_STATUS_CANCELLED
@@ -1457,24 +1457,32 @@ def _run_backtest_background(
         )
         with _lock:
             _backtests[backtest_id] = record
-        _bt_update_job(
-            job_id,
-            status=_BT_JOB_STATUS_COMPLETED,
-            result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
-            backtest_id=backtest_id,
-        )
+        if (
+            _bt_update_job_if_not_cancelled(
+                job_id,
+                status=_BT_JOB_STATUS_COMPLETED,
+                result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
+                backtest_id=backtest_id,
+            )
+            is not True
+        ):
+            return _BT_JOB_STATUS_CANCELLED
         return _BT_JOB_STATUS_COMPLETED
     except InvestmentBacktestError as exc:
         logger.error("Backtest job %s failed with domain error: %s", job_id, exc)
-        if _bt_is_job_cancelled(job_id):
+        if (
+            _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+            is not True
+        ):
             return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
         return _BT_JOB_STATUS_FAILED
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
-        if _bt_is_job_cancelled(job_id):
+        if (
+            _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+            is not True
+        ):
             return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
         return _BT_JOB_STATUS_FAILED
 
 

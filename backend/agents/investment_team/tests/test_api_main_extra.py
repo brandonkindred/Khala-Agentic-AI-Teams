@@ -1224,11 +1224,16 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
 
     # Stub the job-store helpers (instead of patching the real job service).
     state: Dict[str, Any] = {}
+
+    def _fake_update_if_not_cancelled(jid, **kw):
+        state.update(kw)
+        return True
+
     monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
     monkeypatch.setattr(
         api_main,
-        "_bt_update_job",
-        lambda jid, **kw: state.update(kw),
+        "_bt_update_job_if_not_cancelled",
+        _fake_update_if_not_cancelled,
     )
 
     bt_result = BacktestResult(
@@ -1276,8 +1281,9 @@ def test_run_backtest_background_handles_investment_backtest_error(
     from investment_team.models import BacktestConfig, StrategySpec
 
     state: Dict[str, Any] = {}
-    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    monkeypatch.setattr(
+        api_main, "_bt_update_job_if_not_cancelled", lambda jid, **kw: state.update(kw) or True
+    )
 
     def _raises_domain_error(strategy, config):
         raise StrategyExecutionError("bad strategy")
@@ -1308,8 +1314,9 @@ def test_run_backtest_background_handles_generic_exception(
     from investment_team.models import BacktestConfig, StrategySpec
 
     state: Dict[str, Any] = {}
-    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    monkeypatch.setattr(
+        api_main, "_bt_update_job_if_not_cancelled", lambda jid, **kw: state.update(kw) or True
+    )
 
     def _raises_generic(strategy, config):
         raise RuntimeError("network down")
@@ -1340,8 +1347,8 @@ def test_run_backtest_background_early_cancellation(
     from investment_team.models import BacktestConfig, StrategySpec
 
     state: Dict[str, Any] = {}
-    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: True)
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    # RUNNING write is rejected as if a cancel landed before it — no state write.
+    monkeypatch.setattr(api_main, "_bt_update_job_if_not_cancelled", lambda jid, **kw: False)
 
     def _should_not_run(strategy, config):
         raise AssertionError("backtest must not run when cancelled")
@@ -1376,9 +1383,12 @@ def test_run_backtest_background_mid_run_cancellation(
     )
 
     state: Dict[str, Any] = {}
-    cancel_checks = iter([False, True])
-    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    # RUNNING write succeeds; the single remaining mid-run cancel check (after
+    # the backtest executes, before the COMPLETED write) reports cancelled.
+    monkeypatch.setattr(
+        api_main, "_bt_update_job_if_not_cancelled", lambda jid, **kw: state.update(kw) or True
+    )
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: True)
 
     bt_result = BacktestResult(
         total_return_pct=10.0,
@@ -1422,9 +1432,17 @@ def test_run_backtest_background_cancel_during_backtest_execution_error(
     from investment_team.models import BacktestConfig, StrategySpec
 
     state: Dict[str, Any] = {}
-    cancel_checks = iter([False, True])
-    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    # First write (RUNNING) succeeds; second write (FAILED, from the except
+    # block) is rejected as if a cancel landed during backtest execution.
+    update_results = iter([True, False])
+
+    def _fake_update_if_not_cancelled(jid, **kw):
+        ok = next(update_results)
+        if ok:
+            state.update(kw)
+        return ok
+
+    monkeypatch.setattr(api_main, "_bt_update_job_if_not_cancelled", _fake_update_if_not_cancelled)
 
     def _raises_backtest_error(strategy, config):
         raise api_main.BacktestExecutionError(status_code=422, detail="bad strategy")
@@ -1456,9 +1474,17 @@ def test_run_backtest_background_cancel_during_generic_exception(
     from investment_team.models import BacktestConfig, StrategySpec
 
     state: Dict[str, Any] = {}
-    cancel_checks = iter([False, True])
-    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    # First write (RUNNING) succeeds; second write (FAILED, from the except
+    # block) is rejected as if a cancel landed during backtest execution.
+    update_results = iter([True, False])
+
+    def _fake_update_if_not_cancelled(jid, **kw):
+        ok = next(update_results)
+        if ok:
+            state.update(kw)
+        return ok
+
+    monkeypatch.setattr(api_main, "_bt_update_job_if_not_cancelled", _fake_update_if_not_cancelled)
 
     def _raises_generic(strategy, config):
         raise RuntimeError("network down")
@@ -1498,7 +1524,9 @@ def test_run_backtest_background_retry_reuses_backtest_id(
 
     state: Dict[str, Any] = {}
     monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    monkeypatch.setattr(
+        api_main, "_bt_update_job_if_not_cancelled", lambda jid, **kw: state.update(kw) or True
+    )
 
     bt_result = BacktestResult(
         total_return_pct=10.0,
