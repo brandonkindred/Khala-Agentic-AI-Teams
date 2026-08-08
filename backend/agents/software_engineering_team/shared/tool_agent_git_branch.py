@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from shared.git.branch_utils import make_branch_suffix, make_slug
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
     checkout_branch,
@@ -25,7 +25,7 @@ from software_engineering_team.shared.git_utils import (
     delete_branch,
     merge_branch,
 )
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     create_feature_branch as git_create_feature_branch,
 )
 from software_engineering_team.shared.v2_models import ToolAgentOutput, ToolAgentPhaseOutput

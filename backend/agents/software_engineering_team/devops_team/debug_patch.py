@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.git.branch_utils import make_branch_suffix
-from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH
+from shared.git.git_utils import DEVELOPMENT_BRANCH
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 
 from .infra_debug_agent import IaCDebugInput

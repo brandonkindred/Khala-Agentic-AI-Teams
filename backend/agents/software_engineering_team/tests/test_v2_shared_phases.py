@@ -18,8 +18,8 @@ from types import SimpleNamespace
 import pytest
 
 from llm_service.strands_model import LlmRunner
+from shared.git.git_utils import write_files_and_commit
 from software_engineering_team.backend_code_v2_team import models as be_models
-from software_engineering_team.shared.git_utils import write_files_and_commit
 from software_engineering_team.shared.models import (
     ArchitectureComponent,
     SystemArchitecture,

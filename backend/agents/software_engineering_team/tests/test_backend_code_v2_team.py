@@ -705,7 +705,7 @@ class TestToolAgents:
         create_ok, branch = agent.create_feature_branch(tmp_path, "t1", "API")
         assert not create_ok and branch is None
 
-        from software_engineering_team.shared.git_utils import initialize_new_repo
+        from shared.git.git_utils import initialize_new_repo
 
         ok, _ = initialize_new_repo(tmp_path)
         assert ok
@@ -714,7 +714,7 @@ class TestToolAgents:
         assert "feature/" in branch
 
     def test_git_agent_commit_current_changes(self, tmp_path):
-        from software_engineering_team.shared.git_utils import initialize_new_repo
+        from shared.git.git_utils import initialize_new_repo
         from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
@@ -726,7 +726,7 @@ class TestToolAgents:
         assert ok
 
     def test_git_agent_deliver_with_feature_branch_name(self, tmp_path):
-        from software_engineering_team.shared.git_utils import (
+        from shared.git.git_utils import (
             create_feature_branch,
             initialize_new_repo,
         )
