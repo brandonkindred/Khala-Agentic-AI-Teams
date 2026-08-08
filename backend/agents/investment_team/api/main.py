@@ -4814,8 +4814,12 @@ def _run_paper_trading_background(
                     if raw is not None:
                         session = PaperTradingSession.parse_persisted(raw)
                         session.status = PaperTradingStatus.FAILED
-                        session.error = f"Paper trading crashed: {exc}"
-                        session.divergence_analysis = f"Paper trading crashed: {exc}"
+                        # User-facing fields must not leak raw exception text (internal
+                        # paths, dependency names) to API consumers; the full exception
+                        # is already captured above via logger.exception.
+                        user_message = "Paper trading crashed due to an internal error."
+                        session.error = user_message
+                        session.divergence_analysis = user_message
                         session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                         _paper_trading_sessions[session_id] = session
         except Exception:

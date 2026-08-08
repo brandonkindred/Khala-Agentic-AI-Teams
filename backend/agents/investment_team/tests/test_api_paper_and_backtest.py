@@ -2259,7 +2259,8 @@ def test_run_paper_trading_background_guards_non_terminal_agent_result(
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "non-terminal status" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."
 
 
 def test_run_paper_trading_background_guards_terminal_status_missing_completed_at(
@@ -2332,4 +2333,5 @@ def test_run_paper_trading_background_guards_terminal_status_missing_completed_a
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "no completed_at" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."
