@@ -18,7 +18,7 @@ import hashlib
 import json
 import re
 import sys
-from collections.abc import AsyncGenerator, AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable, Callable
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
@@ -580,6 +580,21 @@ def _phase3_design_system_codifier_stub() -> Dict[str, Any]:
     }
 
 
+# Post-converge Phase 3 specialists, matched after the three ordering-sensitive
+# agents below. Each entry is ((anchor_a, anchor_b), builder): both anchors must
+# appear in the lowercased system prompt for that builder to fire. Order among
+# these seven does not matter — their anchor pairs are mutually exclusive.
+_PHASE3_SPECIALIST_REGISTRY: tuple[tuple[tuple[str, str], Callable[[], Dict[str, Any]]], ...] = (
+    (("logo specifier", "clear_space"), _phase3_logo_specifier_stub),
+    (("psychological_rationale", "color system builder"), _phase3_color_system_builder_stub),
+    (("typography builder", "weight_range"), _phase3_typography_builder_stub),
+    (("iconography_style", "illustration_style"), _phase3_iconography_director_stub),
+    (("photography_direction", "motion_principles"), _phase3_photography_video_director_stub),
+    (("voice_tone_spectrum", "language_donts"), _phase3_voice_tone_builder_stub),
+    (("foundation_tokens", "component_standards"), _phase3_design_system_codifier_stub),
+)
+
+
 def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
     """Dispatch to the matching Phase 3 agent structured-output stub helper.
 
@@ -590,15 +605,15 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         ``structured_output`` schema, or ``None`` when no Phase 3 agent matches.
         Dispatches to one of ten helpers covering: CreativeDirector,
         MoodBoardConceptualist, ConvergeDecider, and the seven post-converge
-        specialists (logo_specifier, color_system_builder, typography_builder,
-        iconography_director, photography_video_director, voice_tone_builder,
-        design_system_codifier). Specialist branches match on lowercased prompt
-        *substrings*, not factory names: logo_specifier matches "logo specifier"
-        (space), color_system_builder matches "color system builder", and
-        typography_builder matches "typography builder". The remaining four
-        specialists (iconography_director, photography_video_director,
-        voice_tone_builder, design_system_codifier) have no name-substring
-        anchor at all — they match on output-field names only.
+        specialists in ``_PHASE3_SPECIALIST_REGISTRY`` (logo_specifier,
+        color_system_builder, typography_builder, iconography_director,
+        photography_video_director, voice_tone_builder, design_system_codifier).
+        Specialist anchors match on lowercased prompt *substrings*, not factory
+        names: logo_specifier matches "logo specifier" (space), color_system_builder
+        matches "color system builder", and typography_builder matches "typography
+        builder". The remaining four specialists (iconography_director,
+        photography_video_director, voice_tone_builder, design_system_codifier)
+        have no name-substring anchor at all — they match on output-field names only.
 
     Ordering constraints (first three only — do not conflate them):
         1. CreativeDirector — ``mood_board_candidates`` + ``converge_decider``
@@ -608,7 +623,9 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
            → ``MoodBoardConceptOutput``.
         3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
            → ``CreativeRefinementDecisionOutput`` (separate from CreativeDirector).
-        Specialists are matched afterward by agent-specific prompt anchors.
+        The seven specialists in ``_PHASE3_SPECIALIST_REGISTRY`` are matched
+        afterward, in registry order, by agent-specific prompt anchors; their
+        anchor pairs are mutually exclusive so registry order is not significant.
     """
     if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
         return _phase3_creative_director_stub()
@@ -616,20 +633,9 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         return _phase3_moodboard_conceptualist_stub()
     if "winning_candidate_title" in system_lowered and "scores_by_candidate" in system_lowered:
         return _phase3_converge_decider_stub()
-    if "logo specifier" in system_lowered and "clear_space" in system_lowered:
-        return _phase3_logo_specifier_stub()
-    if "psychological_rationale" in system_lowered and "color system builder" in system_lowered:
-        return _phase3_color_system_builder_stub()
-    if "typography builder" in system_lowered and "weight_range" in system_lowered:
-        return _phase3_typography_builder_stub()
-    if "iconography_style" in system_lowered and "illustration_style" in system_lowered:
-        return _phase3_iconography_director_stub()
-    if "photography_direction" in system_lowered and "motion_principles" in system_lowered:
-        return _phase3_photography_video_director_stub()
-    if "voice_tone_spectrum" in system_lowered and "language_donts" in system_lowered:
-        return _phase3_voice_tone_builder_stub()
-    if "foundation_tokens" in system_lowered and "component_standards" in system_lowered:
-        return _phase3_design_system_codifier_stub()
+    for (anchor_a, anchor_b), builder in _PHASE3_SPECIALIST_REGISTRY:
+        if anchor_a in system_lowered and anchor_b in system_lowered:
+            return builder()
     return None
 
 

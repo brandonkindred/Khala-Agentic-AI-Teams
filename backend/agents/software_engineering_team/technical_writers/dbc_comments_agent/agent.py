@@ -202,8 +202,9 @@ class DbcCommentsAgent:
             attempt (on any chunk) is surfaced via on_status(NEEDS_RETRY,
             ...); a chunk's final exhaustion via on_status(FAILED, ...) and
             already_compliant=False, never a silent fail-open. A merge-step
-            exception (apply_dbc_insertions) is a separate, still fail-open
-            path -- see that block's own comment.
+            exception (apply_dbc_insertions) is handled the same way -- via
+            on_status(FAILED, ...) and already_compliant=False, never fail-open
+            -- see that block's own comment for why.
         """
 
         def _update(status: DbcCommentsStatus, detail: str = "") -> None:
@@ -361,16 +362,21 @@ class DbcCommentsAgent:
                     code, insertions
                 )
             except Exception as e:
-                # Fail-open: merge.py is pure and LLM-free, so there is nothing
-                # a retry could fix here (unlike the LLM-call path above, which
-                # is retried and surfaces failure instead of failing open). An
-                # unexpected merge error must not crash the calling pipeline or
-                # violate run()'s documented "never raises" contract.
-                logger.warning("DbcComments: merge failed (%s), returning compliant (fail-open)", e)
+                # merge.py's apply_dbc_insertions is documented as pure and
+                # raising nothing, so reaching here means an unexpected bug,
+                # not a transient/retryable condition. Treat it the same as
+                # an exhausted LLM-call failure (see that path above) rather
+                # than failing open: the review never actually completed, so
+                # claiming already_compliant=True here would silently mark
+                # non-compliant code as compliant. This still honors run()'s
+                # documented "never raises" contract -- the exception is
+                # caught and surfaced as a failed, non-compliant result
+                # instead of propagating.
+                logger.warning("DbcComments: merge failed (%s), failing loud (non-compliant)", e)
                 _update(DbcCommentsStatus.FAILED, str(e))
                 return DbcCommentsOutput(
-                    already_compliant=True,
-                    summary=f"DbC review skipped due to a merge error: {e}",
+                    already_compliant=False,
+                    summary=f"DbC review failed due to a merge error: {e}",
                 )
             if rejected_insertions:
                 logger.warning(
