@@ -4676,23 +4676,9 @@ def _run_paper_trading_background(
         )
 
         if not market_data:
-            with _lock:
-                if _paper_trading_session_already_terminal(session_id):
-                    logger.warning(
-                        "Paper trade %s: session already terminal when the "
-                        "empty-market-data write was about to run; leaving it "
-                        "untouched (a concurrent writer already finalized it).",
-                        session_id,
-                    )
-                    return
-                raw = _paper_trading_sessions.get(session_id)
-                if raw is not None:
-                    session = PaperTradingSession.parse_persisted(raw)
-                    session.status = PaperTradingStatus.FAILED
-                    session.error = "Failed to fetch market data from external sources."
-                    session.divergence_analysis = session.error
-                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                    _paper_trading_sessions[session_id] = session
+            _fail_paper_trading_session(
+                session_id, "Failed to fetch market data from external sources."
+            )
             return
 
         agent = PaperTradingAgent()

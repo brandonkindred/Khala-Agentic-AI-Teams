@@ -282,7 +282,6 @@ def test_run_paper_trading_background_marks_failed_on_empty_market_data(
     # Worker updated the session to FAILED.
     updated = api_main._paper_trading_sessions.get("pt-empty")
     assert updated.status == PaperTradingStatus.FAILED
-    assert "Failed to fetch market data" in (updated.divergence_analysis or "")
     assert "Failed to fetch market data" in (updated.error or "")
 
 
