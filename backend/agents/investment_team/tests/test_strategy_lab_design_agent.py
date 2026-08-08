@@ -806,6 +806,31 @@ def test_run_exhausts_parse_retries_and_raises(monkeypatch: pytest.MonkeyPatch) 
     assert len(capture.calls) == 3
 
 
+def test_run_validation_error_of_unexpected_type_raises_typeerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_on_validation_error`` must fail loudly (``TypeError``) instead of
+    silently passing through a non-``StrategySpecParseError`` exception —
+    the ``assert isinstance(...)`` it replaced would have vanished entirely
+    under ``python -O``, letting the wrong type reach the correction-prompt
+    builder unnoticed."""
+    capture = _patch_design(monkeypatch, _bar_close_as_indicator_ref_payload())
+
+    def _boom(_parsed: Dict[str, Any]) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("investment_team.strategy_lab.agents.design._finalize_parsed", _boom)
+
+    with pytest.raises(TypeError, match="expected StrategySpecParseError") as excinfo:
+        DesignAgent().run(prior_records=[])
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    # The TypeError propagates immediately from on_validation_error itself —
+    # it is not caught/retried by run_json_with_parse_retry, so only the
+    # first attempt's call is made.
+    assert len(capture.calls) == 1
+
+
 def test_run_parse_retries_zero_means_single_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
