@@ -182,8 +182,9 @@ def validate_team_roster(team_id: str):
 
     Runs every process's step/agent requirements against the roster (each
     referenced agent must exist and be assigned), flags roster agents unused by
-    any process, and flags agents whose profile is too sparse (missing most of
-    skills/capabilities/tools/expertise) — see ``roster_validation.validate_roster``.
+    any process, and flags agents whose Manifest-projected profile is too sparse
+    (missing most of skills/tools/expertise; ``capabilities`` is excluded because
+    Manifest join never fills it) — see ``roster_validation.validate_roster``.
 
     Preconditions: ``team_id`` is a non-empty string.
     Postconditions: ``200`` with a ``RosterValidationResult`` summarizing

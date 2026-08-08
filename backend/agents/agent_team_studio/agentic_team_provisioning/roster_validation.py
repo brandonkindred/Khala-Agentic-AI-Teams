@@ -5,8 +5,9 @@ Checks that:
 1. Every agent referenced in a process step exists on the roster.
 2. Every roster agent is used in at least one process step (no dead weight).
 3. Every process step has at least one assigned agent.
-4. The collective skills, capabilities, tools, and expertise on the roster
-   cover the needs implied by each process step's description/agents.
+4. Manifest-projected skills, tools, and expertise on the roster cover the
+   needs implied by each process step's description/agents (``capabilities``
+   is never projected from AgentManifest, so it is not part of depth checks).
 """
 
 from __future__ import annotations

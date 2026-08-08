@@ -502,7 +502,8 @@ def recommend_agents_for_step(process_id: str, step_id: str):
     Scoring is a simple token-overlap heuristic, not semantic matching:
     lowercased words (length > 2) from the step's ``name``/``description`` are
     intersected against each roster agent's Manifest-resolved
-    skills/capabilities/tools/expertise; the overlap *count* is the
+    skills/tools/expertise (``capabilities`` is always empty on the persona view);
+    the overlap *count* is the
     ``match_score``. Agents with zero overlap are omitted entirely, and the
     remaining ones are sorted by descending score and capped to the top 10.
 
