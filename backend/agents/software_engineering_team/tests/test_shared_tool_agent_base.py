@@ -14,7 +14,6 @@ from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBas
 from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
-    ReviewToolAgent,
     SingleIssueProblemSolveMixin,
     _strands_llm_call_errors,
     fill_review_prompt,
@@ -1004,8 +1003,6 @@ def test_review_json_mode(monkeypatch):
 
 def test_review_tool_agent_is_llm_tool_agent_base_subclass():
     assert issubclass(BaseReviewToolAgent, LlmToolAgentBase)
-    assert issubclass(ReviewToolAgent, LlmToolAgentBase)
-    assert ReviewToolAgent is BaseReviewToolAgent
 
 
 def test_review_tool_agent_selects_review_recipe_attrs():

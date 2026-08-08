@@ -6,9 +6,9 @@ split; models are imported directly.
 
 Invariants:
     - The run-thread registry itself lives in ``shared.run_thread_registry.RunThreadRegistry``;
-      ``_active_run_threads``/``_starting_run_jobs``/``_run_thread_lock`` are back-compat aliases
-      onto its live internals, so background threads observe the same maps regardless of whether
-      they go through the registry or poke these aliases directly.
+      ``_starting_run_jobs``/``_run_thread_lock`` are back-compat aliases onto its live internals,
+      so background threads observe the same maps regardless of whether they go through the
+      registry or poke these aliases directly.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 # pauses do not register here — resume is via workflow signal, not thread restart.
 _registry = RunThreadRegistry()
 # Back-compat aliases — existing call sites and tests reference these names directly.
-_active_run_threads = _registry.threads
 _starting_run_jobs = _registry.starting_jobs
 _run_thread_lock = _registry.lock
 _register_run_thread = _registry.register
