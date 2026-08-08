@@ -35,6 +35,8 @@ import {
   ConfirmDialogComponent,
   type ConfirmDialogData,
 } from '../../shared/confirm-dialog/confirm-dialog.component';
+import { LatestOnly } from '../../shared/latest-only';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import type {
   AgenticTeam,
   AgenticTeamAgent,
@@ -43,6 +45,9 @@ import type {
   ProcessStep,
   RosterValidationResult,
 } from '../../models';
+
+/** Chat prompt seeded by the roster panel's "Suggest via chat" action. */
+const SUGGEST_AGENT_PROMPT = 'Suggest an additional agent for this team.';
 
 @Component({
   selector: 'app-process-designer-chat',
@@ -103,8 +108,8 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   rosterLoading = signal(false);
   rosterActionError = signal<string | null>(null);
   expandedAgent = signal<string | null>(null);
-  /** Monotonic stamp for `refreshRoster`; guards against out-of-order refresh results. */
-  private rosterRefreshSeq = 0;
+  /** Guards `refreshRoster` against out-of-order refresh results. */
+  private readonly rosterRefreshGuard = new LatestOnly();
 
   private conversationId: string | null = null;
   /** Monotonic stamp for `startConversation`; guards against out-of-order createConversation results. */
@@ -184,7 +189,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       },
       error: (err) => {
         if (seq !== this.conversationSeq) return;
-        this.error.set(err?.error?.detail ?? 'Failed to start conversation');
+        this.error.set(extractErrorDetail(err, 'Failed to start conversation'));
       },
     });
   }
@@ -217,41 +222,41 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   refreshRoster(): void {
-    // Sequence token: a roster mutation (add/delete/edit) can trigger a new
-    // refresh while an older one is still in flight. Stamp each refresh and drop
-    // any callback whose stamp is no longer the latest, so a slow older
-    // validateRoster can't complete last and emit a stale is_fully_staffed —
-    // which the embedding stage (Agent Studio Stage 3) would use to (wrongly)
-    // enable "Test this team →" for a roster that has since changed.
-    const seq = ++this.rosterRefreshSeq;
+    // Sequence token: a roster mutation (add/delete) can trigger a new refresh
+    // while an older one is still in flight. Drop any callback whose token is no
+    // longer current, so a slow older validateRoster can't complete last and emit
+    // a stale is_fully_staffed — which the embedding stage (Agent Studio Stage 3)
+    // would use to (wrongly) enable "Test this team →" for a roster that has since
+    // changed.
+    const token = this.rosterRefreshGuard.next();
     this.rosterLoading.set(true);
     this.rosterActionError.set(null);
     this.api.listTeamAgents(this.team.team_id).subscribe({
       next: (agents) => {
-        if (seq !== this.rosterRefreshSeq) return; // superseded by a newer refresh
+        if (!this.rosterRefreshGuard.isCurrent(token)) return; // superseded by a newer refresh
         this.rosterAgents.set(agents);
         // Keep the loading indicator up until validation also resolves — the
         // roster isn't "fully loaded" until its staffing gaps are known.
         this.api.validateRoster(this.team.team_id).subscribe({
           next: (result) => {
-            if (seq !== this.rosterRefreshSeq) return;
+            if (!this.rosterRefreshGuard.isCurrent(token)) return;
             this.rosterValidation.set(result);
             this.rosterLoading.set(false);
             this.rosterChanged.emit(result);
           },
           error: (err) => {
-            if (seq !== this.rosterRefreshSeq) return;
+            if (!this.rosterRefreshGuard.isCurrent(token)) return;
             this.rosterValidation.set(null);
             this.rosterLoading.set(false);
             this.rosterChanged.emit(null);
             // Surface the failure too: clearing the gate silently disables the
             // embedding stage's "Test this team →" with no explanation otherwise.
-            this.rosterActionError.set(err?.error?.detail ?? 'Failed to validate the roster');
+            this.rosterActionError.set(extractErrorDetail(err, 'Failed to validate the roster'));
           },
         });
       },
       error: (err) => {
-        if (seq !== this.rosterRefreshSeq) return;
+        if (!this.rosterRefreshGuard.isCurrent(token)) return;
         // Surface the failure instead of silently leaving a stale roster: the
         // user needs to know their view may be out of date. Also clear the
         // validation and emit null so an embedding stage (Agent Studio Stage 3)
@@ -261,7 +266,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         this.rosterLoading.set(false);
         this.rosterValidation.set(null);
         this.rosterChanged.emit(null);
-        this.rosterActionError.set(err?.error?.detail ?? 'Failed to load roster');
+        this.rosterActionError.set(extractErrorDetail(err, 'Failed to load roster'));
       },
     });
   }
@@ -303,14 +308,14 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.api.addAgentFromRegistry(this.team.team_id, manifestId).subscribe({
       next: () => this.refreshRoster(),
       error: (err) => {
-        this.rosterActionError.set(err?.error?.detail ?? 'Failed to add agent from registry');
+        this.rosterActionError.set(extractErrorDetail(err, 'Failed to add agent from registry'));
       },
     });
   }
 
   /** "Suggest via chat": seed the chat input with a prompt asking for a new agent. */
   suggestAgentViaChat(): void {
-    this.form.patchValue({ message: 'Suggest an additional agent for this team.' });
+    this.form.patchValue({ message: SUGGEST_AGENT_PROMPT });
   }
 
   deleteAgent(agent: AgenticTeamAgent, event: Event): void {
@@ -342,7 +347,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.api.removeTeamAgent(this.team.team_id, agent.agent_name).subscribe({
       next: () => this.refreshRoster(),
       error: (err) => {
-        this.rosterActionError.set(err?.error?.detail ?? 'Failed to remove agent');
+        this.rosterActionError.set(extractErrorDetail(err, 'Failed to remove agent'));
       },
     });
   }
@@ -359,13 +364,17 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   private sendMessage(message: string): void {
-    if (!this.conversationId) return;
+    // Guard here (not just in onSubmit) so onSuggestedQuestion — which bypasses
+    // the form — can't fire a second concurrent send while one is in flight.
+    if (!this.conversationId || this.loading()) return;
 
     this.form.reset({ message: '' });
-    this.messages.update((msgs) => [
-      ...msgs,
-      { role: 'user' as const, content: message, timestamp: new Date().toISOString() },
-    ]);
+    const optimisticMessage: AgenticConversationMessage = {
+      role: 'user',
+      content: message,
+      timestamp: new Date().toISOString(),
+    };
+    this.messages.update((msgs) => [...msgs, optimisticMessage]);
     this.loading.set(true);
     this.error.set(null);
 
@@ -375,7 +384,12 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         this.loading.set(false);
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? 'Failed to send message');
+        // The backend persists the turn only once the LLM call and roster/process
+        // save succeed (see agentic_team_provisioning's send_message); on failure
+        // nothing was saved, so roll back the optimistic append rather than leave
+        // a message visible that a refresh would show was never sent.
+        this.messages.update((msgs) => msgs.filter((m) => m !== optimisticMessage));
+        this.error.set(extractErrorDetail(err, 'Failed to send message'));
         this.loading.set(false);
       },
     });
@@ -408,12 +422,12 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         // Link the new process to the active conversation so chat stays in sync
         if (this.conversationId) {
           this.api.setConversationProcess(this.conversationId, process.process_id).subscribe({
-            error: (err) => this.error.set(err?.error?.detail ?? 'Failed to link process to conversation'),
+            error: (err) => this.error.set(extractErrorDetail(err, 'Failed to link process to conversation')),
           });
         }
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? 'Failed to create process');
+        this.error.set(extractErrorDetail(err, 'Failed to create process'));
         this.saving.set(false);
       },
     });
@@ -536,7 +550,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       error: (err) => {
         this.currentProcess.set(previous);
         this.buildFlowchart(previous);
-        this.error.set(err?.error?.detail ?? 'Failed to save process');
+        this.error.set(extractErrorDetail(err, 'Failed to save process'));
         this.saving.set(false);
       },
     });

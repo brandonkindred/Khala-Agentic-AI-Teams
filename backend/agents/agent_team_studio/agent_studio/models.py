@@ -202,3 +202,24 @@ class AgentStudioDraft(BaseModel):
     created_at: str = Field(..., description="ISO-8601 timestamp; server-managed.")
     updated_at: str = Field(..., description="ISO-8601 timestamp; server-managed.")
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SaveDraftRequest(BaseModel):
+    """Create/update body: optional label + opaque stage/handoff payload.
+
+    On ``PUT``, omitted fields (``None``) leave the stored value unchanged; send
+    an explicit ``payload`` object (including ``{}``) to replace it.
+
+    Invariants:
+        * ``payload``, when provided, is a JSON object (``dict``); the store
+          rejects non-dicts with ``ValueError``.
+    """
+
+    name: str | None = None
+    payload: dict[str, Any] | None = None
+
+
+class RenameDraftRequest(BaseModel):
+    """Rename body for ``PATCH /drafts/{draft_id}``."""
+
+    name: str = Field(..., min_length=1)
