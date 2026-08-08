@@ -7,7 +7,7 @@ split; models are imported directly.
 
 from __future__ import annotations
 
-import asyncio
+
 import contextlib
 import itertools
 import logging
