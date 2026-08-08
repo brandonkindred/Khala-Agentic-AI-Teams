@@ -379,7 +379,7 @@ def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
 
     Preconditions: ``team_id`` is a non-empty string; ``req.process_id``
         identifies a process already saved on the team.
-    Postconditions: ``200`` with the created ``TestPipelineRun`` (a fresh
+    Postconditions: ``201`` with the created ``TestPipelineRun`` (a fresh
         UUID ``run_id``); ``404`` if the team is not found, or the team has
         no process with ``req.process_id``. Dispatch is routed to a durable
         Temporal workflow when Temporal is enabled, else an in-process daemon
