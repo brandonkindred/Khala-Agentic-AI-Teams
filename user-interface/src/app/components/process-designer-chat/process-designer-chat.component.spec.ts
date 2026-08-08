@@ -602,6 +602,19 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.currentProcess()?.process_id).toBe('p-new');
   });
 
+  it('createNewProcess falls back to the error message when the link failure has no detail field', () => {
+    // Regression test for the link-failure handler: it must go through
+    // extractErrorDetail (which falls back to err.message) rather than a raw
+    // err?.error?.detail chain, which would report the generic fallback text
+    // instead of this network-style error's message.
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    api.setConversationProcess.mockReturnValueOnce(throwError(() => ({ message: 'network down' })));
+
+    component.createNewProcess();
+
+    expect(component.error()).toBe('network down');
+  });
+
   // ── Process CRUD: roll back optimistic mutations on save failure ───────────
 
   it('addStep rolls back the new step when updateProcess fails', () => {
