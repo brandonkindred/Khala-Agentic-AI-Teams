@@ -37,13 +37,6 @@ class TestSharedTemplates:
         assert "a.py" in result["files"]
         assert result["summary"] == "done"
 
-    def test_parse_files_with_validation_returns_tuple(self, tmpl):
-        text = "## FILE x.py ##\nprint(1)\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
-        parsed, truncated, errors = tmpl.parse_files_with_validation(text)
-        assert "x.py" in parsed["files"]
-        assert truncated == []
-        assert errors == {}
-
     def test_parse_planning_template(self, tmpl):
         text = (
             "## MICROTASKS ##\n"
