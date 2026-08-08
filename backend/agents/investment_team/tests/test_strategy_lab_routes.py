@@ -3489,6 +3489,61 @@ def _make_subscriber(events):
     return _Sub()
 
 
+def test_make_subscriber_returns_expected_contract() -> None:
+    """``_make_subscriber`` must honor the subscription contract it
+    promises, not just exist.
+
+    Preconditions:
+        - None; exercises ``_make_subscriber`` directly with a sample deque.
+
+    Postconditions:
+        - ``sub.events`` is the exact deque object passed in (not a copy),
+          since ``stream_strategy_lab_run`` polls the live deque for new
+          events pushed after subscription.
+        - ``sub.touch()`` is callable and returns ``None`` without raising.
+    """
+    from collections import deque
+
+    events = deque([{"type": "complete", "summary": "ok"}])
+    sub = _make_subscriber(events)
+
+    assert sub.events is events
+    assert sub.touch() is None
+
+
+def test_stream_tests_reuse_shared_subscriber_helper() -> None:
+    """Guard against the four stream tests regressing back to duplicated
+    inline ``_Sub`` classes.
+
+    Preconditions:
+        - None; inspects this test module's own source.
+
+    Postconditions:
+        - The fake-subscriber class def appears exactly once in the module
+          (inside ``_make_subscriber`` itself) — a second occurrence would
+          mean a test reintroduced an inline copy instead of reusing the
+          helper.
+        - Each of the four stream tests that previously defined its own
+          copy calls ``_make_subscriber(`` instead.
+    """
+    from pathlib import Path
+
+    # Built via concatenation (rather than a literal) so this assertion
+    # doesn't match its own source line and inflate the count.
+    needle = "class " + "_Sub:"
+    source = Path(__file__).read_text()
+    assert source.count(needle) == 1
+
+    reusing_tests = [
+        test_stream_strategy_lab_run_does_not_block_on_threading_lock,
+        test_stream_strategy_lab_run_emits_snapshot_update_and_terminates,
+        test_stream_strategy_lab_run_terminates_on_error_event,
+        test_stream_strategy_lab_run_snapshot_reconciles_progress,
+    ]
+    for test_func in reusing_tests:
+        assert "_make_subscriber(" in inspect.getsource(test_func)
+
+
 def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Streaming a run_id with neither in-memory nor persisted state returns 404."""
     from investment_team.api import main as api_main
