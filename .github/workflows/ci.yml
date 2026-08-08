@@ -1069,6 +1069,9 @@ jobs:
       run:
         working-directory: backend/agents
     services:
+      # 16-alpine matches the pin used elsewhere in the project
+      # (backend/agent_sandbox_image/sandbox-stack.yml) and specifically
+      # avoids the (unpublished, non-startable) Postgres 18 alpine tag.
       postgres:
         image: postgres:16-alpine
         env:
@@ -1170,6 +1173,9 @@ jobs:
     services:
       # trust auth so the ephemeral CI database needs no password (avoids a
       # hardcoded dummy credential); connections come only from this runner.
+      # 16-alpine matches the pin used elsewhere in the project
+      # (backend/agent_sandbox_image/sandbox-stack.yml) and specifically
+      # avoids the (unpublished, non-startable) Postgres 18 alpine tag.
       postgres:
         image: postgres:16-alpine
         env:

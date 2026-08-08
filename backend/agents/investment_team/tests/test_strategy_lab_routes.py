@@ -3579,6 +3579,20 @@ def test_stream_tests_reuse_shared_subscriber_helper() -> None:
         assert "_make_subscriber(" in inspect.getsource(test_func)
 
 
+def test_stream_strategy_lab_run_has_documented_contract() -> None:
+    """Regression guard: the SSE handler's docstring must document its
+    contract with structured Preconditions/Postconditions/Raises sections,
+    not just the threadpool-offload narrative -- a caller needs to know the
+    expected ``run_id`` shape, the 404 case, and the snapshot/done behavior
+    for terminal runs without reading the implementation."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.stream_strategy_lab_run.__doc__
+    assert doc, "stream_strategy_lab_run is missing a docstring"
+    for snippet in ("Preconditions:", "Postconditions:", "Raises:", "404"):
+        assert snippet in doc, f"stream_strategy_lab_run docstring missing {snippet!r}"
+
+
 def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Streaming a run_id with neither in-memory nor persisted state returns 404."""
     from investment_team.api import main as api_main
