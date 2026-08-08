@@ -396,14 +396,18 @@ def test_run_strategy_lab_docstring_does_not_overclaim_uuid4_entropy() -> None:
     """Regression guard for the run_id-truncation docstring bug: run_strategy_lab
     mints an 8-hex-char (32-bit) truncated uuid4, not a full uuid4, so its
     docstring must not claim collision is "astronomically unlikely" from uuid4
-    entropy alone -- the actual protection is the active-run check."""
+    entropy alone. The actual mitigation for two concurrent requests minting
+    the same run_id is the per-run_id transition lock -- not the active-run
+    check, which only guards against a second run starting while one is
+    already running and does not itself detect run_id collisions."""
     from investment_team.api import main as api_main
 
     doc = api_main.run_strategy_lab.__doc__
     assert doc, "run_strategy_lab is missing a docstring"
     assert "astronomically unlikely" not in doc
-    assert "truncated uuid4" in doc
-    assert "active-run check" in doc
+    assert "8-hex-char" in doc
+    assert "_require_run_transition_lock" in doc
+    assert "does not itself guard against run_id collisions" in doc
 
 
 def test_run_strategy_lab_locked_recheck_catches_race_past_early_check(
