@@ -177,11 +177,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.attachFlowchartClickHandlers();
   }
 
-  ngOnDestroy(): void {
-    this.destroy$.next();
-    this.destroy$.complete();
-  }
-
   private scrollToBottom(): void {
     if (this.messagesContainer?.nativeElement) {
       const el = this.messagesContainer.nativeElement;
@@ -221,6 +216,8 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
     this.detachFlowchartClickHandlers();
   }
 
@@ -575,7 +572,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
             .setConversationProcess(this.conversationId, process.process_id)
             .pipe(takeUntil(this.destroy$))
             .subscribe({
-              error: (err) => this.error.set(err?.error?.detail ?? 'Failed to link process to conversation'),
+              error: (err) => this.error.set(extractErrorDetail(err, 'Failed to link process to conversation')),
             });
         }
       },
