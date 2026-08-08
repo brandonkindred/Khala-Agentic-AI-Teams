@@ -9,6 +9,9 @@ Targets:
   terminal-reason → FAILED mapping (when INVESTMENT_LIVE_PAPER_ENABLED=true).
 * ``stop_live_paper_trading`` 404 + happy paths.
 * ``run_paper_trading`` live-mode concurrency guard (409).
+* ``_fail_paper_trading_session`` delegates to the shared
+  ``_apply_paper_trading_failure`` helper instead of re-implementing its
+  field updates.
 """
 
 from __future__ import annotations
@@ -1433,6 +1436,47 @@ def test_fail_paper_trading_session_never_raises_on_store_write_failure(monkeypa
 
     # Must not raise.
     api_main._fail_paper_trading_session("pt-broken-store", "dispatch failed")
+
+
+def test_fail_paper_trading_session_delegates_to_apply_paper_trading_failure(monkeypatch) -> None:
+    """Regression test for #5136: `_fail_paper_trading_session` must delegate
+    to the shared `_apply_paper_trading_failure` helper rather than mutating
+    status/error/completed_at itself, and — unlike the batch recovery path —
+    must not pass any recovery-specific fields. This would fail against the
+    pre-fix implementation, which had no such helper to delegate to.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    live = _live_session("pt-delegates", strategy, PaperTradingStatus.LIVE)
+    store = {"pt-delegates": live}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    real_apply = api_main._apply_paper_trading_failure
+    calls = []
+
+    def _spy(session, error, **kwargs):
+        calls.append((session, error, kwargs))
+        return real_apply(session, error, **kwargs)
+
+    monkeypatch.setattr(api_main, "_apply_paper_trading_failure", _spy)
+
+    api_main._fail_paper_trading_session("pt-delegates", "dispatch failed")
+
+    assert len(calls) == 1
+    session_arg, error_arg, kwargs = calls[0]
+    assert session_arg.session_id == "pt-delegates"
+    assert error_arg == "dispatch failed"
+    assert kwargs == {}
 
 
 # ---------------------------------------------------------------------------
