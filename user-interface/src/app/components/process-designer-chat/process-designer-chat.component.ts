@@ -177,9 +177,16 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.attachFlowchartClickHandlers();
   }
 
+  /**
+   * Postconditions: completes `destroy$` (unsubscribing every
+   * `takeUntil(this.destroy$)` stream) and detaches every flowchart click
+   * listener bound by `attachFlowchartClickHandlers`, so nothing keeps a
+   * closure over a destroyed component.
+   */
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
+    this.detachFlowchartClickHandlers();
   }
 
   private scrollToBottom(): void {
@@ -218,10 +225,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       delete node.dataset['bound'];
     }
     this.flowchartClickListeners.length = 0;
-  }
-
-  ngOnDestroy(): void {
-    this.detachFlowchartClickHandlers();
   }
 
   private startConversation(): void {
