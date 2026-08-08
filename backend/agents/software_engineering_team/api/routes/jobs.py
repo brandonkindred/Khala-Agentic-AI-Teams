@@ -354,7 +354,7 @@ def cancel_job(job_id: str) -> CancelJobResponse:
 
     # When Temporal is enabled, also cancel the workflow so the worker stops
     try:
-        from software_engineering_team.temporal.client import is_temporal_enabled
+        from shared.temporal.client import is_temporal_enabled
         from software_engineering_team.temporal.start_workflow import cancel_run_team_workflow
 
         if is_temporal_enabled():

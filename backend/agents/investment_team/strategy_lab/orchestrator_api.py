@@ -11,10 +11,11 @@ Preconditions:
     Callers import named helpers from this module (prefer lazy import inside
     Temporal activities so ``api.main`` is not loaded at worker import time).
 Postconditions:
-    Run-state I/O helpers are defined directly in this module. Deferred names
-    resolve to the same callable currently defined on ``investment_team.api.main``
-    via lazy attribute lookup. Behavior is unchanged from importing those
-    symbols directly from ``api.main``.
+    Run-state I/O helpers, including ``_snapshot_prior_records``, are defined
+    directly in this module. Deferred names resolve to the same callable
+    currently defined on ``investment_team.api.main`` via lazy attribute
+    lookup. Behavior is unchanged from importing those symbols directly from
+    ``api.main``.
 Invariants:
     ``__all__`` is the complete public helper surface for this module; adding
     a name requires updating the boundaries note.
@@ -32,6 +33,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from investment_team.models import StrategyLabRecord
 from investment_team.strategy_lab.run_state import (
     DEFAULT_FENCING_GENERATION,
 )
@@ -60,9 +62,29 @@ if TYPE_CHECKING:
         _compute_signal_brief_snapshot,
         _finalize_strategy_lab_cycle_record,
         _is_strategy_lab_run_externally_stopped,
-        _snapshot_prior_records,
         _strategy_lab_external_terminal_status,
     )
+
+
+def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]:
+    """Locked read of the strategy-lab store, parsed and sorted by created_at.
+
+    Preconditions:
+        None — safe to call against an empty store.
+    Postconditions:
+        Returns a freshly parsed list of StrategyLabRecord, sorted by
+        ``created_at`` ascending (oldest-first) by default, or descending
+        (newest-first) when ``reverse=True``. Never returns None.
+    """
+    # Import the store lazily and outside the lock so loading ``api.main``
+    # never contends with callers that already hold ``_lock``.
+    from investment_team.api.main import _strategy_lab_records
+
+    with _lock:
+        raw = list(_strategy_lab_records.values())
+    records = [StrategyLabRecord.parse_persisted(r) for r in raw]
+    records.sort(key=lambda r: r.created_at, reverse=reverse)
+    return records
 
 logger = logging.getLogger(__name__)
 
@@ -980,7 +1002,6 @@ __all__ = [
 
 _DEFERRED_EXPORTS = frozenset(
     {
-        "_snapshot_prior_records",
         "_compute_signal_brief_snapshot",
         "_is_strategy_lab_run_externally_stopped",
         "_strategy_lab_external_terminal_status",

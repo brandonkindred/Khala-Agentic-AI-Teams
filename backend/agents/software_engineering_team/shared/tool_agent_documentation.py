@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional, Tuple
 
 from software_engineering_team.shared.tool_agent_base import (
-    ReviewToolAgent,
+    BaseReviewToolAgent,
     relevant_code_for_issue,
 )
 from software_engineering_team.shared.v2_models import ReviewIssue, ToolAgentPhaseOutput
@@ -53,7 +53,7 @@ def extract_doc_files(files: Dict[str, str], patterns: Tuple[str, ...]) -> Dict[
     return doc_files
 
 
-class DocumentationToolAgentBase(ReviewToolAgent):
+class DocumentationToolAgentBase(BaseReviewToolAgent):
     """Documentation tool agent: reviews documentation completeness and updates docs.
 
     Concrete subclasses set the profile: :attr:`doc_patterns`,

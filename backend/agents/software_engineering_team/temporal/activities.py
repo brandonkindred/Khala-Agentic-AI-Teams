@@ -109,7 +109,7 @@ def _run_code_v2_impl(
     """
     import uuid as _uuid
 
-    from software_engineering_team.shared.models import (
+    from shared.dev_models.models import (
         SystemArchitecture,
         Task,
         TaskStatus,
@@ -178,8 +178,8 @@ def _run_frontend_code_v2_impl(
 ) -> None:
     """Same logic as _run_frontend_code_v2_background without starting a thread."""
     from llm_service import get_client
+    from shared.dev_models.models import TaskType
     from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-    from software_engineering_team.shared.models import TaskType
 
     _run_code_v2_impl(
         job_id,
@@ -222,8 +222,8 @@ def _run_backend_code_v2_impl(
 ) -> None:
     """Same logic as _run_backend_code_v2_background without starting a thread."""
     from llm_service import get_client
+    from shared.dev_models.models import TaskType
     from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-    from software_engineering_team.shared.models import TaskType
 
     _run_code_v2_impl(
         job_id,

@@ -303,7 +303,7 @@ class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "angular.json").write_text("{}")
         task = Task(
@@ -318,7 +318,7 @@ class TestPlanningPhase:
     def test_language_detection_from_description(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         task = Task(
             id="t1",
@@ -360,7 +360,7 @@ class TestPlanningPhase:
     def test_run_planning_fallback(self, tmp_path):
         from frontend_code_v2_team.phases.planning import run_planning
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = _TextStubClient(
             "## MICROTASKS ##\n## END MICROTASKS ##\n"
@@ -461,7 +461,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
             PlanningResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "eslint.config.js").write_text("export default [];\n")
         (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
@@ -564,7 +564,7 @@ class TestFrontendDevelopmentAgentBranchReuse:
             PlanningResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "eslint.config.js").write_text("export default [];\n")
         (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
@@ -675,7 +675,7 @@ class TestFrontendCodeV2TeamLead:
             SetupResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         deliver = DeliverResult(
             branch_name="feature/ui",

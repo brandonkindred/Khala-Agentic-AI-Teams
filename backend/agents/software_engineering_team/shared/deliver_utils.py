@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from software_engineering_team.shared.branch_utils import make_branch_suffix, make_slug
-from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH
+from shared.git.branch_utils import make_branch_suffix, make_slug
+from shared.git.git_utils import DEVELOPMENT_BRANCH
 from software_engineering_team.shared.v2_models import DeliverResult
 
 
@@ -106,14 +106,18 @@ def prepare_handoff_branch(
     if not write_ok:
         result.summary = f"Write failed: {write_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
-        _cleanup_handoff_failure(repo_path, result.branch_name, created_branch=created_branch, ops=ops)
+        _cleanup_handoff_failure(
+            repo_path, result.branch_name, created_branch=created_branch, ops=ops
+        )
         return result
 
     commit_ok, commit_msg_out = ops.commit_working_tree(repo_path, commit_msg)
     if not commit_ok:
         result.summary = f"Commit failed: {commit_msg_out}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
-        _cleanup_handoff_failure(repo_path, result.branch_name, created_branch=created_branch, ops=ops)
+        _cleanup_handoff_failure(
+            repo_path, result.branch_name, created_branch=created_branch, ops=ops
+        )
         return result
 
     result.commit_messages.append(commit_msg)

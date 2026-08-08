@@ -13,7 +13,7 @@ import pytest
 
 from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE, LLMRateLimitError
 from shared.command_runner.executor import CommandResult
-from software_engineering_team.shared.models import (
+from shared.dev_models.models import (
     ProductRequirements,
     SystemArchitecture,
 )

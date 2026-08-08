@@ -181,6 +181,7 @@ _job_progress_percent = _strategy_lab_orchestrator_api._job_progress_percent
 _persist_run_state = _strategy_lab_orchestrator_api._persist_run_state
 _purge_strategy_lab_job_storage = _strategy_lab_orchestrator_api._purge_strategy_lab_job_storage
 _reconcile_run_progress = _strategy_lab_orchestrator_api._reconcile_run_progress
+_snapshot_prior_records = _strategy_lab_orchestrator_api._snapshot_prior_records
 _run_state_to_response = _strategy_lab_orchestrator_api._run_state_to_response
 _fail_strategy_lab_run = _strategy_lab_orchestrator_api._fail_strategy_lab_run
 _dispatch_strategy_lab_run = _strategy_lab_orchestrator_api._dispatch_strategy_lab_run
@@ -463,23 +464,6 @@ _backtests: _PersistentDict = _PersistentDict("backtests")
 _strategy_lab_records: _PersistentDict = _PersistentDict("strategy_lab_records")
 _paper_trading_sessions: _PersistentDict = _PersistentDict("paper_trading_sessions")
 _advisor_sessions: _PersistentDict = _PersistentDict("advisor_sessions")
-
-
-def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]:
-    """Locked read of the strategy-lab store, parsed and sorted by created_at.
-
-    Preconditions:
-        None — safe to call against an empty store.
-    Postconditions:
-        Returns a freshly parsed list of StrategyLabRecord, sorted by
-        ``created_at`` ascending (oldest-first) by default, or descending
-        (newest-first) when ``reverse=True``. Never returns None.
-    """
-    with _lock:
-        raw = list(_strategy_lab_records.values())
-    records = [StrategyLabRecord.parse_persisted(r) for r in raw]
-    records.sort(key=lambda r: r.created_at, reverse=reverse)
-    return records
 
 
 @lru_cache(maxsize=1)
@@ -1021,21 +1005,18 @@ def health() -> dict:
 def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
-    Preconditions:
-        - ``request.risk_tolerance``/``request.default_mode`` are already
-          guaranteed to be valid ``RiskTolerance``/``WorkflowMode`` members —
-          FastAPI/Pydantic rejects any other value with a 422 before this
-          handler runs, since both fields are typed as the enum itself.
-        - No profile may already exist for ``request.user_id`` — this endpoint
-          creates; it does not upsert.
-
     Postconditions:
-        - On success: a new IPS is persisted under ``_profiles[request.user_id]``
-          and returned; no prior profile is overwritten.
-        - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
+        On success: a new IPS is persisted under ``_profiles[request.user_id]``
+        and returned; no prior profile is overwritten.
+
+    Raises:
+        - ``HTTPException(422)`` if ``request.risk_tolerance``/``request.default_mode``
+          are not valid ``RiskTolerance``/``WorkflowMode`` members — rejected by
+          FastAPI/Pydantic before this handler runs, since both fields are typed
+          as the enum itself — or if constructing the nested ``UserGoal``,
           ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
-        - Raises ``HTTPException`` 409 if a profile already exists for
-          ``request.user_id``.
+        - ``HTTPException(409)`` if a profile already exists for
+          ``request.user_id`` — this endpoint creates; it does not upsert.
     """
     risk_tol = request.risk_tolerance
     workflow_mode = request.default_mode
@@ -3009,9 +2990,13 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     or ``GET /strategy-lab/runs/{run_id}/status`` for polling.
 
     Raises ``HTTPException(409)`` when another run is already active, or
-    (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
-    when another transition for this freshly-minted run_id is already in
-    flight. An early, unlocked check runs before minting a run_id/acquiring
+    (defense-in-depth: when two concurrent requests happen to mint the
+    identical 8-hex-char run_id -- a 32-bit-entropy collision, not the full
+    uuid4 entropy the truncation forfeits -- the losing request's
+    ``_require_run_transition_lock`` call raises this 409; the active-run
+    check above does not itself guard against run_id collisions) when
+    another transition for this freshly-minted run_id is already in flight.
+    An early, unlocked check runs before minting a run_id/acquiring
     its transition lock, so a rejected request never allocates a registry
     entry that would otherwise never be looked up again -- but that check
     alone can't stop two concurrent requests from both minting a run_id and
@@ -4166,7 +4151,10 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
           in-memory-only snapshot; this endpoint always returns 200. An
           ``_active_runs`` entry missing a truthy ``run_id`` (malformed or
           partially-constructed) is skipped and logged rather than raising
-          ``KeyError``.
+          ``KeyError``. An entry whose response construction
+          (``_run_state_to_response``) fails -- e.g. a field that cannot be
+          coerced to its response type -- is likewise skipped and logged
+          (``logger.warning``) rather than raising out of this endpoint.
     """
 
     def _in_memory_runs_by_id() -> Dict[str, Dict[str, Any]]:
@@ -4216,7 +4204,14 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         in_memory = _in_memory_runs_by_id()
 
-    runs = [_run_state_to_response(r) for r in in_memory.values()]
+    runs: List[StrategyLabRunStatusResponse] = []
+    for rid, r in in_memory.items():
+        try:
+            runs.append(_run_state_to_response(r))
+        except Exception:
+            logger.warning(
+                "Skipping run %r in listing; _run_state_to_response failed", rid, exc_info=True
+            )
     return ActiveRunsResponse(runs=runs)
 
 
@@ -4387,10 +4382,11 @@ class ClearStrategyLabStorageResponse(BaseModel):
 class DeleteStrategyLabRecordResponse(BaseModel):
     """Returned by ``DELETE /strategy-lab/records/{lab_record_id}``.
 
-    ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless the
-    corresponding linked entity actually existed (and was deleted) — not a
-    placeholder for "unknown." ``deleted_paper_trading_sessions`` is a count
-    of linked paper-trading sessions removed, not an id.
+    ``lab_record_id`` echoes the deleted record's id. ``deleted_strategy_id``/
+    ``deleted_backtest_id`` are ``None`` unless the corresponding linked
+    entity actually existed (and was deleted) — not a placeholder for
+    "unknown." ``deleted_paper_trading_sessions`` is a count of linked
+    paper-trading sessions removed, not an id.
     """
 
     lab_record_id: str
@@ -4822,8 +4818,12 @@ def _run_paper_trading_background(
                     if raw is not None:
                         session = PaperTradingSession.parse_persisted(raw)
                         session.status = PaperTradingStatus.FAILED
-                        session.error = f"Paper trading crashed: {exc}"
-                        session.divergence_analysis = f"Paper trading crashed: {exc}"
+                        # User-facing fields must not leak raw exception text (internal
+                        # paths, dependency names) to API consumers; the full exception
+                        # is already captured above via logger.exception.
+                        user_message = "Paper trading crashed due to an internal error."
+                        session.error = user_message
+                        session.divergence_analysis = user_message
                         session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                         _paper_trading_sessions[session_id] = session
         except Exception:
@@ -5039,6 +5039,18 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                 session_id,
                 exc_info=True,
             )
+        # Only the documented Temporal dispatch/worker failure modes get the
+        # 503 below: HTTPException (raised by _require_temporal when Temporal
+        # is disabled), RuntimeError (the worker client never became ready),
+        # and TimeoutError/RPCError (the start ack timed out, or the RPC
+        # itself failed) -- the exact set start_workflow_sync's docstring and
+        # _await_client document. Anything else is a genuine bug (a bad
+        # payload, a programming error) and must surface as its own 500
+        # instead of being misreported as "Temporal worker unavailable."
+        from temporalio.service import RPCError
+
+        is_dispatch_failure = isinstance(exc, (HTTPException, RuntimeError, TimeoutError, RPCError))
+
         # Best-effort failure recording must not mask the original dispatch
         # error (especially an HTTPException with the intended status/detail).
         # If the session was concurrently removed or is unparseable,
@@ -5047,7 +5059,9 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         try:
             _fail_paper_trading_session(
                 session_id,
-                "Failed to start the paper-trading workflow (Temporal unavailable).",
+                "Failed to start the paper-trading workflow (Temporal unavailable)."
+                if is_dispatch_failure
+                else "Unexpected error starting the paper-trading workflow.",
             )
         except Exception:
             logger.exception(
@@ -5056,9 +5070,17 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             )
         if isinstance(exc, HTTPException):
             raise
+        if is_dispatch_failure:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            ) from exc
+        logger.exception(
+            "Unexpected error starting paper-trading workflow for session %s", session_id
+        )
         raise HTTPException(
-            status_code=503,
-            detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            status_code=500,
+            detail="Unexpected error starting the paper-trading workflow.",
         ) from exc
 
     return PaperTradingResponse(
@@ -5473,7 +5495,18 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
         raise HTTPException(
             status_code=404, detail=f"Paper trading session '{session_id}' not found."
         )
-    session = PaperTradingSession.parse_persisted(raw)
+    try:
+        session = PaperTradingSession.parse_persisted(raw)
+    except Exception as exc:
+        logger.warning(
+            "Stop request for paper-trading session %s: persisted record could not be parsed.",
+            session_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Paper trading session '{session_id}' not found or is corrupted.",
+        ) from exc
 
     # Idempotent: a terminal session's workflow is already closed, and Temporal
     # rejects signals to closed executions — so only signal an in-flight session

@@ -122,7 +122,7 @@ def test_architect_design_success(client: TestClient) -> None:
     """architect/design returns architecture documents and diagrams."""
     from unittest.mock import MagicMock, patch
 
-    from software_engineering_team.shared.models import ProductRequirements
+    from shared.dev_models.models import ProductRequirements
 
     spec = "# Task Manager API\n\nREST API for managing tasks with CRUD operations."
 

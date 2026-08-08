@@ -37,7 +37,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import MutableMapping
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 
 import httpx
 import pytest
@@ -1415,6 +1415,63 @@ def test_run_backtest_background_mid_run_cancellation(
     assert "backtest_id" not in state
 
 
+def test_run_backtest_background_cancel_before_completed_write(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, False, True])
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background(
+        "job-cancel-before-completed", strategy, config, "tester", []
+    )
+
+    # Cancelled at the checkpoint immediately before the COMPLETED write.
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    # Only the earlier RUNNING write happened — COMPLETED must never land.
+    assert state.get("status") == "running"
+    assert "backtest_id" not in state
+    # But the backtest record was already persisted before that checkpoint —
+    # the fix skips the status write, not the record write.
+    assert len(api_main._backtests) == 1
+
+
 def test_run_backtest_background_cancel_during_backtest_execution_error(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -1731,6 +1788,8 @@ def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
     import job_service_client as jsc_mod
     from investment_team.strategy_lab import orchestrator_api
 
+    # Timeout lives (and is read) on orchestrator_api; patching api.main's
+    # re-export alias would not shrink the deadline the purge helper uses.
     monkeypatch.setattr(orchestrator_api, "_PURGE_TIMEOUT_S", 0.2)
 
     release = threading.Event()
@@ -2994,7 +3053,13 @@ def test_shutdown_hook_logs_event_bus_teardown_failure_at_warning(
 # ---------------------------------------------------------------------------
 
 
-def _make_finalize_test_record(lab_record_id: str) -> Any:
+def _make_finalize_test_record(
+    lab_record_id: str,
+    *,
+    is_winning: bool = False,
+    is_publishable: bool = False,
+    strategy_code: Optional[str] = None,
+) -> Any:
     from investment_team.models import (
         BacktestConfig,
         BacktestRecord,
@@ -3039,10 +3104,14 @@ def _make_finalize_test_record(lab_record_id: str) -> Any:
         lab_record_id=lab_record_id,
         strategy=strat,
         backtest=bt,
-        # is_winning=False takes the earliest skip branch, so the finalize
-        # call only needs to exercise the on_phase callback + persistence —
-        # no paper-trading infra required.
-        is_winning=False,
+        # is_winning=False takes the earliest skip branch, so the default
+        # finalize call only needs to exercise the on_phase callback +
+        # persistence — no paper-trading infra required. Callers that need
+        # to reach the paper-trading try/except (e.g. is_winning=True,
+        # is_publishable=True, strategy_code set) opt in explicitly.
+        is_winning=is_winning,
+        is_publishable=is_publishable,
+        strategy_code=strategy_code,
         strategy_rationale="r",
         analysis_narrative="n",
         created_at="2024-01-01T01:00:00Z",
@@ -3073,6 +3142,63 @@ def test_finalize_strategy_lab_cycle_record_isolates_raising_on_phase_callback(
     assert result.paper_trading_skipped_reason == "not_winning"
     # Persistence must have run despite the callback raising.
     assert api_main._strategy_lab_records["lab-finalize-callback-boom"] is record
+
+
+def test_finalize_strategy_lab_cycle_record_logs_full_traceback_on_paper_trading_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression test for a non-fatal paper-trading failure's log record:
+    it must be logged with ``logger.exception`` (ERROR level + attached
+    traceback), not ``logger.warning(..., exc)`` (WARNING level, exception
+    text folded into the message, no traceback). The latter made non-fatal
+    paper-trading crashes hard to debug from logs alone."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_backtests", {})
+
+    def _boom_paper_trading_step(**kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_main, "_run_paper_trading_step", _boom_paper_trading_step)
+
+    record = _make_finalize_test_record(
+        "lab-finalize-paper-trading-boom",
+        is_winning=True,
+        is_publishable=True,
+        strategy_code="def strategy(): pass",
+    )
+
+    events: List[tuple[str, Dict[str, Any]]] = []
+
+    def _record_on_phase(phase: str, data: Dict[str, Any]) -> None:
+        events.append((phase, data))
+
+    with caplog.at_level(logging.WARNING, logger=api_main.logger.name):
+        result = api_main._finalize_strategy_lab_cycle_record(record, on_phase=_record_on_phase)
+
+    assert result.paper_trading_status == "failed"
+    assert result.paper_trading_error == "boom"
+    assert ("paper_trading_failed", {"detail": "boom"}) in events
+
+    matching = [
+        r for r in caplog.records if "Paper trading step failed (non-fatal)" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    log_record = matching[0]
+    # Level must be ERROR (logger.exception), not WARNING (the old logger.warning call).
+    assert log_record.levelno == logging.ERROR
+    # The message itself must not have the exception text interpolated in —
+    # the old call was `logger.warning("...: %s", exc)`.
+    assert log_record.getMessage() == "Paper trading step failed (non-fatal)"
+    # The traceback must be attached — the old call passed no exc_info.
+    assert log_record.exc_info is not None
+    assert log_record.exc_info[1] is not None
+    assert "RuntimeError" in (log_record.exc_text or "")
+    assert "boom" in (log_record.exc_text or "")
 
 
 def test_normalize_persisted_job_uses_dict_data_field() -> None:

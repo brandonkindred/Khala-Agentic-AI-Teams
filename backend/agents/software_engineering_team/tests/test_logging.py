@@ -11,9 +11,9 @@ import logging
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 
 from llm_service import DummyLLMClient
+from shared.dev_models.models import ProductRequirements
 from shared.observability import bind_trace_id, current_trace_id
 from software_engineering_team.shared.logging_config import LOG_FORMAT, TraceIdFilter
-from software_engineering_team.shared.models import ProductRequirements
 
 
 def test_architecture_agent_logs_start_and_done(caplog) -> None:

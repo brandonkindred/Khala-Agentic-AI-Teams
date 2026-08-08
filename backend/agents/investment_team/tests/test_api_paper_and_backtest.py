@@ -779,6 +779,32 @@ def test_stop_live_paper_trading_404_when_session_missing(
     assert resp.status_code == 404
 
 
+def test_stop_live_paper_trading_404_when_session_corrupted(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted record that fails ``PaperTradingSession.parse_persisted``
+    must surface as a clean 404, not an unhandled 500 -- and must not be
+    signaled (there's no valid session to check the status of)."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._paper_trading_sessions["pt-corrupt-stop"] = {"session_id": "pt-corrupt-stop"}
+
+    def _fail_if_signaled(session_id):
+        raise AssertionError("must not signal a session that failed to parse")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _fail_if_signaled)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-corrupt-stop/stop")
+
+    assert resp.status_code == 404
+    assert "pt-corrupt-stop" in resp.json()["detail"]
+    # Left untouched: the corrupt record could not be re-parsed.
+    assert api_main._paper_trading_sessions.get("pt-corrupt-stop") == {
+        "session_id": "pt-corrupt-stop"
+    }
+
+
 def test_stop_live_paper_trading_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Stop endpoint must invoke the StopController and stamp the session."""
     from investment_team.api import main as api_main
@@ -2233,7 +2259,8 @@ def test_run_paper_trading_background_guards_non_terminal_agent_result(
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "non-terminal status" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."
 
 
 def test_run_paper_trading_background_guards_terminal_status_missing_completed_at(
@@ -2306,4 +2333,5 @@ def test_run_paper_trading_background_guards_terminal_status_missing_completed_a
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "no completed_at" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."

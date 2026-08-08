@@ -87,10 +87,10 @@ def test_resolve_claude_model_trusts_runtime_value(monkeypatch):
 def test_resolve_model_reads_runtime(monkeypatch):
     """The Ollama path honors the runtime model, ranked above global env but below per-agent."""
     # The Ollama path honors the runtime (UI) model, ranked above LLM_MODEL.
-    monkeypatch.setattr(c, "_runtime", lambda key: "llama3.2" if key == "ollama_model" else "")
-    assert c.resolve_model(None) == "llama3.2"
+    monkeypatch.setattr(c, "_runtime", lambda key: "deepseek-v4-flash:cloud" if key == "ollama_model" else "")
+    assert c.resolve_model(None) == "deepseek-v4-flash:cloud"
     monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
-    assert c.resolve_model(None) == "llama3.2"  # runtime still wins over global env
+    assert c.resolve_model(None) == "deepseek-v4-flash:cloud"  # runtime still wins over global env
     monkeypatch.setenv("LLM_MODEL_backend", "qwen3-coder:480b-cloud")
     assert c.resolve_model("backend") == "qwen3-coder:480b-cloud"  # per-agent env wins
 
@@ -108,18 +108,18 @@ def test_resolve_model_uses_provider_specific_runtime_keys(monkeypatch):
     # Per-provider keys: resolve_model reads ONLY ollama_model and
     # resolve_claude_model reads ONLY claude_model, so a value stored for one
     # provider can never leak into the other (no heuristic filtering needed).
-    runtime = {"ollama_model": "llama3.2", "claude_model": "claude-opus-4-8"}
+    runtime = {"ollama_model": "deepseek-v4-flash:cloud", "claude_model": "claude-opus-4-8"}
     monkeypatch.setattr(c, "_runtime", lambda key: runtime.get(key, ""))
-    assert c.resolve_model(None) == "llama3.2"
+    assert c.resolve_model(None) == "deepseek-v4-flash:cloud"
     assert c.resolve_claude_model(None) == "claude-opus-4-8"
 
 
 def test_resolve_model_for_provider_ollama_uses_runtime(monkeypatch):
     """The chokepoint routes the ollama provider to resolve_model (Ollama key)."""
     # The chokepoint routes ollama -> resolve_model, which reads the Ollama key.
-    runtime = {"provider": "ollama", "ollama_model": "llama3.2"}
+    runtime = {"provider": "ollama", "ollama_model": "deepseek-v4-flash:cloud"}
     monkeypatch.setattr(c, "_runtime", lambda key: runtime.get(key, ""))
-    assert c.resolve_model_for_provider(None) == "llama3.2"
+    assert c.resolve_model_for_provider(None) == "deepseek-v4-flash:cloud"
 
 
 def test_claude_model_options_track_context_table():

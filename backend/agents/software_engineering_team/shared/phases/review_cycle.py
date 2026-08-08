@@ -19,9 +19,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from shared.concurrency import parallel_map
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.gate_outcomes import record_gate_outcome
-from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.phases.rollback import (
     _MicrotaskRollback,
     _record_prior_values,
