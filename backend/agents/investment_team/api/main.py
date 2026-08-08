@@ -5313,6 +5313,11 @@ def _run_live_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is None:
+                logger.warning(
+                    "Live paper trade %s: session removed before results could "
+                    "be persisted; discarding run result.",
+                    session_id,
+                )
                 return
             session = PaperTradingSession.parse_persisted(raw)
             if session.status not in _ACTIVE_PT_STATES:
