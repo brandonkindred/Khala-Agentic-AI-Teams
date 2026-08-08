@@ -66,6 +66,7 @@ from llm_service import LLMClient
 from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_pairs,
+    unified_diffs_from_pairs,
 )
 from software_engineering_team.code_review_agent.previous_content import (
     resolve_previous_content,
@@ -287,6 +288,43 @@ def _maybe_build_change_surface_from_pairs(
     return surface
 
 
+def _patch_has_removal_only_hunk(patch: str) -> bool:
+    """True when a unified-diff ``patch`` contains a hunk with no added lines.
+
+    ``build_change_surface_from_pairs`` only expands the rendered body around
+    *added* touched lines (see ``change_surface._assemble_path_block`` /
+    ``extract_touched_lines``); a hunk that is pure removal -- deleting lines
+    with nothing added in their place -- has no added line for that expansion
+    to anchor on, so its region is silently absent from the rendered block
+    even when the path as a whole has other, unrelated additions and is
+    otherwise present in ``ChangeSurface.blocks``.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (``difflib.unified_diff``
+          output, e.g. from :func:`unified_diffs_from_pairs`), or blank for no
+          change.
+
+    Postconditions:
+        - Returns True iff at least one ``@@ ... @@`` hunk's body (the lines
+          up to the next hunk header or end of patch) contains no line
+          starting with ``"+"``.
+        - Blank ``patch``, or a patch with no ``@@`` hunk headers -> False.
+        - Never raises.
+    """
+    in_hunk = False
+    hunk_has_addition = False
+    for line in (patch or "").splitlines():
+        if line.startswith("@@"):
+            if in_hunk and not hunk_has_addition:
+                return True
+            in_hunk = True
+            hunk_has_addition = False
+            continue
+        if in_hunk and line.startswith("+"):
+            hunk_has_addition = True
+    return in_hunk and not hunk_has_addition
+
+
 def _resolve_change_surface_for_review(
     files: Mapping[str, str],
     repo_path: Path,
@@ -315,15 +353,17 @@ def _resolve_change_surface_for_review(
           ``_maybe_build_change_surface_from_pairs``.
         - Returns ``None`` ("partial coverage") when at least one path
           genuinely changed (its resolved old content differs from its new
-          content) but the built surface omits that path -- e.g. a
-          deletion-only diff contributes no added *touched* lines, so
-          ``build_change_surface_from_pairs`` silently drops it even though
-          the file changed. Submitting a surface that omits a real change
-          would let the reviewer approve without ever seeing it, so a partial
-          surface is treated the same as no surface at all: the caller must
+          content) and either: the built surface omits that path entirely
+          (a deletion-only *file* contributes no added touched lines), or the
+          path's patch contains a removal-only *hunk* (see
+          :func:`_patch_has_removal_only_hunk`) whose deleted region is
+          absent from an otherwise-covered path's rendered body. Submitting a
+          surface that omits a real change -- whole file or one hunk within
+          it -- would let the reviewer approve without ever seeing it, so
+          this is treated the same as no surface at all: the caller must
           submit ``files`` as-is rather than a subset of what changed.
-        - Otherwise (every genuinely-changed path is covered) returns the
-          built ``ChangeSurface``.
+        - Otherwise (every genuinely-changed path is fully represented)
+          returns the built ``ChangeSurface``.
         - Never raises: ``resolve_previous_content`` already degrades
           git/disk failures to misses; the only raise it documents is a blank
           ``repo_path``, guarded here by the empty-``files`` check plus a
@@ -340,11 +380,14 @@ def _resolve_change_surface_for_review(
     surface = _maybe_build_change_surface_from_pairs(files, old.contents)
     if surface is None:
         return None
-    changed_paths = {
-        path for path, new_text in files.items() if old.contents.get(path, "") != new_text
-    }
-    if not changed_paths.issubset(surface.blocks):
-        return None
+    patches = unified_diffs_from_pairs(files, old.contents)
+    for path, new_text in files.items():
+        if old.contents.get(path, "") == new_text:
+            continue
+        if path not in surface.blocks:
+            return None
+        if _patch_has_removal_only_hunk(patches.get(path, "")):
+            return None
     return surface
 
 

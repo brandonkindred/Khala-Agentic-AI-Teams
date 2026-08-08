@@ -36,6 +36,7 @@ from software_engineering_team.shared.v2_review import (
     ReviewConfig,
     _lint_passed,
     _maybe_build_change_surface_from_pairs,
+    _patch_has_removal_only_hunk,
     _resolve_change_surface_for_review,
     run_microtask_review,
     run_review,
@@ -1269,6 +1270,151 @@ def test_code_review_deletion_only_file_falls_back_to_files(tmp_path: Path) -> N
         "a.py": "def other():\n    return 1\n",
         "b.py": "def helper():\n    return 1\n\n\ndef added():\n    return 2\n",
     }
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+# ---------------------------------------------------------------------------
+# _patch_has_removal_only_hunk
+# ---------------------------------------------------------------------------
+
+
+def test_patch_has_removal_only_hunk_true_for_pure_deletion_hunk() -> None:
+    patch = "--- a/a.py\n+++ b/a.py\n@@ -1,3 +1,0 @@\n-def validate():\n-    pass\n-\n"
+    assert _patch_has_removal_only_hunk(patch) is True
+
+
+def test_patch_has_removal_only_hunk_false_for_pure_addition_hunk() -> None:
+    patch = "--- a/a.py\n+++ b/a.py\n@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
+    assert _patch_has_removal_only_hunk(patch) is False
+
+
+def test_patch_has_removal_only_hunk_false_for_mixed_modify_hunk() -> None:
+    """A hunk with both a removed and an added line (a same-spot modification)
+    is not a removal-only hunk -- the touched added line still anchors the
+    surface's expansion around that location."""
+    patch = "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-def old_name():\n+def new_name():\n     return 1\n"
+    assert _patch_has_removal_only_hunk(patch) is False
+
+
+def test_patch_has_removal_only_hunk_true_when_earlier_hunk_is_removal_only() -> None:
+    """A later hunk with additions must not mask an earlier removal-only hunk."""
+    patch = (
+        "--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,2 +1,0 @@\n-def removed():\n-    pass\n"
+        "@@ -10,0 +9,2 @@\n+def added():\n+    return 1\n"
+    )
+    assert _patch_has_removal_only_hunk(patch) is True
+
+
+def test_patch_has_removal_only_hunk_true_when_later_hunk_is_removal_only() -> None:
+    """An earlier hunk with additions must not mask a later removal-only hunk."""
+    patch = (
+        "--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
+        "@@ -10,2 +12,0 @@\n-def removed():\n-    pass\n"
+    )
+    assert _patch_has_removal_only_hunk(patch) is True
+
+
+def test_patch_has_removal_only_hunk_blank_patch_returns_false() -> None:
+    assert _patch_has_removal_only_hunk("") is False
+
+
+def test_patch_has_removal_only_hunk_no_hunks_returns_false() -> None:
+    assert _patch_has_removal_only_hunk("--- a/a.py\n+++ b/a.py\n") is False
+
+
+# ---------------------------------------------------------------------------
+# Within-file removal-only hunk (a covered path whose rendered block still
+# omits a distant deletion), GitHub issue #5400 follow-up
+# ---------------------------------------------------------------------------
+
+# Old/new content for a single file with two well-separated hunks: an
+# early pure-deletion hunk (removes validate()) and a later pure-addition
+# hunk (adds added()). Difflib keeps these as two distinct hunks because the
+# filler lines between them exceed the default 3-line context window.
+_MIXED_HUNK_OLD = (
+    "def validate(x):\n"
+    "    if not x:\n"
+    "        raise ValueError('bad')\n"
+    "    return x\n"
+    "\n"
+    "\n"
+    "def filler1(): return 1\n"
+    "def filler2(): return 2\n"
+    "def filler3(): return 3\n"
+    "def filler4(): return 4\n"
+    "def filler5(): return 5\n"
+    "def filler6(): return 6\n"
+    "def filler7(): return 7\n"
+    "def filler8(): return 8\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+    "\n"
+)
+_MIXED_HUNK_NEW = (
+    "def filler1(): return 1\n"
+    "def filler2(): return 2\n"
+    "def filler3(): return 3\n"
+    "def filler4(): return 4\n"
+    "def filler5(): return 5\n"
+    "def filler6(): return 6\n"
+    "def filler7(): return 7\n"
+    "def filler8(): return 8\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+    "\n"
+    "def added():\n"
+    "    return 2\n"
+    "\n"
+)
+
+
+def test_resolve_change_surface_for_review_within_file_removal_only_hunk_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A path present in ``surface.blocks`` (it has an added-only hunk) but
+    whose distant removal-only hunk (a deleted function) is nowhere in the
+    rendered body must not be treated as covered."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_HUNK_OLD)
+
+    result = _resolve_change_surface_for_review({"a.py": _MIXED_HUNK_NEW}, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_within_file_removal_only_hunk_falls_back_to_files(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: the same within-file scenario must submit ``files=``
+    rather than a surface whose rendered body omits the deletion."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_HUNK_OLD)
+    files = {"a.py": _MIXED_HUNK_NEW}
 
     cr_agent = MagicMock()
     cr_agent.run.return_value = MagicMock(issues=[])
