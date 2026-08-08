@@ -1,13 +1,10 @@
 """Direct unit tests for the small, isolated helpers in ``api/pr_review.py``.
 
-The big end-to-end suite (``test_coding_team_review_pr.py``) already exercises
-admission, review-mode decisions, partitioning, comment posting, and
-finalization thoroughly, both directly and through the ``/review-pr``
-endpoint. This file targets the handful of pure/near-pure helpers that suite
-only reaches indirectly (or not at all): heartbeat liveness, duplicate-review
-and sibling-checkout detection, language inference, the whole-file focus
-note, author resolution, and the reviewer-dispatch/merge logic in
-``_run_reviewer``. Self-contained: no imports from other test modules.
+Covers heartbeat liveness, duplicate-review and sibling-checkout detection,
+language inference, the whole-file/hunk focus notes, author resolution, the
+reviewer-dispatch/merge logic in ``_run_reviewer``, change-surface assembly,
+and the per-file surface/whole-file/hunk partitioning in
+``_decide_review_mode``. Self-contained: no imports from other test modules.
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ from software_engineering_team.api import pr_review
 from software_engineering_team.api.coding_team_state import _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S
 from software_engineering_team.code_review_agent.change_surface import ChangeSurface
 from software_engineering_team.github_source import PullRequestFile
+from software_engineering_team.models import JobStatus
 
 _STALE_S = pr_review._REVIEW_GUARD_HEARTBEAT_STALE_S
 
@@ -800,3 +798,197 @@ class TestBuildChangeSurfaceForReviewable:
             files, {"gone.py": content, "ok.py": content}
         )
         assert list(surface.blocks.keys()) == ["ok.py"]
+
+
+# ---------------------------------------------------------------------------
+# _decide_review_mode
+# ---------------------------------------------------------------------------
+
+# Patch/content pair that builds a non-empty change surface (mirrors
+# TestBuildChangeSurfaceForReviewable.test_head_backed_usable_patch_builds_surface):
+# one added line, matching head content.
+_SURFACE_CONTENT = "def f():\n    return 1\n"
+_SURFACE_PATCH = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+
+# Deletion-only patch: removes a line, adds nothing. `extract_touched_lines`
+# (added-only) is empty, so the change-surface builder always omits this path
+# regardless of fetched head content -- it can only ever land in whole-file
+# or hunk fallback.
+_DELETION_ONLY_PATCH = "@@ -1,3 +1,2 @@\n def f():\n-    x = 1\n     return 1\n"
+_DELETION_ONLY_CONTENT = "def f():\n    return 1\n"
+
+# Removes every line with no replacement -- non-blank patch, but
+# render_annotated_hunks has nothing to emit (no `+`/context lines).
+_BLANK_RENDER_PATCH = "@@ -1,2 +0,0 @@\n-line1\n-line2\n"
+
+
+class _FakeReviewPR:
+    def __init__(
+        self,
+        head_sha: str = "deadbeef",
+        html_url: str = "https://github.com/acme/widgets/pull/7",
+    ) -> None:
+        self.head_sha = head_sha
+        self.html_url = html_url
+
+
+class _FakeContentClient:
+    """Fake GitHubClient for `_decide_review_mode`: `get_file_contents` keyed by filename.
+
+    A filename absent from `contents` raises, mirroring a 404/fetch failure
+    that `_fetch_head_files` degrades internally (never propagates).
+    """
+
+    def __init__(self, contents: Dict[str, str]) -> None:
+        self._contents = contents
+
+    def get_file_contents(self, owner: str, repo: str, filename: str, head_sha: str) -> str:
+        if filename not in self._contents:
+            raise RuntimeError(f"404: {filename}@{head_sha}")
+        return self._contents[filename]
+
+
+def _decide_review_mode_collaborators(monkeypatch):
+    """Patch `_decide_review_mode`'s terminal-write collaborators.
+
+    Returns `(comments, jobs, reviews)`, each appended to by the respective
+    patched call so a noop path's courtesy comment and terminal write can be
+    asserted on.
+    """
+    comments: List[Dict[str, Any]] = []
+    jobs: List[Dict[str, Any]] = []
+    reviews: List[Dict[str, Any]] = []
+    monkeypatch.setattr(
+        main,
+        "_safe_comment",
+        lambda client, owner, repo, pr_number, comment: comments.append(
+            {"owner": owner, "repo": repo, "pr_number": pr_number, "comment": comment}
+        ),
+    )
+    monkeypatch.setattr(
+        main, "update_job", lambda job_id, **kw: jobs.append({"job_id": job_id, **kw})
+    )
+    monkeypatch.setattr(
+        main, "update_review", lambda job_id, **kw: reviews.append({"job_id": job_id, **kw})
+    )
+    return comments, jobs, reviews
+
+
+class TestDecideReviewModeUnit:
+    def test_no_files_completes_noop_and_returns_none(self, monkeypatch) -> None:
+        comments, jobs, reviews = _decide_review_mode_collaborators(monkeypatch)
+        client = _FakeContentClient({})
+        pr = _FakeReviewPR()
+
+        result = pr_review._decide_review_mode(client, "job-1", "acme", "widgets", 7, pr, [])
+
+        assert result is None
+        assert comments[0]["comment"] == "Code review: no changed files to review."
+        assert jobs[0]["status"] == JobStatus.COMPLETED.value
+        assert reviews[0]["status_text"] == "No changed files to review"
+        assert jobs[0]["github_pr_url"] == pr.html_url
+
+    def test_no_reviewable_files_completes_noop(self, monkeypatch) -> None:
+        comments, _, _ = _decide_review_mode_collaborators(monkeypatch)
+        client = _FakeContentClient({})
+        pr = _FakeReviewPR()
+        files = [
+            PullRequestFile("gone.py", "removed", _SURFACE_PATCH, 0, 3, None),
+            PullRequestFile("empty.py", "modified", "", 0, 0, None),
+        ]
+
+        result = pr_review._decide_review_mode(client, "job-1", "acme", "widgets", 7, pr, files)
+
+        assert result is None
+        assert comments[0]["comment"] == "Code review: no reviewable file content."
+
+    def test_surface_covered_file_is_excluded_from_head_files(self, monkeypatch) -> None:
+        """The fix this PR makes: a path the change surface covers must not
+        also be handed to whole-file review -- `head_files` stays disjoint
+        from `change_surface.blocks`."""
+        _decide_review_mode_collaborators(monkeypatch)
+        client = _FakeContentClient({"mod.py": _SURFACE_CONTENT})
+        pr = _FakeReviewPR()
+        files = [PullRequestFile("mod.py", "modified", _SURFACE_PATCH, 1, 1, None)]
+
+        decision = pr_review._decide_review_mode(client, "job-1", "acme", "widgets", 7, pr, files)
+
+        assert decision is not None
+        assert not decision.change_surface.is_empty
+        assert "mod.py" in decision.change_surface.blocks
+        assert decision.head_files == {}
+        assert decision.code == ""
+        assert decision.files_reviewed == 1
+        assert isinstance(decision.repo_reader, pr_review.GitHubRepoReader)
+
+    def test_fetched_file_without_surface_coverage_uses_whole_file_fallback(
+        self, monkeypatch
+    ) -> None:
+        _decide_review_mode_collaborators(monkeypatch)
+        client = _FakeContentClient({"mod.py": _DELETION_ONLY_CONTENT})
+        pr = _FakeReviewPR()
+        files = [PullRequestFile("mod.py", "modified", _DELETION_ONLY_PATCH, 0, 1, None)]
+
+        decision = pr_review._decide_review_mode(client, "job-1", "acme", "widgets", 7, pr, files)
+
+        assert decision is not None
+        assert decision.change_surface.is_empty
+        assert decision.head_files == {"mod.py": _DELETION_ONLY_CONTENT}
+        assert decision.code == ""
+        assert decision.files_reviewed == 1
+
+    def test_total_fetch_failure_falls_back_to_hunks(self, monkeypatch) -> None:
+        _decide_review_mode_collaborators(monkeypatch)
+        client = _FakeContentClient({})  # every fetch fails
+        pr = _FakeReviewPR()
+        files = [PullRequestFile("mod.py", "modified", _SURFACE_PATCH, 1, 1, None)]
+
+        decision = pr_review._decide_review_mode(client, "job-1", "acme", "widgets", 7, pr, files)
+
+        assert decision is not None
+        assert decision.change_surface.is_empty
+        assert decision.head_files == {}
+        assert "### mod.py ###" in decision.code
+        assert decision.files_reviewed == 1
+
+    def test_total_failure_with_blank_hunk_render_is_a_noop(self, monkeypatch) -> None:
+        """A file whose patch removes lines only (nothing for
+        `render_annotated_hunks` to emit) and whose head fetch also fails
+        leaves surface, head_files, AND hunk code all empty -- must degrade
+        to the noop path, not a `ReviewModeDecision` carrying blank code."""
+        comments, jobs, _ = _decide_review_mode_collaborators(monkeypatch)
+        client = _FakeContentClient({})  # every fetch fails
+        pr = _FakeReviewPR()
+        files = [PullRequestFile("del.py", "modified", _BLANK_RENDER_PATCH, 0, 2, None)]
+
+        result = pr_review._decide_review_mode(client, "job-1", "acme", "widgets", 7, pr, files)
+
+        assert result is None
+        assert comments[0]["comment"] == "Code review: no reviewable file content."
+        assert jobs[0]["status"] == JobStatus.COMPLETED.value
+
+    def test_mixed_surface_whole_file_and_hunk_partition_is_disjoint(self, monkeypatch) -> None:
+        """One file per mode at once: surface-covered, whole-file fallback
+        (fetched but surface-uncovered), and hunk fallback (fetch failed).
+        The three sets must never overlap and every file counts exactly once."""
+        _decide_review_mode_collaborators(monkeypatch)
+        client = _FakeContentClient(
+            {"surface.py": _SURFACE_CONTENT, "whole.py": _DELETION_ONLY_CONTENT}
+        )
+        pr = _FakeReviewPR()
+        files = [
+            PullRequestFile("surface.py", "modified", _SURFACE_PATCH, 1, 1, None),
+            PullRequestFile("whole.py", "modified", _DELETION_ONLY_PATCH, 0, 1, None),
+            PullRequestFile("hunk.py", "modified", _SURFACE_PATCH, 1, 1, None),
+        ]
+
+        decision = pr_review._decide_review_mode(client, "job-1", "acme", "widgets", 7, pr, files)
+
+        assert decision is not None
+        assert set(decision.change_surface.blocks) == {"surface.py"}
+        assert set(decision.head_files) == {"whole.py"}
+        assert "### hunk.py ###" in decision.code
+        assert "surface.py" not in decision.code
+        assert "whole.py" not in decision.code
+        assert set(decision.change_surface.blocks).isdisjoint(decision.head_files)
+        assert decision.files_reviewed == 3
