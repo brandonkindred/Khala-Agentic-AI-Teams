@@ -1716,9 +1716,19 @@ class DummyLLMClient(LLMClient):
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
     ) -> str:
-        # ``objective`` is accepted to match the LLMClient contract; the dummy
-        # client makes no real LLM call and performs no attribution, so it
-        # tolerates an omitted objective (test stubs need not declare one).
+        """Return a plain-text stub response.
+
+        This no-op implementation satisfies the LLMClient contract without
+        making a real LLM call. ``objective`` is accepted to match the
+        contract but performs no attribution, so test stubs may omit it.
+
+        Preconditions:
+            - ``prompt`` is a string; other arguments are accepted for
+              contract compatibility and are ignored.
+        Postconditions:
+            - ``self._request_count`` is incremented by one and a fixed
+              placeholder string is returned.
+        """
         self._request_count += 1
         return "Dummy text completion (no LLM)."
 
