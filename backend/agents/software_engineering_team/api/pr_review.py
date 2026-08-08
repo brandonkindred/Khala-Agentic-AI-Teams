@@ -1163,16 +1163,25 @@ def _decide_review_mode(
           comment and finalized the job ``COMPLETED``; the caller must return
           immediately without further GitHub calls.
         - Otherwise returns a :class:`ReviewModeDecision` where: ``head_files``
-          is fetched via :func:`_fetch_head_files` for the reviewable files;
-          when every reviewable file fetched whole, ``code == ""`` and
-          ``files_reviewed == len(head_files)``; when only some fetched,
-          ``code`` is built (via :func:`_build_review_code`) ONLY from the
-          files that failed to fetch, and ``files_reviewed`` sums both; when
-          none fetched, ``code`` is built from all ``files`` and
-          ``files_reviewed`` is the hunk count. ``change_surface`` is the
-          head-backed builder result (empty when no head-backed reviewable
-          files). ``repo_reader`` is always constructed for ``pr.head_sha``,
-          whole-file success or not.
+          is fetched via :func:`_fetch_head_files` for the reviewable files,
+          and ``change_surface`` is built from it via
+          :func:`_build_change_surface_for_reviewable`. When ``change_surface``
+          is non-empty, :func:`_run_reviewer` dispatches it as the PRIMARY
+          input and bypasses ``head_files`` entirely, so every reviewable file
+          the surface does NOT cover (``reviewable - set(change_surface.blocks)``
+          — whether its fetch failed, or fetch succeeded but the builder
+          produced no usable body for it, e.g. a patch with no added lines)
+          is hunk-rendered into ``code`` here, and ``files_reviewed`` sums the
+          surfaced count plus the hunk count: no reviewable file is ever
+          covered by neither ``change_surface.blocks`` nor ``code``. When
+          ``change_surface`` is empty, the whole-file/hunk decision falls back
+          to ``head_files`` alone: every reviewable file fetched whole yields
+          ``code == ""`` and ``files_reviewed == len(head_files)``; a partial
+          fetch renders ``code`` (via :func:`_build_review_code`) ONLY from the
+          files that failed to fetch, summing both counts; a total fetch
+          failure renders ``code`` from all ``files``. ``repo_reader`` is
+          always constructed for ``pr.head_sha``, whole-file/surface success
+          or not.
         - Never raises for GitHub-fetch failures (:func:`_fetch_head_files`
           degrades internally); any other exception propagates to the
           caller's outer handler.
@@ -1228,15 +1237,48 @@ def _decide_review_mode(
     # partial fetch failure must not discard the whole-file bodies
     # that DID come back.
     head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
+    # Built before the code/files_reviewed decision below (it is a pure
+    # function of files/head_files) since _run_reviewer dispatches a
+    # non-empty change_surface as PRIMARY and bypasses head_files entirely —
+    # the fallback-code decision needs to know which files that will leave
+    # uncovered, not just which files failed to fetch.
+    change_surface = _build_change_surface_for_reviewable(files, head_files)
     missing = reviewable - set(head_files)
     code = ""
-    if head_files and not missing:
-        # Every reviewable file fetched whole: the hunk blob would be
-        # thrown away unread, so skip rendering it entirely.
+    if not change_surface.is_empty:
+        # The surface covers at least one file and will be dispatched as the
+        # PRIMARY reviewer input (see _run_reviewer), replacing the
+        # whole-file head_files attempt entirely. Any reviewable file the
+        # surface does NOT cover — whether its fetch failed, or fetch
+        # succeeded but the builder produced no usable body for it (e.g. a
+        # patch with no added lines) — must still fall back to hunk
+        # rendering here, or it would be silently dropped from review
+        # entirely: neither the surface nor the (bypassed) whole-file body
+        # would ever reach the reviewer for it.
+        surfaced = set(change_surface.blocks)
+        uncovered = reviewable - surfaced
+        if uncovered:
+            fallback_files = [f for f in files if f.filename in uncovered]
+            code, hunk_reviewed = _build_review_code(fallback_files)
+            files_reviewed = len(surfaced) + hunk_reviewed
+            logger.info(
+                "PR review #%s: change surface covers %d/%d reviewable "
+                "file(s); the remaining %d fall back to hunk review",
+                pr_number,
+                len(surfaced),
+                len(reviewable),
+                len(uncovered),
+            )
+        else:
+            files_reviewed = len(surfaced)
+    elif head_files and not missing:
+        # Every reviewable file fetched whole but none produced a usable
+        # change surface: the hunk blob would be thrown away unread, so skip
+        # rendering it entirely.
         files_reviewed = len(head_files)
     elif head_files:
-        # Partial fetch: hunk-render ONLY the files that failed to
-        # fetch whole; files that DID fetch stay in whole-file mode.
+        # Partial fetch, no surface at all: hunk-render ONLY the files that
+        # failed to fetch whole; files that DID fetch stay in whole-file mode.
         fallback_files = [f for f in files if f.filename in missing]
         code, hunk_reviewed = _build_review_code(fallback_files)
         files_reviewed = len(head_files) + hunk_reviewed
@@ -1281,7 +1323,6 @@ def _decide_review_mode(
             len(reviewable),
         )
     repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
-    change_surface = _build_change_surface_for_reviewable(files, head_files)
     return ReviewModeDecision(
         valid_by_path=valid_by_path,
         changed_by_path=changed_by_path,
