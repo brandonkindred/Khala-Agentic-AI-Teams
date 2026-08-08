@@ -951,6 +951,41 @@ def test_restart_strategy_lab_run_404(lab_job_client, api_client) -> None:
     assert resp.status_code == 404
 
 
+def test_restart_strategy_lab_run_404_when_state_deleted_between_reads(
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
+) -> None:
+    """Regression: a run deleted in the window between the pre-lock existence
+    check and the lock-acquired re-read must 404 cleanly with the same
+    message as the early check, not raise (surfacing as a 500) or fall
+    through to a different 404 shape.
+
+    Simulated via a stateful ``_get_run_state`` stub keyed on call count —
+    the same technique as
+    ``test_resume_strategy_lab_run_404_when_state_deleted_between_reads``,
+    restart's own analogue of that resume regression.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-deleted-mid-restart"
+    api_main._active_runs[run_id] = _resumable_state(run_id)
+
+    call_count = {"n": 0}
+
+    def _stateful_get_run_state(rid: str):
+        call_count["n"] += 1
+        if call_count["n"] > 1:
+            api_main._active_runs.pop(rid, None)
+            return None
+        return api_main._active_runs.get(rid)
+
+    monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == f"Strategy lab run '{run_id}' not found."
+    assert call_count["n"] >= 2
+
+
 def test_restart_strategy_lab_run_400_when_payload_missing(lab_job_client, api_client) -> None:
     """A restartable run with no stored ``request_payload`` to rebuild dispatch from returns 400."""
     from investment_team.api import main as api_main
