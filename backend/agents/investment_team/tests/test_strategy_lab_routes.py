@@ -392,6 +392,20 @@ def test_run_strategy_lab_initial_state_has_generation_one(
     assert api_main._active_runs[run_id]["generation"] == 1
 
 
+def test_run_strategy_lab_docstring_does_not_overclaim_uuid4_entropy() -> None:
+    """Regression guard for the run_id-truncation docstring bug: run_strategy_lab
+    mints an 8-hex-char (32-bit) truncated uuid4, not a full uuid4, so its
+    docstring must not claim collision is "astronomically unlikely" from uuid4
+    entropy alone -- the actual protection is the active-run check."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.run_strategy_lab.__doc__
+    assert doc, "run_strategy_lab is missing a docstring"
+    assert "astronomically unlikely" not in doc
+    assert "truncated uuid4" in doc
+    assert "active-run check" in doc
+
+
 def test_run_strategy_lab_locked_recheck_catches_race_past_early_check(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
