@@ -1615,6 +1615,23 @@ def test_delete_strategy_lab_record_404(api_client) -> None:
     assert resp.status_code == 404
 
 
+def test_delete_strategy_lab_record_response_has_documented_contract() -> None:
+    """Regression guard: DeleteStrategyLabRecordResponse's docstring must
+    define lab_record_id and the None-vs-present semantics of the linked
+    strategy/backtest ids, not just restate the field names."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.DeleteStrategyLabRecordResponse.__doc__
+    assert doc, "DeleteStrategyLabRecordResponse is missing a docstring"
+    for snippet in (
+        "lab_record_id",
+        "deleted_strategy_id",
+        "deleted_backtest_id",
+        "deleted_paper_trading_sessions",
+    ):
+        assert snippet in doc, f"DeleteStrategyLabRecordResponse docstring missing {snippet!r}"
+
+
 def test_run_paper_trading_404_when_lab_record_missing(api_client) -> None:
     resp = api_client.post(
         "/strategy-lab/paper-trade",
