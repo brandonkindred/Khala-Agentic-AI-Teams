@@ -124,6 +124,16 @@ def _chunk_cache_namespace() -> str:
 
 
 def _chunk_outcome_cache_size() -> int:
+    """Return the configured size of the process-global chunk outcome cache.
+
+    Reads ``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` from the environment,
+    defaulting to ``DEFAULT_CHUNK_OUTCOME_CACHE_SIZE`` (512) and clamping
+    any negative value to 0.
+
+    Postconditions:
+        - Returns a non-negative int. A return value of 0 means caching is
+          disabled and the map phase becomes a pure passthrough.
+    """
     return parse_env_int(
         "CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", DEFAULT_CHUNK_OUTCOME_CACHE_SIZE, 0
     )
