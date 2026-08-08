@@ -4275,6 +4275,30 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     window. In-memory ``_active_runs`` lookups use ``_async_lock`` (not the
     threading ``_lock``) for the same reason. The streaming generator itself
     remains async so it doesn't block Uvicorn worker threads once connected.
+
+    Preconditions:
+        - ``run_id`` is a string (path param). It need not resolve to a known
+          run -- a miss is normal input this function itself handles (see
+          ``Raises``), not a caller obligation.
+
+    Postconditions:
+        - Returns a ``StreamingResponse`` (``media_type="text/event-stream"``).
+        - If ``run_id`` is found in ``_active_runs``, its state is refreshed
+          via ``_reconcile_run_progress`` (offloaded to the threadpool)
+          before use; otherwise state is loaded via
+          ``_load_run_from_job_service`` (also offloaded).
+        - If the (possibly just-reconciled) status is in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, the response body is a one-shot
+          generator that yields a ``snapshot`` event followed by ``done`` and
+          returns immediately, without subscribing to the live event bus.
+        - Otherwise the response subscribes to the per-job event bus and
+          streams ``snapshot``/``progress``/``cycle_complete``/
+          ``cycle_skipped`` events, terminating on ``complete``/``error``/
+          ``cancelled`` followed by a final ``done``.
+
+    Raises:
+        - ``HTTPException`` 404: ``run_id`` resolves to no state in either
+          ``_active_runs`` or the job-service fallback.
     """
     # Deliberately local (not module-level): tests substitute a fake
     # subscribe/unsubscribe by monkeypatching them directly on the
