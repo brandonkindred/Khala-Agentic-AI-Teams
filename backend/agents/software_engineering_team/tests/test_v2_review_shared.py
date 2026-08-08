@@ -1220,3 +1220,73 @@ def test_resolve_change_surface_for_review_new_file_no_base_returns_none(
     result = _resolve_change_surface_for_review({"new.py": "brand new\n"}, tmp_path)
 
     assert result is None
+
+
+def test_resolve_change_surface_for_review_deletion_only_file_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A deletion-only diff (old had a function, new drops it with no added
+    lines) contributes no touched lines, so the builder silently omits that
+    path from ``blocks`` even though it genuinely changed. When another file
+    in the same submission DOES have added lines, the builder still returns a
+    non-empty (but partial) surface -- that partial surface must be rejected
+    (``None``) rather than silently submitted, or the reviewer would approve
+    without ever seeing the dropped file's change."""
+    _init_repo(tmp_path)
+    _commit_file(
+        tmp_path,
+        "a.py",
+        "def validate(x):\n    if not x:\n        raise ValueError('bad')\n    return x\n\n\ndef other():\n    return 1\n",
+    )
+    _commit_file(tmp_path, "b.py", "def helper():\n    return 1\n")
+
+    files = {
+        # validate() deleted entirely -> pure removal, no added touched lines.
+        "a.py": "def other():\n    return 1\n",
+        # b.py gains a function -> has added touched lines.
+        "b.py": "def helper():\n    return 1\n\n\ndef added():\n    return 2\n",
+    }
+
+    result = _resolve_change_surface_for_review(files, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_deletion_only_file_falls_back_to_files(tmp_path: Path) -> None:
+    """End-to-end: a mixed submission where one file's only change is a
+    deletion must submit ``files=`` (every path), never a surface that omits
+    the deletion."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(
+        tmp_path,
+        "a.py",
+        "def validate(x):\n    if not x:\n        raise ValueError('bad')\n    return x\n\n\ndef other():\n    return 1\n",
+    )
+    _commit_file(tmp_path, "b.py", "def helper():\n    return 1\n")
+
+    files = {
+        "a.py": "def other():\n    return 1\n",
+        "b.py": "def helper():\n    return 1\n\n\ndef added():\n    return 2\n",
+    }
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""

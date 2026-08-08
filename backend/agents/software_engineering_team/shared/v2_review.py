@@ -313,7 +313,17 @@ def _resolve_change_surface_for_review(
           was resolved but the resulting surface has nothing to show (every
           resolved path is identical to its new content), via
           ``_maybe_build_change_surface_from_pairs``.
-        - Otherwise returns the built ``ChangeSurface``.
+        - Returns ``None`` ("partial coverage") when at least one path
+          genuinely changed (its resolved old content differs from its new
+          content) but the built surface omits that path -- e.g. a
+          deletion-only diff contributes no added *touched* lines, so
+          ``build_change_surface_from_pairs`` silently drops it even though
+          the file changed. Submitting a surface that omits a real change
+          would let the reviewer approve without ever seeing it, so a partial
+          surface is treated the same as no surface at all: the caller must
+          submit ``files`` as-is rather than a subset of what changed.
+        - Otherwise (every genuinely-changed path is covered) returns the
+          built ``ChangeSurface``.
         - Never raises: ``resolve_previous_content`` already degrades
           git/disk failures to misses; the only raise it documents is a blank
           ``repo_path``, guarded here by the empty-``files`` check plus a
@@ -327,7 +337,15 @@ def _resolve_change_surface_for_review(
         return None
     if not old.contents:
         return None
-    return _maybe_build_change_surface_from_pairs(files, old.contents)
+    surface = _maybe_build_change_surface_from_pairs(files, old.contents)
+    if surface is None:
+        return None
+    changed_paths = {
+        path for path, new_text in files.items() if old.contents.get(path, "") != new_text
+    }
+    if not changed_paths.issubset(surface.blocks):
+        return None
+    return surface
 
 
 def _code_review_step(
