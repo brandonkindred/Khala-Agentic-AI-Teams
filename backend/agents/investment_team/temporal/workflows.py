@@ -69,7 +69,19 @@ _HEARTBEAT_INTERVAL_S = 30.0
 _HEARTBEAT_TIMEOUT = timedelta(seconds=120)
 
 
-@activity.defn(name="investment_run_backtest")
+# no_thread_cancel_exception=True: by default temporalio forcibly raises
+# CancelledError inside this thread the instant the server's Cancel task is
+# polled — decoupled from heartbeat timing, so it can (and typically does)
+# arrive before this activity's own BackgroundHeartbeat-driven _bt_cancel_job
+# call lands. CancelledError is Exception-subclassed, so an unguarded forced
+# raise would be caught by _run_backtest_background's broad except-Exception
+# handler and persist the job as failed instead of cancelled — the opposite
+# of "honors cancellation". Disabling the forced raise makes cancellation
+# purely cooperative: is_cancelled() still flips immediately, but only the
+# _beat()-driven _bt_cancel_job()/checkpoint path can ever mark the job
+# cancelled, matching the same checkpoint-based semantics as the existing
+# REST cancel route.
+@activity.defn(name="investment_run_backtest", no_thread_cancel_exception=True)
 def run_backtest_activity(
     job_id: str,
     strategy: dict[str, Any],
