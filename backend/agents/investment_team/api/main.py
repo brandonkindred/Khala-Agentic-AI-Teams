@@ -5039,6 +5039,18 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
                 session_id,
                 exc_info=True,
             )
+        # Only the documented Temporal dispatch/worker failure modes get the
+        # 503 below: HTTPException (raised by _require_temporal when Temporal
+        # is disabled), RuntimeError (the worker client never became ready),
+        # and TimeoutError/RPCError (the start ack timed out, or the RPC
+        # itself failed) -- the exact set start_workflow_sync's docstring and
+        # _await_client document. Anything else is a genuine bug (a bad
+        # payload, a programming error) and must surface as its own 500
+        # instead of being misreported as "Temporal worker unavailable."
+        from temporalio.service import RPCError
+
+        is_dispatch_failure = isinstance(exc, (HTTPException, RuntimeError, TimeoutError, RPCError))
+
         # Best-effort failure recording must not mask the original dispatch
         # error (especially an HTTPException with the intended status/detail).
         # If the session was concurrently removed or is unparseable,
@@ -5047,7 +5059,9 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         try:
             _fail_paper_trading_session(
                 session_id,
-                "Failed to start the paper-trading workflow (Temporal unavailable).",
+                "Failed to start the paper-trading workflow (Temporal unavailable)."
+                if is_dispatch_failure
+                else "Unexpected error starting the paper-trading workflow.",
             )
         except Exception:
             logger.exception(
@@ -5056,9 +5070,17 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             )
         if isinstance(exc, HTTPException):
             raise
+        if is_dispatch_failure:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            ) from exc
+        logger.exception(
+            "Unexpected error starting paper-trading workflow for session %s", session_id
+        )
         raise HTTPException(
-            status_code=503,
-            detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+            status_code=500,
+            detail="Unexpected error starting the paper-trading workflow.",
         ) from exc
 
     return PaperTradingResponse(
