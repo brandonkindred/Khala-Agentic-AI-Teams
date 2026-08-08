@@ -16,8 +16,8 @@ x-team-env-base: &team-env-base
   OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
   PYTHONUNBUFFERED: "1"
   POSTGRES_HOST: postgres
-  POSTGRES_USER: ${POSTGRES_USER:-postgres}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
   POSTGRES_DB: ${POSTGRES_DB:-postgres}
   TEMPORAL_ADDRESS: temporal:7233
   JOB_SERVICE_URL: http://job-service:8085
@@ -105,8 +105,8 @@ services:
       - -c
       - max_connections=500
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       # Per-team sandbox roles (issue #257). Consumed by
       # postgres/init/04-create-sandbox-team-roles.sh on first boot. Unset
@@ -126,7 +126,7 @@ services:
       - postgres_data_v18:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -324,8 +324,8 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
@@ -995,8 +995,8 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
       UNIFIED_API_TEAM_ASSISTANTS_ENABLED: ${UNIFIED_API_TEAM_ASSISTANTS_ENABLED:-true}
