@@ -615,6 +615,20 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.error()).toBe('network down');
   });
 
+  it('createNewProcess falls back to the generic message when detail is a non-string 422 shape', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    api.setConversationProcess.mockReturnValueOnce(
+      throwError(() => ({ error: { detail: [{ msg: 'field required' }] } })),
+    );
+
+    component.createNewProcess();
+
+    // Regression for #5172: the old chain treated a truthy non-string `detail`
+    // (e.g. FastAPI's 422 validation-error array) as the message itself instead
+    // of falling through to a readable fallback string.
+    expect(component.error()).toBe('Failed to link process to conversation');
+  });
+
   // ── Process CRUD: roll back optimistic mutations on save failure ───────────
 
   it('addStep rolls back the new step when updateProcess fails', () => {
