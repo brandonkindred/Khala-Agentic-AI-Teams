@@ -62,6 +62,7 @@ from investment_team.models import (
     UserPreferences,
     ValidationReport,
     WorkflowMode,
+    get_fee_defaults,
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
 from investment_team.shared.job_store import (
@@ -5164,19 +5165,32 @@ def _default_slippage_bps() -> float:
     )
 
 
-def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
+def _resolve_fee_overrides(
+    request: "RunPaperTradingRequest", asset_class: Optional[str] = None
+) -> tuple[float, float]:
     """Return ``(transaction_cost_bps, slippage_bps)`` for the live config.
 
     Uses explicit ``None`` checks instead of ``or`` so a caller asking for
     zero-fee / zero-slippage experiments isn't silently bumped to the
     defaults — ``0.0`` is falsy but semantically meaningful here.
+
+    When ``asset_class`` is given, an omitted override falls back to
+    ``get_fee_defaults(asset_class)`` so non-stock strategies (crypto,
+    forex, ...) get correct per-asset-class fees instead of the flat
+    stock-tier default. Callers that don't have an asset class in scope
+    keep the operator-tunable env-var default.
     """
+    fee_defaults = get_fee_defaults(asset_class) if asset_class is not None else None
     tx = (
         request.transaction_cost_bps
         if request.transaction_cost_bps is not None
-        else _default_tx_cost_bps()
+        else (fee_defaults["transaction_cost_bps"] if fee_defaults else _default_tx_cost_bps())
     )
-    slip = request.slippage_bps if request.slippage_bps is not None else _default_slippage_bps()
+    slip = (
+        request.slippage_bps
+        if request.slippage_bps is not None
+        else (fee_defaults["slippage_bps"] if fee_defaults else _default_slippage_bps())
+    )
     return tx, slip
 
 
@@ -5231,7 +5245,7 @@ def _run_live_paper_trading_background(
 
         strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
 
-        tx_cost, slip = _resolve_fee_overrides(request)
+        tx_cost, slip = _resolve_fee_overrides(request, asset_class=strategy.asset_class)
         # Captured once: two separate datetime.now() calls could straddle
         # midnight and produce a start/end date that spans two days for a
         # config meant to represent a single live trading day.
