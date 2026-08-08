@@ -242,13 +242,12 @@ single-shot JSON devops agents.
   loop actually owns the retry/fallback decision for these three agents.)
 - **No continuation actually happens, despite the name.**
   `complete_json_with_continuation` (`shared/llm.py`) makes exactly **one**
-  `agent(prompt, ...)` call; its own docstring says
-  `max_continuation_cycles` "is accepted for backward compatibility but
-  ignored." On a truncated or fenced/prose-wrapped response it falls back
-  to `extract_json_from_response` for recovery (one extra parse attempt, not
-  an extra LLM call); if that also fails, `LLMJsonParseError` is raised. So
-  this pattern has **no built-in retry or multi-call continuation at all**
-  — `DevOpsSingleShotAgent` makes a single LLM call per `run()`, full stop.
+  `agent(prompt, ...)` call. On a truncated or fenced/prose-wrapped response
+  it falls back to `extract_json_from_response` for recovery (one extra
+  parse attempt, not an extra LLM call); if that also fails,
+  `LLMJsonParseError` is raised. So this pattern has **no built-in retry or
+  multi-call continuation at all** — `DevOpsSingleShotAgent` makes a single
+  LLM call per `run()`, full stop.
 - **`pre_call`** is the only built-in way to avoid calling the LLM at all;
   when it returns non-`None`, `run()` returns that value directly.
 - **Explicit standardization decision recorded in the module docstring:**

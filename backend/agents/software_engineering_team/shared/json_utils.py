@@ -92,32 +92,6 @@ def attempt_fix_output_continuation(
     return result.content
 
 
-def complete_with_continuation(
-    llm: "LLMClient",
-    prompt: str,
-    *,
-    agent_name: str = "TextAgent",
-    max_continuation_cycles: int = MAX_CONTINUATION_CYCLES,
-    mode: str = "text",
-    decompose_fn: Optional[Callable[[str], List[str]]] = None,
-    merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
-    original_content: Optional[str] = None,
-    chunk_prompt_template: Optional[str] = None,
-) -> str:
-    """Make an LLM call with truncation handling via continuation. Text only; no JSON.
-
-    Use complete_text_with_continuation for new code. This wrapper is kept for
-    backward compatibility and always returns the response as text. Parse with
-    output_templates.
-    """
-    return complete_text_with_continuation(
-        llm=llm,
-        prompt=prompt,
-        agent_name=agent_name,
-        max_continuation_cycles=max_continuation_cycles,
-    )
-
-
 def parse_json_with_recovery(
     llm: "LLMClient",
     prompt: str,
