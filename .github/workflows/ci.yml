@@ -1300,6 +1300,7 @@ jobs:
       - test-backend
       - test-integration
       - test-branding
+      - test-job-matching-schema-registration
     steps:
       - name: Verify dependencies
         env:
