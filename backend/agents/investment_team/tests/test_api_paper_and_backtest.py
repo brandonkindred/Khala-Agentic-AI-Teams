@@ -1277,6 +1277,8 @@ def test_fail_paper_trading_session_is_idempotent_on_completed(monkeypatch) -> N
 
 
 def test_fail_paper_trading_session_marks_active_session_failed(monkeypatch) -> None:
+    """An active paper-trading session must be marked FAILED, with the error
+    message recorded, when explicitly failed via _fail_paper_trading_session."""
     from investment_team.api import main as api_main
     from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
 
@@ -1350,6 +1352,8 @@ def test_fail_paper_trading_session_never_raises_on_store_write_failure(monkeypa
 def test_run_paper_trading_409_when_live_session_already_active(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """Starting a new live paper-trading session for a strategy that already
+    has an active session must return 409 rather than starting a duplicate."""
     from investment_team.api import main as api_main
     from investment_team.models import (
         PaperTradingSession,
