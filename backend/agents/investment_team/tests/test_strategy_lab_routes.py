@@ -2445,6 +2445,41 @@ def test_list_strategy_lab_runs_skips_active_run_entry_missing_run_id(
     assert run_ids == {"run-ok"}
 
 
+def test_list_strategy_lab_runs_skips_entry_response_construction_failure(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ``_active_runs`` entry that ``_run_state_to_response`` cannot convert
+    into a response model (e.g. a ``total_cycles`` value that can't coerce to
+    ``int``) must not 500 the whole listing -- it's skipped and logged, and
+    every other (well-formed) entry still appears in the response. Regression
+    test: the response-construction step used to sit outside the endpoint's
+    ``try/except``, so a single malformed entry's ``ValidationError`` would
+    propagate uncaught, violating the documented "always returns 200"
+    contract."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-ok"] = {
+        "run_id": "run-ok",
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    # total_cycles is a required `int` field on the response model; a dict
+    # value cannot be coerced, so `_run_state_to_response` raises.
+    api_main._active_runs["run-bad-total-cycles"] = {
+        "run_id": "run-bad-total-cycles",
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": {"not": "an int"},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.get("/strategy-lab/runs")
+
+    assert resp.status_code == 200
+    run_ids = {r["run_id"] for r in resp.json()["runs"]}
+    assert run_ids == {"run-ok"}
+
+
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
