@@ -78,7 +78,6 @@ from software_engineering_team.api.state import (  # noqa: F401
     RESTARTABLE_STATUSES,
     RESUMABLE_STATUSES,
     SUPERVISOR_LOG_DIR,
-    _active_orchestrator_threads,
     _coerce_current_activity,
     _coerce_progress,
     _get_projects_root,

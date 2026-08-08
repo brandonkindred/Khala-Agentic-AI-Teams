@@ -18,9 +18,6 @@ from software_engineering_team.shared.tool_agent_build_specialist import (
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
-# Back-compat alias: the runner historically lived in this module.
-_run_frontend_build_and_parse = run_frontend_build_and_parse
-
 __all__ = ["BuildSpecialistAdapterAgent", "MAX_RELEVANT_CODE_CHARS"]
 
 
