@@ -5972,6 +5972,9 @@ def send_advisor_message(
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
 
+    Preconditions:
+        - None. Unknown session IDs are tolerated.
+
     Postconditions:
         - Returns the session with `found=True` if `session_id` matches a
           known session.
