@@ -18,15 +18,20 @@ from pydantic import BaseModel
 
 from llm_service import DummyLLMClient
 from llm_service.clients.dummy import (
+    _PHASE3_SPECIALIST_REGISTRY,
     _STRIP_FILLERS,
     _STRIP_SUFFIXES,
     _STRIP_VERBS,
     CODE_REVIEW_MIN_PROMPT_LENGTH,
     _aggregated_user_tool_text,
+    _branding_phase3_structured_stub,
     _branding_structured_output_stub_by_model_name,
     _content_to_text,
     _extract_name_from_hint,
     _last_user_text,
+    _phase3_converge_decider_stub,
+    _phase3_creative_director_stub,
+    _phase3_moodboard_conceptualist_stub,
     _placeholder_slug,
     is_dummy_llm_client_wrapped,
 )
@@ -653,6 +658,88 @@ def test_branding_phase2_branch_results_do_not_share_mutable_state() -> None:
     )
     first["boilerplate_variants"].append("mutated")
     assert "mutated" not in second["boilerplate_variants"]
+
+
+# ---------------------------------------------------------------------------
+# _branding_phase3_structured_stub / _PHASE3_SPECIALIST_REGISTRY
+#
+# Regression coverage for the registry refactor of the Phase 3 dispatch
+# helper: it used to match all ten Phase 3 agents through a flat sequence of
+# inline ``if "anchor" in system_lowered and "other_anchor" in system_lowered``
+# checks. The three ordering-sensitive matchers (CreativeDirector,
+# MoodBoardConceptualist, ConvergeDecider) stayed inline; the seven
+# post-converge specialists moved into ``_PHASE3_SPECIALIST_REGISTRY``, a
+# tuple of ``(anchor_tuple, builder_fn)`` entries iterated in a loop.
+# ``_PHASE3_SPECIALIST_REGISTRY`` did not exist before that refactor, so
+# ``test_phase3_specialist_registry_shape`` fails outright against the
+# pre-refactor module.
+# ---------------------------------------------------------------------------
+
+
+def test_phase3_specialist_registry_shape() -> None:
+    """Registry must hold exactly the seven post-converge specialists, with
+    no duplicate anchor pairs or builders — locks the shape introduced when
+    the long if-chain was replaced.
+    """
+    assert len(_PHASE3_SPECIALIST_REGISTRY) == 7
+    anchor_pairs = [anchors for anchors, _builder in _PHASE3_SPECIALIST_REGISTRY]
+    assert len(anchor_pairs) == len(set(anchor_pairs))
+    builders = [builder for _anchors, builder in _PHASE3_SPECIALIST_REGISTRY]
+    assert len(builders) == len(set(builders))
+
+
+@pytest.mark.parametrize(
+    "anchors,builder",
+    _PHASE3_SPECIALIST_REGISTRY,
+    ids=[builder.__name__ for _anchors, builder in _PHASE3_SPECIALIST_REGISTRY],
+)
+def test_phase3_specialist_registry_entry_dispatches_to_its_own_builder(
+    anchors: tuple[str, str], builder: Any
+) -> None:
+    """Each registry entry must route a prompt carrying both of its anchors to
+    its own builder's exact payload — the behavior the old per-specialist
+    ``if`` branch used to provide directly.
+    """
+    anchor_a, anchor_b = anchors
+    system_lowered = f"some prompt text mentioning {anchor_a} plus {anchor_b} somewhere else"
+    assert _branding_phase3_structured_stub(system_lowered) == builder()
+
+
+def test_phase3_specialist_registry_requires_both_anchors() -> None:
+    """A prompt naming only one of a specialist's two anchors must not match —
+    guards against an accidental ``or`` (either anchor) replacing the
+    registry loop's ``and`` (both anchors) check.
+    """
+    for anchor_a, anchor_b in (anchors for anchors, _builder in _PHASE3_SPECIALIST_REGISTRY):
+        assert _branding_phase3_structured_stub(anchor_a) is None
+        assert _branding_phase3_structured_stub(anchor_b) is None
+
+
+def test_phase3_ordering_sensitive_matchers_precede_registry() -> None:
+    """CreativeDirector, MoodBoardConceptualist, and ConvergeDecider must stay
+    explicit inline checks ahead of the registry loop, matching their own
+    stubs exactly.
+    """
+    assert (
+        _branding_phase3_structured_stub("mood_board_candidates and converge_decider")
+        == _phase3_creative_director_stub()
+    )
+    assert (
+        _branding_phase3_structured_stub("moodboard conceptualist producing visual_direction")
+        == _phase3_moodboard_conceptualist_stub()
+    )
+    assert (
+        _branding_phase3_structured_stub("winning_candidate_title paired with scores_by_candidate")
+        == _phase3_converge_decider_stub()
+    )
+
+
+def test_phase3_structured_stub_returns_none_when_nothing_matches() -> None:
+    """A prompt with no Phase 3 anchors at all must fall through every
+    ordering-sensitive check and the whole registry loop, returning ``None``
+    rather than a stray dict.
+    """
+    assert _branding_phase3_structured_stub("you are a helpful assistant") is None
 
 
 def test_senior_backend_branch_generates_valid_python_for_quote_laden_hint() -> None:
