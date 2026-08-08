@@ -288,6 +288,57 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.rosterValidation()).toBeNull();
   });
 
+  // ── ngOnDestroy: in-flight subscriptions must not touch a destroyed component ─
+
+  it('ngOnDestroy stops a late createConversation response from updating a destroyed component', () => {
+    const pending = new Subject<ConversationStateResponse>();
+    api.createConversation.mockReturnValueOnce(pending.asObservable());
+
+    component.newConversation(); // subscribes to `pending`, still in flight
+    const conversationIdBefore = (component as unknown as { conversationId: string | null })
+      .conversationId;
+    const messagesBefore = component.messages();
+
+    fixture.destroy(); // runs real Angular teardown, invoking ngOnDestroy()
+
+    // The response arrives after teardown; without the takeUntil guard this would
+    // still run applyState() against the destroyed component.
+    expect(() =>
+      pending.next({
+        conversation_id: 'late',
+        messages: [{ role: 'assistant', content: 'late reply', timestamp: '2024-01-01T00:00:00Z' }],
+        current_process: null,
+        suggested_questions: [],
+      }),
+    ).not.toThrow();
+
+    expect((component as unknown as { conversationId: string | null }).conversationId).toBe(
+      conversationIdBefore,
+    );
+    expect(component.messages()).toEqual(messagesBefore);
+  });
+
+  it('ngOnDestroy stops a late nested validateRoster response from updating a destroyed component', () => {
+    const pendingValidation = new Subject<RosterValidationResult>();
+    api.validateRoster.mockReturnValueOnce(pendingValidation.asObservable());
+    const seen: (RosterValidationResult | null)[] = [];
+    component.rosterChanged.subscribe((v) => seen.push(v));
+
+    // listTeamAgents (of) resolves synchronously, subscribing the nested
+    // validateRoster call, which is left pending on `pendingValidation`.
+    component.refreshRoster();
+    const validationBefore = component.rosterValidation();
+    const loadingBefore = component.rosterLoading();
+
+    fixture.destroy();
+
+    expect(() => pendingValidation.next(validation({ summary: 'late' }))).not.toThrow();
+
+    expect(component.rosterValidation()).toBe(validationBefore);
+    expect(component.rosterLoading()).toBe(loadingBefore);
+    expect(seen).toEqual([]); // rosterChanged never emitted — the late result was dropped
+  });
+
   // ── Add from registry ────────────────────────────────────────────────────
 
   it('onAddFromRegistryDialogClosed adds the agent and refreshes the roster', () => {
