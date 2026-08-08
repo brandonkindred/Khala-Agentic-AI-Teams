@@ -1872,6 +1872,94 @@ def test_delete_strategy_lab_record_success(monkeypatch: pytest.MonkeyPatch, api
     assert api_main._backtests.get("bt-lab-X") is None
 
 
+def test_delete_strategy_lab_record_deletes_job_service_rows(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The linked strategy/backtest deletes must reach the job service, not
+    just an in-memory cache.
+
+    ``api_client`` normally swaps ``_strategies``/``_backtests`` for a plain
+    ``_InMemoryDict``, so ``test_delete_strategy_lab_record_success`` alone
+    can't tell a real ``JobServiceClient.delete_job`` call apart from a
+    no-op. This test wires ``_strategies``/``_backtests`` back to real
+    ``_PersistentDict`` instances backed by fake job-service clients, so a
+    regression to "only clears the in-memory entry" would leave the fake
+    clients' rows in place and fail the assertions below.
+    """
+    import job_service_client as jsc_mod
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    fake_strategies_client = _FakeJobClient(team="investment_strategies")
+    fake_backtests_client = _FakeJobClient(team="investment_backtests")
+    monkeypatch.setitem(jsc_mod._client_cache, "investment_strategies", fake_strategies_client)
+    monkeypatch.setitem(jsc_mod._client_cache, "investment_backtests", fake_backtests_client)
+    monkeypatch.setattr(api_main, "_strategies", api_main._PersistentDict("strategies"))
+    monkeypatch.setattr(api_main, "_backtests", api_main._PersistentDict("backtests"))
+
+    cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    strat = StrategySpec(
+        strategy_id="strat-lab-Z",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-lab-Z",
+        strategy_id="strat-lab-Z",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
+    )
+    record = StrategyLabRecord(
+        lab_record_id="lab-Z",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    api_main._strategy_lab_records["lab-Z"] = record
+    api_main._strategies["strat-lab-Z"] = strat
+    api_main._backtests["bt-lab-Z"] = bt
+
+    monkeypatch.setattr(api_main, "_delete_paper_sessions_for_lab_record", lambda lab_id: 0)
+
+    resp = api_client.delete("/strategy-lab/records/lab-Z")
+    body = resp.json()
+    assert body["deleted_strategy_id"] == "strat-lab-Z"
+    assert body["deleted_backtest_id"] == "bt-lab-Z"
+    # The regression this test guards against: the rows must be gone from
+    # the fake job-service clients, not merely absent from a local dict.
+    assert fake_strategies_client.get_job("strat-lab-Z") is None
+    assert fake_backtests_client.get_job("bt-lab-Z") is None
+
+
 def test_delete_strategy_lab_record_reports_none_for_missing_strategy_and_backtest(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
