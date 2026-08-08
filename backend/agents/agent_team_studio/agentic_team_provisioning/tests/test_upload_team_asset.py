@@ -4,9 +4,10 @@ Previously the route read the whole upload into memory with no size limit,
 wrote it with dest.write_bytes(content) unconditionally (silently overwriting
 any same-named asset), and ran the blocking write/stat synchronously on the
 event loop. The fix enforces a configurable size limit read in bounded
-chunks (413 on overflow, without ever buffering the full oversized payload),
-rejects a same-name collision with 409, and offloads the filesystem write/stat
-to a thread.
+chunks (413 on overflow), streams each chunk directly to disk instead of
+buffering the full payload in memory, rejects a same-name collision with 409,
+removes any partial file on failure, and offloads the filesystem
+open/write/close/stat calls to a thread.
 """
 
 from __future__ import annotations
@@ -95,7 +96,7 @@ def test_upload_duplicate_name_returns_409_and_does_not_overwrite(client: TestCl
 def test_upload_offloads_filesystem_write_to_a_thread(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):
-    """The blocking write/stat run via asyncio.to_thread, not on the event loop."""
+    """The blocking open/write/close/stat run via asyncio.to_thread, not on the event loop."""
     from agent_team_studio.agentic_team_provisioning.api import main
 
     calls: list[str] = []
@@ -113,4 +114,64 @@ def test_upload_offloads_filesystem_write_to_a_thread(
         files={"file": ("report.txt", b"hello", "text/plain")},
     )
     assert resp.status_code == 200
-    assert calls == ["write_bytes", "stat"]
+    assert calls == ["open", "write", "close", "stat"]
+
+
+def test_upload_streams_chunks_directly_to_disk_without_buffering_full_content(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Each chunk is written to disk as it's read, not buffered into one join+write.
+
+    Forces a tiny chunk size so a small payload still spans several reads,
+    then asserts more than one write call happened and that the writes
+    concatenate back to the original payload exactly.
+    """
+    from agent_team_studio.agentic_team_provisioning.api import main
+
+    monkeypatch.setattr(main, "_ASSET_UPLOAD_CHUNK_BYTES", 4)
+
+    write_calls: list[bytes] = []
+    real_to_thread = main.asyncio.to_thread
+
+    async def _tracking_to_thread(func, *args, **kwargs):
+        if getattr(func, "__name__", "") == "write":
+            write_calls.append(args[0])
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", _tracking_to_thread)
+
+    team_id = _seed_team()
+    payload = b"0123456789abcdef"
+    resp = client.post(
+        f"/teams/{team_id}/assets",
+        files={"file": ("data.bin", payload, "application/octet-stream")},
+    )
+    assert resp.status_code == 200
+    assert len(write_calls) > 1
+    assert b"".join(write_calls) == payload
+
+    download = client.get(f"/teams/{team_id}/assets/data.bin")
+    assert download.status_code == 200
+    assert download.content == payload
+
+
+def test_upload_exceeding_limit_removes_partial_file_from_disk(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A rejected oversized upload leaves no partial file on disk, not just off the listing."""
+    from agent_team_studio.agentic_team_provisioning.api import main
+    from agent_team_studio.agentic_team_provisioning.infrastructure import (
+        get_team_infrastructure,
+    )
+
+    monkeypatch.setenv("AGENTIC_TEAM_MAX_ASSET_BYTES", "10")
+    team_id = _seed_team()
+
+    resp = client.post(
+        f"/teams/{team_id}/assets",
+        files={"file": ("big.bin", b"x" * 1000, "application/octet-stream")},
+    )
+    assert resp.status_code == 413
+
+    infra = get_team_infrastructure(team_id)
+    assert not (infra.assets_dir / main._safe_asset_name("big.bin")).exists()

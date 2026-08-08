@@ -391,6 +391,70 @@ def test_review_task_description_with_placeholder_tokens_not_corrupted(monkeypat
     assert task in seen[0]
 
 
+def test_review_oversized_task_description_passed_through_intact(monkeypatch):
+    """``task_description`` reaching ``review()`` must never be truncated, no
+    matter how large — the one-shot review path has no character cap on this
+    field (unlike ``relevant_code_for_issue``'s single-issue fix budget)."""
+    seen: list[str] = []
+    oversized_task = ("D" * 200_000) + "TASK_TAIL_MARKER"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    out = agent.review(_Input(current_files={"a.ts": "code"}, task_description=oversized_task))
+    assert "1 issue(s) found." in out.summary
+    assert len(seen) == 1
+    assert oversized_task in seen[0]
+    assert "TASK_TAIL_MARKER" in seen[0]
+
+
+def test_review_oversized_code_text_passed_through_intact(monkeypatch):
+    """Code content built from ``current_files`` must never be truncated on
+    the one-shot review path, however large — unlike the single-issue fix
+    path's ``DEFAULT_MAX_RELEVANT_CODE_CHARS`` budget, ``review()`` imposes
+    no cap on ``_build_code_text``'s output."""
+    seen: list[str] = []
+    oversized_a = ("A" * 120_000) + "FILE_A_TAIL_MARKER"
+    oversized_b = ("B" * 120_000) + "FILE_B_TAIL_MARKER"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    out = agent.review(_Input(current_files={"a.ts": oversized_a, "b.ts": oversized_b}))
+    assert "1 issue(s) found." in out.summary
+    assert len(seen) == 1
+    assert oversized_a in seen[0]
+    assert oversized_b in seen[0]
+    assert "FILE_A_TAIL_MARKER" in seen[0]
+    assert "FILE_B_TAIL_MARKER" in seen[0]
+
+
+def test_fill_review_prompt_oversized_values_not_truncated():
+    """The substitution primitive itself must pass oversized values through
+    at full length, independent of any agent plumbing."""
+    oversized_task = ("T" * 250_000) + "TASK_TAIL_MARKER"
+    oversized_code = ("C" * 250_000) + "CODE_TAIL_MARKER"
+    out = fill_review_prompt(
+        "TASK={task_description}\nCODE={code}",
+        task_description=oversized_task,
+        code=oversized_code,
+    )
+    assert out == f"TASK={oversized_task}\nCODE={oversized_code}"
+    assert len(out) == len("TASK=\nCODE=") + len(oversized_task) + len(oversized_code)
+
+
 def test_review_no_prompt_raises():
     class _NoPromptAgent(_DemoAgent):
         review_prompt = None

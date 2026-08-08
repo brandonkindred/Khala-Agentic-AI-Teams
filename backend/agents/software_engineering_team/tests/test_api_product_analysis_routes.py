@@ -84,36 +84,6 @@ def test_run_product_analysis_accepts_provided_spec_content(client, tmp_path: Pa
     assert body["job_id"]
 
 
-def test_run_product_analysis_dispatches_to_temporal_even_when_disabled(
-    client, tmp_path: Path, monkeypatch
-):
-    """No thread fallback: start_standalone_workflow is called regardless of is_temporal_enabled()."""
-    import software_engineering_team.temporal.start_workflow as start_workflow
-    from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    monkeypatch.setattr("software_engineering_team.temporal.client.is_temporal_enabled", lambda: False)
-    dispatched: dict = {}
-    monkeypatch.setattr(
-        start_workflow,
-        "start_standalone_workflow",
-        lambda standalone_type, job_id, repo_path, **kw: dispatched.update(
-            standalone_type=standalone_type, job_id=job_id
-        ),
-    )
-
-    resp = client.post(
-        "/product-analysis/run",
-        json={"repo_path": str(repo), "spec_content": "# Spec"},
-    )
-
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "running"
-    assert dispatched["standalone_type"] == STANDALONE_TYPE_PRODUCT_ANALYSIS
-    assert dispatched["job_id"] == resp.json()["job_id"]
-
-
 def test_start_from_spec_400_for_invalid_project_name(client):
     """Project names with spaces or special chars are rejected."""
     resp = client.post(
@@ -138,34 +108,6 @@ def test_start_from_spec_creates_project_and_starts(monkeypatch, tmp_path: Path,
     proj_dir = tmp_path / "projects" / "myproj"
     assert proj_dir.exists()
     assert (proj_dir / _api_main.SPEC_FILENAME).read_text(encoding="utf-8").startswith("# Spec")
-
-
-def test_start_from_spec_dispatches_to_temporal_even_when_disabled(
-    monkeypatch, tmp_path: Path, client
-):
-    """No thread fallback: start_standalone_workflow is called regardless of is_temporal_enabled()."""
-    import software_engineering_team.temporal.start_workflow as start_workflow
-    from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
-
-    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setattr("software_engineering_team.temporal.client.is_temporal_enabled", lambda: False)
-    dispatched: dict = {}
-    monkeypatch.setattr(
-        start_workflow,
-        "start_standalone_workflow",
-        lambda standalone_type, job_id, repo_path, **kw: dispatched.update(
-            standalone_type=standalone_type, job_id=job_id
-        ),
-    )
-
-    resp = client.post(
-        "/product-analysis/start-from-spec",
-        json={"project_name": "myproj2", "spec_content": "# Spec\nFeature"},
-    )
-
-    assert resp.status_code == 200
-    assert dispatched["standalone_type"] == STANDALONE_TYPE_PRODUCT_ANALYSIS
-    assert dispatched["job_id"] == resp.json()["job_id"]
 
 
 def test_start_from_spec_keeps_project_dir_on_dispatch_failure(

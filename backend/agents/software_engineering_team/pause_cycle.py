@@ -335,8 +335,8 @@ def _wait_and_collect_answers(
 ) -> "tuple[List[Dict[str, Any]], bool]":
     """Block until answered/terminal/timeout, then resolve answers or fail out.
 
-    The heartbeat lets the answers endpoint (possibly in another worker process) tell a live,
-    blocked wait loop apart from a dead one before it considers auto-resuming the job.
+    The heartbeat keeps the blocked wait-loop lease fresh so other workers can tell a live
+    pause loop apart from a dead one (e.g. after a process crash).
 
     Postconditions:
         - On answers: returns ``(resolved, True)`` and the job is back to ``running``.
@@ -450,9 +450,6 @@ def _run_pause_cycle(
         waiting_for_answers=True,
         pending_questions=structured,
         answer_wait_heartbeat_at=hitl.heartbeat_timestamp(),
-        # Clear the cross-worker resume-claim lease so THIS pause is immediately claimable without
-        # waiting out the prior lease's TTL (the seq counter is left monotonic).
-        resume_claim_at=None,
     )
     resume_token: Optional[str] = None
     pause_kind: Optional[str] = None

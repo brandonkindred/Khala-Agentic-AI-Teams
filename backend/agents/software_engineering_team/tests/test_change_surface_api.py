@@ -90,9 +90,15 @@ def test_build_from_patches_all_blank_patches() -> None:
     assert surface.is_empty
 
 
-def test_build_from_patches_nonempty_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        build_change_surface_from_patches({"a.py": "@@ -1,1 +1,1 @@\n+x"})
+def test_build_from_patches_nonempty_assembles_when_content_provided() -> None:
+    content = "def outer():\n    return 1\n"
+    patch = "@@ -1,2 +1,2 @@\n def outer():\n-    return 0\n+    return 1\n"
+    surface = build_change_surface_from_patches(
+        {"a.py": patch},
+        new_contents={"a.py": content},
+    )
+    assert not surface.is_empty
+    assert "### a.py ###" in surface.code
 
 
 def test_build_from_pairs_empty_new_contents() -> None:
@@ -105,21 +111,11 @@ def test_build_from_pairs_empty_new_with_old_still_empty() -> None:
     assert surface.is_empty
 
 
-def test_build_from_pairs_nonempty_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        build_change_surface_from_pairs({"a.py": "new"})
-
-
-def test_build_from_pairs_nonempty_with_old_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        build_change_surface_from_pairs({"a.py": "new"}, old_contents={"a.py": "old"})
-
-
 def test_expand_touched_ranges_empty() -> None:
     assert expand_touched_ranges("def f():\n    pass\n", []) == ()
     assert expand_touched_ranges("def f():\n    pass\n", set()) == ()
 
 
-def test_expand_touched_ranges_non_python_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        expand_touched_ranges("function f() {\n  return 1;\n}\n", {2}, path="f.ts")
+def test_expand_touched_ranges_non_python_uses_fallback() -> None:
+    ranges = expand_touched_ranges("function f() {\n  return 1;\n}\n", {2}, path="f.ts")
+    assert ranges == (LineRange(1, 3),)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +20,13 @@ from investment_team.agents import (
     FinancialAdvisorAgent,
     InvestmentCommitteeAgent,
     PolicyGuardianAgent,
+)
+from investment_team.exceptions import (
+    InvestmentBacktestError,
+    LookaheadViolationError,
+    MarketDataUnavailableError,
+    MissingStrategyCodeError,
+    StrategyExecutionError,
 )
 from investment_team.market_data_cache.postgres import SCHEMA as MD_CACHE_SCHEMA
 from investment_team.market_lab_data import (
@@ -56,6 +62,7 @@ from investment_team.models import (
     UserPreferences,
     ValidationReport,
     WorkflowMode,
+    get_fee_defaults,
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
 from investment_team.shared.job_store import (
@@ -99,8 +106,12 @@ from investment_team.shared.job_store import (
 )
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+from investment_team.strategy_lab import orchestrator_api as _strategy_lab_orchestrator_api
 from investment_team.strategy_lab.config import (
     MAX_BATCH_COUNT as _MAX_BATCH_COUNT,
+)
+from investment_team.strategy_lab.config import (
+    MAX_PAPER_TRADING_LOOKBACK_DAYS as _MAX_PAPER_TRADING_LOOKBACK_DAYS,
 )
 from investment_team.strategy_lab.config import (
     MAX_PARALLEL as _MAX_PARALLEL,
@@ -128,7 +139,7 @@ from investment_team.strategy_lab.orchestrator_api import (
     _delete_jobs_concurrently as _delete_jobs_concurrently,  # noqa: F401
 )
 from investment_team.strategy_lab.run_state import (
-    acquire_run_transition_lock as _acquire_run_transition_lock,
+    DEFAULT_FENCING_GENERATION,
 )
 from investment_team.strategy_lab.run_state import (
     active_runs as _active_runs,
@@ -138,6 +149,9 @@ from investment_team.strategy_lab.run_state import (
 )
 from investment_team.strategy_lab.run_state import (
     get_lab_run_job_client as _get_lab_run_job_client,
+)
+from investment_team.strategy_lab.run_state import (
+    get_run_generation_strict as _get_run_generation_strict,
 )
 from investment_team.strategy_lab.run_state import (
     get_run_state as _get_run_state,
@@ -170,10 +184,30 @@ from job_service_client import (
     validate_job_for_action,
 )
 from shared.app import create_team_app
-from shared.env_config import env_float
+from shared.env_config import env_bool, env_float
 from shared.sse import sse_job_stream_async, sse_line
 
 logger = logging.getLogger(__name__)
+
+STRATEGY_LAB_TERMINAL_STATUSES = _strategy_lab_orchestrator_api.STRATEGY_LAB_TERMINAL_STATUSES
+_STRATEGY_LAB_PROGRESS_FIELDS = _strategy_lab_orchestrator_api._STRATEGY_LAB_PROGRESS_FIELDS
+_PURGE_MAX_WORKERS = _strategy_lab_orchestrator_api._PURGE_MAX_WORKERS
+_PURGE_TIMEOUT_S = _strategy_lab_orchestrator_api._PURGE_TIMEOUT_S
+_build_run_state = _strategy_lab_orchestrator_api._build_run_state
+_delete_jobs_concurrently = _strategy_lab_orchestrator_api._delete_jobs_concurrently
+_delete_paper_sessions_for_lab_record = (
+    _strategy_lab_orchestrator_api._delete_paper_sessions_for_lab_record
+)
+_job_progress_percent = _strategy_lab_orchestrator_api._job_progress_percent
+_persist_run_state = _strategy_lab_orchestrator_api._persist_run_state
+_purge_strategy_lab_job_storage = _strategy_lab_orchestrator_api._purge_strategy_lab_job_storage
+_reconcile_run_progress = _strategy_lab_orchestrator_api._reconcile_run_progress
+_run_state_to_response = _strategy_lab_orchestrator_api._run_state_to_response
+_fail_strategy_lab_run = _strategy_lab_orchestrator_api._fail_strategy_lab_run
+_dispatch_strategy_lab_run = _strategy_lab_orchestrator_api._dispatch_strategy_lab_run
+_no_active_run_locked = _strategy_lab_orchestrator_api._no_active_run_locked
+_ensure_no_active_run = _strategy_lab_orchestrator_api._ensure_no_active_run
+_require_run_transition_lock = _strategy_lab_orchestrator_api._require_run_transition_lock
 
 
 def _startup() -> None:
@@ -484,11 +518,132 @@ def _now() -> str:
 # Strategy Lab run tracking models
 # ---------------------------------------------------------------------------
 
-# All terminal statuses a strategy lab run can land in. Kept local to this
-# module because "completed_with_errors" is a lab-specific concept and the
-# shared job_service_client constants don't know about it. Used by the SSE
-# stream short-circuit, status reconciliation, and restart gating so a
-# freshly-introduced terminal state can't silently diverge.
+# restart_strategy_lab_run's restartable-status gate: "completed_with_errors"
+# is a terminal outcome of the same workflow as "completed" and must be
+# restartable too, but it's lab-specific and doesn't belong in the shared
+# job_service_client.RESTARTABLE_STATUSES constant.
+STRATEGY_LAB_RESTARTABLE_STATUSES: frozenset[str] = RESTARTABLE_STATUSES | {"completed_with_errors"}
+
+# restart_strategy_lab_run's fencing-generation mint amount: a run created
+# before generation fencing shipped has no persisted "generation" field, and
+# the job service's atomic increment treats an absent field as 0 -- a plain
+# +1 would land on 1, which is also what a pre-upgrade caller that omits
+# generation entirely is treated as presenting (check_fencing_token accepts
+# equal tokens), so that first post-upgrade restart must jump straight to 2
+# instead. See restart_strategy_lab_run's own inline comment for the full
+# reasoning.
+GENERATION_INCREMENT_NORMAL = 1
+GENERATION_INCREMENT_LEGACY_BOOTSTRAP = 2
+
+# Passed as `_persist_run_state`'s `exclude_fields` by every write that must
+# never regress the durable fencing high-water mark from a possibly-stale
+# in-memory snapshot (run/resume/restart/rollback state writes) -- the
+# generation field is only ever advanced via `apply_and_get`'s atomic
+# increment, never via one of these ordinary state persists.
+_GENERATION_EXCLUDE_FIELDS = frozenset({"generation"})
+
+
+class UnsafeDurableGenerationError(ValueError):
+    """Durable ``generation`` cannot be advanced safely via job-service increment.
+
+    Raised when the persisted value is a representation ``get_run_generation_strict``
+    would accept as a positive fencing token (e.g. the numeric string ``\"5\"``) but
+    job-service ``apply`` would coerce to ``0`` before adding the delta — so a plain
+    increment would *regress* the conceptual generation and reopen fencing.
+    """
+
+
+def _legacy_generation_bootstrap_increment(durable_data: Dict[str, Any]) -> int:
+    """Return the fencing-generation increment ``restart_strategy_lab_run``
+    should atomically apply for this run's durable record.
+
+    A run created before generation fencing shipped has no "generation"
+    field in its persisted record at all, and the job service's atomic
+    increment treats an absent field as 0 -- so a plain +1 would mint
+    generation 1 for such a run's first restart. That's exactly the
+    generation ``persist_run_state_activity``/``finalize_cycle_record_activity``
+    fall back to for a caller that omits ``generation`` entirely (an activity
+    scheduled before the field existed), and ``check_fencing_token`` accepts
+    equal tokens -- so that stale activity would pass fencing again. Jumping
+    straight to ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` in that one case
+    makes the minted value strictly exceed the legacy default; a run that
+    already has an explicit positive integer "generation" field (every run
+    created after this change, and any legacy run past its first
+    post-upgrade restart) increments by the ordinary
+    ``GENERATION_INCREMENT_NORMAL`` instead.
+
+    The same +2 bootstrap applies when the key is present but still
+    uninitialized in the sense ``get_run_generation_strict`` already uses for
+    soft defaults: ``None``, ``""``, an int below ``DEFAULT_FENCING_GENERATION``,
+    or a non-int that cannot be parsed as an int (job-service increment
+    coerces those to ``0``, so +2 lands on generation 2). Bools and floats are
+    rejected instead (``get_run_generation_strict`` raises on them). A
+    non-int that *parses* as a positive int (e.g. ``\"5\"``) also fails closed:
+    increment would zero the field first and mint ``2``, regressing the
+    conceptual token and letting in-flight activities that present ``5``
+    pass ``check_fencing_token``.
+
+    Preconditions:
+        - ``durable_data`` is the run's durable job record (its ``"data"``
+          column merged in) -- or ``{}`` when the job does not exist.
+          Callers MUST pass the DURABLE record here, not `_get_run_state`'s
+          process-local ``active_runs`` snapshot: a resume of this same
+          legacy run can already have populated that in-memory entry with a
+          ``generation=1`` default (``resume_strategy_lab_run`` deliberately
+          excludes "generation" from ITS durable write, so the durable
+          record stays legacy even after that). Passing the in-memory
+          snapshot instead would see "generation" present, mint only +1,
+          and land on durable generation 1 -- exactly what a still-in-flight
+          legacy activity (which omits ``generation`` entirely, defaulting
+          to 1) presents, defeating fencing.
+        - Callers MUST NOT substitute ``{}`` for a failed durable read.
+          Blindly treating a read failure as legacy and minting +2 can
+          regress a durable non-native positive token (e.g. ``\"5\"``) via
+          job-service zeroing. Restart fails closed on bootstrap-read
+          failure instead.
+
+    Postconditions:
+        - Returns ``GENERATION_INCREMENT_LEGACY_BOOTSTRAP`` when
+          ``durable_data`` has no usable positive native-int "generation"
+          (absent, ``None``/empty, unparseable non-int, or native int
+          ``< DEFAULT_FENCING_GENERATION``).
+        - Returns ``GENERATION_INCREMENT_NORMAL`` for a native ``int``
+          ``>= DEFAULT_FENCING_GENERATION``.
+        - Raises ``UnsafeDurableGenerationError`` when the durable value is a
+          bool/float, or a non-int that parses to an int
+          ``>= DEFAULT_FENCING_GENERATION`` (increment would regress the
+          token). Callers must translate that into a fail-closed response
+          rather than minting.
+    """
+    if "generation" not in durable_data:
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    raw = durable_data["generation"]
+    if raw is None or raw == "":
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    # bool is an int subclass; float is accepted by job-service increment but
+    # rejected by get_run_generation_strict — fail closed rather than minting
+    # a float/bool-derived token that fencing reads cannot round-trip.
+    if isinstance(raw, bool) or isinstance(raw, float):
+        raise UnsafeDurableGenerationError(
+            f"durable generation {raw!r} is not a native int fencing token"
+        )
+    if isinstance(raw, int):
+        if raw < DEFAULT_FENCING_GENERATION:
+            return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+        return GENERATION_INCREMENT_NORMAL
+    # Non-int: unparseable garbage zeros under job-service increment → +2 is
+    # safe. A parseable positive value (e.g. "5") must NOT use increment: the
+    # service would zero it first and regress the conceptual generation.
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    if parsed < DEFAULT_FENCING_GENERATION:
+        return GENERATION_INCREMENT_LEGACY_BOOTSTRAP
+    raise UnsafeDurableGenerationError(
+        f"durable generation {raw!r} parses to {parsed} but is not a native int; "
+        "job-service increment would zero it and regress the fencing token"
+    )
 
 
 class StrategyLabRunStartResponse(BaseModel):
@@ -539,6 +694,11 @@ class StrategyLabRunStatusResponse(BaseModel):
     batch_count: int = 1
     completed_batches: int = 0
     current_batch: Optional[int] = None
+    # Read-only fencing generation (see run_state.get_run_generation /
+    # _build_run_state) -- exposed so a caller can observe that a restart
+    # superseded a prior incarnation; never accepted as client input anywhere,
+    # so surfacing it carries none of the write-path fencing risk.
+    generation: int = 1
 
 
 class ActiveRunsResponse(BaseModel):
@@ -558,70 +718,26 @@ class StrategyLabConfigResponse(BaseModel):
     asset_categories: List[str] = Field(default_factory=list)
 
 
-def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusResponse:
-    """Convert an ``_active_runs`` entry to a Pydantic response.
-
-    Preconditions:
-        ``state`` is an ``_active_runs`` entry (or a persisted job dict of the
-        same shape). Every field, including ``run_id``, ``status``,
-        ``started_at``, and ``total_cycles``, is read with a default, so a
-        partially-populated merged/resume/snapshot dict (e.g. a job-service
-        entry with unexpected gaps) is safe -- this defends the same
-        currently-enforced-by-construction invariant (every writer of
-        ``_active_runs`` sets ``run_id``) that ``status`` already defended
-        against, rather than assuming it can never be violated.
-    Postconditions:
-        Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
-        field, defaulting each absent field to its response default
-        (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
-        lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
-        and mapping a present ``current_cycle`` dict to a
-        ``StrategyLabCycleProgress`` (``None`` when absent). ``batch_size`` is
-        the one field that deliberately does NOT fall back to the model's
-        structural default of ``1``: an absent ``batch_size`` means this is a
-        legacy single-batch record predating multi-batch support, so it falls
-        back to ``total_cycles`` (the whole run was one batch) rather than to
-        ``1`` (which would misreport it as ``total_cycles`` batches of size 1).
-        Pure: ``state`` is not mutated. A ``current_cycle`` that is not a
-        dict, or is a dict whose fields fail ``StrategyLabCycleProgress``
-        validation, degrades to ``None`` instead of raising -- ``state`` can
-        be job-service data reconciled with no shape check (see
-        ``_reconcile_run_progress``), so it is not assumed well-formed.
-    """
-    cc = state.get("current_cycle")
-    current_cycle: Optional[StrategyLabCycleProgress] = None
-    if isinstance(cc, dict):
-        try:
-            current_cycle = StrategyLabCycleProgress(**cc)
-        except ValidationError:
-            current_cycle = None
-    return StrategyLabRunStatusResponse(
-        run_id=state.get("run_id", ""),
-        status=state.get("status", "unknown"),
-        started_at=state.get("started_at", ""),
-        total_cycles=state.get("total_cycles", 0),
-        completed_cycles=state.get("completed_cycles", 0),
-        skipped_cycles=state.get("skipped_cycles", 0),
-        errored_cycles=state.get("errored_cycles", 0),
-        errored_details=state.get("errored_details", []),
-        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
-        current_cycle=current_cycle,
-        completed_record_ids=state.get("completed_record_ids", []),
-        error=state.get("error"),
-        batch_size=state.get("batch_size", state.get("total_cycles", 1)),
-        batch_count=state.get("batch_count", 1),
-        completed_batches=state.get("completed_batches", 0),
-        current_batch=state.get("current_batch"),
-    )
-
-
 class CreateProfileRequest(BaseModel):
+    """Inputs to create an Investment Policy Statement (IPS) for a user.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str = Field(..., description="Unique user identifier")
-    risk_tolerance: str = Field(..., description="low, medium, high, or very_high")
+    risk_tolerance: RiskTolerance = Field(
+        ..., description="One of: " + ", ".join(m.value for m in RiskTolerance)
+    )
     max_drawdown_tolerance_pct: float = Field(..., ge=0, le=100)
     time_horizon_years: int = Field(..., ge=1)
     annual_gross_income: float = Field(..., ge=0)
-    income_stability: str = Field(default="stable")
+    income_stability: Literal["stable", "variable", "seasonal", "commission"] = Field(
+        default="stable"
+    )
     total_net_worth: float = Field(..., ge=0)
     investable_assets: float = Field(..., ge=0)
     monthly_savings: float = Field(default=0.0)
@@ -632,22 +748,29 @@ class CreateProfileRequest(BaseModel):
     emergency_fund_months: int = Field(default=6)
     excluded_asset_classes: List[str] = Field(default_factory=list)
     excluded_industries: List[str] = Field(default_factory=list)
-    esg_preference: str = Field(default="none")
+    esg_preference: Literal["none", "light", "moderate", "strict"] = Field(default="none")
     crypto_allowed: bool = Field(default=True)
     options_allowed: bool = Field(default=True)
     leverage_allowed: bool = Field(default=False)
     goals: List[Dict[str, Any]] = Field(default_factory=list)
-    max_single_position_pct: float = Field(default=10.0)
+    max_single_position_pct: float = Field(default=10.0, ge=0, le=100)
     max_asset_class_pct: Dict[str, float] = Field(default_factory=dict)
     live_trading_enabled: bool = Field(default=False)
     human_approval_required_for_live: bool = Field(default=True)
-    speculative_sleeve_cap_pct: float = Field(default=10.0)
-    rebalance_frequency: str = Field(default="quarterly")
-    default_mode: str = Field(default="monitor_only")
+    speculative_sleeve_cap_pct: float = Field(default=10.0, ge=0, le=100)
+    rebalance_frequency: Literal["monthly", "quarterly", "semi-annual", "annual"] = Field(
+        default="quarterly"
+    )
+    default_mode: WorkflowMode = Field(
+        default=WorkflowMode.MONITOR_ONLY,
+        description="One of: " + ", ".join(m.value for m in WorkflowMode),
+    )
     notes: List[str] = Field(default_factory=list)
 
 
 class CreateProfileResponse(BaseModel):
+    """Returned by ``POST /profiles`` — the newly created IPS for the user."""
+
     user_id: str
     ips: IPS
     message: str = "Investment Policy Statement created successfully."
@@ -660,6 +783,15 @@ class GetProfileResponse(BaseModel):
 
 
 class CreateProposalRequest(BaseModel):
+    """Inputs to create a portfolio proposal for a user with an existing IPS.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     prepared_by: str = Field(..., description="Agent or user ID who prepared this proposal")
     user_id: str = Field(..., description="User ID whose IPS this is for")
     objective: str = Field(..., description="Investment objective")
@@ -671,22 +803,41 @@ class CreateProposalRequest(BaseModel):
 
 
 class CreateProposalResponse(BaseModel):
+    """Returned by ``POST /proposals/create`` — the newly created proposal."""
+
     proposal_id: str
     proposal: PortfolioProposal
     message: str = "Portfolio proposal created successfully."
 
 
 class GetProposalResponse(BaseModel):
+    """Returned by ``GET /proposals/{proposal_id}``.
+
+    ``found=False``/``proposal=None`` when no proposal exists for the given
+    id — a normal, expected outcome, not an error.
+    """
+
     proposal_id: str
     proposal: Optional[PortfolioProposal] = None
     found: bool = True
 
 
 class ValidateProposalRequest(BaseModel):
+    """Inputs to validate an existing proposal against a user's IPS.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str = Field(..., description="User ID to get IPS for validation")
 
 
 class ValidateProposalResponse(BaseModel):
+    """Returned by ``POST /proposals/{proposal_id}/validate``."""
+
     proposal_id: str
     valid: bool
     violations: List[str] = Field(default_factory=list)
@@ -712,18 +863,24 @@ class CreateStrategyRequest(BaseModel):
 
 
 class CreateStrategyResponse(BaseModel):
+    """Returned by ``POST /strategies`` — the newly created strategy."""
+
     strategy_id: str
     strategy: StrategySpec
     message: str = "Strategy created successfully."
 
 
 class ValidateStrategyRequest(BaseModel):
+    """Inputs to run validation checks against an existing strategy."""
+
     backtest_period: str = Field(default="2020-01-01 to 2024-12-31")
     scenario_set: List[str] = Field(default_factory=lambda: ["baseline", "stress", "monte_carlo"])
     checks: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ValidateStrategyResponse(BaseModel):
+    """Returned by ``POST /strategies/{strategy_id}/validate``."""
+
     strategy_id: str
     validation: ValidationReport
     passed: bool
@@ -731,6 +888,15 @@ class ValidateStrategyResponse(BaseModel):
 
 
 class RunBacktestRequest(BaseModel):
+    """Inputs to submit a backtest job for an existing strategy.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     strategy_id: str = Field(..., description="Strategy ID to back test")
     submitted_by: str = Field(..., description="Agent or user ID submitting the back test")
     start_date: str = Field(..., description="Backtest start date, ISO format")
@@ -744,16 +910,43 @@ class RunBacktestRequest(BaseModel):
 
 
 class RunBacktestResponse(BaseModel):
+    """Full backtest result, returned once a backtest job completes."""
+
     backtest: BacktestRecord
     message: str = "Backtest completed and recorded successfully."
 
 
 class ListBacktestsResponse(BaseModel):
+    """Response body for ``GET /backtests``.
+
+    ``count`` is always ``len(items)`` — enforced by a model_validator so a
+    caller can never construct a payload whose count disagrees with its list.
+    """
+
     items: List[BacktestRecord] = Field(default_factory=list)
     count: int = 0
 
+    @model_validator(mode="after")
+    def _derive_count_from_items(self) -> "ListBacktestsResponse":
+        """Recompute ``count`` from ``items`` so it can never drift apart.
+
+        Postconditions: ``count == len(items)`` regardless of what was passed
+        in for ``count``.
+        """
+        self.count = len(self.items)
+        return self
+
 
 class PromotionDecisionRequest(BaseModel):
+    """Inputs to run the promotion-gate decision for a validated strategy.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     strategy_id: str = Field(..., description="Strategy ID to promote")
     user_id: str = Field(..., description="User ID for IPS lookup")
     proposer_agent_id: str = Field(..., description="ID of agent who proposed the strategy")
@@ -765,6 +958,8 @@ class PromotionDecisionRequest(BaseModel):
 
 
 class PromotionDecisionResponse(BaseModel):
+    """Returned by ``POST /promotions/decide`` — the computed promotion decision."""
+
     strategy_id: str
     decision: PromotionDecision
 
@@ -785,16 +980,29 @@ class WorkflowStatusResponse(BaseModel):
 
 
 class QueueItemResponse(BaseModel):
+    """A single queued item, as returned by ``GET /workflow/queues``."""
+
     queue: str
     payload_id: str
     priority: str = "normal"
 
 
 class QueuesResponse(BaseModel):
+    """Returned by ``GET /workflow/queues`` — all queues, keyed by queue name."""
+
     queues: Dict[str, List[QueueItemResponse]] = Field(default_factory=dict)
 
 
 class CreateMemoRequest(BaseModel):
+    """Inputs to create an Investment Committee memo recording a recommendation.
+
+    Rejects unknown fields (``model_config extra="forbid"``) so a
+    stale/misspelled client payload fails fast with a 422 instead of
+    silently dropping the field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str
     recommendation: str
     rationale: str
@@ -802,6 +1010,8 @@ class CreateMemoRequest(BaseModel):
 
 
 class CreateMemoResponse(BaseModel):
+    """Returned by ``POST /memos`` — the newly created committee memo."""
+
     memo: InvestmentCommitteeMemo
 
 
@@ -816,38 +1026,23 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
     Preconditions:
-        - ``request.risk_tolerance`` must be a valid ``RiskTolerance`` value.
-        - ``request.default_mode`` must be a valid ``WorkflowMode`` value.
+        - ``request.risk_tolerance``/``request.default_mode`` are already
+          guaranteed to be valid ``RiskTolerance``/``WorkflowMode`` members —
+          FastAPI/Pydantic rejects any other value with a 422 before this
+          handler runs, since both fields are typed as the enum itself.
         - No profile may already exist for ``request.user_id`` — this endpoint
           creates; it does not upsert.
 
     Postconditions:
         - On success: a new IPS is persisted under ``_profiles[request.user_id]``
           and returned; no prior profile is overwritten.
-        - Raises ``HTTPException`` 400 if ``risk_tolerance`` or ``default_mode``
-          is invalid (message lists the current enum values).
         - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
           ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
         - Raises ``HTTPException`` 409 if a profile already exists for
           ``request.user_id``.
     """
-    try:
-        risk_tol = RiskTolerance(request.risk_tolerance)
-    except ValueError:
-        allowed = ", ".join(m.value for m in RiskTolerance)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid risk_tolerance: {request.risk_tolerance}. Must be one of: {allowed}",
-        )
-
-    try:
-        workflow_mode = WorkflowMode(request.default_mode)
-    except ValueError:
-        allowed = ", ".join(m.value for m in WorkflowMode)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid default_mode: {request.default_mode}. Must be one of: {allowed}",
-        )
+    risk_tol = request.risk_tolerance
+    workflow_mode = request.default_mode
 
     try:
         goals = [
@@ -945,9 +1140,13 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         ``request.user_id`` must already have an IPS created via
         ``create_profile``.
     Postconditions:
-        Raises 404 if no IPS exists for ``request.user_id``. Otherwise
-        persists a new ``PortfolioProposal`` under a freshly generated
+        Persists a new ``PortfolioProposal`` under a freshly generated
         ``proposal_id`` and returns it.
+
+    Raises:
+        - ``HTTPException(404)`` if no IPS exists for ``request.user_id``.
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          that is not a dict, or whose ``proposal`` value is not a dict.
     """
     with _lock:
         ips = _profiles.get(request.user_id)
@@ -961,6 +1160,12 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         {"proposal_id": proposal_id, "request": request.model_dump(mode="json")},
         key=proposal_id,
     )
+    if not isinstance(result, dict) or not isinstance(result.get("proposal"), dict):
+        logger.error("Invalid advisory response for proposal %s: %r", proposal_id, result)
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return CreateProposalResponse(
         proposal_id=proposal_id, proposal=PortfolioProposal.model_validate(result["proposal"])
     )
@@ -997,6 +1202,11 @@ def validate_proposal(
         Raises 404 if the proposal or the user's IPS is missing. Otherwise
         returns whether the proposal passed IPS validation and any
         violations found; does not mutate the stored proposal.
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          that is not a dict, whose ``valid`` value is not a bool, or whose
+          ``violations`` value is not a list.
     """
     with _lock:
         proposal = _proposals.get(proposal_id)
@@ -1012,6 +1222,18 @@ def validate_proposal(
         {"proposal_id": proposal_id, "user_id": request.user_id},
         key=proposal_id,
     )
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("valid"), bool)
+        or not isinstance(result.get("violations"), list)
+    ):
+        logger.error(
+            "Invalid advisory response for proposal %s validation: %r", proposal_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return ValidateProposalResponse(
         proposal_id=proposal_id,
         valid=result["valid"],
@@ -1083,6 +1305,12 @@ def validate_strategy(
         Raises 404 if the strategy is missing. Otherwise returns the
         ``ValidationReport`` produced by the validation checks, whether the
         strategy passed, and any failures found.
+
+    Raises:
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          that is not a dict, is missing ``validation``, ``passed``, or
+          ``failures``, or whose ``validation``/``passed``/``failures``
+          values are not a dict/bool/list respectively.
     """
     with _lock:
         strategy = _strategies.get(strategy_id)
@@ -1095,6 +1323,21 @@ def validate_strategy(
         {"strategy_id": strategy_id, "request": request.model_dump(mode="json")},
         key=strategy_id,
     )
+    required_keys = ("validation", "passed", "failures")
+    if (
+        not isinstance(result, dict)
+        or any(key not in result for key in required_keys)
+        or not isinstance(result["validation"], dict)
+        or not isinstance(result["passed"], bool)
+        or not isinstance(result["failures"], list)
+    ):
+        logger.error(
+            "Invalid advisory response for strategy %s validation: %r", strategy_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
     return ValidateStrategyResponse(
         strategy_id=strategy_id,
         validation=ValidationReport.model_validate(result["validation"]),
@@ -1159,7 +1402,7 @@ def _run_backtest_background(
     config: BacktestConfig,
     submitted_by: str,
     notes: List[str],
-) -> None:
+) -> str:
     """Background worker: run a real-data backtest and persist the completed record.
 
     Long-running (market data + sandbox execution), so this runs off the request
@@ -1181,22 +1424,24 @@ def _run_backtest_background(
           deterministically from ``job_id``. A second invocation for the same
           ``job_id`` (e.g. a Temporal activity retry that lands after a worker
           crash left the job at RUNNING) therefore overwrites the same record
-          instead of orphaning a duplicate.
-        - On ``BacktestExecutionError`` or other exceptions: job status becomes
-          FAILED with an error string, unless a cancel check already returned
+          instead of orphaning a duplicate. Returns ``_BT_JOB_STATUS_COMPLETED``.
+        - On ``InvestmentBacktestError`` or other exceptions: job status becomes
+          FAILED with an error string, unless a cancel check already returned.
+          Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
         - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
-          without writing COMPLETED or FAILED so the cancelled status visible at
-          that check is preserved. Updates use unconditional ``_bt_update_job``,
-          so a cancel that lands between a check and the next update can still be
-          overwritten with RUNNING, COMPLETED, or FAILED.
+          ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
+          cancelled status visible at that check is preserved. Updates use
+          unconditional ``_bt_update_job``, so a cancel that lands between a
+          check and the next update can still be overwritten with RUNNING,
+          COMPLETED, or FAILED.
     """
     try:
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         # Deterministic (not random) so a retry of the same job_id — e.g. a
         # Temporal activity retry after a worker crash left the job RUNNING —
         # overwrites the same record instead of minting a duplicate.
@@ -1222,15 +1467,19 @@ def _run_backtest_background(
             result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
             backtest_id=backtest_id,
         )
-    except BacktestExecutionError as exc:
+        return _BT_JOB_STATUS_COMPLETED
+    except InvestmentBacktestError as exc:
+        logger.error("Backtest job %s failed with domain error: %s", job_id, exc)
         if _bt_is_job_cancelled(job_id):
-            return
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc.detail))
+            return _BT_JOB_STATUS_CANCELLED
+        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        return _BT_JOB_STATUS_FAILED
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
         if _bt_is_job_cancelled(job_id):
-            return
+            return _BT_JOB_STATUS_CANCELLED
         _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        return _BT_JOB_STATUS_FAILED
 
 
 @app.post("/backtests", response_model=BacktestJobSubmission)
@@ -1247,11 +1496,11 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
         `GET /backtests/status/{job_id}` for the outcome. Strategies with
         generated ``strategy_code`` run in a sandbox (the normal Strategy
         Lab path); strategies without ``strategy_code`` are not rejected
-        synchronously here — the job is created and only fails
-        asynchronously once the background worker (``_run_backtest_background``)
-        reaches ``_run_real_data_backtest``, which raises 422. That failure
-        surfaces as job ``status="failed"`` with the 422 detail in
-        ``error``, not as an HTTP 422 response from this endpoint.
+        synchronously here — the job is accepted and
+        ``_run_real_data_backtest`` raises ``MissingStrategyCodeError``
+        inside ``_run_backtest_background`` once the job runs, which the
+        job store surfaces as a FAILED status (poll the job to see the
+        error), not a live HTTP 422 response from this endpoint.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1398,7 +1647,7 @@ def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
         items = [item for item in items if item.strategy_id == strategy_id]
 
     items.sort(key=lambda item: item.completed_at, reverse=True)
-    return ListBacktestsResponse(items=items, count=len(items))
+    return ListBacktestsResponse(items=items)
 
 
 @app.post("/promotions/decide", response_model=PromotionDecisionResponse)
@@ -1411,7 +1660,19 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         process that also serves ``/workflow/status``/``/workflow/queues`` —
         applies the activity's returned audit-log/escalation delta to the local
         ``_workflow_state`` so those reads stay consistent regardless of which
-        process ran the activity.
+        process ran the activity. The activity result is fully validated
+        before any of that shared state is mutated, so a malformed result
+        never leaves ``_workflow_state`` partially updated.
+
+    Raises:
+        - ``HTTPException(404)`` if ``strategy_id`` or the user's IPS is not found.
+        - ``HTTPException(400)`` if the strategy has no validation report.
+        - ``HTTPException(502)`` if the advisory result is not a dict, is missing
+          a ``decision`` field, has a non-list/non-string ``audit_log_appended``,
+          or has a malformed ``escalation_enqueued`` payload (non-dict, missing
+          ``queue``/``payload_id``/``priority``, or unknown queue name).
+        - ``HTTPException(500)`` if ``decision`` fails ``PromotionDecision``
+          validation.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -1441,20 +1702,84 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         },
         key=request.strategy_id,
     )
-    with _lock:
-        _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
-        escalation = result.get("escalation_enqueued")
-        if escalation:
-            _workflow_state.queues[escalation["queue"]].append(
-                QueueItem(
-                    queue=escalation["queue"],
-                    payload_id=escalation["payload_id"],
-                    priority=escalation["priority"],
-                )
+
+    # Validate the entire result up front — decision, audit-log shape, and
+    # escalation queue item — before mutating any shared _workflow_state, so
+    # a malformed activity result never leaves the audit log or queues
+    # partially updated.
+    if not isinstance(result, dict):
+        logger.error(
+            "Invalid advisory response for strategy %s promotion: %r", request.strategy_id, result
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
+    if "decision" not in result or result["decision"] is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result is missing required 'decision' field",
+        )
+    decision_data = result["decision"]
+    if not isinstance(decision_data, dict):
+        logger.error(
+            "Invalid advisory decision for strategy %s promotion: %r",
+            request.strategy_id,
+            decision_data,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
+    try:
+        decision = PromotionDecision.model_validate(decision_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid decision payload: {exc}") from exc
+
+    audit_entries = result.get("audit_log_appended") or []
+    if not isinstance(audit_entries, list) or not all(isinstance(e, str) for e in audit_entries):
+        raise HTTPException(
+            status_code=502,
+            detail="Promotion decision result has invalid 'audit_log_appended' entries",
+        )
+
+    escalation = result.get("escalation_enqueued")
+    queue_item: QueueItem | None = None
+    if escalation is not None:
+        if not isinstance(escalation, dict):
+            raise HTTPException(
+                status_code=502,
+                detail="Promotion decision result has invalid 'escalation_enqueued' payload",
             )
+        queue_name = escalation.get("queue")
+        payload_id = escalation.get("payload_id")
+        priority = escalation.get("priority")
+        if not isinstance(queue_name, str) or not queue_name:
+            raise HTTPException(
+                status_code=502,
+                detail="Promotion decision result has invalid escalation queue name",
+            )
+        if queue_name not in _workflow_state.queues:
+            raise HTTPException(status_code=502, detail=f"Unknown escalation queue '{queue_name}'")
+        if not isinstance(payload_id, str) or not payload_id:
+            raise HTTPException(
+                status_code=502,
+                detail="Promotion decision result has invalid escalation payload_id",
+            )
+        if not isinstance(priority, str) or not priority:
+            raise HTTPException(
+                status_code=502,
+                detail="Promotion decision result has invalid escalation priority",
+            )
+        queue_item = QueueItem(queue=queue_name, payload_id=payload_id, priority=priority)
+
+    with _lock:
+        _workflow_state.audit_log.extend(audit_entries)
+        if queue_item is not None:
+            _workflow_state.queues[queue_item.queue].append(queue_item)
     return PromotionDecisionResponse(
         strategy_id=request.strategy_id,
-        decision=PromotionDecision.model_validate(result["decision"]),
+        decision=decision,
     )
 
 
@@ -1488,10 +1813,14 @@ def workflow_queues() -> QueuesResponse:
     Postconditions:
         Takes no inputs; always returns 200. Returns a ``_lock``-protected
         snapshot of every queue name currently present in
-        ``_workflow_state.queues`` — an empty dict if none have been
-        populated yet, since queues are created lazily (e.g. by
-        ``promotion_decision``'s escalation path). Each queue name maps to
-        its full ordered list of items, converted to ``QueueItemResponse``.
+        ``_workflow_state.queues`` — pre-populated with the fixed set of
+        known queue names (``research``, ``portfolio_design``,
+        ``validation``, ``promotion``, ``execution``, ``escalation``) by
+        ``WorkflowState``'s ``default_factory``; ``promotion_decision``
+        only appends to one of these existing queues after validating the
+        escalation payload's ``queue`` value against them, it does not
+        create new queue keys. Each queue name maps to its full ordered
+        list of items, converted to ``QueueItemResponse``.
     """
     with _lock:
         queues = {}
@@ -1514,12 +1843,17 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         Delegates entirely to ``_execute_advisory("committee_memo", ...)``
         with ``key=request.user_id`` as the idempotency/ordering key; no
         local precondition checks are performed (no user/IPS existence
-        check, unlike ``promotion_decision``). Raises ``HTTPException(503)``
-        when Temporal is disabled/unavailable; on any other workflow
-        failure, raises the ``HTTPException`` that
-        ``_translate_advisory_failure`` maps it to. Raises
-        ``HTTPException(502)`` when the advisory result lacks a ``memo``
-        payload. On success, returns the generated ``InvestmentCommitteeMemo``.
+        check, unlike ``promotion_decision``). On success, returns the
+        generated ``InvestmentCommitteeMemo``.
+
+    Raises:
+        - ``HTTPException(503)`` when Temporal is disabled/unavailable; on
+          any other workflow failure, the ``HTTPException`` that
+          ``_translate_advisory_failure`` maps it to.
+        - ``HTTPException(502)`` when the advisory result is not a dict or
+          lacks a dict-shaped ``memo`` payload.
+        - ``HTTPException(500)`` if the ``memo`` field fails
+          ``InvestmentCommitteeMemo`` validation.
     """
     result = _execute_advisory(
         "committee_memo",
@@ -1531,31 +1865,22 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
         },
         key=request.user_id,
     )
-    memo_data = result.get("memo")
-    if not memo_data:
-        logger.error("committee_memo activity returned no memo: %r", result)
-        raise HTTPException(status_code=502, detail="Memo generation result is missing")
-    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(memo_data))
+    if not isinstance(result, dict) or not isinstance(result.get("memo"), dict):
+        logger.error("Invalid advisory response for memo (user %s): %r", request.user_id, result)
+        raise HTTPException(
+            status_code=502,
+            detail="Advisory execution returned unexpected response structure",
+        )
+    try:
+        memo = InvestmentCommitteeMemo.model_validate(result["memo"])
+    except ValidationError as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid memo payload: {exc}") from exc
+    return CreateMemoResponse(memo=memo)
 
 
 # ---------------------------------------------------------------------------
 # Strategy Lab — ideation, backtesting, and analysis
 # ---------------------------------------------------------------------------
-
-
-class BacktestExecutionError(Exception):
-    """Raised by ``_run_real_data_backtest`` when a backtest cannot be executed.
-
-    Framework-agnostic replacement for raising ``HTTPException`` from this
-    non-route business-logic helper, so it stays callable and unit-testable
-    outside an HTTP context. ``status_code``/``detail`` mirror
-    ``HTTPException``'s attributes for the caller's convenience.
-    """
-
-    def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
 
 
 def _run_real_data_backtest(
@@ -1572,21 +1897,33 @@ def _run_real_data_backtest(
 
     Only Strategy-Lab-generated scripts may produce trades. The prior
     LLM-per-bar fallback has been removed; strategies without
-    ``strategy_code`` now raise ``BacktestExecutionError`` (422).
+    ``strategy_code`` raise ``MissingStrategyCodeError``.
+
+    This is a service-layer helper — it raises the domain exceptions in
+    ``investment_team.exceptions`` rather than ``HTTPException``, so it stays
+    usable from non-HTTP callers (Temporal activities, CLI tools, tests).
+    Callers with an HTTP request context are responsible for translating
+    those exceptions into the appropriate ``HTTPException``.
 
     Returns (BacktestResult, trade_ledger).
+
+    Raises:
+        - ``MissingStrategyCodeError`` if ``strategy.strategy_code`` is unset.
+        - ``MarketDataUnavailableError`` if no market data could be fetched
+          for the requested symbols/range.
+        - ``LookaheadViolationError`` if the generated script accessed
+          look-ahead (future) market data.
+        - ``StrategyExecutionError`` if the generated script otherwise fails
+          during execution.
     """
     # Lazy import: yfinance is slow to import; defer until a request arrives.
     from investment_team.market_data_service import MarketDataService
 
     if not strategy.strategy_code:
-        raise BacktestExecutionError(
-            status_code=422,
-            detail=(
-                "strategy_code is required. The legacy LLM-per-bar backtest "
-                "path has been removed; regenerate the strategy via the "
-                "Strategy Lab ideation agent."
-            ),
+        raise MissingStrategyCodeError(
+            "strategy_code is required. The legacy LLM-per-bar backtest "
+            "path has been removed; regenerate the strategy via the "
+            "Strategy Lab ideation agent."
         )
 
     market_service = MarketDataService()
@@ -1606,9 +1943,8 @@ def _run_real_data_backtest(
     )
 
     if not market_data:
-        raise BacktestExecutionError(
-            status_code=502,
-            detail="Failed to fetch historical market data. Please check the date range and try again.",
+        raise MarketDataUnavailableError(
+            "Failed to fetch historical market data. Please check the date range and try again."
         )
 
     from investment_team.trading_service.modes.backtest import run_backtest
@@ -1625,21 +1961,15 @@ def _run_real_data_backtest(
     service_result = run.service_result
 
     if service_result.lookahead_violation:
-        raise BacktestExecutionError(
-            status_code=422,
-            detail=(
-                f"Strategy code attempted to access look-ahead data: {(service_result.error or '')}"
-            ),
+        raise LookaheadViolationError(
+            f"Strategy code attempted to access look-ahead data: {(service_result.error or '')}"
         )
     if service_result.error:
         # Any service-level error must fail the request — mid-run crashes
         # append closed trades *before* raising, so a non-empty ledger here
         # still represents a partial/failed execution and must not be
         # reported as a successful backtest.
-        raise BacktestExecutionError(
-            status_code=422,
-            detail=f"Strategy code execution failed: {service_result.error}",
-        )
+        raise StrategyExecutionError(f"Strategy code execution failed: {service_result.error}")
 
     logger.info(
         "Backtest complete for %s: %d trades",
@@ -1770,9 +2100,19 @@ class RunStrategyLabRequest(BaseModel):
         ),
     )
     paper_trading_lookback_days: int = Field(
-        default=365,
+        # Cap the default at the configured ceiling: Pydantic v2 doesn't validate
+        # field defaults, so a bare `default=365` would slip past
+        # `le=_MAX_PAPER_TRADING_LOOKBACK_DAYS` for an omitted request when an
+        # operator lowers STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS below 365,
+        # bypassing the advertised cap (the UI omits this field).
+        default=min(365, _MAX_PAPER_TRADING_LOOKBACK_DAYS),
         ge=30,
-        description="Days of recent market data to fetch for paper trading.",
+        le=_MAX_PAPER_TRADING_LOOKBACK_DAYS,
+        description=(
+            "Days of recent market data to fetch for paper trading. Upper "
+            "bound is configurable via STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS "
+            "(default 3650)."
+        ),
     )
     allowed_asset_classes: Optional[List[str]] = Field(
         default=None,
@@ -1804,7 +2144,7 @@ class RunStrategyLabRequest(BaseModel):
         if not normalized:
             raise ValueError(
                 "allowed_asset_classes must contain at least one of: "
-                "stocks, crypto, forex, futures, commodities"
+                + ", ".join(PROMPT_ASSET_CLASSES)
             )
         return normalized
 
@@ -1813,29 +2153,54 @@ class StrategyLabRunResponse(BaseModel):
     """Summary of a single completed ideation + backtest + analysis cycle.
 
     ``count`` is the number of records in ``records`` (0 or 1 for a single
-    cycle). Not currently used as a FastAPI ``response_model``.
+    cycle) — enforced by a model_validator. Not currently used as a FastAPI
+    ``response_model``.
     """
 
     records: List[StrategyLabRecord] = Field(default_factory=list)
     count: int = 0
     message: str = "Strategy ideated, backtested, and analysed successfully."
 
+    @model_validator(mode="after")
+    def _derive_count_from_records(self) -> "StrategyLabRunResponse":
+        """Recompute ``count`` from ``records`` so it can never drift apart.
+
+        Postconditions: ``count == len(records)`` regardless of what was
+        passed in for ``count``.
+        """
+        self.count = len(self.records)
+        return self
+
 
 class StrategyLabResultsResponse(BaseModel):
     """Response body for ``GET /strategy-lab/results``.
 
-    ``items``/``count`` reflect the records after the optional
-    ``?winning=`` filter is applied. ``winning_count``/``losing_count``
-    are computed from the full, unfiltered set of records and represent
-    how many strategies met (``is_winning=True``) or missed
-    (``is_winning=False``) the annualized-return winning threshold —
-    they do not change based on the ``winning`` query filter.
+    ``items``/``count``/``winning_count``/``losing_count`` are all derived
+    from the same (already-filtered, when ``?winning=`` is given) ``items``
+    list, so ``winning_count + losing_count == count`` always holds — a
+    ``?winning=true`` request reports ``losing_count == 0`` rather than the
+    unfiltered global losing count. (The UI's winning/losing tab chips call
+    the endpoint unfiltered, so they always see the full-set counts.)
     """
 
     items: List[StrategyLabRecord] = Field(default_factory=list)
     count: int = 0
     winning_count: int = 0
     losing_count: int = 0
+
+    @model_validator(mode="after")
+    def _derive_counts_from_items(self) -> "StrategyLabResultsResponse":
+        """Recompute all three count fields from ``items`` so they can never drift apart.
+
+        Postconditions: ``count == len(items)``; ``winning_count``/
+        ``losing_count`` equal the number of ``items`` with
+        ``is_winning`` True/False, regardless of what was passed in for
+        those fields.
+        """
+        self.count = len(self.items)
+        self.winning_count = sum(1 for r in self.items if r.is_winning)
+        self.losing_count = self.count - self.winning_count
+        return self
 
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
@@ -2164,16 +2529,10 @@ def _strategy_lab_signal_expert_enabled() -> bool:
     the market-data fetch and ``SignalIntelligenceExpert`` call entirely and
     fails open with a ``{"skipped": True, ...}`` brief instead.
 
-    Reads the ``STRATEGY_LAB_SIGNAL_EXPERT_ENABLED`` env var, defaulting to
-    enabled (``"true"``) when unset. Case-insensitive; ``"true"``, ``"1"``,
-    and ``"yes"`` are treated as enabled -- any other explicit value
-    (including an empty string) is treated as disabled.
+    Reads the ``STRATEGY_LAB_SIGNAL_EXPERT_ENABLED`` env var via
+    ``shared.env_config.env_bool``, defaulting to enabled when unset.
     """
-    return os.environ.get("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "true").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    return env_bool("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", default=True)
 
 
 def _compute_signal_brief_snapshot(
@@ -2343,17 +2702,6 @@ def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
     return _strategy_lab_external_terminal_status(run_id) == "cancelled"
 
 
-# Fields the Temporal workflow's persist-state activity writes as partial
-# deltas over a run's lifetime (see strategy_lab/temporal/workflows.py
-# _persist_state call sites): per-batch-start (current_batch), per-wave
-# (completed_cycles, contiguous_cycles, completed_record_ids, errored_cycles,
-# skipped_cycles, errored_details, tracker_merge_error_count),
-# per-batch-complete (completed_batches). current_cycle is included
-# defensively even though no persist point currently sets it -- the ``if
-# field in data`` guard in ``_reconcile_run_progress`` makes it inert until,
-# and unless, that changes.
-
-
 def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
     """Dispatch a job through Temporal when it is enabled, else report failure.
 
@@ -2394,300 +2742,6 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
     except Exception:
         logger.exception("Temporal dispatch failed; falling back to in-process execution")
         return False
-
-
-def _fail_strategy_lab_run(run_id: str, error: str) -> None:
-    """Mark a strategy-lab run "failed" (best-effort, idempotent).
-
-    Preconditions:
-        - ``run_id`` may or may not exist in ``_active_runs``.
-    Postconditions:
-        - If the run exists and isn't already in
-          ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
-          with ``error`` recorded, the new state persisted, and a delayed
-          cleanup of the ``_active_runs`` entry scheduled 900s out — so a
-          dispatch failure (e.g. a Temporal outage) doesn't leak the entry
-          forever. That cleanup is a no-op if
-          ``run_id`` gets resumed (and thus a new state object installed)
-          before the delay elapses, so it never tears down a live resumed
-          run. A missing run and an already-terminal run are both no-ops.
-          Never raises.
-    """
-    try:
-        with _lock:
-            state = _active_runs.get(run_id)
-            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
-                return
-            state["status"] = "failed"
-            state["error"] = error
-            state["current_cycle"] = None
-            # Snapshot for persistence outside the lock: _persist_run_state
-            # performs a synchronous job-service RPC, and _lock is the
-            # process-wide lock also used by run-status queries, dispatch,
-            # and reconciliation -- holding it across network I/O would
-            # block all of those for the RPC's duration. A shallow copy is
-            # enough (_persist_run_state only reads top-level keys) and
-            # protects the persisted snapshot from a concurrent mutator of
-            # this same dict object racing the now-unlocked persist call.
-            persisted_state = dict(state)
-        _persist_run_state(run_id, persisted_state)
-
-        from investment_team.api.job_event_bus import cleanup_job
-
-        def _cleanup() -> None:
-            # Runs on threading.Timer's own daemon thread, 900s after this
-            # function returns -- the outer try/except below has long since
-            # exited by then, so it can't catch anything raised in here. An
-            # uncaught cleanup_job failure would otherwise surface only as an
-            # unhandled exception trace on a background thread, with the
-            # rest of this callback silently skipped.
-            try:
-                with _lock:
-                    # resume/restart always replace the entry with a new dict
-                    # rather than mutate this one in place, so an identity check
-                    # reliably detects a run that got resumed within this delay
-                    # window — pop/cleanup would otherwise tear down a live,
-                    # freshly-resumed run's tracking state.
-                    if _active_runs.get(run_id) is not state:
-                        return
-                    _active_runs.pop(run_id, None)
-                cleanup_job(run_id)
-            except Exception:
-                logger.warning(
-                    "Failed to clean up strategy-lab run %s after failure timeout",
-                    run_id,
-                    exc_info=True,
-                )
-
-        timer = threading.Timer(900.0, _cleanup)
-        timer.daemon = True
-        timer.start()
-    except Exception:
-        logger.warning(
-            "Failed to mark strategy-lab run %s failed: %s", run_id, error, exc_info=True
-        )
-
-
-def _dispatch_strategy_lab_run(
-    run_id: str, request: RunStrategyLabRequest, *, allow_already_started: bool = True
-) -> None:
-    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
-
-    Preconditions:
-        - ``run_id``'s state is already registered in ``_active_runs`` and
-          persisted (the activity reads its resume offset from that state).
-
-    Postconditions:
-        - The durable workflow is started. A collision with an already-running
-          workflow under this run_id's deterministic id (e.g. a resume issued
-          after an API-process restart, while the durable workflow itself kept
-          running) is handled per ``allow_already_started``:
-          - ``True`` (the default — used by the initial run and resume,
-            whose intent matches what's already running): treated as a
-            successful dispatch, a no-op; the run is NOT marked failed.
-          - ``False`` (used by restart, whose reset-to-cycle-0 intent does
-            NOT match a lingering old execution): raises
-            ``HTTPException(409)`` instead — also without marking the run
-            failed, since the old workflow may still be healthy and marking
-            it failed would cause that workflow to observe the status and
-            abort itself.
-          On any other failure (Temporal disabled/unavailable, or the start
-          RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` (which schedules a delayed cleanup
-          timer), and then: if ``exc`` is already an ``HTTPException`` (e.g.
-          ``_require_temporal()``'s own 503, or one the dispatch RPC itself
-          raised), it is re-raised unchanged, preserving its original status
-          code and detail; otherwise it is wrapped in a fresh
-          ``HTTPException(503)``.
-    """
-    try:
-        from temporalio.exceptions import WorkflowAlreadyStartedError
-    except ImportError:  # pragma: no cover - temporalio always installed
-        # Import outside the dispatch try/except below (not inside its
-        # `except Exception`) so a hypothetical ImportError here can't mask
-        # the dispatch failure that block is meant to translate into a 503.
-        # `()` as an isinstance target always resolves False, so the
-        # WorkflowAlreadyStartedError branch below simply never matches --
-        # every dispatch failure then falls through to the generic 503 path.
-        WorkflowAlreadyStartedError = ()  # type: ignore[assignment]
-
-    try:
-        _require_temporal()
-        from investment_team.strategy_lab.temporal.start_workflow import (
-            start_strategy_lab_batch_workflow,
-        )
-
-        start_strategy_lab_batch_workflow(run_id, request)
-    except Exception as exc:
-        if isinstance(exc, WorkflowAlreadyStartedError):
-            if allow_already_started:
-                # The durable workflow for this run_id is already running
-                # (most commonly: resume was called after an API-process
-                # restart wiped _active_runs, but the workflow itself
-                # survived). Marking the run "failed" here would be observed
-                # by that still-running workflow as an external stop signal
-                # (via strategy_lab_external_terminal_status) and abort a
-                # healthy run, so treat the collision as the dispatch
-                # already having succeeded.
-                logger.info(
-                    "Strategy-lab workflow for run %s is already running; "
-                    "treating dispatch as a no-op success.",
-                    run_id,
-                )
-                return
-            # Restart's reset-to-cycle-0 intent does NOT match a lingering
-            # old execution the way resume's does — silently succeeding
-            # would tell the caller "restarted from scratch" while the old
-            # execution (old input, old progress) is what's actually still
-            # running. Reject distinctly from a real Temporal-down 503 so
-            # callers can tell "retry shortly" from "Temporal is down", and
-            # don't mark the run failed — the old workflow may still be
-            # healthy, and failing it would cause it to observe that status
-            # and abort itself.
-            raise HTTPException(
-                status_code=409,
-                detail="A prior execution for this run is still winding down; retry shortly.",
-            ) from exc
-        _fail_strategy_lab_run(
-            run_id, "Failed to start the strategy-lab workflow (Temporal unavailable)."
-        )
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to start the strategy-lab workflow; Temporal worker unavailable.",
-        ) from exc
-
-
-def _no_active_run_locked() -> None:
-    """Raise 409 if any strategy-lab run is currently running.
-
-    Lock-free core of ``_ensure_no_active_run``, factored out so a caller that
-    also needs to write ``_active_runs`` can run the check and the write
-    inside the *same* ``_lock`` acquisition — see ``resume_strategy_lab_run``,
-    which does exactly that so a concurrent transition for a *different*
-    run_id can't interleave between an isolated check and an isolated write
-    and slip past this guard.
-
-    Preconditions:
-        - Caller already holds ``_lock``.
-
-    Postconditions:
-        - Returns ``None`` when no entry in ``_active_runs`` has status
-          ``"running"``; otherwise raises ``HTTPException(409)``. Does not
-          mutate ``_active_runs`` and does not itself acquire or release
-          ``_lock``. An entry missing a ``"status"`` key is treated as not
-          running (``.get()`` default) rather than raising ``KeyError`` --
-          a malformed entry must not defeat this conflict guard.
-    """
-    if any(r.get("status") == "running" for r in _active_runs.values()):
-        raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
-
-
-def _ensure_no_active_run() -> None:
-    """Raise 409 if any strategy-lab run is currently running.
-
-    Shared 409-guard for the run/resume/restart endpoints, which each allow at
-    most one concurrent strategy-lab run.
-
-    Preconditions:
-        - Caller does not already hold ``_lock`` (this acquires it itself).
-
-    Postconditions:
-        - Returns ``None`` when no entry in ``_active_runs`` has status
-          ``"running"``; otherwise raises ``HTTPException(409)``. Does not mutate
-          ``_active_runs``.
-    """
-    with _lock:
-        _no_active_run_locked()
-
-
-def _require_run_transition_lock(run_id: str) -> threading.Lock:
-    """Acquire run_id's transition lock, or raise 409 when another transition
-    for the same run_id is already in flight.
-
-    Shared guard for the run/resume/restart endpoints: serializes same-run_id
-    transitions so two concurrent calls (e.g. two restarts, or a resume
-    racing a restart) for the same run_id can't both pass the check-then-act
-    window between ``_ensure_no_active_run()`` and this run_id's state being
-    written (#4028).
-
-    Preconditions:
-        - None.
-
-    Postconditions:
-        - Returns the acquired ``threading.Lock`` — held by the caller, who
-          MUST release it (``try/finally: run_lock.release()``) — when no
-          other run/resume/restart transition for this ``run_id`` is
-          currently in flight.
-
-    Raises:
-        - ``HTTPException`` 409 when another transition for this ``run_id``
-          is already in flight. Never blocks; holds nothing in that case.
-    """
-    run_lock = _acquire_run_transition_lock(run_id)
-    if run_lock is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Another transition for this run is already in progress; retry shortly.",
-        )
-    return run_lock
-
-
-def _build_run_state(
-    run_id: str,
-    *,
-    started_at: str,
-    total_cycles: int,
-    batch_size: int,
-    batch_count: int,
-    request_payload: Dict[str, Any],
-    completed_cycles: int = 0,
-    contiguous_cycles: Optional[int] = None,
-    skipped_cycles: int = 0,
-    errored_cycles: int = 0,
-    errored_details: Optional[List[Any]] = None,
-    tracker_merge_error_count: int = 0,
-    completed_record_ids: Optional[List[Any]] = None,
-    completed_batches: int = 0,
-) -> Dict[str, Any]:
-    """Build a strategy-lab run-state dict, shared by run/resume/restart.
-
-    Defaults match the fresh-run (initial) case; resume/restart override the
-    fields that carry forward or reset.
-
-    Preconditions:
-        - ``request_payload`` is the serialized ``RunStrategyLabRequest`` for this run.
-
-    Postconditions:
-        - Returns a new dict with ``status == "running"``. The ``contiguous_cycles``
-          key is present iff ``contiguous_cycles`` is not ``None`` (the initial run
-          omits it; resume sets the offset; restart resets it to ``0``). Mutable
-          defaults (``errored_details``, ``completed_record_ids``) become fresh lists
-          when not supplied. Does not mutate its arguments.
-    """
-    state: Dict[str, Any] = {
-        "run_id": run_id,
-        "status": "running",
-        "started_at": started_at,
-        "total_cycles": total_cycles,
-        "completed_cycles": completed_cycles,
-        "skipped_cycles": skipped_cycles,
-        "errored_cycles": errored_cycles,
-        "errored_details": errored_details if errored_details is not None else [],
-        "tracker_merge_error_count": tracker_merge_error_count,
-        "current_cycle": None,
-        "completed_record_ids": (completed_record_ids if completed_record_ids is not None else []),
-        "error": None,
-        "request_payload": request_payload,
-        "batch_size": batch_size,
-        "batch_count": batch_count,
-        "completed_batches": completed_batches,
-        "current_batch": None,
-    }
-    if contiguous_cycles is not None:
-        state["contiguous_cycles"] = contiguous_cycles
-    return state
 
 
 def _dispatch_backtest_run(
@@ -2793,25 +2847,46 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
           corresponding activity's preconditions; ``key`` is a stable id for the
           logical operation.
     Postconditions:
-        - Returns the workflow's result dict. Raises ``HTTPException(503)`` when
-          Temporal is disabled/unavailable; on any other workflow failure,
-          raises the ``HTTPException`` :func:`_translate_advisory_failure` maps
-          it to (never an opaque unhandled exception).
+        - Returns the raw workflow result dict verbatim; this helper does not
+          validate the presence or shape of any expected key, so callers must
+          guard the result themselves (an ``isinstance``/key-presence/value-type
+          check) and raise ``HTTPException(502)`` for a malformed payload
+          before indexing into it. Raises ``HTTPException(503)`` when Temporal
+          is disabled/unavailable, when the Temporal client didn't become
+          ready in time (a bare ``RuntimeError`` from
+          ``shared.temporal._await_client``, mapped here to the same 503 as
+          the up-front check), or when the ``investment_team.temporal.
+          start_workflow`` module fails to import (a deployment/packaging
+          defect, not a downstream advisory-workflow failure, so it is kept
+          distinct from :func:`_translate_advisory_failure`'s 502 fallback).
+          On any other workflow failure, raises the ``HTTPException``
+          :func:`_translate_advisory_failure` maps it to (never an opaque
+          unhandled exception).
     """
     _require_temporal()
-    from investment_team.temporal.start_workflow import execute_advisory_workflow
-
     try:
+        from investment_team.temporal.start_workflow import execute_advisory_workflow
+
         return execute_advisory_workflow(op, payload, key=key)
     except HTTPException:
         raise
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Required advisory workflow module is unavailable.",
+        ) from exc
     except RuntimeError as exc:
-        # ``shared.temporal._await_client`` raises a bare RuntimeError when
-        # TEMPORAL_ADDRESS is set but the worker's client never became ready in
-        # time — the same "no running worker" condition ``_require_temporal``
-        # checks for up front, just discovered later. Map it to the same 503
-        # instead of letting it fall through to _translate_advisory_failure's
-        # generic 502.
+        # ``shared.temporal._await_client`` raises exactly
+        # RuntimeError("Temporal client not available; is the team's worker
+        # running?") when TEMPORAL_ADDRESS is set but the worker's client
+        # never became ready in time — the same "no running worker"
+        # condition ``_require_temporal`` checks for up front, just
+        # discovered later. Map only that specific condition to the same
+        # 503; any other RuntimeError raised by workflow/activity code is a
+        # distinct failure and belongs to _translate_advisory_failure like
+        # every other exception type, not this 503.
+        if "Temporal client not available" not in str(exc):
+            raise _translate_advisory_failure(exc) from exc
         raise HTTPException(
             status_code=503,
             detail="This endpoint requires a running Temporal worker (client did not become ready in time).",
@@ -2843,14 +2918,16 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
     Postconditions:
         - Returns (does not raise) an ``HTTPException``, found by walking ``exc``'s
           cause chain: the mapped 404/400 for an ``ApplicationError`` whose
-          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 500 (with the
+          ``type`` is a key in ``_ADVISORY_ERROR_TYPE_STATUS``; 502 (with the
           error's own message as detail) for an ``ApplicationError`` whose
           ``type`` is NOT a recognized key (``_ADVISORY_ERROR_TYPE_STATUS.get``'s
-          fallback); 409 for a ``WorkflowAlreadyStartedError`` (workflow-id
-          collision); or 502 when the cause chain contains neither (e.g. a bare
+          fallback — so an unmapped advisory failure type never surfaces as an
+          opaque unhandled 500); 409 for a ``WorkflowAlreadyStartedError``
+          (workflow-id collision); or 502 with a generic dispatch-failure
+          detail when the cause chain contains neither (e.g. a bare
           transport-level error) — the only case this function has no
-          error-specific detail to surface, unlike the 500 case above, which
-          always carries the underlying ``ApplicationError``'s message.
+          error-specific detail to surface, unlike the ``ApplicationError``
+          case above, which always carries the underlying error's own message.
     """
     from temporalio.exceptions import ApplicationError as _AppErr
     from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -2865,7 +2942,7 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
             break
         seen.add(id(cause))
         if isinstance(cause, _AppErr):
-            status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 500)
+            status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 502)
             return HTTPException(status_code=status, detail=cause.message)
         if isinstance(cause, WorkflowAlreadyStartedError):
             return HTTPException(
@@ -2986,7 +3063,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
 
         # Dispatch the run as a durable Temporal workflow so it survives a
         # worker/process restart and is visible in the Temporal UI.
-        _dispatch_strategy_lab_run(run_id, request)
+        _dispatch_strategy_lab_run(run_id, request, generation=initial_state["generation"])
     finally:
         run_lock.release()
 
@@ -3004,22 +3081,16 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
           (already-filtered, when ``winning`` is given) list as ``items``/
           ``count``, so ``winning_count + losing_count == count`` always
           holds -- a ``?winning=true`` request reports ``losing_count == 0``
-          rather than the unfiltered global losing count.
+          rather than the unfiltered global losing count. (The UI's
+          winning/losing tab chips call this endpoint unfiltered, so they
+          always see the full-set counts regardless.)
     """
     items = _snapshot_prior_records(reverse=True)
 
     if winning is not None:
         items = [r for r in items if r.is_winning == winning]
 
-    winning_count = sum(1 for r in items if r.is_winning)
-    losing_count = len(items) - winning_count
-
-    return StrategyLabResultsResponse(
-        items=items,
-        count=len(items),
-        winning_count=winning_count,
-        losing_count=losing_count,
-    )
+    return StrategyLabResultsResponse(items=items)
 
 
 # ---------------------------------------------------------------------------
@@ -3220,8 +3291,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status — read INSIDE
-          the transition lock below, not beforehand — is in
+        - ``run_id`` identifies a run whose status — read via ``_get_run_state``
+          (the in-memory ``active_runs`` entry when present, else a durable
+          fallback read; see its own docstring) INSIDE the transition lock
+          below, not beforehand — is in
           ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/
           agent_crash). Reading it (or the counters/payload derived from it)
           before acquiring the lock could observe a stale snapshot: another
@@ -3251,7 +3324,20 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
           progress — ``completed_record_ids``/``errored_cycles``/
           ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
-          — and persists the new state.
+          — and persists the new state. The durable write omits
+          ``generation`` (see ``_persist_run_state``'s ``exclude_fields``):
+          the value read above is a snapshot, and a concurrent restart on
+          another process/replica could mint a newer durable value in the
+          gap before this write lands, so this write must never be able to
+          regress the durable generation back down to that stale snapshot.
+        - Re-reads the durable generation once more immediately before
+          dispatch and, if it has since advanced past the earlier snapshot
+          (a concurrent restart on another process/replica minted a newer
+          one in the gap), dispatches with the newer value instead —
+          narrowing, not eliminating, the window in which this resume's
+          workflow could otherwise be dispatched carrying a generation that
+          is already stale, which would permanently fence out its own
+          activities.
         - Dispatches the durable Temporal workflow from the first
           not-yet-contiguously-completed cycle, so no already-persisted cycle
           is re-run (and thus never duplicated).
@@ -3260,11 +3346,28 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
+          Can also fire from the post-lock re-read if the run was deleted in
+          the window between the pre-lock existence check and this request
+          acquiring the transition lock (a concurrent delete winning that
+          race), not just when ``run_id`` never existed at all.
         - ``HTTPException`` 400: the run's status is not in
-          ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
-          dict.
+          ``RESUMABLE_STATUSES``; its ``request_payload`` is missing/not a
+          dict; or the stored ``request_payload`` fails
+          ``RunStrategyLabRequest`` validation (e.g. a corrupted or
+          schema-stale persisted payload).
         - ``HTTPException`` 409: another transition for this run_id is
-          already in flight (#4028), or another run is already ``"running"``.
+          already in flight, or another run is already ``"running"``.
+        - ``HTTPException`` 503: reading the current durable generation —
+          either the initial carry-forward read or the pre-dispatch
+          revalidation — failed. Covers both a job-service transport
+          failure (unreachable/timed out) AND ``_get_run_generation_strict``
+          raising ``ValueError`` for a malformed/corrupt persisted
+          ``generation`` value — either way, the generation can't be
+          reliably determined, so the request fails closed with the same
+          503 rather than distinguishing the two causes. The revalidation
+          failure additionally marks the run ``"failed"`` (state was
+          already written by this point, so leaving it ``"running"`` with
+          no workflow ever dispatched would wedge it).
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged).
@@ -3277,6 +3380,13 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # Preconditions for why reading it beforehand risks a stale-snapshot
         # duplicate dispatch.
         state = _get_run_state(run_id)
+        if state is None:
+            # The cheap pre-lock check above saw the run exist, but it was
+            # deleted before this request acquired the transition lock.
+            # Mirror the early check's exact 404 rather than falling through
+            # to `validate_job_for_action`'s generic "Job ... not found" text
+            # so both races produce the same response shape.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
             validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
         except JobNotFoundError as exc:
@@ -3292,9 +3402,33 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # contiguous_cycles tracks the highest unbroken sequence from index 0
         # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
         contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
-        request = RunStrategyLabRequest(**payload)
+        try:
+            request = RunStrategyLabRequest(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid stored request payload: {exc}"
+            ) from exc
         total_cycles = request.batch_size * request.batch_count
-        completed_batches = contiguous_cycles // request.batch_size
+        completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
+
+        # The generation carried forward must come from the DURABLE store, not
+        # `state` (which may be `_get_run_state`'s process-local `active_runs`
+        # snapshot): in a multi-process/multi-replica deployment, a restart
+        # handled by a different process already minted a newer generation
+        # there, and copying a stale locally-cached value into
+        # `_persist_run_state` below would regress the durable high-water
+        # mark, un-fencing everything that restart just fenced out.
+        try:
+            current_generation = _get_run_generation_strict(
+                run_id, client=_get_lab_run_job_client()
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to read the current generation for this resume; job service unavailable.",
+            ) from exc
+
+        _ensure_no_active_run()
 
         # Re-initialize in-memory state
         resumed_state = _build_run_state(
@@ -3312,6 +3446,11 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
             completed_record_ids=state.get("completed_record_ids", []),
             completed_batches=completed_batches,
+            # A resume continues the same incarnation rather than superseding
+            # one, so it carries the current (durable, authoritative)
+            # generation forward unchanged (unlike restart, which mints a new
+            # one below).
+            generation=current_generation,
         )
         # Check-and-write atomically under one `_lock` acquisition: an
         # isolated `_ensure_no_active_run()` call followed by a separate
@@ -3321,12 +3460,72 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         with _lock:
             _no_active_run_locked()
             _active_runs[run_id] = resumed_state
-        _persist_run_state(run_id, resumed_state)
+        # Exclude "generation" from this write: current_generation above is a
+        # snapshot from just before this point, and a concurrent restart on
+        # another process/replica could mint a newer durable value in the gap
+        # between that read and this write. update_job/create_job merge
+        # fields into the durable record rather than replacing it wholesale,
+        # so omitting the key here means this write can never regress the
+        # durable generation back down to a stale snapshot.
+        _persist_run_state(run_id, resumed_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+
+        # Revalidate the generation immediately before dispatch: `current_generation`
+        # above is a snapshot from before this request's own state write, and a
+        # concurrent restart on another process/replica could have minted (and
+        # already dispatched under) a newer generation in that gap. Dispatching
+        # this resume's workflow under the stale value would permanently fence
+        # out its own activities the moment it tried to persist anything -- the
+        # only live workflow for this run, wedged with no way to make progress.
+        # Re-reading here narrows that window to the residual gap between this
+        # read and the dispatch call itself; closing it fully would need
+        # cross-replica atomic coordination over both generation selection and
+        # workflow-id dispatch ownership, which is the same out-of-scope
+        # multi-process limitation already accepted for the per-run_id
+        # transition lock.
+        try:
+            dispatch_generation = _get_run_generation_strict(
+                run_id, client=_get_lab_run_job_client()
+            )
+        except Exception as exc:
+            _fail_strategy_lab_run(
+                run_id, f"Failed to revalidate generation before dispatch: {exc}"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to revalidate the current generation before resuming; job service unavailable.",
+            ) from exc
+        if dispatch_generation > resumed_state["generation"]:
+            # `resumed_state` is the same dict object installed at
+            # `_active_runs[run_id]` above, so mutating it in place keeps
+            # both in sync -- guard the mutation with `_lock` since a
+            # concurrent same-process reader (e.g. the run-status endpoint)
+            # may be iterating `_active_runs` at the same time.
+            with _lock:
+                resumed_state["generation"] = dispatch_generation
+        elif dispatch_generation < resumed_state["generation"]:
+            # The generation field is meant to be strictly monotonic (only
+            # ever advanced via an atomic job-service increment), so a
+            # LOWER value here can't represent a legitimate concurrent
+            # mint -- it indicates a corrupted or otherwise malformed
+            # durable record. Fail closed rather than dispatch under a
+            # value that violates the invariant fencing depends on.
+            _fail_strategy_lab_run(
+                run_id,
+                f"Durable generation regressed from {resumed_state['generation']} "
+                f"to {dispatch_generation} during pre-dispatch revalidation",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Detected a durable generation regression while revalidating "
+                    "before dispatch; job service state is inconsistent."
+                ),
+            )
 
         # The Temporal activity derives its resume offset from the persisted
         # contiguous-cycle count (set above), so a durable resume picks up where the
         # run left off.
-        _dispatch_strategy_lab_run(run_id, request)
+        _dispatch_strategy_lab_run(run_id, request, generation=resumed_state["generation"])
     finally:
         run_lock.release()
 
@@ -3347,15 +3546,16 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Restart a strategy lab run from the beginning.
 
     Preconditions:
-        - ``run_id`` identifies a run whose persisted status — read INSIDE
-          the transition lock below, not beforehand — is in
-          ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
+        - ``run_id`` identifies a run whose status — read via ``_get_run_state``
+          (the in-memory ``active_runs`` entry when present, else a durable
+          fallback read; see its own docstring) INSIDE the transition lock
+          below, not beforehand — is in ``STRATEGY_LAB_RESTARTABLE_STATUSES``
           (completed/failed/cancelled/interrupted/agent_crash/completed_with_errors).
           Reading it before acquiring the lock could observe another
           transition's transiently-written "running" reset and misreport a
           genuine in-flight-elsewhere race as a permanent 400 instead of a
           retryable 409 ("running" is deliberately excluded from
-          ``RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
+          ``STRATEGY_LAB_RESTARTABLE_STATUSES``). Only a cheap existence check (``run_id``
           resolves to *some* known run) runs before the lock, so a request
           for a nonexistent run_id never allocates a transition-lock entry.
         - The run's persisted ``request_payload`` is present and is a dict.
@@ -3380,14 +3580,36 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         - Rebuilds ``_active_runs[run_id]`` as a full reset — ``contiguous_cycles``
           is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
           ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
-          carried forward — and persists the new state.
+          carried forward — and persists the new state. A freshly minted
+          ``generation`` (atomically incremented in the job store) is set on
+          the in-memory state, fencing out any write a still-in-flight
+          activity from the just-terminated workflow attempts afterward. The
+          durable write omits ``generation`` — ``apply_and_get`` already
+          persisted it atomically, and re-asserting it here could regress an
+          even newer value a different restart on another process/replica
+          minted in the gap since (the same reasoning as the rollback's own
+          write below).
+        - Re-reads the durable generation once more immediately before
+          dispatch and, if it has since advanced past this restart's own
+          mint (a different restart on another process/replica minted a
+          newer one in the gap), dispatches with the newer value instead —
+          narrowing, not eliminating, the window in which this restart's
+          workflow could otherwise win the deterministic workflow-id race
+          while carrying a generation that is already stale, which would
+          permanently fence out its own activities.
         - Dispatches the durable Temporal workflow starting at cycle 0. If
           that dispatch still 409s (a residual collision — e.g. a second
           restart/resume racing in after the termination check above), the
-          reset is rolled back — both ``_active_runs[run_id]`` and the
-          persisted state are restored to their pre-restart snapshot — so
-          the run isn't left wedged showing ``"running"`` and blocking every
-          future run/resume/restart call.
+          reset is rolled back — ``_active_runs[run_id]`` and the persisted
+          state are restored to their pre-restart status/counters — so the
+          run isn't left wedged showing ``"running"`` and blocking every
+          future run/resume/restart call. ``generation`` is the one field
+          NOT restored to its pre-restart value: the durable write excludes
+          it entirely, and the in-memory snapshot instead re-reads whatever
+          the durable store currently holds — never this request's own
+          (possibly superseded, in a multi-process race) mint — so a
+          concurrently-dispatched newer transition's generation can never be
+          regressed by this rollback.
         - Returns the run's start response with the full total cycle count.
 
     Raises:
@@ -3403,29 +3625,62 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
           ``allow_already_started`` parameter; the optimistic reset is rolled
           back in this case, see Postconditions).
         - ``HTTPException`` 503: Temporal is disabled/unavailable
-          (``_require_temporal``), or the prior execution couldn't be
-          resolved because the worker client never became ready
-          (``RuntimeError``) or a Temporal RPC itself failed
-          (``temporalio.service.RPCError``) -- the only two failure modes
-          ``terminate_and_await_workflow_sync`` raises for a genuine
-          Temporal-side problem (besides ``TimeoutError``, mapped to 409
-          above). Any other exception (e.g. a programming error in this
-          block) is NOT caught here and propagates as an unhandled 500,
-          rather than being misreported as Temporal unavailability.
+          (``_require_temporal``); the prior execution couldn't be resolved
+          because the worker client never became ready (``RuntimeError``) or
+          a Temporal RPC itself failed (``temporalio.service.RPCError``) --
+          the only two failure modes ``terminate_and_await_workflow_sync``
+          raises for a genuine Temporal-side problem (besides
+          ``TimeoutError``, mapped to 409 above; any other exception, e.g. a
+          programming error in this block, is NOT caught here and propagates
+          as an unhandled 500 instead of being misreported as Temporal
+          unavailability); minting the new generation failed; persisting the
+          optimistic reset state failed; or the pre-dispatch revalidation
+          read of the generation failed (job service unavailable in any
+          case). "Minting failed" covers both ways ``apply_and_get`` can
+          fail: it raises on a transport error, or returns a falsy value
+          when the job no longer exists in the job service — the latter also
+          503s rather than some other status, since the prior workflow was
+          already confirmed terminated above and the run cannot safely be
+          left without a fencing generation. The persist-failure and
+          revalidation-failure cases both additionally mark the run
+          ``"failed"`` (state was already written in-memory by this point,
+          so leaving it ``"running"`` with no durably-persisted/dispatched
+          workflow would wedge it).
 
     Two concurrent restart/resume calls for the same run_id can no longer
     both pass the check-then-write window (#4028, closed by
     ``_require_run_transition_lock``, which reserves this run_id for the
     whole check→terminate→write→dispatch sequence below).
 
-    Known, accepted residual race (requires multiple unlikely events to
-    align; closing it is a real feature, not a quick patch — tracked as a
-    follow-up rather than fixed here):
-        - Confirming the old *workflow* terminated does not guarantee an
-          already in-flight, non-heartbeating *activity* has stopped —
-          Strategy Lab's activities aren't cooperatively cancellable, so one
-          can still commit a cycle record or paper trade after the new
-          cycle-0 workflow has started (tracked as #4029).
+    Generation fencing substantially narrows the race left by confirming the
+    old *workflow* terminated: that confirmation alone does not guarantee an
+    already in-flight, non-heartbeating *activity* has stopped — Strategy
+    Lab's activities aren't cooperatively cancellable — so without fencing
+    one could still commit a cycle record or persist progress after the new
+    cycle-0 workflow has started. The generation minted above is threaded
+    through the new workflow's persist/finalize activities (see
+    ``shared.fencing.check_fencing_token``), so a stale activity's write is
+    checked against it rather than always silently landing. For
+    ``persist_run_state_activity`` (a fast, synchronous write immediately
+    adjacent to its check) this closes the realistic window outright. For
+    ``finalize_cycle_record_activity`` (whose write happens after a
+    market-data fetch and paper-trading execution — a real amount of time)
+    the check happens both before and after that work, but the two checks
+    still can't make the underlying write atomic against the generation; see
+    ``strategy_lab.temporal.activities``'s module docstring for the full,
+    honest accounting.
+
+    Known, accepted residual limitation (tracked as a separate follow-up
+    rather than fixed here — closing it is a real feature, not a quick
+    patch): a stale in-flight activity from the terminated incarnation can
+    still run to completion — burning time and cost on an LLM call, a
+    backtest, or a paper trade — before its write is checked/rejected as
+    fenced. Cooperative cancellation (checking
+    ``activity.is_cancelled()``/heartbeating so a terminated workflow's
+    activities actually stop executing) would close this remaining gap, and
+    would also fully close ``finalize_cycle_record_activity``'s wider
+    check-to-write window by stopping its execution outright rather than
+    merely detecting staleness after the fact.
     """
     # Cheap existence-only check (no lock): avoids growing the transition-lock
     # registry for a run_id that was never created (or already purged),
@@ -3443,12 +3698,14 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # RESTARTABLE_STATUSES, so status is only trustworthy once no other
         # transition for this run_id can be concurrently rewriting it.
         state = _get_run_state(run_id)
-        # "completed_with_errors" is a terminal outcome of the same workflow as
-        # "completed" and must be restartable. Extend the shared set locally
-        # rather than leaking a lab-specific status into job_service_client.
-        _lab_restartable = RESTARTABLE_STATUSES | {"completed_with_errors"}
+        if state is None:
+            # A concurrent delete_strategy_lab_run completed in the window between
+            # the pre-lock existence check above and this re-read; validate_job_for_action
+            # below would also 404 via JobNotFoundError, but this mirrors the
+            # pre-lock check's message for a consistent 404 body.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
-            validate_job_for_action(state, run_id, _lab_restartable, "restarted")
+            validate_job_for_action(state, run_id, STRATEGY_LAB_RESTARTABLE_STATUSES, "restarted")
         except JobNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except JobStateError as exc:
@@ -3460,7 +3717,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
         _ensure_no_active_run()
 
-        request = RunStrategyLabRequest(**payload)
+        try:
+            request = RunStrategyLabRequest(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid stored request payload: {exc}"
+            ) from exc
         total_cycles = request.batch_size * request.batch_count
 
         # Resolve any prior execution BEFORE writing anything: a still-running
@@ -3495,11 +3757,129 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # above, or a programming error -- is NOT one of the documented
             # Temporal-side failure modes and must propagate as an unhandled
             # 500 instead of being misreported as "Temporal worker unavailable."
+            logger.exception(
+                "Failed to terminate prior strategy-lab workflow for run %s before restart", run_id
+            )
             raise HTTPException(
                 status_code=503,
                 detail=(
                     "Failed to resolve the prior strategy-lab execution before "
                     "restarting; Temporal worker unavailable."
+                ),
+            ) from exc
+
+        # Mint a new generation for this incarnation: the fresh cycle-0
+        # workflow started below carries it through every persist/finalize
+        # activity, so a stale write from the just-terminated workflow's
+        # still-in-flight activity (terminating the workflow doesn't stop an
+        # already-dispatched, non-heartbeating activity) is fenced instead of
+        # silently landing. Atomic increment-and-read-back mirrors
+        # software_engineering_team/job_store.py's claim_resume. The
+        # increment amount itself accounts for a legacy (pre-fencing) run's
+        # missing "generation" field -- see
+        # `_legacy_generation_bootstrap_increment`'s own docstring.
+        #
+        # get_job (below) and apply_and_get (further down) are deliberately
+        # two separate, non-atomic job-service calls -- not a bug. get_job's
+        # result ONLY decides which increment amount apply_and_get applies
+        # (+1 ordinary vs +2 legacy-bootstrap); it never supplies a value
+        # apply_and_get treats as authoritative. apply_and_get's own
+        # increment-and-read-back is what's atomic, and it always increments
+        # from whatever the durable value actually is at the moment it runs,
+        # regardless of what get_job saw. So a race in this gap (another
+        # restart's apply_and_get already advanced the generation, or the
+        # job was deleted) can only affect which increment amount THIS call
+        # applies -- never which direction the generation moves (always up)
+        # or whether the result is still a valid, monotonically-newer
+        # fencing token. A deleted-job race is caught by apply_and_get's own
+        # falsy-result handling below.
+        #
+        # A get_job *transport* failure is different: without seeing the
+        # durable representation we cannot choose a safe increment (a blind
+        # +2 would zero a durable numeric-string token like "5" and regress
+        # fencing). Fail closed with 503 rather than minting.
+        client = _get_lab_run_job_client()
+        try:
+            durable_job = client.get_job(run_id)
+        except Exception as exc:
+            logger.warning(
+                "get_job failed during restart's legacy-generation check for %s: %s", run_id, exc
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; could not "
+                    "read the durable generation to choose a safe increment."
+                ),
+            ) from exc
+        # get_job's contract is Optional[Dict[str, Any]] -- a JSONB "data"
+        # column merged into the top-level dict server-side (job_service.db's
+        # _row_to_dict), never returned as a separate nested key. `or {}`
+        # normalizes only the "no job" case; no further shape-guessing needed.
+        durable_data = durable_job or {}
+        try:
+            generation_increment = _legacy_generation_bootstrap_increment(durable_data)
+        except UnsafeDurableGenerationError as exc:
+            # A parseable-but-non-native generation (e.g. "5") cannot be
+            # advanced via increment without job-service zeroing it first and
+            # regressing the fencing token. Fail closed rather than mint a
+            # weaker generation that in-flight activities presenting the
+            # conceptual value would still pass.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; durable "
+                    "generation is not a native integer and cannot be advanced safely."
+                ),
+            ) from exc
+        try:
+            updated_generation_record = client.apply_and_get(
+                run_id, increment={"generation": generation_increment}
+            )
+        except Exception as exc:
+            # apply_and_get raises on a transport failure (connection refused,
+            # timeout, ...) rather than returning None — only a falsy return
+            # (job not found) is the "expected" failure mode below, so a raised
+            # exception needs its own translation to the same documented 503.
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to mint a new generation for this restart; job service transport error.",
+            ) from exc
+        if not updated_generation_record:
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to mint a new generation for this restart; run record not found in job service.",
+            )
+        try:
+            # No default: a missing/non-int "generation" in the mint
+            # response is a malformed reply from the job service, not a
+            # legitimate absent-field case (apply_and_get's increment
+            # target always comes back populated on success) -- treat it
+            # the same as any other mint failure rather than silently
+            # assuming a value that could itself be stale. Checked via
+            # isinstance rather than a bare int(...) coercion: the latter
+            # would silently truncate a float or accept a numeric string
+            # instead of rejecting it as the malformed reply it is, and
+            # would accept a bool (an int subclass in Python) as a
+            # seemingly valid generation.
+            raw_generation = updated_generation_record["generation"]
+            if not isinstance(raw_generation, int) or isinstance(raw_generation, bool):
+                raise ValueError(f"non-integer generation {raw_generation!r}")
+            new_generation = raw_generation
+            if new_generation <= 0:
+                # The increment applied is always positive (see
+                # _legacy_generation_bootstrap_increment), so a non-positive
+                # result means the durable record itself was already
+                # corrupt -- treat it the same as a malformed reply rather
+                # than dispatching with a value that could match a stale
+                # activity's default/legacy token and defeat fencing.
+                raise ValueError(f"non-positive generation {new_generation!r}")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Failed to mint a new generation for this restart; job service "
+                    "returned an invalid generation value."
                 ),
             ) from exc
 
@@ -3514,6 +3894,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             # restart re-runs from cycle 0 instead of resuming a prior run's
             # contiguous-cycle count persisted on this run_id.
             contiguous_cycles=0,
+            generation=new_generation,
         )
         # Re-run the no-active-run check atomically with the write: the
         # early call above (before the Temporal termination RPC) is only a
@@ -3525,25 +3906,145 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         with _lock:
             _no_active_run_locked()
             _active_runs[run_id] = restarted_state
-        _persist_run_state(run_id, restarted_state)
+        # Exclude "generation" from this write: `apply_and_get` above already
+        # durably persisted it atomically, so re-asserting it here is
+        # redundant at best -- and actively harmful in a multi-process/
+        # multi-replica deployment, where a DIFFERENT restart on another
+        # process/replica could mint (and already dispatch under) an even
+        # newer generation in the gap between this request's own mint and
+        # this write. Writing this request's now-stale minted value here
+        # would regress the durable high-water mark and un-fence that
+        # legitimately newer, already-running incarnation -- the exact
+        # regression the rollback path below already guards against for its
+        # own write; this is the same guard for the non-collision path.
+        try:
+            _persist_run_state(run_id, restarted_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
+        except Exception as exc:
+            # _persist_run_state is documented to propagate job-service
+            # failures uncaught rather than swallow them -- this call site
+            # must translate that into the same documented 503 every other
+            # job-service failure in this function produces, not let it
+            # escape as a raw 500. _fail_strategy_lab_run is itself
+            # best-effort/never-raises, so it's safe to call even though the
+            # durable write we're reacting to just failed.
+            _fail_strategy_lab_run(run_id, f"Failed to persist restarted run state: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to persist restarted run state; job service unavailable.",
+            ) from exc
+
+        # Revalidate the generation immediately before dispatch: `new_generation`
+        # above is a snapshot from this restart's own mint, and a DIFFERENT
+        # restart on another process/replica could have minted (and already
+        # dispatched under) an even newer one in the gap since. If THIS
+        # request's dispatch then wins the deterministic workflow-id race
+        # (the other replica's collides instead), dispatching under the
+        # stale value here would permanently fence out the only live
+        # workflow's own activities the moment they tried to persist
+        # anything. Re-reading here narrows that window to the residual gap
+        # between this read and the dispatch call itself -- the same
+        # narrowing already applied to resume's dispatch, and the same
+        # out-of-scope multi-process limitation acknowledged there.
+        try:
+            dispatch_generation = _get_run_generation_strict(
+                run_id, client=_get_lab_run_job_client()
+            )
+        except Exception as exc:
+            _fail_strategy_lab_run(
+                run_id, f"Failed to revalidate generation before dispatch: {exc}"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to revalidate the current generation before restarting; job service unavailable.",
+            ) from exc
+        if dispatch_generation > restarted_state["generation"]:
+            # `restarted_state` is the same dict object installed at
+            # `_active_runs[run_id]` above, so mutating it in place keeps
+            # both in sync -- guard the mutation with `_lock` since a
+            # concurrent same-process reader (e.g. the run-status endpoint)
+            # may be iterating `_active_runs` at the same time.
+            with _lock:
+                restarted_state["generation"] = dispatch_generation
+        elif dispatch_generation < restarted_state["generation"]:
+            # Same invariant-violation guard as resume's identical check:
+            # generation only ever advances via an atomic increment, so a
+            # lower value here means the durable record is corrupted or
+            # otherwise inconsistent -- fail closed instead of dispatching
+            # under it.
+            _fail_strategy_lab_run(
+                run_id,
+                f"Durable generation regressed from {restarted_state['generation']} "
+                f"to {dispatch_generation} during pre-dispatch revalidation",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Detected a durable generation regression while revalidating "
+                    "before dispatch; job service state is inconsistent."
+                ),
+            )
 
         # Restart from scratch through Temporal (offset 0, per the reset
         # persisted state above). allow_already_started=False: unlike resume, a
         # collision here means an old, un-reset execution is still running, not
         # that the intended restart is already in flight.
         try:
-            _dispatch_strategy_lab_run(run_id, request, allow_already_started=False)
+            _dispatch_strategy_lab_run(
+                run_id,
+                request,
+                generation=restarted_state["generation"],
+                allow_already_started=False,
+            )
         except HTTPException as exc:
             if exc.status_code == 409:
                 # The reset above never actually took effect (an old execution
                 # is still running under this run_id) — restore the pre-restart
-                # snapshot so _ensure_no_active_run() doesn't wedge on a phantom
-                # "running" entry, blocking every future run/resume/restart call
-                # until the stale execution happens to overwrite it on its own.
-                with _lock:
-                    _active_runs[run_id] = state
+                # status/counters so _ensure_no_active_run() doesn't wedge on a
+                # phantom "running" entry, blocking every future run/resume/
+                # restart call until the stale execution happens to overwrite it
+                # on its own. The freshly minted generation is deliberately NOT
+                # rolled back with the rest of the snapshot: the prior workflow
+                # was already confirmed terminated above, so its activities must
+                # stay fenced out regardless of whether this restart's own
+                # dispatch succeeded — reverting to the pre-restart generation
+                # would let a still-in-flight activity from that terminated
+                # workflow pass fencing again, reopening the exact race
+                # generation fencing exists to close.
+                #
+                # But this restart's OWN mint (new_generation) is only correct
+                # to durably re-assert when it's still the current one. In a
+                # multi-process/multi-replica deployment (the per-run_id
+                # transition lock is process-local, see #4028's scope note),
+                # a DIFFERENT restart on another process could have raced this
+                # one, minted an even newer generation, and already dispatched
+                # successfully — that's a real, legitimate active run, not a
+                # stale leftover; overwriting its generation back down to this
+                # request's stale mint would un-fence it. Re-read the current
+                # durable value for the in-memory snapshot (falls back to this
+                # request's own mint only if even that read fails), and
+                # exclude "generation" from the durable write entirely so it
+                # can never be regressed by this rollback either way.
                 try:
-                    _persist_run_state(run_id, state)
+                    current_generation = _get_run_generation_strict(
+                        run_id, client=_get_lab_run_job_client()
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to re-read current generation during restart rollback "
+                        "for run %s; falling back to minted generation %s: %s",
+                        run_id,
+                        new_generation,
+                        exc,
+                    )
+                    current_generation = new_generation
+                rolled_back_state = dict(state)
+                rolled_back_state["generation"] = current_generation
+                with _lock:
+                    _active_runs[run_id] = rolled_back_state
+                try:
+                    _persist_run_state(
+                        run_id, rolled_back_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS
+                    )
                 except Exception:
                     # Best-effort rollback persist: a failure here must not
                     # replace the more actionable 409 below with an unrelated
@@ -3553,6 +4054,15 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
                         run_id,
                         exc_info=True,
                     )
+                # Known, accepted residual limitation (matches #4028's own
+                # documented multi-process scope boundary — not new here):
+                # this rollback can still overwrite a concurrently-dispatched
+                # newer transition's status/counters with this request's
+                # stale pre-restart snapshot in that same multi-process race.
+                # Closing that fully would need real cross-process
+                # coordination (e.g. an optimistic-concurrency/conditional
+                # update on the whole record), out of scope for generation
+                # fencing specifically.
             raise
     finally:
         run_lock.release()
@@ -3848,24 +4358,18 @@ class ClearStrategyLabStorageResponse(BaseModel):
 
 
 class DeleteStrategyLabRecordResponse(BaseModel):
+    """Returned by ``DELETE /strategy-lab/records/{lab_record_id}``.
+
+    ``deleted_strategy_id``/``deleted_backtest_id`` are ``None`` unless the
+    corresponding linked entity actually existed (and was deleted) — not a
+    placeholder for "unknown." ``deleted_paper_trading_sessions`` is a count
+    of linked paper-trading sessions removed, not an id.
+    """
+
     lab_record_id: str
     deleted_strategy_id: Optional[str] = None
     deleted_backtest_id: Optional[str] = None
     deleted_paper_trading_sessions: int = 0
-
-
-# Bounded thread-pool ceiling for the job-service fan-out helpers below. These
-# issue blocking sync HTTP calls, so threads (not asyncio) are the right tool;
-# the cap keeps a large server-side job list from spawning unbounded threads.
-# NB: _purge_strategy_lab_job_storage runs the four teams on an outer pool of 4,
-# so a full purge peaks at 4 x _PURGE_MAX_WORKERS = 64 transient threads against
-# the job service — keep both widths in mind when tuning either.
-
-# Overall wall-clock ceiling for a full purge fan-out. Each underlying HTTP call
-# is already bounded by the job-service client's per-request timeout + finite
-# retries, but a pathological straggler must never wedge the endpoint, so the
-# collection below stops waiting past this deadline and abandons any unfinished
-# unit (counting it as 0 deleted) rather than blocking a server thread.
 
 
 @app.delete(
@@ -4136,12 +4640,19 @@ def _run_paper_trading_background(
           signal also failed to reach.
 
     Raises:
-        - None. All failures, including import errors for the two lazily-imported
-          dependencies, are caught and logged; the session is marked FAILED instead.
-          This includes a failure to re-parse the persisted session record while
-          handling a crash: that secondary failure is itself caught and logged,
-          so an unparseable record is left as-is (logged, not updated) rather
-          than letting the parse error escape in place of the original crash.
+        - None, for ``Exception`` and its subclasses: import errors for the two
+          lazily-imported dependencies, provider/network failures, and this
+          function's own postcondition guards are all caught and logged; the
+          session is marked FAILED instead. This includes a failure to re-parse
+          the persisted session record while handling a crash: that secondary
+          failure is itself caught and logged, so an unparseable record is left
+          as-is (logged, not updated) rather than letting the parse error escape
+          in place of the original crash.
+        - ``KeyboardInterrupt`` / ``SystemExit`` / ``GeneratorExit`` (``BaseException``
+          but not ``Exception``) are deliberately NOT caught here and propagate to
+          the caller — silently converting a worker-thread interrupt or interpreter
+          shutdown signal into a FAILED session would mask it instead of letting it
+          terminate the worker.
     """
     try:
         # Validate the documented precondition — a missing, unparseable, or
@@ -4196,23 +4707,9 @@ def _run_paper_trading_background(
         )
 
         if not market_data:
-            with _lock:
-                if _paper_trading_session_already_terminal(session_id):
-                    logger.warning(
-                        "Paper trade %s: session already terminal when the "
-                        "empty-market-data write was about to run; leaving it "
-                        "untouched (a concurrent writer already finalized it).",
-                        session_id,
-                    )
-                    return
-                raw = _paper_trading_sessions.get(session_id)
-                if raw is not None:
-                    session = PaperTradingSession.parse_persisted(raw)
-                    session.status = PaperTradingStatus.FAILED
-                    session.error = "Failed to fetch market data from external sources."
-                    session.divergence_analysis = session.error
-                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                    _paper_trading_sessions[session_id] = session
+            _fail_paper_trading_session(
+                session_id, "Failed to fetch market data from external sources."
+            )
             return
 
         agent = PaperTradingAgent()
@@ -4263,7 +4760,18 @@ def _run_paper_trading_background(
                     result_session.verdict,
                     len(result_session.trades),
                 )
-    except Exception as exc:
+    except BaseException as exc:
+        # Deliberately narrower than a bare `except BaseException`: KeyboardInterrupt /
+        # SystemExit / GeneratorExit are BaseException but not Exception and must
+        # propagate rather than being converted into a FAILED session — same
+        # distinction shared.concurrency.parallel_map draws for worker exceptions.
+        # Everything else (import failures, provider/network errors, programming
+        # bugs) is still folded into a FAILED session below: nothing downstream
+        # (run_paper_trading_activity) marks this session terminal if this worker
+        # raises, so surfacing a non-interrupt exception here would leave the
+        # session stuck RUNNING forever instead of failing cleanly.
+        if not isinstance(exc, Exception):
+            raise
         logger.exception("Paper trade %s: background worker crashed", session_id)
         # Nested try/except: parse_persisted() below can itself raise (e.g. a
         # corrupt persisted record) — that secondary exception is not caught by
@@ -4544,11 +5052,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
 def _live_paper_enabled() -> bool:
     """Return True when the live paper-trading path is opted in via env var."""
-    return os.environ.get("INVESTMENT_LIVE_PAPER_ENABLED", "false").lower() in {
-        "true",
-        "1",
-        "yes",
-    }
+    return env_bool("INVESTMENT_LIVE_PAPER_ENABLED", default=False)
 
 
 # Per-session in-process StopController registry used by
@@ -4605,6 +5109,40 @@ def _paper_trading_session_already_terminal(session_id: str) -> bool:
     return session.status not in _ACTIVE_PT_STATES
 
 
+def _apply_paper_trading_failure(
+    session: PaperTradingSession,
+    error: str,
+    *,
+    completed_at: Optional[str] = None,
+    terminated_reason: Optional[str] = None,
+    set_legacy_divergence_analysis: bool = False,
+) -> None:
+    """Mutate ``session`` in place to record a terminal failure.
+
+    Shared by ``_fail_paper_trading_session`` (single-session, self-locking) and
+    ``_recover_orphaned_paper_trading_sessions`` (whole-batch, caller-locked) so
+    the terminal-write fields live in one place.
+
+    Preconditions:
+        - Caller holds ``_lock`` and has already decided ``session`` should be
+          failed (e.g. confirmed it isn't already COMPLETED/FAILED).
+    Postconditions:
+        - session.status == FAILED and session.error == error.
+        - session.completed_at is set to ``completed_at`` if given, else the
+          current UTC time.
+        - If ``terminated_reason`` is not None, session.terminated_reason is set.
+        - If ``set_legacy_divergence_analysis``, session.divergence_analysis is
+          mirrored from session.error.
+    """
+    session.status = PaperTradingStatus.FAILED
+    session.error = error
+    session.completed_at = completed_at or datetime.now(tz=timezone.utc).isoformat()
+    if terminated_reason is not None:
+        session.terminated_reason = terminated_reason
+    if set_legacy_divergence_analysis:
+        session.divergence_analysis = session.error
+
+
 def _fail_paper_trading_session(session_id: str, error: str) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
@@ -4636,9 +5174,7 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             # deciding to mark it failed).
             return
         try:
-            session.status = PaperTradingStatus.FAILED
-            session.error = error
-            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            _apply_paper_trading_failure(session, error)
             _paper_trading_sessions[session_id] = session
         except Exception:
             # The mutations above and the dict write (which round-trips
@@ -4686,19 +5222,32 @@ def _default_slippage_bps() -> float:
     )
 
 
-def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
+def _resolve_fee_overrides(
+    request: "RunPaperTradingRequest", asset_class: Optional[str] = None
+) -> tuple[float, float]:
     """Return ``(transaction_cost_bps, slippage_bps)`` for the live config.
 
     Uses explicit ``None`` checks instead of ``or`` so a caller asking for
     zero-fee / zero-slippage experiments isn't silently bumped to the
     defaults — ``0.0`` is falsy but semantically meaningful here.
+
+    When ``asset_class`` is given, an omitted override falls back to
+    ``get_fee_defaults(asset_class)`` so non-stock strategies (crypto,
+    forex, ...) get correct per-asset-class fees instead of the flat
+    stock-tier default. Callers that don't have an asset class in scope
+    keep the operator-tunable env-var default.
     """
+    fee_defaults = get_fee_defaults(asset_class) if asset_class is not None else None
     tx = (
         request.transaction_cost_bps
         if request.transaction_cost_bps is not None
-        else _default_tx_cost_bps()
+        else (fee_defaults["transaction_cost_bps"] if fee_defaults else _default_tx_cost_bps())
     )
-    slip = request.slippage_bps if request.slippage_bps is not None else _default_slippage_bps()
+    slip = (
+        request.slippage_bps
+        if request.slippage_bps is not None
+        else (fee_defaults["slippage_bps"] if fee_defaults else _default_slippage_bps())
+    )
     return tx, slip
 
 
@@ -4753,7 +5302,7 @@ def _run_live_paper_trading_background(
 
         strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
 
-        tx_cost, slip = _resolve_fee_overrides(request)
+        tx_cost, slip = _resolve_fee_overrides(request, asset_class=strategy.asset_class)
         # Captured once: two separate datetime.now() calls could straddle
         # midnight and produce a start/end date that spans two days for a
         # config meant to represent a single live trading day.
@@ -4786,6 +5335,11 @@ def _run_live_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is None:
+                logger.warning(
+                    "Live paper trade %s: session removed before results could "
+                    "be persisted; discarding run result.",
+                    session_id,
+                )
                 return
             session = PaperTradingSession.parse_persisted(raw)
             if session.status not in _ACTIVE_PT_STATES:
@@ -5231,16 +5785,18 @@ def _recover_orphaned_paper_trading_sessions() -> None:
                     continue
                 if session.status not in _ACTIVE_PT_STATES:
                     continue
-                session.status = PaperTradingStatus.FAILED
-                session.completed_at = now_iso
-                session.terminated_reason = "process_exit"
-                session.error = (
-                    "Paper trading did not complete — the worker process exited before "
-                    "finalizing the session. Re-run the paper trade from the Strategy Lab."
-                )
-                # Preserve the legacy free-form field too so older clients still read a message.
-                session.divergence_analysis = session.error
                 try:
+                    _apply_paper_trading_failure(
+                        session,
+                        (
+                            "Paper trading did not complete — the worker process exited "
+                            "before finalizing the session. Re-run the paper trade from "
+                            "the Strategy Lab."
+                        ),
+                        completed_at=now_iso,
+                        terminated_reason="process_exit",
+                        set_legacy_divergence_analysis=True,
+                    )
                     _paper_trading_sessions[session.session_id] = session
                     recovered += 1
                 except Exception:
@@ -5315,8 +5871,11 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
           created ``AdvisorSession``.
 
     Raises:
-        - ``HTTPException(500)`` if the advisory workflow returns a result
-          missing ``advisor_message`` or ``session``.
+        - ``HTTPException(502)`` if the advisory workflow returns a non-dict
+          result, a dict missing ``advisor_message`` or ``session``, or whose
+          ``advisor_message``/``session`` values are not a str/dict respectively.
+        - ``HTTPException(500)`` if ``session`` fails ``AdvisorSession``
+          validation.
     """
     session_id = f"adv-{uuid.uuid4().hex}"
     result = _execute_advisory(
@@ -5324,15 +5883,26 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
         {"session_id": session_id, "user_id": request.user_id},
         key=session_id,
     )
-    if "advisor_message" not in result or "session" not in result:
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("advisor_message"), str)
+        or not isinstance(result.get("session"), dict)
+    ):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor execution returned unexpected response structure",
         )
+    try:
+        session = AdvisorSession.model_validate(result["session"])
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Advisor execution returned unexpected response structure: {exc}",
+        ) from exc
     return StartAdvisorSessionResponse(
         session_id=session_id,
         advisor_message=result["advisor_message"],
-        session=AdvisorSession.model_validate(result["session"]),
+        session=session,
     )
 
 
@@ -5350,10 +5920,14 @@ def send_advisor_message(
           current topic, and any still-missing required fields.
 
     Raises:
-        - ``HTTPException(404)`` if ``session_id`` does not match a known session.
-        - ``HTTPException(500)`` if the advisory workflow returns a result
+        - ``HTTPException(404)`` if ``session_id`` does not match a known session
+          — either when this route is first called, or if the session is
+          concurrently removed between the initial check and workflow dispatch.
+        - ``HTTPException(502)`` if the advisory workflow returns a result
           missing ``advisor_message``, ``session_status``, ``current_topic``,
-          or ``missing_fields``.
+          or ``missing_fields``, or whose ``advisor_message``/
+          ``session_status``/``current_topic`` values are not a str or whose
+          ``missing_fields`` value is not a list.
     """
     with _lock:
         session = _advisor_sessions.get(session_id)
@@ -5361,15 +5935,33 @@ def send_advisor_message(
     if not session:
         raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
 
+    # Re-check immediately before dispatch: the lock above is released for
+    # this synchronous, potentially slow _execute_advisory call (holding a
+    # single process-wide lock across that I/O would serialize every route
+    # in this module), which leaves a window for another request to remove
+    # the session between the check above and here. Narrow it as tightly as
+    # possible rather than dispatching against a session that may already be
+    # gone.
+    with _lock:
+        if session_id not in _advisor_sessions:
+            raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
+
     result = _execute_advisory(
         "advisor_message",
         {"session_id": session_id, "message": request.message},
         key=session_id,
     )
     required_keys = ("advisor_message", "session_status", "current_topic", "missing_fields")
-    if any(key not in result for key in required_keys):
+    if (
+        not isinstance(result, dict)
+        or any(key not in result for key in required_keys)
+        or not isinstance(result["advisor_message"], str)
+        or not isinstance(result["session_status"], str)
+        or not isinstance(result["current_topic"], str)
+        or not isinstance(result["missing_fields"], list)
+    ):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor execution returned unexpected response structure",
         )
     return SendAdvisorMessageResponse(
@@ -5383,12 +5975,12 @@ def send_advisor_message(
 @app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
 def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
     """Get the current state of an advisor session.
-    Preconditions:
-        - `session_id` must identify a previously started advisor session.
 
     Postconditions:
-        - Returns the session if found.
-        - Otherwise, returns `found=False` with `session=None`.
+        - Returns the session with `found=True` if `session_id` matches a
+          known session.
+        - Returns `found=False` with `session=None` if no session matches
+          (a missing session is not an error).
 
     Raises:
         - None (intentionally avoids standard 404 errors for missing sessions).
@@ -5418,8 +6010,10 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
     Raises:
         - ``HTTPException(404)`` if ``session_id`` does not match a known session.
         - ``HTTPException(400)`` if required fields are still missing.
-        - ``HTTPException(500)`` if the advisory workflow returns a result
-          missing ``user_id`` or ``ips``.
+        - ``HTTPException(502)`` if the advisory workflow returns a result
+          missing ``user_id`` or ``ips``, or whose ``user_id``/``ips`` values
+          are not a str/dict respectively.
+        - ``HTTPException(500)`` if ``ips`` fails ``IPS`` validation.
     """
     with _lock:
         raw_session = _advisor_sessions.get(session_id)
@@ -5440,11 +6034,20 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         )
 
     result = _execute_advisory("advisor_complete", {"session_id": session_id}, key=session_id)
-    if "user_id" not in result or "ips" not in result:
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("user_id"), str)
+        or not isinstance(result.get("ips"), dict)
+    ):
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Advisor completion returned unexpected response structure",
         )
-    return CompleteAdvisorSessionResponse(
-        user_id=result["user_id"], ips=IPS.model_validate(result["ips"])
-    )
+    try:
+        ips = IPS.model_validate(result["ips"])
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Advisor completion returned unexpected response structure: {exc}",
+        ) from exc
+    return CompleteAdvisorSessionResponse(user_id=result["user_id"], ips=ips)

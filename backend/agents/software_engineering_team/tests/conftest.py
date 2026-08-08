@@ -146,7 +146,7 @@ def patched_job_store(monkeypatch, fake_job_client):  # noqa: F811 (pytest fixtu
 
 
 @pytest.fixture(autouse=True)
-def _reset_code_review_chunk_cache():
+def _reset_code_review_chunk_cache(monkeypatch: pytest.MonkeyPatch):
     """Clear the process-global map-phase and compaction caches around every test.
 
     Both caches persist across calls by design (that is what lets the
@@ -159,7 +159,12 @@ def _reset_code_review_chunk_cache():
     reset, one test's cached outcome would be served to the next test whose
     content and context hash the same. Clearing empty caches is trivially cheap,
     so this runs for every SE test unconditionally.
+
+    Also clears ``KHALA_BUILD_ID`` / ``KHALA_CACHE_BUILD_ID`` so a polluted shell
+    cannot desync tests that seed via namespace helpers from production paths.
     """
+    monkeypatch.delenv("KHALA_BUILD_ID", raising=False)
+    monkeypatch.delenv("KHALA_CACHE_BUILD_ID", raising=False)
     _clear_coordinator_caches()
     clear_compaction_cache()
     yield

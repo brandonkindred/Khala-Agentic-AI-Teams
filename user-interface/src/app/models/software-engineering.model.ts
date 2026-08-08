@@ -262,9 +262,14 @@ export interface AnswerSubmission {
   other_text: string | null;
 }
 
-/** Request for POST /run-team/{job_id}/answers. */
+/** Request for POST /run-team/{job_id}/answers (and sibling HITL answer endpoints). */
 export interface SubmitAnswersRequest {
   answers: AnswerSubmission[];
+  /**
+   * Echo of a Temporal-native pause's `resume_token` from status/pause notification.
+   * Required by coding-team when the job carries a resume_token; ignored elsewhere.
+   */
+  resume_token?: string | null;
 }
 
 // ---------------------------------------------------------------------------

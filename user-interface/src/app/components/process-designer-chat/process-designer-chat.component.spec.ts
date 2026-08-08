@@ -288,6 +288,57 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.rosterValidation()).toBeNull();
   });
 
+  // ── ngOnDestroy: in-flight subscriptions must not touch a destroyed component ─
+
+  it('ngOnDestroy stops a late createConversation response from updating a destroyed component', () => {
+    const pending = new Subject<ConversationStateResponse>();
+    api.createConversation.mockReturnValueOnce(pending.asObservable());
+
+    component.newConversation(); // subscribes to `pending`, still in flight
+    const conversationIdBefore = (component as unknown as { conversationId: string | null })
+      .conversationId;
+    const messagesBefore = component.messages();
+
+    fixture.destroy(); // runs real Angular teardown, invoking ngOnDestroy()
+
+    // The response arrives after teardown; without the takeUntil guard this would
+    // still run applyState() against the destroyed component.
+    expect(() =>
+      pending.next({
+        conversation_id: 'late',
+        messages: [{ role: 'assistant', content: 'late reply', timestamp: '2024-01-01T00:00:00Z' }],
+        current_process: null,
+        suggested_questions: [],
+      }),
+    ).not.toThrow();
+
+    expect((component as unknown as { conversationId: string | null }).conversationId).toBe(
+      conversationIdBefore,
+    );
+    expect(component.messages()).toEqual(messagesBefore);
+  });
+
+  it('ngOnDestroy stops a late nested validateRoster response from updating a destroyed component', () => {
+    const pendingValidation = new Subject<RosterValidationResult>();
+    api.validateRoster.mockReturnValueOnce(pendingValidation.asObservable());
+    const seen: (RosterValidationResult | null)[] = [];
+    component.rosterChanged.subscribe((v) => seen.push(v));
+
+    // listTeamAgents (of) resolves synchronously, subscribing the nested
+    // validateRoster call, which is left pending on `pendingValidation`.
+    component.refreshRoster();
+    const validationBefore = component.rosterValidation();
+    const loadingBefore = component.rosterLoading();
+
+    fixture.destroy();
+
+    expect(() => pendingValidation.next(validation({ summary: 'late' }))).not.toThrow();
+
+    expect(component.rosterValidation()).toBe(validationBefore);
+    expect(component.rosterLoading()).toBe(loadingBefore);
+    expect(seen).toEqual([]); // rosterChanged never emitted — the late result was dropped
+  });
+
   // ── Add from registry ────────────────────────────────────────────────────
 
   it('onAddFromRegistryDialogClosed adds the agent and refreshes the roster', () => {
@@ -461,6 +512,70 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.editingAgent()).toBe('Writer');
   });
 
+  // ── sendMessage: optimistic append must reconcile with backend atomicity ────
+  //
+  // The backend (agentic_team_provisioning's send_message) persists a turn's
+  // messages only after the LLM call and roster/process save succeed; on
+  // failure nothing is saved. The UI optimistically appends the user's message
+  // before the API call, so a failed send must roll that optimistic message
+  // back — otherwise it stays visible until a refresh silently drops it.
+
+  it('appends the user message and the assistant reply on a successful send', () => {
+    api.sendMessage.mockReturnValueOnce(
+      of({
+        conversation_id: 'c-1',
+        messages: [
+          { role: 'user', content: 'hi', timestamp: '2024-01-01T00:00:00Z' },
+          { role: 'assistant', content: 'hello', timestamp: '2024-01-01T00:00:01Z' },
+        ],
+        current_process: null,
+        suggested_questions: [],
+      }),
+    );
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit();
+
+    expect(api.sendMessage).toHaveBeenCalledWith('c-1', 'hi');
+    expect(component.messages().map((m) => m.content)).toEqual(['hi', 'hello']);
+    expect(component.error()).toBeNull();
+  });
+
+  it('rolls back the optimistic user message when the send fails', () => {
+    const send$ = new Subject<unknown>();
+    api.sendMessage.mockReturnValueOnce(send$.asObservable() as never);
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit();
+
+    // Before the API responds, the optimistic message must already be visible —
+    // otherwise the later empty-array assertion can't distinguish a real rollback
+    // from an implementation that never appended anything in the first place.
+    expect(component.messages().map((m) => m.content)).toEqual(['hi']);
+
+    send$.error({
+      error: { detail: 'Failed to update the team roster or process; please try again.' },
+    });
+
+    expect(component.messages()).toHaveLength(0);
+    expect(component.error()).toBe(
+      'Failed to update the team roster or process; please try again.',
+    );
+  });
+
+  it('ignores a suggested-question click while a send is already in flight', () => {
+    const send$ = new Subject<unknown>();
+    api.sendMessage.mockReturnValueOnce(send$.asObservable() as never);
+
+    component.form.setValue({ message: 'hi' });
+    component.onSubmit(); // first send now in flight
+
+    component.onSuggestedQuestion('another question'); // must be ignored
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(component.messages().map((m) => m.content)).toEqual(['hi']);
+  });
+
   // ── createNewProcess: create + link to the active conversation ─────────────
 
   it('createNewProcess creates the process and links it to the active conversation', () => {
@@ -563,5 +678,79 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.currentProcess()?.name).toBe('Original');
     expect(component.currentProcess()?.description).toBe('Original desc');
     expect(component.error()).toBe('save failed');
+  });
+
+  // ── Flowchart click-handler cleanup (memory-leak fix) ────────────────────
+  //
+  // attachFlowchartClickHandlers binds a click listener to every rendered
+  // [data-step-id] node. Because the flowchart SVG is fully replaced via
+  // [innerHTML] on each buildFlowchart call, those listeners must be
+  // explicitly detached before the old nodes are discarded (and on component
+  // destroy) or they leak closures over `this` and DOM node references.
+
+  describe('flowchart click handler cleanup', () => {
+    function createFlowchartFixture(proc: ProcessDefinition): ComponentFixture<ProcessDesignerChatComponent> {
+      api.createConversation.mockReturnValueOnce(
+        of({ conversation_id: 'c-flow', messages: [], current_process: proc, suggested_questions: [] }),
+      );
+      const flowFixture = TestBed.createComponent(ProcessDesignerChatComponent);
+      flowFixture.componentInstance.team = team();
+      flowFixture.detectChanges();
+      return flowFixture;
+    }
+
+    it('clicking a rendered node still invokes onStepClick', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      expect(node).toBeTruthy();
+      expect(node.dataset['bound']).toBe('1');
+
+      node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
+    });
+
+    it('detaches listeners from outgoing nodes before the flowchart is rebuilt', () => {
+      const proc = process({
+        steps: [step({ step_id: 's-1', next_steps: ['s-2'] }), step({ step_id: 's-2' })],
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+
+      const nodeBefore = flowFixture.nativeElement.querySelector('[data-step-id="s-2"]') as HTMLElement;
+      expect(nodeBefore).toBeTruthy();
+      const removeEventListenerSpy = vi.spyOn(nodeBefore, 'removeEventListener');
+
+      // Triggers buildFlowchart, which must detach the outgoing nodes' listeners
+      // (and clear their `data-bound` markers) before the new SVG is rendered.
+      flowComponent.onStepDeleted('s-2');
+
+      expect(removeEventListenerSpy).toHaveBeenCalledWith('click', expect.any(Function));
+      expect(nodeBefore.dataset['bound']).toBeUndefined();
+      expect((flowComponent as unknown as { flowchartClickListeners: unknown[] }).flowchartClickListeners).toHaveLength(0);
+
+      // The rebuilt flowchart still binds a fresh listener to the surviving node.
+      flowFixture.detectChanges();
+      const nodeAfter = flowFixture.nativeElement.querySelector('[data-step-id="s-1"]') as HTMLElement;
+      expect(nodeAfter.dataset['bound']).toBe('1');
+      expect((flowComponent as unknown as { flowchartClickListeners: unknown[] }).flowchartClickListeners).toHaveLength(1);
+    });
+
+    it('detaches remaining listeners on destroy', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      const removeEventListenerSpy = vi.spyOn(node, 'removeEventListener');
+
+      flowFixture.destroy();
+
+      expect(removeEventListenerSpy).toHaveBeenCalledWith('click', expect.any(Function));
+      expect(node.dataset['bound']).toBeUndefined();
+    });
   });
 });

@@ -1,6 +1,7 @@
-# Full stack: Postgres, Temporal, khala (unified API), and Angular UI.
+# Full stack: Postgres, Redis, Temporal, khala (unified API), and Angular UI.
 # Run from repo root: docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
-# Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 4201 Angular UI, 8888 Unified API (direct)
+# Ports: 5432 Postgres, 6379 Redis (loopback host bind), 7233 Temporal gRPC, 8080 Temporal UI,
+# 4201 Angular UI, 8888 Unified API (direct)
 #
 # Static IPs and extra_hosts pin service addresses so DNS resolution failures
 # inside containers don't break inter-service traffic.
@@ -15,8 +16,8 @@ x-team-env-base: &team-env-base
   OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
   PYTHONUNBUFFERED: "1"
   POSTGRES_HOST: postgres
-  POSTGRES_USER: ${POSTGRES_USER:-postgres}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
   POSTGRES_DB: ${POSTGRES_DB:-postgres}
   TEMPORAL_ADDRESS: temporal:7233
   JOB_SERVICE_URL: http://job-service:8085
@@ -57,6 +58,37 @@ x-team-env-base: &team-env-base
   TEAM_TEMPORAL_WORKER_FUNC: start_se_temporal_worker_thread
   SE_WORKSPACE_DIR: /data/agents/software_engineering_team/workspaces
 
+# Shared.cache Redis wiring for SE only (code-review + SE compaction). Kept off
+# *team-env-base so other team containers do not receive Redis credentials and
+# cannot write `cr:*` / `llm:compact:*` namespaces (review-cache poisoning).
+# Prefer REDIS_HOST + REDIS_PASSWORD parts over embedding the password in
+# REDIS_URL — Python `shared.cache.config.redis_url()` percent-encodes the
+# password. Compose cannot safely quote arbitrary passwords into a URL default.
+# In-process memory: set REDIS_HOST= (empty) and leave REDIS_URL blank.
+# Use `${REDIS_HOST-redis}` (no `:`) so an empty .env value is preserved —
+# `${REDIS_HOST:-redis}` would treat empty as unset and re-default to redis.
+# See docs/ENV_VARS.md (REDIS_*).
+x-se-redis-env: &se-redis-env
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-please-change-me}
+  REDIS_HOST: ${REDIS_HOST-redis}
+  REDIS_PORT: ${REDIS_PORT:-6379}
+  REDIS_DB: ${REDIS_DB:-0}
+  # Unset/blank REDIS_URL → build from HOST/PORT/PASSWORD (URL-encoded).
+  # Explicit REDIS_URL= still wins when non-blank (operator override).
+  REDIS_URL: ${REDIS_URL-}
+  REDIS_CACHE_TTL_S: ${REDIS_CACHE_TTL_S:-3600}
+  REDIS_LOCK_TTL_S: ${REDIS_LOCK_TTL_S:-3600}
+  # Independent of lock TTL — crashed leaders unblock waiters after 5m, not 1h.
+  REDIS_WAITER_TIMEOUT_S: ${REDIS_WAITER_TIMEOUT_S:-300}
+  REDIS_RESULT_TTL_S: ${REDIS_RESULT_TTL_S:-}
+  REDIS_SOCKET_CONNECT_TIMEOUT_S: ${REDIS_SOCKET_CONNECT_TIMEOUT_S:-1.0}
+  REDIS_SOCKET_TIMEOUT_S: ${REDIS_SOCKET_TIMEOUT_S:-1.0}
+  REDIS_MAX_CONNECTIONS: ${REDIS_MAX_CONNECTIONS:-50}
+  # Appended to cr:*/llm:compact:* namespaces so a deploy is a cold cache.
+  # Leave blank for local (shared hits across restarts of the same image).
+  KHALA_BUILD_ID: ${KHALA_BUILD_ID-}
+  KHALA_CACHE_BUILD_ID: ${KHALA_CACHE_BUILD_ID-}
+
 # Opt-in OTLP → Tempo. Merge only into services you are actively debugging.
 x-team-otel-export: &team-otel-export
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
@@ -73,8 +105,8 @@ services:
       - -c
       - max_connections=500
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       # Per-team sandbox roles (issue #257). Consumed by
       # postgres/init/04-create-sandbox-team-roles.sh on first boot. Unset
@@ -94,7 +126,7 @@ services:
       - postgres_data_v18:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -129,6 +161,73 @@ services:
     networks:
       stack:
         ipv4_address: 172.28.0.32
+
+  # Redis backs shared.cache for SE (code-review + compaction). Optional for
+  # local `make run` (falls back to in-process memory); compose wires REDIS_*
+  # only on se-service via *se-redis-env (not every team). Local stack uses
+  # requirepass from REDIS_PASSWORD (default please-change-me, same placeholder
+  # as Neo4j). Host publish remains IPv4 loopback-only — from the host use
+  # ``127.0.0.1:6379``, not ``localhost`` / ``::1``. Production deployments
+  # must use a strong secret and keep Redis off public interfaces.
+  # See docs/ENV_VARS.md (REDIS_*).
+  redis:
+    image: redis:7.4-alpine
+    container_name: khala-stack-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-please-change-me}
+      # Prefer REDISCLI_AUTH over redis-cli -a so the password is not in argv
+      # (process listings / healthcheck logs). Same default as REDIS_PASSWORD.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-please-change-me}
+    # Cache-only: bound memory; disable RDB/AOF persistence. Use noeviction so
+    # idle single-flight lock keys (SET NX EX, not touched during a long
+    # compute) are not LRU-evicted under memory pressure — capacity is enforced
+    # by shared.cache ZSET trim (with one write-retry after trim on OOM) +
+    # key TTLs (default value TTL 1h). A full Redis still fails open on write
+    # after the retry. Intentionally no named volume — Redis is an ephemeral
+    # shared cache here; durability lives in Postgres / job state, not Redis.
+    # A restart is a cold cache, which shared.cache treats as misses (recompute).
+    # requirepass lives in a generated conf file so the redis-server argv does
+    # not include the password (process listings). Healthcheck still uses
+    # REDISCLI_AUTH from the service env. Password bytes are escaped via
+    # docker/redis/escape_requirepass.sh as redis.conf ``\xHH`` per byte so
+    # backslash, quote, and trailing newlines round-trip under BusyBox Alpine.
+    volumes:
+      - ./redis/escape_requirepass.sh:/escape_requirepass.sh:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        conf=/tmp/khala-redis.conf
+        esc=$$(printf '%s' "$$REDIS_PASSWORD" | /bin/sh /escape_requirepass.sh)
+        cat > "$$conf" <<EOF
+        bind 0.0.0.0
+        requirepass "$$esc"
+        maxmemory 512mb
+        maxmemory-policy noeviction
+        save ""
+        appendonly no
+        EOF
+        exec redis-server "$$conf"
+    # Host publish is IPv4 loopback only (127.0.0.1:6379). There is no IPv6
+    # host publish — on IPv6-preferring systems use ``127.0.0.1:6379``, not
+    # bare ``localhost`` (which may resolve to ``::1`` and fail to connect).
+    # Containers still reach Redis via the stack network (redis:6379 /
+    # 172.28.0.33).
+    # Default REDIS_PASSWORD is local-dev only (public in-repo); never reuse it
+    # outside a developer workstation. Host publish stays loopback-bound.
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      # Auth via REDISCLI_AUTH (service env above) — redis-cli reads it automatically.
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      stack:
+        ipv4_address: 172.28.0.33
 
   temporal:
     image: temporalio/auto-setup:1.24.2
@@ -225,8 +324,8 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
@@ -245,6 +344,7 @@ services:
       - "postgres:172.28.0.2"
       - "temporal:172.28.0.3"
       - "job-service:172.28.0.5"
+      - "redis:172.28.0.33"
     ports: ["8090:8090"]
     networks:
       stack: { ipv4_address: 172.28.0.8, aliases: [blogging-service] }
@@ -266,10 +366,15 @@ services:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
-    # SE is opted into Tempo export (see *team-otel-export). Other team
-    # services inherit *team-env-base only and keep spans in-process.
+      # service_started (not healthy): shared.cache fail-opens when Redis is
+      # down, and REDIS_HOST= (empty) opts into in-process memory — SE must
+      # still boot if the Redis container is unhealthy or unused.
+      redis: { condition: service_started }
+    # SE is opted into Tempo export (see *team-otel-export) and shared.cache
+    # Redis (*se-redis-env). Other team services inherit *team-env-base only
+    # (no Redis credentials) and keep spans in-process.
     environment:
-      <<: [*team-env-base, *team-otel-export]
+      <<: [*team-env-base, *team-otel-export, *se-redis-env]
     volumes: &team-volumes
       - agents_data:/data/agents
     extra_hosts: *team-extra-hosts
@@ -890,8 +995,8 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
       UNIFIED_API_TEAM_ASSISTANTS_ENABLED: ${UNIFIED_API_TEAM_ASSISTANTS_ENABLED:-true}

@@ -1,17 +1,20 @@
 # Strategy Lab API orchestration: inventory and extract boundaries
 
-This note inventories Strategy Lab run/cycle helpers and documents ownership
-between `investment_team/api/main.py` and
-`strategy_lab/orchestrator_api.py`. Cluster 1's persist/reconcile/progress
-pieces and Cluster 5's purge helpers now have real implementations in
-`orchestrator_api.py`; `api.main` re-exports them for compatibility.
+This note inventories the Strategy Lab run/cycle helpers, documents the target
+ownership for `strategy_lab/orchestrator_api.py`, and records how shared state
+(`lock`, record maps) is accessed after the partial body move. Read this before
+relocating remaining helpers — it is the map for "where does this belong" so
+later extraction steps do not invent ownership mid-refactor.
 
 Companion notes: `MIXIN_BOUNDARIES.md` (pipeline mixin family),
 `run_state.py` (already-extracted in-memory run registry + shared `lock`).
 
-**This extraction does not change runtime semantics.** `api.main` remains the
-FastAPI route and model owner, while it re-exports the extracted helper objects
-so existing imports retain identity.
+**Partial body move complete (persist / reconcile / purge / snapshot /
+dispatch).** Run-state I/O, purge, prior-record snapshot, and
+dispatch/failure/concurrency-guard helper bodies now live in
+`orchestrator_api.py`; `api.main` keeps thin aliases for routes and tests.
+Four Temporal-hot helpers remain deferred via lazy `__getattr__` (see below).
+Runtime semantics are unchanged.
 
 ---
 
@@ -46,28 +49,33 @@ back from `api.main` (circular-import trap once `main` imports
 `orchestrator_api`) — **except** the temporary lazy
 `api.main._strategy_lab_records` read inside `_snapshot_prior_records`, which
 must be removed when store extraction lands. Do **not** require a DI context
-object for body-move steps.
+object for the first body-move steps.
 
 `_PersistentDict` may move with the stores or remain a shared util that the
-store module imports — decide when the store extraction lands.
+store module imports — decide when the store extraction lands; not required
+for the façade step.
 
 ---
 
 ## Helper inventory
 
-### Cluster 1 — Run-state I/O (partially extracted)
+### Cluster 1 — Run-state I/O
+
+**Owner:** bodies in `orchestrator_api`; `api.main` aliases for routes/tests.
 
 | Helper | Role | Primary callers |
 |---|---|---|
-| `_persist_run_state` | Create/update lab-run job | `orchestrator_api` implementation; `api.main` re-export |
-| `_reconcile_run_progress` | Sync in-memory progress from job service | `orchestrator_api` implementation; `api.main` re-export |
+| `_persist_run_state` | Create/update lab-run job | routes; Temporal `persist_run_state_activity`; `_fail_strategy_lab_run` |
+| `_reconcile_run_progress` | Sync in-memory progress from job service | `list` / `status` / `stream` / `jobs` routes |
 | `_run_state_to_response` | Map state dict → status response model | status / list routes |
 | `_build_run_state` | Mint run-state dict for run/resume/restart | run / resume / restart routes |
-| `_job_progress_percent` | Clamp progress % | `orchestrator_api` implementation; `api.main` re-export |
-| `_STRATEGY_LAB_PROGRESS_FIELDS` | Field allowlist for reconcile | `orchestrator_api` implementation; `api.main` re-export |
-| `STRATEGY_LAB_TERMINAL_STATUSES` | Terminal status frozenset | `orchestrator_api` implementation; `api.main` re-export |
+| `_job_progress_percent` | Clamp progress % | `list_strategy_lab_jobs` |
+| `_STRATEGY_LAB_PROGRESS_FIELDS` | Field allowlist for reconcile | `_reconcile_run_progress` |
+| `STRATEGY_LAB_TERMINAL_STATUSES` | Terminal status frozenset | reconcile, fail, routes |
 
 ### Cluster 2 — Dispatch / failure / concurrency guards
+
+**Owner:** bodies in `orchestrator_api`; `api.main` aliases for routes/tests.
 
 | Helper | Role | Primary callers |
 |---|---|---|
@@ -77,7 +85,7 @@ store module imports — decide when the store extraction lands.
 | `_ensure_no_active_run` | Locked wrapper around `_no_active_run_locked` | run / resume / restart |
 | `_require_run_transition_lock` | Non-blocking per-`run_id` transition lock or 409 | run / resume / restart |
 
-### Cluster 3 — Cycle pipeline
+### Cluster 3 — Cycle pipeline (still in `api.main`; finalize deferred via façade)
 
 | Helper | Role | Primary callers |
 |---|---|---|
@@ -97,7 +105,7 @@ either leave a narrow import of that step from `api.main` temporarily or
 extract the step into a paper-trading helper module in the same extract
 wave — do not silently duplicate it.
 
-### Cluster 4 — Cancel / terminal status
+### Cluster 4 — Cancel / terminal status (still in `api.main`; external-terminal helpers deferred via façade)
 
 | Helper | Role | Primary callers |
 |---|---|---|
@@ -107,15 +115,18 @@ wave — do not silently duplicate it.
 | `_strategy_lab_run_failure` | Optional failure string for a run | status surfaces |
 | `_STRATEGY_LAB_EXTERNAL_TERMINAL_STATUSES` | `cancelled`/`failed`/`interrupted` | external-terminal helpers |
 
-### Cluster 5 — Storage purge / prior-record snapshot (extracted)
+### Cluster 5 — Storage purge / prior-record snapshot
 
-| Helper | Role | Primary callers |
-|---|---|---|
-| `_snapshot_prior_records` | Locked parse+sort of lab records | `orchestrator_api` implementation; `api.main` re-export |
-| `_delete_jobs_concurrently` | Bounded parallel `delete_job` | `orchestrator_api` implementation; `api.main` re-export |
-| `_delete_paper_sessions_for_lab_record` | Delete paper jobs for one lab id | `orchestrator_api` implementation; `api.main` re-export |
-| `_purge_strategy_lab_job_storage` | Full lab + paper storage purge | `orchestrator_api` implementation; `api.main` re-export |
-| `_PURGE_MAX_WORKERS`, `_PURGE_TIMEOUT_S` | Purge fan-out knobs | `orchestrator_api` constants; `api.main` re-export |
+**Owner:** purge and snapshot helpers in `orchestrator_api` (aliases on
+`api.main`).
+
+| Helper | Role | Primary callers | Owner |
+|---|---|---|---|
+| `_snapshot_prior_records` | Locked parse+sort of lab records | cycles; `snapshot_prior_records_activity`; signal brief | `orchestrator_api` |
+| `_delete_jobs_concurrently` | Bounded parallel `delete_job` | purge helpers | `orchestrator_api` |
+| `_delete_paper_sessions_for_lab_record` | Delete paper jobs for one lab id | `delete_strategy_lab_record` | `orchestrator_api` |
+| `_purge_strategy_lab_job_storage` | Full lab + paper storage purge | `clear_strategy_lab_storage` | `orchestrator_api` |
+| `_PURGE_MAX_WORKERS`, `_PURGE_TIMEOUT_S` | Purge fan-out knobs | purge helpers | `orchestrator_api` |
 
 ### Explicitly not claimed by `orchestrator_api`
 
@@ -135,12 +146,14 @@ wave — do not silently duplicate it.
 
 ```
 activities.persist_run_state_activity
-  → orchestrator_api._persist_run_state
+  → orchestrator_api._persist_run_state  (real body)
        → run_state.get_lab_run_job_client
 
 activities.snapshot_prior_records_activity
   → orchestrator_api._snapshot_prior_records
-       → run_state.lock + lazy api.main._strategy_lab_records
+       → run_state.lock + lazy api.main._strategy_lab_records (temporary
+         exception to the "no store reads back from api.main" rule, pending
+         store extraction; still constructed in api.main)
 
 activities.compute_signal_brief_activity
   → orchestrator_api._compute_signal_brief_snapshot  →  api.main...
@@ -159,7 +172,7 @@ activities.finalize_cycle_record_activity
        → lock + strategy_lab_records / strategies / backtests / paper_trading_sessions
 ```
 
-### HTTP route edges (documented; not re-exported in the façade step)
+### HTTP route edges (documented; real bodies in `orchestrator_api`, called via `api.main` aliases)
 
 `run` / `resume` / `restart`
   → `_ensure_no_active_run` / `_no_active_run_locked`, `_require_run_transition_lock`,
@@ -174,36 +187,62 @@ activities.finalize_cycle_record_activity
 
 ---
 
-## Current export boundary
+## Partial body move (persist / reconcile / purge / dispatch)
 
-`orchestrator_api.py` implements these Cluster 1/5 helpers:
+**Bodies now in `orchestrator_api`:**
 
-1. `_persist_run_state`
-2. `_reconcile_run_progress`
-3. `_job_progress_percent`
-4. `_STRATEGY_LAB_PROGRESS_FIELDS`
-5. `STRATEGY_LAB_TERMINAL_STATUSES`
-6. `_snapshot_prior_records`
-7. `_delete_jobs_concurrently`
-8. `_delete_paper_sessions_for_lab_record`
-9. `_purge_strategy_lab_job_storage`
-10. `_PURGE_MAX_WORKERS` / `_PURGE_TIMEOUT_S`
+- `STRATEGY_LAB_TERMINAL_STATUSES`
+- `_STRATEGY_LAB_PROGRESS_FIELDS`
+- `_persist_run_state`
+- `_reconcile_run_progress`
+- `_run_state_to_response`
+- `_build_run_state`
+- `_job_progress_percent`
+- `_PURGE_MAX_WORKERS`, `_PURGE_TIMEOUT_S`
+- `_delete_jobs_concurrently`
+- `_delete_paper_sessions_for_lab_record`
+- `_purge_strategy_lab_job_storage`
+- `_snapshot_prior_records`
+- `_dispatch_strategy_lab_run`
+- `_fail_strategy_lab_run`
+- `_no_active_run_locked`
+- `_ensure_no_active_run`
+- `_require_run_transition_lock`
 
-`api.main` imports and re-exports those exact objects. Only the four remaining
-Temporal-hot helpers use lazy resolution (`__getattr__` → `api.main`):
-`_compute_signal_brief_snapshot`, `_is_strategy_lab_run_externally_stopped`,
-`_strategy_lab_external_terminal_status`, and
-`_finalize_strategy_lab_cycle_record`.
+**`api.main` aliases:** routes and tests import the same symbols from
+`api.main`; those names re-export from `orchestrator_api` so monkeypatches and
+existing call sites keep working.
 
-`strategy_lab/temporal/activities.py` imports its helpers from
+**Monkeypatch caveat:** aliasing helper **names** on `api.main` keeps route
+stubs and tests that patch via `api.main` working for the moved bodies.
+Closed-over module globals (`_active_runs`, `_persist_run_state`,
+`threading.Timer`) are bound inside `orchestrator_api` / `run_state` — patch
+those on the module where the real body lives, not only on `api.main`.
+
+**Deferred via lazy `__getattr__` → `api.main` (four Temporal-hot helpers):**
+
+1. `_compute_signal_brief_snapshot`
+2. `_is_strategy_lab_run_externally_stopped`
+3. `_strategy_lab_external_terminal_status`
+4. `_finalize_strategy_lab_cycle_record`
+
+**Ownership regression:** `tests/test_orchestrator_api.py` asserts moved callables
+have no top-level function bodies in `api.main` (aliases only). Extend `_MOVED` /
+`_MOVED_CALLABLES` when a later extract lands more bodies.
+
+Lazy resolution avoids eagerly loading `api.main` when activities import the
+façade at worker startup; monkeypatches on `api.main` still apply for
+deferred names.
+
+`strategy_lab/temporal/activities.py` imports Temporal-hot helpers from
 `orchestrator_api` instead of `api.main`.
 
 ---
 
-## Deferred extraction order (remaining)
+## Deferred extraction order (remaining work)
 
-Cluster 1 persist/reconcile/progress and Cluster 5 purge/snapshot bodies are
-already in `orchestrator_api` (this extract). Remaining order:
+Order later body-move PRs to keep Temporal and HTTP sharing one
+implementation without circular imports:
 
 1. **Store extraction** — move lab `_PersistentDict` instances (and optionally
    `_PersistentDict` itself) behind `run_state` or `strategy_lab/stores.py`;
@@ -211,28 +250,31 @@ already in `orchestrator_api` (this extract). Remaining order:
    `_snapshot_prior_records` keeps a **lazy** import of
    `api.main._strategy_lab_records` (import outside the lock) as a temporary
    exception to the "do not import stores from `api.main`" rule.
-2. **Move remaining Temporal-hot / cycle helpers** (Cluster 3 finalize + signal
-   brief; Cluster 4 external-terminal helpers) into `orchestrator_api` for real;
-   drop lazy `__getattr__` re-export indirection for those names.
-3. **Move dispatch/guards** (Cluster 2) and thin Strategy Lab routes to
-   delegation-only call sites.
-4. **Optional:** extract `_run_paper_trading_step` dependency cleanly if it
+2. **Remaining Temporal-hot bodies** — finalize, signal brief, and
+   external-terminal helpers (`_finalize_strategy_lab_cycle_record`,
+   `_compute_signal_brief_snapshot`, `_is_strategy_lab_run_externally_stopped`,
+   `_strategy_lab_external_terminal_status`); drop `__getattr__` indirection
+   for those four.
+3. **Optional:** extract `_run_paper_trading_step` dependency cleanly if it
    still couples finalize to the paper-trading route module.
 
-Each step should stay behavior-preserving (verbatim move + import rewires),
-with the investment_team test suite as the gate.
+Cluster 2 (dispatch / fail / transition guards) and the Cluster 5
+`_snapshot_prior_records` body landed before the remaining finalize/signal-
+brief bodies by deliberate narrow scope — not the original suggested order
+above.
 
 **Test-patch note:** helpers and constants owned by `orchestrator_api` /
 `run_state` must be monkeypatched on those modules (not on `api.main`
 re-export aliases). Implementations close over their defining module's
 globals, so alias-only patches silently miss.
 
+Each step should stay behavior-preserving (verbatim move + import rewires),
+with the investment_team test suite as the gate.
+
 ---
 
-## Out of scope (current extract and remaining steps)
+## Out of scope for the persist/reconcile/purge/dispatch extract
 
+- Moving the five deferred Temporal-hot bodies (still via `__getattr__`)
 - Changing Strategy Lab runtime semantics
 - Splitting the shared `lock`
-- FastAPI route/model ownership moves (routes stay in `api.main` until the
-  dispatch/thinning step)
-- Non-Strategy-Lab `api.main` restructuring

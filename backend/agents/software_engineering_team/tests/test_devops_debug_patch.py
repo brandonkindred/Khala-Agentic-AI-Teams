@@ -821,7 +821,11 @@ class TestDevOpsPipelineDebugPatchLoop:
                 write_changes=False,
             )
         assert result.success
-        assert result.iterations == MAX_INFRA_FIX_ITERATIONS
+        # The stubbed exec_tools fails on calls 1-3 and succeeds on call 4, so 3
+        # debug/patch iterations is the actual observed behavior of this stub -
+        # independent of whatever MAX_INFRA_FIX_ITERATIONS happens to be set to.
+        assert result.iterations == 3
+        assert result.iterations <= MAX_INFRA_FIX_ITERATIONS
         client.assert_exhausted()
 
 

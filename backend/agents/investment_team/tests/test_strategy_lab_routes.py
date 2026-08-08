@@ -26,19 +26,22 @@ from __future__ import annotations
 import inspect
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from collections.abc import MutableMapping
+from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
 
+from investment_team.api.main import _dispatch_strategy_lab_run as _real_dispatch_strategy_lab_run
+from investment_team.api.main import _persist_run_state as _real_persist_run_state
 
-class _InMemoryDict:
-    """Minimal dict-like stand-in used to monkeypatch module-level storage dicts.
 
-    Implements the full mapping protocol (``__iter__``, ``__len__``, ``keys``,
-    ``items``, ``update``, ``setdefault``, ...) so it's a safe substitute
-    anywhere the production code treats ``_profiles``/``_proposals``/etc. as a
-    plain dict, including iteration or ``len()``.
-    """
+class _InMemoryDict(MutableMapping):
+    """Plain-dict stand-in for monkeypatching api.main's module-level record
+    stores. Subclasses MutableMapping (rather than hand-rolling the dict
+    protocol) so it gets correct semantics -- including __iter__/__len__/
+    keys/items/update/setdefault and a real KeyError on deleting a missing
+    key -- for free, matching what production code calling these stores
+    would see from an actual dict."""
 
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
@@ -49,40 +52,33 @@ class _InMemoryDict:
     def __getitem__(self, k):
         return self._d[k]
 
-    def get(self, k, default=None):
-        return self._d.get(k, default)
-
-    def __contains__(self, k):
-        return k in self._d
-
     def __delitem__(self, k):
         del self._d[k]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         return iter(self._d)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._d)
 
-    def pop(self, k, *args):
-        if args:
-            return self._d.pop(k, args[0])
-        return self._d.pop(k)
 
-    def keys(self):
-        return self._d.keys()
-
-    def items(self):
-        return self._d.items()
-
-    def values(self):
-        return list(self._d.values())
-
-    def update(self, *args, **kwargs):
-        self._d.update(*args, **kwargs)
-
-    def setdefault(self, k, default=None):
-        return self._d.setdefault(k, default)
+def test_in_memory_dict_matches_real_dict_protocol() -> None:
+    """Regression: the hand-rolled predecessor of this MutableMapping-based
+    test double was missing __iter__/__len__/keys/items/update/setdefault,
+    and its __delitem__ silently no-op'd on a missing key instead of
+    raising KeyError like a real dict -- gaps that could mask a bug in
+    production code exercising the full mapping protocol against these
+    monkeypatched stores."""
+    d = _InMemoryDict()
+    d["a"] = 1
+    d.setdefault("b", 2)
+    d.update({"c": 3})
+    assert len(d) == 3
+    assert set(iter(d)) == {"a", "b", "c"}
+    assert dict(d.items()) == {"a": 1, "b": 2, "c": 3}
+    assert set(d.keys()) == {"a", "b", "c"}
+    with pytest.raises(KeyError):
+        del d["missing"]
 
 
 @pytest.fixture
@@ -114,11 +110,13 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     # the ``api.main`` alias and the source module attribute to the *same* object,
     # so direct reads/writes (routes) and ``_get_run_state`` (which closes over
     # ``run_state.active_runs``) observe one consistent store.
+    from investment_team.strategy_lab import orchestrator_api
     from investment_team.strategy_lab import run_state as _run_state
 
     shared_runs: Dict[str, Any] = {}
     monkeypatch.setattr(api_main, "_active_runs", shared_runs)
     monkeypatch.setattr(_run_state, "active_runs", shared_runs)
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared_runs)
 
     # Reset the per-run_id transition-lock registry too, so a test that
     # deliberately pre-holds a lock to simulate contention can't leak it into
@@ -139,7 +137,21 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
 
     # Stub the persistence calls so they don't try to reach the job service.
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    # Patch both the ``api.main`` alias (used by run/resume/restart routes)
+    # and ``orchestrator_api`` (where ``_fail_strategy_lab_run`` / activities
+    # resolve ``_persist_run_state`` from module globals after the helper
+    # extract) — stubbing only the alias leaves fail-path writes hitting the
+    # real job-service client.
+    def _noop_persist(*a, **k):
+        return None
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _noop_persist)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _noop_persist)
+    monkeypatch.setattr(
+        orchestrator_api,
+        "_get_lab_run_job_client",
+        lambda: api_main._get_lab_run_job_client(),
+    )
 
     return TestClient(api_main.app)
 
@@ -162,11 +174,58 @@ class _StubLabClient:
 
     def delete_job(self, jid: str) -> bool:
         self.deleted.append(jid)
-        if jid not in self.by_id:
-            return False
-        self.by_id.pop(jid)
+        existed = jid in self.by_id
+        self.by_id.pop(jid, None)
         self.jobs = [j for j in self.jobs if j.get("job_id") != jid]
-        return True
+        return existed
+
+    def apply_and_get(
+        self,
+        jid: str,
+        *,
+        merge_fields: Optional[Dict[str, Any]] = None,
+        merge_nested: Optional[Dict[str, Any]] = None,
+        append_to: Optional[Dict[str, List[Any]]] = None,
+        increment: Optional[Dict[str, int]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Minimal stand-in for JobServiceClient.apply_and_get's increment-and-read-back.
+
+        Auto-vivifies an entry for jid rather than requiring get_job/create_job to have
+        been called first, so tests exercising restart's generation mint don't need to
+        separately seed the job store. Only increment and merge_fields are honored;
+        merge_nested and append_to are accepted (to match the real client's signature)
+        but not implemented -- no current test relies on either. create_job isn't
+        implemented (route tests that hit this path stub _persist_run_state to a
+        no-op instead); update_job is implemented separately below.
+        """
+        record = self.by_id.setdefault(jid, {"job_id": jid})
+        # Match job_service.db.apply_patch order: merge_fields first, then
+        # increment with the same non-(int|float) → 0 coercion production uses.
+        if merge_fields:
+            record.update(merge_fields)
+        if increment:
+            for key, delta in increment.items():
+                current = record.get(key, 0)
+                if not isinstance(current, (int, float)) or isinstance(current, bool):
+                    current = 0
+                record[key] = current + delta
+        self.jobs = list(self.by_id.values())
+        return dict(record)
+
+    def update_job(self, jid: str, *, heartbeat: bool = True, **fields: Any) -> None:
+        """Minimal stand-in for JobServiceClient.update_job's partial merge.
+
+        Merges only the explicitly-provided fields into the record (matching
+        job_service.db.update_job's "merge fields into the job's data" partial
+        semantics, not a full replace) -- a field _persist_run_state's
+        exclude_fields omitted from this call is left untouched, exactly as
+        the real job service behaves. ``heartbeat`` is accepted for signature
+        compatibility with the real JobServiceClient.update_job but is
+        intentionally ignored in this stub.
+        """
+        record = self.by_id.setdefault(jid, {"job_id": jid})
+        record.update(fields)
+        self.jobs = list(self.by_id.values())
 
 
 @pytest.fixture
@@ -226,10 +285,12 @@ def test_stub_lab_client_get_job_returns_copy_for_known_id() -> None:
 
 def test_no_active_run_locked_noop_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """No entries at all -- must not raise."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(api_main, "_active_runs", {})
-    api_main._no_active_run_locked()  # must not raise
+    shared = {}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
+    orchestrator_api._no_active_run_locked()  # must not raise
+    assert shared == {}
 
 
 def test_no_active_run_locked_raises_409_when_running_entry_present(
@@ -237,15 +298,15 @@ def test_no_active_run_locked_raises_409_when_running_entry_present(
 ) -> None:
     from fastapi import HTTPException
 
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(
-        api_main, "_active_runs", {"run-1": {"run_id": "run-1", "status": "running"}}
-    )
+    shared = {"run-1": {"run_id": "run-1", "status": "running"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
 
     with pytest.raises(HTTPException) as exc_info:
-        api_main._no_active_run_locked()
+        orchestrator_api._no_active_run_locked()
     assert exc_info.value.status_code == 409
+    assert shared["run-1"]["status"] == "running"
 
 
 def test_no_active_run_locked_tolerates_entry_missing_status_key(
@@ -254,11 +315,13 @@ def test_no_active_run_locked_tolerates_entry_missing_status_key(
     """An _active_runs entry lacking the "status" key entirely must not raise
     KeyError -- it's treated as not-running (via .get()'s default), so this
     conflict guard still works instead of itself crashing into a 500."""
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(api_main, "_active_runs", {"malformed": {"run_id": "malformed"}})
+    shared = {"malformed": {"run_id": "malformed"}}
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
 
-    api_main._no_active_run_locked()  # must not raise KeyError
+    orchestrator_api._no_active_run_locked()  # must not raise KeyError
+    assert shared == {"malformed": {"run_id": "malformed"}}
 
 
 def test_no_active_run_locked_detects_running_entry_alongside_malformed_one(
@@ -268,20 +331,18 @@ def test_no_active_run_locked_detects_running_entry_alongside_malformed_one(
     running entry -- the guard still correctly raises 409 for it."""
     from fastapi import HTTPException
 
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
 
-    monkeypatch.setattr(
-        api_main,
-        "_active_runs",
-        {
-            "malformed": {"run_id": "malformed"},
-            "run-1": {"run_id": "run-1", "status": "running"},
-        },
-    )
+    shared = {
+        "malformed": {"run_id": "malformed"},
+        "run-1": {"run_id": "run-1", "status": "running"},
+    }
+    monkeypatch.setattr(orchestrator_api, "_active_runs", shared)
 
     with pytest.raises(HTTPException) as exc_info:
-        api_main._no_active_run_locked()
+        orchestrator_api._no_active_run_locked()
     assert exc_info.value.status_code == 409
+    assert shared["run-1"]["status"] == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +374,22 @@ def test_run_strategy_lab_starts_run_when_idle(api_client) -> None:
     assert body["total_cycles"] == 2
     # The run was registered.
     assert body["run_id"] in api_main._active_runs
+
+
+def test_run_strategy_lab_initial_state_has_generation_one(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A fresh run's initial state carries generation 1 — the default incarnation
+    a restart later mints a superseding value against."""
+    from investment_team.api import main as api_main
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    assert api_main._active_runs[run_id]["generation"] == 1
 
 
 def test_run_strategy_lab_locked_recheck_catches_race_past_early_check(
@@ -361,7 +438,10 @@ def test_run_strategy_lab_cleans_up_active_runs_when_persist_fails(
     def _boom(*_a, **_k):
         raise RuntimeError("job service unreachable")
 
+    from investment_team.strategy_lab import orchestrator_api
+
     monkeypatch.setattr(api_main, "_persist_run_state", _boom)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _boom)
 
     with pytest.raises(RuntimeError, match="job service unreachable"):
         api_client.post(
@@ -378,7 +458,13 @@ def test_run_strategy_lab_cleans_up_active_runs_when_persist_fails(
     assert api_main._active_runs == {}
 
     # A subsequent request must be free to start a fresh run, not 409.
-    monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
+    from investment_team.strategy_lab import orchestrator_api as _orch_api
+
+    def _noop_persist(*a, **k):
+        return None
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _noop_persist)
+    monkeypatch.setattr(_orch_api, "_persist_run_state", _noop_persist)
     resp = api_client.post(
         "/strategy-lab/run",
         json={"batch_size": 2, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
@@ -451,6 +537,23 @@ def test_resume_strategy_lab_run_400_when_payload_missing(lab_job_client, api_cl
     assert resp.status_code == 400
 
 
+def test_resume_strategy_lab_run_400_when_payload_fails_validation(
+    lab_job_client, api_client
+) -> None:
+    """A resumable run whose stored payload is a dict but fails
+    ``RunStrategyLabRequest`` validation (corrupted/schema-stale data)
+    returns a clean 400 rather than an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    state = _resumable_state("run-invalid-schema")
+    state["request_payload"]["batch_size"] = 0  # violates Field(ge=1)
+    api_main._active_runs["run-invalid-schema"] = state
+
+    resp = api_client.post("/strategy-lab/runs/run-invalid-schema/resume")
+    assert resp.status_code == 400
+    assert "Invalid stored request payload" in resp.json()["detail"]
+
+
 def test_resume_strategy_lab_run_409_when_another_active(lab_job_client, api_client) -> None:
     """Resuming is rejected with 409 while a different run_id is already active."""
     from investment_team.api import main as api_main
@@ -494,6 +597,352 @@ def test_resume_strategy_lab_run_carries_forward_tracker_merge_error_count(
     assert resp.status_code == 200
     assert api_main._active_runs["run-h"]["tracker_merge_error_count"] == 3
     assert api_main._active_runs["run-h"]["errored_cycles"] == 3
+
+
+def test_resume_strategy_lab_run_carries_forward_generation_unchanged(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A resume continues the same incarnation rather than superseding one, so it
+    must carry the current generation forward unchanged (unlike restart, which
+    mints a new one) -- read from the DURABLE store, not the in-memory
+    snapshot (see test below for why that distinction matters)."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-i"] = _resumable_state("run-i", generation=4)
+    stub = _StubLabClient(jobs=[{"job_id": "run-i", "generation": 4}])
+    mint_calls: List[Any] = []
+    real_apply_and_get = stub.apply_and_get
+    monkeypatch.setattr(
+        stub,
+        "apply_and_get",
+        lambda *a, **k: (mint_calls.append((a, k)), real_apply_and_get(*a, **k))[1],
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    resp = api_client.post("/strategy-lab/runs/run-i/resume")
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-i"]["generation"] == 4
+    # Resume must carry the generation forward, never mint a new one --
+    # only restart is allowed to call the atomic-increment mint path.
+    assert mint_calls == []
+
+
+def test_resume_strategy_lab_run_uses_durable_generation_not_stale_local_cache(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: in a multi-process/multi-replica deployment, a restart handled
+    by a different process already minted a newer generation durably, while
+    this process's in-memory active_runs snapshot may still show the old one.
+    Resume must carry forward the DURABLE value, not the stale local one --
+    otherwise it would regress the durable high-water mark and un-fence
+    everything the restart just fenced out."""
+    from investment_team.api import main as api_main
+
+    # In-memory snapshot is stale (generation 1); the durable store already
+    # has generation 3 from a restart this process never observed.
+    api_main._active_runs["run-j"] = _resumable_state("run-j", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-j", "generation": 3}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-j/resume")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-j"]["generation"] == 3
+    assert stub.by_id["run-j"]["generation"] == 3  # not regressed back to 1
+
+
+def test_resume_strategy_lab_run_write_does_not_regress_generation_minted_mid_request(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: even after reading the durable generation, resume's own
+    _persist_run_state write must not clobber a NEWER durable value minted by
+    a concurrent restart on another process/replica in the gap between the
+    initial read and this write. Simulated by bumping the stub's durable
+    generation only on the FIRST read (mimicking a same-request race window
+    that happens once, between the initial read and the write) and then
+    leaving the durable store alone -- so the revalidation read and the
+    final assertion both observe whatever the write actually left behind,
+    genuinely proving the write didn't regress it back down to the stale
+    snapshot. (A prior version of this test re-bumped the durable value on
+    EVERY read, including the one after the write; that would have forced
+    the final assertion to pass even if the write itself had incorrectly
+    regressed the durable generation in between, since the post-write read
+    would silently re-stamp it back to 5 regardless.)"""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
+
+    api_main._active_runs["run-race"] = _resumable_state("run-race", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-race", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # Override the api_client fixture's blanket _persist_run_state no-op
+    # stub: this test needs the real durable-write behavior (including its
+    # exclude_fields handling) to observe the regression it claims to catch.
+    monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _real_persist_run_state)
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_with_concurrent_restart_on_first_read(jid: str):
+        read_calls.append(jid)
+        result = real_get_job(jid)
+        if len(read_calls) == 1:
+            # Simulate a restart on another replica minting generation 5 in
+            # the durable store immediately after this resume's first read
+            # of it -- a one-time race, not re-injected on later reads.
+            stub.by_id[jid]["generation"] = 5
+        return result
+
+    monkeypatch.setattr(stub, "get_job", _get_job_with_concurrent_restart_on_first_read)
+
+    resp = api_client.post("/strategy-lab/runs/run-race/resume")
+
+    assert resp.status_code == 200
+    assert read_calls == ["run-race", "run-race"]  # confirms both reads happened
+    # The durable value must still be 5 -- resume's write must not have
+    # regressed it back down to the stale 1 it read moments earlier. Nothing
+    # re-injects 5 after the write, so this genuinely reflects the write's
+    # own exclude_fields behavior, not a test-side reset.
+    assert stub.by_id["run-race"]["generation"] == 5
+
+
+def test_resume_strategy_lab_run_dispatches_with_revalidated_generation_not_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a concurrent restart on another process/replica can mint (and
+    dispatch under) a newer generation between resume's initial durable read
+    and its dispatch call. Dispatching this resume's workflow under the
+    earlier, now-stale snapshot would permanently fence out its own
+    activities (the only live workflow for this run) the moment they tried
+    to persist anything -- so the value actually handed to
+    _dispatch_strategy_lab_run must reflect a revalidated read taken as
+    close to dispatch as possible, not the earlier snapshot."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-revalidate"] = _resumable_state("run-revalidate", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-revalidate", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_bumping_generation_after_first_read(jid: str):
+        read_calls.append(jid)
+        result = real_get_job(jid)
+        # Simulate a concurrent restart minting (and dispatching under)
+        # generation 5 durably, right after this resume's *first* read of
+        # the generation (used to build/persist its own state) but before
+        # its second, pre-dispatch revalidation read.
+        if len(read_calls) == 1:
+            stub.by_id[jid]["generation"] = 5
+        return result
+
+    monkeypatch.setattr(stub, "get_job", _get_job_bumping_generation_after_first_read)
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main,
+        "_dispatch_strategy_lab_run",
+        lambda run_id, request, *, generation, allow_already_started=True: captured.update(
+            generation=generation
+        ),
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-revalidate/resume")
+
+    assert resp.status_code == 200
+    assert read_calls == ["run-revalidate", "run-revalidate"]  # both reads happened
+    assert captured["generation"] == 5  # revalidated value, not the stale snapshot of 1
+    assert api_main._active_runs["run-revalidate"]["generation"] == 5
+
+
+def test_resume_strategy_lab_run_returns_503_when_revalidation_detects_generation_regression(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The generation field is meant to be strictly monotonic (only ever
+    advanced via an atomic job-service increment). If the pre-dispatch
+    revalidation read ever comes back LOWER than the earlier snapshot --
+    which cannot represent a legitimate concurrent mint -- that indicates a
+    corrupted or otherwise inconsistent durable record. Must fail closed
+    rather than silently dispatch under the lower, invariant-violating
+    value."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-regress"] = _resumable_state("run-regress", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-regress", "generation": 5}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_regressing_after_first_read(jid: str):
+        read_calls.append(jid)
+        result = real_get_job(jid)
+        if len(read_calls) == 1:
+            # Simulate the durable record becoming corrupted/inconsistent
+            # between the initial read (5) and the revalidation read (2) --
+            # a real decrease, not a legitimate concurrent mint.
+            stub.by_id[jid]["generation"] = 2
+        return result
+
+    monkeypatch.setattr(stub, "get_job", _get_job_regressing_after_first_read)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-regress/resume")
+
+    assert resp.status_code == 503
+    assert "regress" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-regress"]["status"] == "failed"
+
+
+def test_resume_strategy_lab_run_returns_503_when_generation_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-k"] = _resumable_state("run-k", generation=1)
+
+    class _RaisingClient(_StubLabClient):
+        def get_job(self, jid):
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _RaisingClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-k/resume")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-k"]["status"] == "interrupted"  # unchanged, no partial resume
+
+
+def test_resume_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The pre-dispatch revalidation read (added alongside the initial
+    carry-forward read) must also fail closed -- and, unlike the initial
+    read's failure (which happens before any state mutation), this failure
+    happens after resume already wrote "running" state, so it must also
+    mark the run "failed" rather than leaving it wedged as "running" with
+    no workflow ever dispatched."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-revalidate-fail"] = _resumable_state("run-revalidate-fail", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-revalidate-fail", "generation": 1}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_failing_on_second_read(jid: str):
+        read_calls.append(jid)
+        if len(read_calls) == 2:
+            raise ConnectionError("connection refused")
+        return real_get_job(jid)
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing_on_second_read)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-revalidate-fail/resume")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    # Three get_job reads: the initial carry-forward read, the pre-dispatch
+    # revalidation that's made to fail here, and _fail_strategy_lab_run's own
+    # durable-generation check before it writes the "failed" status.
+    assert read_calls == ["run-revalidate-fail"] * 3
+    assert api_main._active_runs["run-revalidate-fail"]["status"] == "failed"
+
+
+def test_resume_strategy_lab_run_revalidation_failure_does_not_regress_concurrently_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: if the pre-dispatch revalidation read itself hits a
+    transient job-service failure after a concurrent replica has already
+    minted (and dispatched under) a newer generation, the resulting
+    _fail_strategy_lab_run call must not durably regress that generation.
+    Marking a run "failed" is a status/error update, not a fencing
+    decision -- writing this request's stale in-memory generation back to
+    the durable record would re-enable an incarnation generation fencing
+    has already superseded and stop the legitimate newer one."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-revalidate-fail2"] = _resumable_state("run-revalidate-fail2", generation=1)
+    stub = _StubLabClient(jobs=[{"job_id": "run-revalidate-fail2", "generation": 1}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_bumping_then_failing(jid: str):
+        read_calls.append(jid)
+        if len(read_calls) == 1:
+            result = real_get_job(jid)
+            # Concurrent replica mints (and dispatches under) generation 5
+            # immediately after this resume's first read.
+            stub.by_id[jid]["generation"] = 5
+            return result
+        raise ConnectionError("connection refused")  # the pre-dispatch revalidation read
+
+    monkeypatch.setattr(stub, "get_job", _get_job_bumping_then_failing)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # Override the api_client fixture's blanket _persist_run_state no-op
+    # stub: this test needs the real durable-write behavior (including
+    # _fail_strategy_lab_run's own persist call) to observe the regression.
+    from investment_team.strategy_lab import orchestrator_api
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _real_persist_run_state)
+
+    resp = api_client.post("/strategy-lab/runs/run-revalidate-fail2/resume")
+
+    assert resp.status_code == 503
+    assert api_main._active_runs["run-revalidate-fail2"]["status"] == "failed"
+    # The legitimate, concurrently minted generation 5 must survive --
+    # marking this request's run "failed" must not regress it back to the
+    # stale value (1) this request read moments earlier.
+    assert stub.by_id["run-revalidate-fail2"]["generation"] == 5
+
+
+def test_fail_strategy_lab_run_does_not_clobber_concurrently_resumed_incarnation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: if a resume/restart replaces `_active_runs[run_id]` with a
+    newer incarnation while `_fail_strategy_lab_run` is between its durable
+    generation read and re-acquiring the lock to write, the stale fail-write
+    must not land on that newer incarnation. The durable read itself can
+    return a generation that still matches this call's stale in-memory
+    snapshot (e.g. the concurrent restart hasn't persisted its mint yet),
+    so the earlier durable-generation guard alone does not catch this --
+    only re-checking the in-memory generation right before the write does."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
+
+    run_id = "run-fail-race"
+    api_main._active_runs[run_id] = _resumable_state(run_id, generation=1, status="running")
+
+    def _fake_get_run_generation_strict(run_id_arg, client=None):
+        # Simulate a concurrent restart replacing the in-memory entry with a
+        # newer incarnation while this durable read is "in flight", but the
+        # durable read still returns the stale generation this request
+        # already knows about.
+        api_main._active_runs[run_id] = _resumable_state(run_id, generation=2, status="running")
+        return 1
+
+    # ``_fail_strategy_lab_run`` lives in ``orchestrator_api`` and resolves
+    # helpers from that module's globals — patch there, not only the
+    # ``api.main`` re-export aliases.
+    monkeypatch.setattr(
+        orchestrator_api, "_get_run_generation_strict", _fake_get_run_generation_strict
+    )
+    persisted_calls: List[Any] = []
+
+    def _capture_persist(rid, state, **kw):
+        persisted_calls.append((rid, dict(state)))
+
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _capture_persist)
+    monkeypatch.setattr(api_main, "_persist_run_state", _capture_persist)
+
+    api_main._fail_strategy_lab_run(run_id, "boom")
+
+    assert api_main._active_runs[run_id]["status"] == "running"
+    assert api_main._active_runs[run_id]["generation"] == 2
+    assert persisted_calls == []
 
 
 def test_restart_strategy_lab_run_404(lab_job_client, api_client) -> None:
@@ -565,11 +1014,730 @@ def test_restart_strategy_lab_run_happy_path(lab_job_client, api_client) -> None
         "status": "completed_with_errors",  # extended restartable set
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
+    # lab_job_client already patches _get_lab_run_job_client to a single
+    # shared _StubLabClient instance: restart calls _get_lab_run_job_client()
+    # multiple times per request (bootstrap check, mint, pre-dispatch
+    # revalidation), and each call must observe the same durable state --
+    # a fresh instance per call would make the revalidation read see an
+    # empty store and misreport a generation regression.
     resp = api_client.post("/strategy-lab/runs/run-g/restart")
     assert resp.status_code == 200
     body = resp.json()
     assert body["run_id"] == "run-g"
     assert "restarted" in body["message"]
+
+
+def test_restart_strategy_lab_run_mints_new_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Restart mints a fresh generation (atomically incremented, not just reset to
+    a fixed value) so the new incarnation's writes fence out any stale activity
+    still in flight from the terminated one."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-gen"] = {
+        "run_id": "run-gen",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 3,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-gen", "generation": 3}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-gen/restart")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-gen"]["generation"] == 4
+    assert stub.by_id["run-gen"]["generation"] == 4
+
+
+def test_restart_strategy_lab_run_write_does_not_regress_concurrently_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: apply_and_get already durably persists the freshly minted
+    generation atomically -- this restart's own subsequent full-state
+    persist write is redundant for that field. If a DIFFERENT restart on
+    another process/replica mints (and dispatches under) an even newer
+    generation in the gap between this restart's own mint and its own
+    write, that write must not regress the durable value back down to this
+    request's now-stale mint (a non-colliding restart, unlike the dispatch-
+    collision rollback path, which already has its own dedicated test)."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-race3"] = {
+        "run_id": "run-race3",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-race3", "generation": 1}])
+    real_apply_and_get = stub.apply_and_get
+
+    def _apply_and_get_then_concurrent_mint(jid, **kwargs):
+        result = real_apply_and_get(jid, **kwargs)
+        # Simulate a different restart on another replica minting (and
+        # dispatching under) generation 3 immediately after this restart's
+        # own mint (to 2) above.
+        stub.by_id[jid]["generation"] = 3
+        return result
+
+    monkeypatch.setattr(stub, "apply_and_get", _apply_and_get_then_concurrent_mint)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # Override the api_client fixture's blanket _persist_run_state no-op
+    # stub: this test needs the real durable-write behavior to observe the
+    # regression.
+    from investment_team.strategy_lab import orchestrator_api
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _real_persist_run_state)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _real_persist_run_state)
+
+    resp = api_client.post("/strategy-lab/runs/run-race3/restart")
+
+    assert resp.status_code == 200
+    # The concurrently minted generation 3 must survive this restart's own
+    # (non-colliding) persist write untouched.
+    assert stub.by_id["run-race3"]["generation"] == 3
+
+
+def test_restart_strategy_lab_run_dispatches_with_the_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: the generation passed into _dispatch_strategy_lab_run must be
+    the exact value restart just minted -- passed through explicitly, not
+    re-derived by build_strategy_lab_batch_input via a separate read that could
+    transiently fail or diverge (see _dispatch_strategy_lab_run's precondition)."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-dispatch-gen"] = {
+        "run_id": "run-dispatch-gen",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 4,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-dispatch-gen", "generation": 4}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main,
+        "_dispatch_strategy_lab_run",
+        lambda run_id, request, *, generation, allow_already_started=True: captured.update(
+            generation=generation
+        ),
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-dispatch-gen/restart")
+
+    assert resp.status_code == 200
+    assert captured["generation"] == 5  # minted (4 -> 5); matches the persisted value below
+    assert api_main._active_runs["run-dispatch-gen"]["generation"] == 5
+
+
+def test_restart_strategy_lab_run_dispatches_with_revalidated_generation_not_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a DIFFERENT restart on another process/replica can mint
+    (and dispatch under) an even newer generation immediately after this
+    restart's own mint. Dispatching this restart's workflow under the
+    earlier, now-stale minted value would permanently fence out its own
+    activities if it wins the workflow-id race -- so the value actually
+    handed to _dispatch_strategy_lab_run must reflect a revalidated read
+    taken as close to dispatch as possible, not this restart's own earlier
+    mint."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-restart-revalidate"] = {
+        "run_id": "run-restart-revalidate",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-revalidate", "generation": 1}])
+    real_apply_and_get = stub.apply_and_get
+
+    def _apply_and_get_then_concurrent_mint(jid, **kwargs):
+        result = real_apply_and_get(jid, **kwargs)
+        # Simulate a different restart on another replica minting (and
+        # dispatching under) generation 9 immediately after this restart's
+        # own mint above.
+        stub.by_id[jid]["generation"] = 9
+        return result
+
+    monkeypatch.setattr(stub, "apply_and_get", _apply_and_get_then_concurrent_mint)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main,
+        "_dispatch_strategy_lab_run",
+        lambda run_id, request, *, generation, allow_already_started=True: captured.update(
+            generation=generation
+        ),
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-revalidate/restart")
+
+    assert resp.status_code == 200
+    assert captured["generation"] == 9  # revalidated value, not this restart's own stale mint (2)
+    assert api_main._active_runs["run-restart-revalidate"]["generation"] == 9
+
+
+def test_restart_strategy_lab_run_returns_503_when_revalidation_detects_generation_regression(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Mirrors the equivalent resume regression test: the durable generation
+    can only legitimately advance (atomic increments only), so if the
+    pre-dispatch revalidation read comes back LOWER than this restart's own
+    just-minted value, that's a corrupted/inconsistent durable record, not a
+    concurrent mint -- must fail closed rather than dispatch under it."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-restart-regress"] = {
+        "run_id": "run-restart-regress",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-regress", "generation": 1}])
+    real_apply_and_get = stub.apply_and_get
+
+    def _apply_and_get_then_corrupt_lower(jid, **kwargs):
+        result = real_apply_and_get(jid, **kwargs)
+        # This restart mints 2 (1 -> 2); simulate the durable record then
+        # becoming corrupted/inconsistent, reporting a lower value on the
+        # subsequent revalidation read.
+        stub.by_id[jid]["generation"] = 0
+        return result
+
+    monkeypatch.setattr(stub, "apply_and_get", _apply_and_get_then_corrupt_lower)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-regress/restart")
+
+    assert resp.status_code == 503
+    assert "regress" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-restart-regress"]["status"] == "failed"
+
+
+def test_restart_strategy_lab_run_returns_503_when_pre_dispatch_revalidation_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The pre-dispatch revalidation read (added alongside the mint-time
+    bootstrap check) must also fail closed -- and, unlike the bootstrap
+    check's failure, this failure happens after restart already wrote
+    "running" state, so it must also mark the run "failed" rather than
+    leaving it wedged as "running" with no workflow ever dispatched."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-restart-revalidate-fail"] = {
+        "run_id": "run-restart-revalidate-fail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-revalidate-fail", "generation": 1}])
+
+    real_get_job = stub.get_job
+    read_calls: List[str] = []
+
+    def _get_job_failing_on_second_read(jid: str):
+        read_calls.append(jid)
+        if len(read_calls) == 2:
+            raise ConnectionError("connection refused")
+        return real_get_job(jid)
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing_on_second_read)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-revalidate-fail/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    # Three get_job reads: the mint-time legacy-bootstrap check, the
+    # pre-dispatch revalidation that's made to fail here, and
+    # _fail_strategy_lab_run's own durable-generation check before it writes
+    # the "failed" status.
+    assert read_calls == ["run-restart-revalidate-fail"] * 3
+    assert api_main._active_runs["run-restart-revalidate-fail"]["status"] == "failed"
+
+
+def test_restart_strategy_lab_run_returns_503_when_persisting_reset_state_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """_persist_run_state is documented to propagate job-service failures
+    uncaught rather than swallow them -- restart's write of the optimistic
+    reset state must translate that into the same documented 503 every
+    other job-service failure in this function produces, and mark the run
+    "failed" (state was already written in-memory by this point) rather
+    than leak a raw 500 or leave the run wedged "running" with no durably
+    persisted/dispatched workflow."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import orchestrator_api
+
+    api_main._active_runs["run-restart-persist-fail"] = {
+        "run_id": "run-restart-persist-fail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-restart-persist-fail", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    def _persist_raises(*args, **kwargs):
+        raise RuntimeError("job service down")
+
+    monkeypatch.setattr(api_main, "_persist_run_state", _persist_raises)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _persist_raises)
+
+    resp = api_client.post("/strategy-lab/runs/run-restart-persist-fail/restart")
+
+    assert resp.status_code == 503
+    assert "persist" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-restart-persist-fail"]["status"] == "failed"
+
+
+def test_restart_strategy_lab_run_bootstraps_legacy_run_generation_above_one(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A run created before generation fencing shipped has no generation field in
+    its persisted record at all. Its first post-upgrade restart must mint
+    generation 2, not 1 -- 1 is what a pre-upgrade in-flight activity (which
+    omits generation entirely) is treated as presenting, and
+    check_fencing_token accepts equal tokens, so minting exactly 1 would fence
+    nothing for that stale activity."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-legacy"] = {
+        "run_id": "run-legacy",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        # No "generation" key at all -- simulates a run created before this change.
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-legacy"}])  # likewise no "generation" field
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-legacy/restart")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-legacy"]["generation"] == 2
+    assert stub.by_id["run-legacy"]["generation"] == 2
+
+
+@pytest.mark.parametrize("uninitialized_generation", [None, 0, ""])
+def test_restart_strategy_lab_run_bootstraps_uninitialized_generation_above_one(
+    monkeypatch: pytest.MonkeyPatch, api_client, uninitialized_generation
+) -> None:
+    """A durable record with generation null/0/empty must bootstrap to 2 on
+    first restart, same as a missing key -- job-service increment coerces
+    those to 0, so a plain +1 would mint 1 and reopen the equal-token hole."""
+    from investment_team.api import main as api_main
+
+    run_id = f"run-uninit-{uninitialized_generation!r}"
+    api_main._active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    stub = _StubLabClient(jobs=[{"job_id": run_id, "generation": uninitialized_generation}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+
+    assert resp.status_code == 200
+    assert api_main._active_runs[run_id]["generation"] == 2
+    assert stub.by_id[run_id]["generation"] == 2
+
+
+def test_restart_strategy_lab_run_fails_closed_on_numeric_string_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a durable generation of \"5\" must not restart-mint via
+    increment (which would zero the string and land on 2, regressing the
+    conceptual token so in-flight activities presenting 5 still pass
+    fencing). Fail closed with 503 and leave the durable value untouched."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-str-gen"] = {
+        "run_id": "run-str-gen",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-str-gen", "generation": "5"}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-str-gen/restart")
+
+    assert resp.status_code == 503
+    assert "native integer" in resp.json()["detail"].lower()
+    assert stub.by_id["run-str-gen"]["generation"] == "5"
+
+
+def test_restart_strategy_lab_run_bootstrap_check_read_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A get_job failure during restart's legacy-generation bootstrap check
+    must fail closed with 503 -- without seeing the durable representation
+    we cannot choose a safe increment (a blind +2 would zero a durable
+    numeric-string token like \"5\" and regress fencing)."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-bootstrapreadfail"] = {
+        "run_id": "run-bootstrapreadfail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 3,
+    }
+
+    stub = _StubLabClient(jobs=[{"job_id": "run-bootstrapreadfail", "generation": 3}])
+
+    def _get_job_failing(_jid: str):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-bootstrapreadfail/restart")
+
+    assert resp.status_code == 503
+    assert "durable generation" in resp.json()["detail"].lower()
+    # Mint must not have run -- durable value stays at the pre-restart token.
+    assert stub.by_id["run-bootstrapreadfail"]["generation"] == 3
+
+
+def test_restart_strategy_lab_run_bootstrap_read_failure_does_not_regress_numeric_string_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: bootstrap get_job failure must not fall through to a blind
+    +2 mint that zeros durable \"5\" to 2 and reopens fencing for in-flight
+    activities presenting conceptual generation 5."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-str-readfail"] = {
+        "run_id": "run-str-readfail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-str-readfail", "generation": "5"}])
+
+    def _get_job_failing(_jid: str):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(stub, "get_job", _get_job_failing)
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.post("/strategy-lab/runs/run-str-readfail/restart")
+
+    assert resp.status_code == 503
+    assert stub.by_id["run-str-readfail"]["generation"] == "5"
+
+
+def test_restart_strategy_lab_run_bootstraps_from_durable_record_not_stale_in_memory_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: resuming a legacy run (no durable "generation" field)
+    populates the in-memory active_runs entry with a default generation=1
+    (get_run_generation_strict's fallback), while resume deliberately
+    excludes "generation" from its own durable write -- so the durable
+    record stays legacy. A restart of the SAME run in the SAME process
+    afterward must still recognize the durable record as legacy and mint
+    generation 2, not defer to the in-memory entry (which now has a
+    "generation" key) and mint only +1 -- landing on durable generation 1,
+    exactly what a still-in-flight legacy activity (which omits generation
+    entirely, defaulting to 1) presents, which check_fencing_token accepts
+    as current rather than fencing out."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-legacy2"] = {
+        "run_id": "run-legacy2",
+        "status": "interrupted",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "completed_cycles": 0,
+        "contiguous_cycles": 0,
+        # No "generation" key -- simulates a run created before this change.
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-legacy2"}])  # durable: also no "generation" field
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resume_resp = api_client.post("/strategy-lab/runs/run-legacy2/resume")
+    assert resume_resp.status_code == 200
+    # Confirms the race is set up correctly: resume's in-memory default
+    # must not have reached the durable record.
+    assert "generation" not in stub.by_id["run-legacy2"]
+    assert api_main._active_runs["run-legacy2"]["generation"] == 1
+
+    # Simulate the resumed run later reaching a restartable terminal status,
+    # still carrying that stale in-memory generation=1.
+    api_main._active_runs["run-legacy2"]["status"] = "completed_with_errors"
+
+    restart_resp = api_client.post("/strategy-lab/runs/run-legacy2/restart")
+
+    assert restart_resp.status_code == 200
+    assert stub.by_id["run-legacy2"]["generation"] == 2
+    assert api_main._active_runs["run-legacy2"]["generation"] == 2
+
+
+def test_restart_strategy_lab_run_rollback_does_not_regress_concurrently_minted_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: two replicas restarting the same terminal run concurrently
+    don't serialize against each other (the per-run_id transition lock is
+    process-local). If replica A mints generation 2, then replica B mints and
+    successfully dispatches generation 3 before A's own dispatch, A's dispatch
+    collides (409) and rolls back -- that rollback must NOT durably overwrite
+    B's legitimate generation 3 with A's stale minted value of 2."""
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    import shared.temporal
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
+
+    api_main._active_runs["run-race2"] = {
+        "run_id": "run-race2",
+        "status": "cancelled",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-race2", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    monkeypatch.setattr(shared.temporal, "terminate_and_await_workflow_sync", lambda *a, **k: None)
+    # Override the api_client fixture's blanket _dispatch_strategy_lab_run
+    # no-op stub with the real function: this test needs its actual
+    # WorkflowAlreadyStartedError -> 409-and-rollback handling, only with
+    # the inner start_strategy_lab_batch_workflow call replaced below.
+    monkeypatch.setattr(api_main, "_dispatch_strategy_lab_run", _real_dispatch_strategy_lab_run)
+
+    def _dispatch_collides_after_a_concurrent_replica_wins(rid, req, generation):
+        # Simulate replica B concurrently restarting the same run: it mints
+        # generation 3 (durably, via the same apply_and_get idiom) and
+        # successfully dispatches, all while this (replica A's) request is
+        # mid-dispatch. A's own attempt then collides with B's fresh workflow.
+        stub.by_id[rid]["generation"] = 3
+        raise WorkflowAlreadyStartedError(
+            workflow_id=f"strategy-lab-{rid}", run_id="prior-run", workflow_type="X"
+        )
+
+    monkeypatch.setattr(
+        sl_sw, "start_strategy_lab_batch_workflow", _dispatch_collides_after_a_concurrent_replica_wins
+    )
+
+    resp = api_client.post("/strategy-lab/runs/run-race2/restart")
+
+    assert resp.status_code == 409
+    # B's legitimate generation 3 must survive A's rollback untouched.
+    assert stub.by_id["run-race2"]["generation"] == 3
+    assert api_main._active_runs["run-race2"]["generation"] == 3
+
+
+def test_restart_strategy_lab_run_returns_503_when_generation_mint_fails(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A job-service hiccup during the generation mint must not silently restart
+    without a fenced generation — it should fail loudly (503) instead."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintfail"] = {
+        "run_id": "run-mintfail",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _NoApplyClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):  # simulates job-service unavailability
+            return None
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _NoApplyClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintfail/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    # State was not overwritten by a partial restart.
+    assert api_main._active_runs["run-mintfail"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintfail"]["generation"] == 1
+
+
+def test_restart_strategy_lab_run_returns_503_when_generation_mint_raises(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A real job-service transport failure (connection refused, timeout, ...)
+    raises from apply_and_get rather than returning None -- must still map to
+    the documented 503, not escape as an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintraise"] = {
+        "run_id": "run-mintraise",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _RaisingClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _RaisingClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintraise/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintraise"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintraise"]["generation"] == 1
+
+
+def test_restart_strategy_lab_run_returns_503_when_mint_response_is_malformed(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """apply_and_get returning a truthy record whose "generation" field is
+    missing or not an int is a malformed mint response, not a legitimate
+    absent-field case -- must map to the same documented 503 rather than
+    propagate a raw ValueError/TypeError/KeyError as an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintmalformed"] = {
+        "run_id": "run-mintmalformed",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _MalformedMintClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            return {"job_id": jid, "generation": "not-a-number"}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _MalformedMintClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintmalformed/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintmalformed"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintmalformed"]["generation"] == 1
+
+
+def test_restart_strategy_lab_run_returns_503_when_mint_response_is_non_positive(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """apply_and_get returning a truthy record whose "generation" field is a
+    well-typed but non-positive int (a corrupt durable record, since the
+    applied increment is always positive) must map to the same documented
+    503 as a missing/non-int value -- a non-positive generation could match
+    a stale/legacy activity's default token and defeat fencing if allowed
+    through."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintnonpositive"] = {
+        "run_id": "run-mintnonpositive",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _NonPositiveMintClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            return {"job_id": jid, "generation": 0}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _NonPositiveMintClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintnonpositive/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintnonpositive"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintnonpositive"]["generation"] == 1
+
+
+@pytest.mark.parametrize("non_int_generation", [2.7, True, False])
+def test_restart_strategy_lab_run_returns_503_when_mint_response_is_non_integer(
+    monkeypatch: pytest.MonkeyPatch, api_client, non_int_generation
+) -> None:
+    """apply_and_get returning a "generation" that's a float or bool (an int
+    subclass in Python, so `isinstance(True, int)` is True) must be rejected
+    as a malformed mint response, not silently coerced via int(...) --
+    a truncated float or a bool-derived 0/1 could produce a fencing token
+    that doesn't match the durable job-service value."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-mintnonint"] = {
+        "run_id": "run-mintnonint",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+
+    class _NonIntMintClient(_StubLabClient):
+        def apply_and_get(self, jid, **kwargs):
+            return {"job_id": jid, "generation": non_int_generation}
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _NonIntMintClient())
+
+    resp = api_client.post("/strategy-lab/runs/run-mintnonint/restart")
+
+    assert resp.status_code == 503
+    assert "generation" in resp.json()["detail"].lower()
+    assert api_main._active_runs["run-mintnonint"]["status"] == "completed_with_errors"
+    assert api_main._active_runs["run-mintnonint"]["generation"] == 1
+
+
+def test_restart_generation_fences_stale_activity_from_terminated_incarnation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """End-to-end regression (the literal acceptance criterion): a stale activity
+    from the pre-restart incarnation — captured with the OLD generation before the
+    restart happened — must be rejected by both persist_run_state_activity and
+    finalize_cycle_record_activity after the restart, proving it can no longer
+    corrupt the freshly restarted run's state."""
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
+    from investment_team.strategy_lab.temporal import activities as act
+
+    api_main._active_runs["run-stale"] = {
+        "run_id": "run-stale",
+        "status": "completed_with_errors",
+        "request_payload": {"batch_size": 1, "batch_count": 1},
+        "generation": 1,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-stale", "generation": 1}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    # get_run_generation_strict (used by the fencing checks below) reads the
+    # durable store via run_state.get_lab_run_job_client directly, not
+    # api.main's alias -- both must point at the same backing store for this
+    # test to represent one consistent durable store.
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: stub)
+
+    # Capture the pre-restart generation, as a stale in-flight activity would have.
+    stale_generation = run_state.get_run_generation_strict("run-stale")
+    assert stale_generation == 1
+
+    resp = api_client.post("/strategy-lab/runs/run-stale/restart")
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-stale"]["generation"] == 2
+
+    from temporalio.exceptions import ApplicationError
+
+    with pytest.raises(ApplicationError) as persist_exc:
+        act.persist_run_state_activity(
+            "run-stale", {"status": "running"}, generation=stale_generation
+        )
+    assert persist_exc.value.type == "StaleFencingTokenError"
+
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+    with pytest.raises(ApplicationError) as finalize_exc:
+        act.finalize_cycle_record_activity(
+            {
+                "run_id": "run-stale",
+                "generation": stale_generation,
+                "record": {"lab_record_id": "stale-record"},
+            }
+        )
+    assert finalize_exc.value.type == "StaleFencingTokenError"
+
+    # The stale record never got as far as being persisted.
+    assert "stale-record" not in api_main._active_runs["run-stale"].get("completed_record_ids", [])
 
 
 def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
@@ -596,6 +1764,8 @@ def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
 
     # The route's own primary persist (before dispatch) must still succeed --
     # only the rollback persist (after the 409) is the one under test here.
+    from investment_team.strategy_lab import orchestrator_api
+
     persist_calls = {"n": 0}
 
     def _persist_fails_after_first_call(*args, **kwargs):
@@ -604,6 +1774,7 @@ def test_restart_strategy_lab_run_rollback_persist_failure_does_not_mask_409(
             raise RuntimeError("job service down")
 
     monkeypatch.setattr(api_main, "_persist_run_state", _persist_fails_after_first_call)
+    monkeypatch.setattr(orchestrator_api, "_persist_run_state", _persist_fails_after_first_call)
 
     resp = api_client.post("/strategy-lab/runs/run-rollback/restart")
     assert resp.status_code == 409
@@ -794,6 +1965,42 @@ def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_befo
     assert api_main._active_runs[run_id]["contiguous_cycles"] == 5
 
 
+def test_resume_strategy_lab_run_404_when_state_deleted_between_reads(
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
+) -> None:
+    """Regression: a run deleted in the window between the pre-lock existence
+    check and the lock-acquired re-read must 404 cleanly with the same
+    message as the early check, not raise or fall through to a different
+    404 shape.
+
+    Simulated via a stateful ``_get_run_state`` stub keyed on call count (the
+    same technique as
+    ``test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_before``),
+    except the second call simulates the run vanishing rather than being
+    overwritten.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-deleted-mid-resume"
+    api_main._active_runs[run_id] = _resumable_state(run_id)
+
+    call_count = {"n": 0}
+
+    def _stateful_get_run_state(rid: str):
+        call_count["n"] += 1
+        if call_count["n"] > 1:
+            api_main._active_runs.pop(rid, None)
+            return None
+        return api_main._active_runs.get(rid)
+
+    monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == f"Strategy lab run '{run_id}' not found."
+    assert call_count["n"] >= 2
+
+
 def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
     monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
 ) -> None:
@@ -945,6 +2152,9 @@ def test_restart_strategy_lab_run_serializes_concurrent_restarts_for_same_run_id
         "status": "completed",
         "request_payload": {"batch_size": 1, "batch_count": 1},
     }
+    # lab_job_client provides a single shared instance -- see
+    # test_restart_strategy_lab_run_happy_path for why a fresh instance per
+    # _get_lab_run_job_client() call breaks the pre-dispatch revalidation read.
 
     entered = threading.Event()
     release = threading.Event()
@@ -1258,6 +2468,47 @@ def test_job_progress_percent_clamps_out_of_range_values() -> None:
 
     assert api_main._job_progress_percent(5, 4) == 100  # completed exceeds total
     assert api_main._job_progress_percent(-1, 4) == 0  # negative completed
+
+
+@pytest.mark.parametrize(
+    "completed,total",
+    [("not-a-number", 4), (4, "not-a-number"), (None, 4), ([], 4), ({}, {})],
+)
+def test_job_progress_percent_tolerates_non_numeric_inputs(completed, total) -> None:
+    """Regression: malformed in-memory or persisted state (e.g. a
+    non-numeric string from durable-record corruption) must not raise
+    TypeError -- list_strategy_lab_jobs's in-memory loop calls this
+    unguarded by any try/except, unlike the persisted-job merge loop, so a
+    raise here would crash the whole endpoint despite its own documented
+    "always returns 200" contract."""
+    from investment_team.api import main as api_main
+
+    assert api_main._job_progress_percent(completed, total) == 0
+
+
+def test_list_strategy_lab_jobs_tolerates_malformed_in_memory_progress_fields(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: a malformed in-memory run (non-numeric completed_cycles/
+    total_cycles, e.g. from corrupted durable state merged in via
+    normalize_persisted_job) must not crash the endpoint -- it must degrade
+    to a 0% progress entry instead, honoring the documented "always returns
+    200" contract for the in-memory path, not just the persisted-job path."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-malformed-progress"] = {
+        "run_id": "run-malformed-progress",
+        "status": "completed",
+        "completed_cycles": "not-a-number",
+        "total_cycles": "also-not-a-number",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    job = next(j for j in resp.json()["jobs"] if j["job_id"] == "run-malformed-progress")
+    assert job["progress"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1962,6 +3213,52 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
     assert body["error"] == "boom"
 
 
+def test_get_strategy_lab_run_status_includes_generation(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The status response is documented as a "full snapshot" of a run --
+    the fencing generation must be part of that snapshot (readable, never
+    client-settable) so a caller can observe that a restart superseded a
+    prior incarnation."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-gen"] = {
+        "run_id": "run-gen",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 3,
+        "generation": 4,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-gen", "status": "running"}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs/run-gen/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["generation"] == 4
+
+
+def test_get_strategy_lab_run_status_defaults_generation_to_one_when_absent(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A legacy/pre-fencing run with no persisted "generation" field must
+    still report a valid response, defaulting to generation 1."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-legacy-gen"] = {
+        "run_id": "run-legacy-gen",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 3,
+    }
+    stub = _StubLabClient(jobs=[{"job_id": "run-legacy-gen", "status": "running"}])
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/runs/run-legacy-gen/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["generation"] == 1
+
 def test_get_strategy_lab_run_status_degrades_malformed_current_cycle_to_none(api_client) -> None:
     """A ``current_cycle`` dict that fails ``StrategyLabCycleProgress``
     validation (e.g. missing the required ``cycle_index`` field) must not
@@ -2057,7 +3354,7 @@ def test_get_strategy_lab_run_status_logs_reconciliation_failure(
     """A job-service failure during reconciliation is logged (at DEBUG) and the
     endpoint still returns 200 with the last-known in-memory status."""
     from investment_team.api import main as api_main
-    from investment_team.strategy_lab import orchestrator_api, run_state
+    from investment_team.strategy_lab import orchestrator_api
 
     api_main._active_runs["run-broken"] = {
         "run_id": "run-broken",
@@ -2070,7 +3367,7 @@ def test_get_strategy_lab_run_status_logs_reconciliation_failure(
         def get_job(self, *a, **k):
             raise RuntimeError("backend down")
 
-    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
 
     with caplog.at_level("DEBUG", logger=orchestrator_api.logger.name):
         resp = api_client.get("/strategy-lab/runs/run-broken/status")
@@ -2101,6 +3398,30 @@ def test_get_strategy_lab_run_status_loads_from_job_service_when_absent(
     resp = api_client.get("/strategy-lab/runs/loaded/status")
     body = resp.json()
     assert body["status"] == "completed"
+
+
+def test_get_strategy_lab_run_status_loads_generation_from_job_service_when_absent(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The job-service fallback path (no in-memory entry) must also carry the
+    persisted generation through to the response, not just the in-memory
+    path covered by test_get_strategy_lab_run_status_includes_generation."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs.clear()
+    monkeypatch.setattr(
+        api_main,
+        "_load_run_from_job_service",
+        lambda rid: {
+            "run_id": rid,
+            "status": "completed",
+            "started_at": "2024-01-01T00:00:00Z",
+            "total_cycles": 1,
+            "generation": 7,
+        },
+    )
+    resp = api_client.get("/strategy-lab/runs/loaded/status")
+    assert resp.json()["generation"] == 7
 
 
 # ---------------------------------------------------------------------------
@@ -2149,6 +3470,29 @@ def test_delete_strategy_lab_run_409_when_transition_lock_held(
 # ---------------------------------------------------------------------------
 # stream_strategy_lab_run — terminal short-circuit + 404
 # ---------------------------------------------------------------------------
+
+
+def _make_subscriber(events):
+    """Build a fake job_event_bus subscription pre-loaded with ``events``.
+
+    Preconditions:
+        - ``events`` is a deque of event dicts (may be empty).
+
+    Postconditions:
+        - Returns an object exposing ``.events`` (the same deque passed in)
+          and a no-op ``touch()`` method, matching the interface
+          ``stream_strategy_lab_run`` expects from a ``job_event_bus``
+          subscription.
+    """
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = events
+
+        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
+            pass
+
+    return _Sub()
 
 
 def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
@@ -2263,15 +3607,7 @@ def test_stream_strategy_lab_run_does_not_block_on_threading_lock(
 
     pre_events = deque([{"type": "complete", "summary": "ok"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-            self.closed = False
-
-        def touch(self) -> None:
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     result: Dict[str, Any] = {}
@@ -2334,11 +3670,21 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
         * ``body_iter`` is an iterator over UTF-8 string chunks (TestClient
           ``iter_text()``).
         * ``max_chunks`` and ``timeout_seconds`` are positive.
+        * The caller is responsible for bounding a stalled/blocking
+          ``next(body_iter)`` call (e.g. ``api_client.stream(..., timeout=...)``'s
+          own read timeout) -- this is a plain synchronous ``for`` loop, so it
+          cannot itself interrupt a chunk read that never arrives; the
+          ``timeout_seconds``/``time.monotonic()`` check below only fires
+          *between* chunks that do arrive.
 
     Postconditions:
         * Returns the concatenated body up to and including the ``done`` line.
         * Raises ``AssertionError`` if the terminal line is not seen within
-          ``max_chunks`` chunks or ``timeout_seconds`` wall-clock seconds.
+          ``max_chunks`` chunks, if more than ``timeout_seconds`` (measured
+          via ``time.monotonic()``) elapses between chunks, or if
+          ``body_iter`` is exhausted first (a route regression that stops
+          emitting before the terminal event would otherwise silently
+          return an incomplete body instead of failing the test).
     """
     assert max_chunks > 0
     assert timeout_seconds > 0
@@ -2352,10 +3698,7 @@ def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: 
             return buf
         assert seen <= max_chunks, f"SSE stream exceeded {max_chunks} chunks without terminating"
         assert time.monotonic() < deadline, "SSE stream did not terminate within timeout"
-    assert '"type": "done"' in buf or '"type":"done"' in buf, (
-        "SSE stream ended without terminal done marker"
-    )
-    return buf
+    raise AssertionError("SSE stream ended without a terminal done line")
 
 
 def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
@@ -2391,18 +3734,11 @@ def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
         ]
     )
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
     sub_holder = {"sub": None, "unsubscribed": False}
 
     def _fake_subscribe(rid: str):
         assert rid == "active"
-        sub_holder["sub"] = _Sub()
+        sub_holder["sub"] = _make_subscriber(pre_events)
         return sub_holder["sub"]
 
     def _fake_unsubscribe(rid: str, sub) -> None:
@@ -2449,14 +3785,7 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
 
     pre_events = deque([{"type": "error", "error": "kaboom"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     with api_client.stream("GET", "/strategy-lab/runs/boom/stream", timeout=2.0) as resp:
@@ -2509,14 +3838,7 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
 
     pre_events = deque([{"type": "complete", "summary": "ok"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     with api_client.stream("GET", "/strategy-lab/runs/stream-prog/stream", timeout=2.0) as resp:

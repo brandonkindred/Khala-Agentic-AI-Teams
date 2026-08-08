@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from software_engineering_team.code_review_agent.change_surface import (
     LineRange,
     expand_touched_ranges,
@@ -58,14 +56,14 @@ def test_expand_multiple_touched_lines_same_function_dedupes() -> None:
     assert ranges == (LineRange(1, 4),)
 
 
-def test_expand_module_level_line_omitted() -> None:
+def test_expand_module_level_line_uses_fallback() -> None:
     ranges = expand_touched_ranges(_TOP_LEVEL, {4}, path="mod.py")
-    assert ranges == ()
+    assert ranges == (LineRange(4, 4),)
 
 
-def test_expand_unparseable_python_returns_empty() -> None:
+def test_expand_unparseable_python_uses_fallback() -> None:
     ranges = expand_touched_ranges("def broken(\n", {1}, path="broken.py")
-    assert ranges == ()
+    assert ranges == (LineRange(1, 1),)
 
 
 def test_expand_empty_path_parseable_python_uses_ast() -> None:
@@ -78,10 +76,9 @@ def test_expand_pyi_suffix_uses_ast() -> None:
     assert ranges == (LineRange(1, 1),)
 
 
-def test_expand_empty_path_unparseable_raises_not_implemented() -> None:
-    # Empty path only uses AST when content parses; otherwise defer to fallback.
-    with pytest.raises(NotImplementedError):
-        expand_touched_ranges("function f() { return 1; }\n", {1}, path="")
+def test_expand_empty_path_unparseable_uses_fallback() -> None:
+    ranges = expand_touched_ranges("function f() { return 1; }\n", {1}, path="")
+    assert ranges == (LineRange(1, 1),)
 
 
 def test_expand_ignores_non_positive_touched_lines() -> None:

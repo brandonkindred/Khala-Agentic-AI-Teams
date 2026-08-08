@@ -23,6 +23,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch):
         "LLM_BASE_URL",
     ):
         monkeypatch.delenv(var, raising=False)
+    c._warned_non_claude_models.clear()
     yield
 
 

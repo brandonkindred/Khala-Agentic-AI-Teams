@@ -23,7 +23,7 @@ from llm_service.clients.dummy import (
     _STRIP_VERBS,
     CODE_REVIEW_MIN_PROMPT_LENGTH,
     _aggregated_user_tool_text,
-    _branding_phase2_structured_output_stub,
+    _branding_structured_output_stub_by_model_name,
     _content_to_text,
     _extract_name_from_hint,
     _last_user_text,
@@ -103,6 +103,63 @@ def test_structured_output_model_routes_by_class_despite_misleading_prompt() -> 
     assert "elevator_pitches" in j
     assert "messaging_framework" not in j
     TaglineOutput.model_validate(j)
+
+
+def test_phase45_structured_output_model_wins_over_channel_guide_prompt() -> None:
+    """Model-class routing must ignore Phase 4 channel-guide prompt anchors.
+
+    A system prompt that would text-route to ChannelGuidelineOutput must still
+    yield the OwnershipOutput stub when that class is passed as
+    structured_output_model.
+    """
+    from branding_team.models import OwnershipOutput
+
+    c = DummyLLMClient()
+    misleading_system_prompt = "Define content_types and frequency_guidance for channel: 'website'."
+    j = c.complete_json(
+        "go",
+        system_prompt=misleading_system_prompt,
+        temperature=0.0,
+        structured_output_model=OwnershipOutput,
+    )
+    assert "ownership_model" in j
+    assert "decision_authority" in j
+    assert "channel" not in j
+    assert "content_types" not in j
+    OwnershipOutput.model_validate(j)
+
+
+def test_channel_guideline_model_extracts_channel_from_system_prompt() -> None:
+    """ChannelGuidelineOutput model routing fills channel from the prompt."""
+    from branding_team.models import ChannelGuidelineOutput
+
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt=(
+            "You are a Website Channel Specialist. channel: 'website'\n"
+            "Define content_types and frequency_guidance."
+        ),
+        temperature=0.0,
+        structured_output_model=ChannelGuidelineOutput,
+    )
+    assert j["channel"] == "website"
+    ChannelGuidelineOutput.model_validate(j)
+
+
+def test_channel_guideline_model_defaults_channel_when_absent() -> None:
+    """ChannelGuidelineOutput model routing defaults channel when prompt has none."""
+    from branding_team.models import ChannelGuidelineOutput
+
+    c = DummyLLMClient()
+    j = c.complete_json(
+        "go",
+        system_prompt="Return channel guidelines without a quoted channel id.",
+        temperature=0.0,
+        structured_output_model=ChannelGuidelineOutput,
+    )
+    assert j["channel"] == "channel"
+    ChannelGuidelineOutput.model_validate(j)
 
 
 def test_phase2_system_prompt_without_model_does_not_route_by_text_anchors() -> None:
@@ -713,13 +770,13 @@ def test_is_dummy_llm_client_wrapped_unwraps_client_attribute() -> None:
 
 
 # ---------------------------------------------------------------------------
-# chat() / stream() deterministic routing (issue #4252 round 2): this is the
-# path Strands actually drives structured_output_model= agents through —
-# LLMClientModel.stream() converts tool_specs to OpenAI-style tools and calls
-# chat(); a bare Agent(model=DummyLLMClient()) calls stream() directly with
-# tool_specs. Both must route by the StructuredOutputTool's name (which
-# Strands sets to the model's __name__) rather than depend on complete_json's
-# text-anchor scan, which is what issue #4252 flags as fragile.
+# chat() / stream() deterministic routing: this is the path Strands actually
+# drives structured_output_model= agents through — LLMClientModel.stream()
+# converts tool_specs to OpenAI-style tools and calls chat(); a bare
+# Agent(model=DummyLLMClient()) calls stream() directly with tool_specs. Both
+# must route by the StructuredOutputTool's name (which Strands sets to the
+# model's __name__) for every model-routed branding structured-output class,
+# rather than depend on complete_json's text-anchor scan.
 # ---------------------------------------------------------------------------
 
 
@@ -744,25 +801,38 @@ def _openai_structured_output_tools(model_name: str) -> list[dict[str, Any]]:
     ]
 
 
-_PHASE2_ROUTED_MODEL_NAMES: tuple[str, ...] = (
+_MODEL_ROUTED_MODEL_NAMES: tuple[str, ...] = (
+    # Phase 2 — Narrative & Messaging
     "BrandStoryOutput",
     "BrandArchetypesOutput",
     "TaglineOutput",
     "MessagingFrameworkOutput",
     "PersonaProfilesOutput",
     "WritingGuidelinesOutput",
+    # Phase 4 — Experience & Channel Activation
+    "BrandExperiencePrinciplesOutput",
+    "ChannelGuidelineOutput",
+    "BrandArchitectureOutput",
+    "BrandInActionOutput",
+    # Phase 5 — Governance & Evolution
+    "OwnershipOutput",
+    "ApprovalWorkflowsOutput",
+    "AssetWikiOutput",
+    "TrainingOnboardingOutput",
+    "BrandHealthKPIsOutput",
+    "EvolutionFrameworkOutput",
+    "BrandGuidelinesOutput",
 )
 
 
-@pytest.mark.parametrize("model_name", _PHASE2_ROUTED_MODEL_NAMES)
+@pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 def test_chat_routes_structured_output_tool_by_name_despite_misleading_prompt(
     model_name: str,
 ) -> None:
     """chat() must route by the tool's name, not by scanning the user prompt,
-    for every Phase 2 class, not just one. Asserts exact equality against
-    _branding_phase2_structured_output_stub's own output rather than a
-    hand-picked subset of keys, so a wrong/extra/missing key in any class's
-    payload would fail this test too, not just an unrecognized-name miss.
+    for every model-routed branding class. Asserts exact equality against
+    _branding_structured_output_stub_by_model_name's output rather than a
+    hand-picked subset of keys.
     """
     c = DummyLLMClient()
     messages = [
@@ -771,7 +841,7 @@ def test_chat_routes_structured_output_tool_by_name_despite_misleading_prompt(
     ]
     result = c.chat(messages, tools=_openai_structured_output_tools(model_name))
     args = result["__tool_calls__"][0]["function"]["arguments"]
-    assert args == _branding_phase2_structured_output_stub(model_name)
+    assert args == _branding_structured_output_stub_by_model_name(model_name)
 
 
 def test_chat_unrecognized_tool_name_falls_back_to_text_scan() -> None:
@@ -830,12 +900,12 @@ async def test_stream_unrecognized_tool_name_falls_back_to_text_scan() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", _PHASE2_ROUTED_MODEL_NAMES)
+@pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(
     model_name: str,
 ) -> None:
     """stream() must route by tool_specs' name, not by scanning the user text,
-    for every Phase 2 class, not just one — mirrors the chat() test above,
+    for every model-routed branding class — mirrors the chat() test above,
     including asserting exact equality rather than a hand-picked key subset.
     """
     c = DummyLLMClient()
@@ -859,4 +929,4 @@ async def test_stream_routes_structured_output_tool_by_name_despite_misleading_p
         if tool_input:
             chunks.append(tool_input)
     data = json.loads(chunks[0])
-    assert data == _branding_phase2_structured_output_stub(model_name)
+    assert data == _branding_structured_output_stub_by_model_name(model_name)
