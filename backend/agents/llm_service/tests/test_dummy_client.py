@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from llm_service import DummyLLMClient
 from llm_service.clients.dummy import (
+    _DEFAULT_DUMMY_CONTEXT_TOKENS,
     _PHASE3_SPECIALIST_REGISTRY,
     _STRIP_FILLERS,
     _STRIP_SUFFIXES,
@@ -40,6 +41,7 @@ from llm_service.clients.dummy import (
 def test_dummy_get_max_context_tokens() -> None:
     c = DummyLLMClient()
     assert c.get_max_context_tokens() == 16384
+    assert c.get_max_context_tokens() == _DEFAULT_DUMMY_CONTEXT_TOKENS
 
 
 def test_dummy_complete_returns_str() -> None:
