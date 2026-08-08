@@ -80,6 +80,15 @@ def test_list_teams_route_has_dbc_docstring() -> None:
     assert "Postconditions:" in doc
 
 
+def test_list_team_agents_route_has_dbc_docstring() -> None:
+    from agent_team_studio.agentic_team_provisioning.api.routes.teams import list_team_agents
+
+    doc = list_team_agents.__doc__
+    assert doc
+    assert "Preconditions:" in doc
+    assert "Postconditions:" in doc
+
+
 def test_get_process_route_has_dbc_docstring() -> None:
     from agent_team_studio.agentic_team_provisioning.api.main import get_process
 
