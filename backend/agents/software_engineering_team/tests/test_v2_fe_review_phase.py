@@ -100,7 +100,10 @@ def test_fe_run_build_verification_uses_profile_label():
 
 def test_fe_run_llm_review_calls_coordinator_with_skip_tail_passes(monkeypatch):
     """The fallback calls the shared coordinator directly, in lightweight mode
-    (no tail passes), threading task/files through to CodeReviewInput."""
+    (no tail passes), threading task/files through to CodeReviewInput. Frontend
+    also appends its accessibility-verification note to task_requirements (see
+    _ACCESSIBILITY_VERIFY_NOTE) -- the shared coordinator's CODE_REVIEW profile
+    has no per-team criteria slot, so this is how that guidance rides along."""
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
@@ -120,7 +123,7 @@ def test_fe_run_llm_review_calls_coordinator_with_skip_tail_passes(monkeypatch):
     assert input_data.skip_tail_passes is True
     assert input_data.files == {"x.ts": "code"}
     assert input_data.task_description == task.description
-    assert input_data.task_requirements == "reqs"
+    assert input_data.task_requirements == f"reqs\n\n{review_mod._ACCESSIBILITY_VERIFY_NOTE}"
     assert input_data.acceptance_criteria == ["AC1", "AC2"]
 
 

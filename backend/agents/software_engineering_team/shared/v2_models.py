@@ -230,9 +230,11 @@ class BaseMicrotaskReviewConfig(BaseModel):
     enable_llm_review_grounding: bool = Field(
         default=True,
         description=(
-            "When True, LLM-fallback review findings are grounded against task "
-            "requirements/ACs/spec/architecture and submitted file names; "
-            "ungrounded proper-noun claims are dropped"
+            "Forwarded to the code-review gate's llm_review_fn for call-signature "
+            "compatibility, but both V2 teams' coordinator-backed LLM fallback "
+            "(_run_llm_review) treat it as a no-op: the coordinator's chunk "
+            "reviewer only ever reports on the literal code it was shown, so "
+            "there is no free-text hallucinated-claim filter left to toggle"
         ),
     )
     grounding_failure_cycle_limit: int = Field(

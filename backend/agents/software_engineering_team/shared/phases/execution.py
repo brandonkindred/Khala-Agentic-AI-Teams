@@ -518,8 +518,9 @@ def run_gated_execution_impl(
         unaffected, and the LLM fallback reviewers' context-bounding path is
         never entered with nothing to bound).
         ``review_config.enable_llm_review_grounding`` (default True) is forwarded
-        to the code-review gate so the LLM-fallback path can drop ungrounded
-        proper-noun findings; set it False to disable that filter.
+        to the code-review gate for call-signature compatibility only; both V2
+        teams' coordinator-backed LLM fallback treats it as a no-op (see
+        ``_run_llm_review``'s docstring in either team's ``phases/review.py``).
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. When a microtask's review fails and

@@ -29,27 +29,6 @@ if str(_team_dir) not in sys.path:
 from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
 
 
-class _TextStubClient(DummyLLMClient):
-    """Returns a canned text response from ``complete_json()`` to simulate the
-    legacy text-template review path."""
-
-    def __init__(self, text: str = "") -> None:
-        super().__init__()
-        self._text = text
-
-    def complete_json(
-        self,
-        prompt: str,
-        *,
-        temperature: float = 0.0,
-        system_prompt: Optional[str] = None,
-        tools: Optional[list] = None,
-        think: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        return self._text
-
-
 class _ScriptedTextClient(DummyLLMClient):
     """Returns different text responses on successive calls."""
 
@@ -93,6 +72,14 @@ class _CallableTextClient(DummyLLMClient):
         **kwargs: Any,
     ) -> Any:
         return self._fn(prompt)
+
+
+_CLEAN_COORDINATOR_APPROVAL = {
+    "approved": True,
+    "issues": [],
+    "summary": "All good.",
+    "spec_compliance_notes": "",
+}
 
 
 def _create_test_task(task_type: str = "frontend") -> "Task":
@@ -381,12 +368,7 @@ class TestFrontendRunExecutionWithReviewGates:
             # branch on the chunk-review prompt's own anchor text (matches
             # DummyLLMClient's own "code to review" catch-all).
             if "code to review" in prompt.lower():
-                return {
-                    "approved": True,
-                    "issues": [],
-                    "summary": "All good.",
-                    "spec_compliance_notes": "",
-                }
+                return _CLEAN_COORDINATOR_APPROVAL
             _call_count[0] += 1
             if _call_count[0] == 1:
                 # First call: execution (file generation)
@@ -589,12 +571,7 @@ class TestFrontendQaSecurityGateToolAgentScoping:
             # on the chunk-review prompt's own anchor text (matches
             # DummyLLMClient's own "code to review" catch-all).
             if "code to review" in prompt.lower():
-                return {
-                    "approved": True,
-                    "issues": [],
-                    "summary": "All good.",
-                    "spec_compliance_notes": "",
-                }
+                return _CLEAN_COORDINATOR_APPROVAL
             _call_count[0] += 1
             if _call_count[0] == 1:
                 return (
