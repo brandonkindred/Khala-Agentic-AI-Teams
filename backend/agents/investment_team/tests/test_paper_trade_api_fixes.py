@@ -9,6 +9,10 @@ Covers:
   per-strategy concurrency guard.
 * ``RunPaperTradingRequest.timeframe`` rejects values outside its
   documented allowed set at the API boundary instead of only failing later.
+* ``_recover_orphaned_paper_trading_sessions`` and ``_fail_paper_trading_session``
+  both delegate their terminal-write fields to the shared
+  ``_apply_paper_trading_failure`` helper instead of each re-implementing the
+  status/error/completed_at update inline.
 
 The recovery tests run against an in-memory ``FakeJobServiceClient`` swapped
 into the module-level ``_paper_trading_sessions`` ``_PersistentDict`` so the
@@ -24,6 +28,7 @@ import time
 import pytest
 from pydantic import ValidationError
 
+import investment_team.api.main as api_main
 from investment_team.api.main import (
     RunPaperTradingRequest,
     _lock,
@@ -345,3 +350,69 @@ def test_recovery_holds_lock_for_entire_pass_against_concurrent_writer(
         assert _fetch_session("pt-race").status == PaperTradingStatus.COMPLETED
     finally:
         _paper_trading_sessions.pop("pt-race", None)
+
+
+# ---------------------------------------------------------------------------
+# DRY consolidation: recovery and the single-session fail helper share one
+# terminal-write implementation (_apply_paper_trading_failure)
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_sets_legacy_divergence_analysis_mirrored_from_error() -> None:
+    """The recovery loop mirrors ``error`` into the legacy
+    ``divergence_analysis`` field -- unlike ``_fail_paper_trading_session``,
+    which intentionally leaves that field untouched (see
+    ``test_run_paper_trading_background_marks_failed_on_empty_market_data``
+    in test_api_paper_and_backtest.py). This is one of the two
+    recovery-specific fields the shared helper must still apply after
+    delegating the common part of the update.
+    """
+    session = _make_session("pt-divergence", PaperTradingStatus.OPENING)
+    _install_session(session)
+    try:
+        _recover_orphaned_paper_trading_sessions()
+        recovered = _fetch_session("pt-divergence")
+        assert recovered.divergence_analysis is not None
+        assert recovered.divergence_analysis == recovered.error
+    finally:
+        _paper_trading_sessions.pop("pt-divergence", None)
+
+
+def test_fail_and_recover_delegate_to_shared_apply_paper_trading_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_fail_paper_trading_session`` (single-session) and
+    ``_recover_orphaned_paper_trading_sessions`` (whole-batch) must both
+    route their terminal write through the shared ``_apply_paper_trading_failure``
+    helper rather than each re-implementing the status/error/completed_at
+    update inline -- the DRY consolidation this fix introduced, so a future
+    schema change to ``PaperTradingSession`` only needs to touch one place.
+
+    Regression guard: on the pre-fix code, ``_apply_paper_trading_failure``
+    does not exist, so ``monkeypatch.setattr`` below raises ``AttributeError``
+    and this test fails outright rather than silently passing.
+    """
+    calls: list[str] = []
+    original = api_main._apply_paper_trading_failure
+
+    def _tracking_apply(session, error, **kwargs):
+        calls.append(session.session_id)
+        return original(session, error, **kwargs)
+
+    monkeypatch.setattr(api_main, "_apply_paper_trading_failure", _tracking_apply)
+
+    single = _make_session("pt-single", PaperTradingStatus.RUNNING)
+    _install_session(single)
+    batch = _make_session("pt-batch", PaperTradingStatus.OPENING)
+    _install_session(batch)
+    try:
+        api_main._fail_paper_trading_session("pt-single", "boom")
+        api_main._recover_orphaned_paper_trading_sessions()
+
+        assert "pt-single" in calls
+        assert "pt-batch" in calls
+        assert _fetch_session("pt-single").status == PaperTradingStatus.FAILED
+        assert _fetch_session("pt-batch").status == PaperTradingStatus.FAILED
+    finally:
+        _paper_trading_sessions.pop("pt-single", None)
+        _paper_trading_sessions.pop("pt-batch", None)
