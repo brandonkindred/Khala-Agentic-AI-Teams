@@ -11,8 +11,8 @@ live here pending later splits.
 
 This module remains the owning namespace for collaborators the test suite
 monkeypatches (``_store``, ``_agent``, ``_test_store``, ``_pipeline_runner``,
-``_save_agents_from_llm``, ``_roster_agent_from_manifest``, ``_build_test_agent``,
-``_call_test_agent``, …). Route and
+``_save_agents_from_llm``, ``_save_agents_and_process``, ``_roster_agent_from_manifest``,
+``_build_test_agent``, ``_call_test_agent``, …). Route and
 service modules dereference those names through ``main`` at call time.
 """
 
@@ -28,6 +28,7 @@ from urllib.parse import quote
 
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import (
     schedule_provision_step_agents,
@@ -227,6 +228,100 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
     """Provision per-step agent environments via agent_provisioning_team (background)."""
     schedule_provision_step_agents(team_id, process, _store)
+
+
+def _save_agents_and_process(
+    team_id: str,
+    conversation_id: str,
+    agents_data: list[dict[str, Any]] | None,
+    process: ProcessDefinition | None,
+) -> None:
+    """Register a conversation turn's roster/process updates, or fail with a 503.
+
+    Called by ``create_conversation``/``send_message`` after the LLM call and
+    before either message of the turn is persisted, so a failure here still
+    leaves the conversation history untouched (the caller lets this propagate
+    before appending messages).
+
+    Preconditions: ``team_id`` and ``conversation_id`` are guaranteed valid by
+        the caller — ``create_conversation``/``send_message`` each look up the
+        team/conversation before reaching this point — and are not
+        independently re-validated here.
+    Postconditions: on success, any entries in ``agents_data`` that carry an
+        ``agent_name`` are merged into the roster (``_save_agents_from_llm``
+        silently drops entries without one, and is a no-op if none remain),
+        and ``process`` (if given) is saved and linked to the conversation.
+        Not atomic across the two steps: if the roster save
+        commits but the process save/link then fails, the roster is left
+        updated while the process is not (documented gap, not silently
+        hidden — closing it would need a shared transaction across
+        ``_save_agents_from_llm`` and ``_store.save_process``, which the
+        underlying stores don't currently support). A client retry after
+        such a failure re-invokes the LLM and calls this helper again, but
+        that cannot duplicate roster entries: ``merge_generated_agents``
+        fully replaces the generated-sourced portion of the roster on every
+        call (only ``source == "registry"`` entries survive from what was
+        already there), so re-merging is idempotent with respect to the
+        generated set, not additive. Scheduling background
+        agent-env provisioning (``_after_process_saved``) is best-effort: it
+        runs after the process is already saved and linked, and a failure
+        there is logged and swallowed rather than propagated, so it can never
+        discard an otherwise-successful turn or make the roster/process saves
+        look retryable when they already committed. On failure of the roster
+        or process save itself, a non-retryable data/programming error
+        (``ValueError``, ``TypeError``, ``AttributeError``, ``KeyError``,
+        pydantic ``ValidationError`` — e.g. malformed LLM ``agents_data``)
+        propagates as itself, since retrying an identical malformed request
+        cannot succeed. An ``HTTPException`` already raised by a callee also
+        propagates unchanged (it is an intentional status, not an outage).
+        Any other failure (e.g. a registry or database outage) is raised as
+        ``HTTPException(503)`` instead of the underlying exception, so the
+        caller gets a clear "try again" signal.
+    """
+    try:
+        _save_agents_from_llm(team_id, agents_data)
+        if process:
+            _store.save_process(team_id, process)
+            _store.set_conversation_process(conversation_id, process.process_id)
+            try:
+                _after_process_saved(team_id, process)
+            except Exception:
+                # Best-effort: scheduling provisioning must not discard an
+                # already-committed roster/process, nor the turn about to be
+                # persisted by the caller.
+                logger.exception(
+                    "Failed to schedule background agent-env provisioning for "
+                    "team %s process %s; roster/process already saved, "
+                    "continuing",
+                    team_id,
+                    process.process_id,
+                )
+    except (ValueError, TypeError, AttributeError, KeyError, ValidationError):
+        # Not retryable: a data-shape or programming bug, not a transient
+        # outage — let it propagate as itself (500) rather than a misleading
+        # "service unavailable, try again".
+        logger.exception(
+            "Non-retryable error saving roster/process for team %s (conversation %s)",
+            team_id,
+            conversation_id,
+        )
+        raise
+    except HTTPException:
+        # An intentionally raised HTTP status (e.g. a client error) is neither
+        # of the two categories above — propagate it unchanged rather than
+        # relabeling it a retryable 503.
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Failed to save roster/process for team %s (conversation %s); "
+            "turn discarded, no messages persisted",
+            team_id,
+            conversation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to update the team roster or process; please try again.",
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

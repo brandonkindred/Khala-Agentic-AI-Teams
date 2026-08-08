@@ -2,14 +2,16 @@
 
 Preconditions: callers pass the same request models / ids the former ``main``
     handlers accepted.
-Postconditions: behavior matches the pre-split handlers, including 503 on
-    registry failure after a persisted chat turn. Collaborators are read from
-    ``api.main`` at call time.
+Postconditions: behavior matches the pre-split handlers. Roster/process saves
+    (via ``main._save_agents_and_process``) happen before either chat message
+    of a turn is persisted, so a registry-outage 503 leaves the conversation
+    history untouched instead of stranding a half-saved turn — see
+    ``create_conversation``/``send_message`` for the exact failure-mode
+    boundaries. Collaborators are read from ``api.main`` at call time.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 from fastapi import HTTPException
@@ -22,8 +24,6 @@ from agent_team_studio.agentic_team_provisioning.models import (
     SendMessageRequest,
     SetConversationProcessRequest,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _build_state_response(
@@ -45,18 +45,29 @@ def _build_state_response(
 
 
 def create_conversation(req: CreateConversationRequest):
-    """Start a new conversation for a team, optionally seeded with an initial message.
+    """Create a conversation and, if given, run its first turn.
 
-    Preconditions: ``req.team_id`` refers to an existing team.
-    Postconditions: ``200`` with the conversation's state; ``404`` if the team is
-        unknown (nothing persisted). When ``req.initial_message`` is given, the
-        user/assistant chat turn is appended to the store *before* the LLM's
-        roster is saved via ``_save_agents_from_llm``; if that save fails because
-        the agent registry is unavailable, this raises ``503`` instead of an
-        opaque ``500`` — but the conversation is left with the chat turn already
-        persisted and the roster/registry write rolled back (partial state). A
-        client retrying the same message re-processes it against a conversation
-        that already contains the prior turn.
+    When ``req.initial_message`` is given, the turn's writes (user + assistant
+    messages, roster save, process save) happen in dependency order but are
+    committed to the conversation history only after the LLM call and the
+    roster/process saves have all succeeded. Without an initial message, this
+    atomicity guarantee doesn't apply — there is no LLM call or roster/process
+    save, just a single greeting message written directly.
+
+    Preconditions: ``req.team_id`` names an existing team.
+    Postconditions: on success, the conversation exists with the greeting or
+        the full first turn persisted. When an initial message is given: a
+        failure in ``_agent.respond`` (LLM error, propagates as-is) or
+        ``_save_agents_and_process`` (roster/process save failure, raised as
+        ``HTTPException(503)`` — see its docstring for the non-retryable-error
+        exceptions to that) happens before either append, so no partial turn
+        is left and a client retry re-processes a clean conversation. That
+        guarantee narrows once the two ``_store.append_message`` calls begin:
+        each is its own committed write, so a failure between them (e.g. a
+        store outage on the second call) can leave the user message persisted
+        without the assistant reply — callers should not assume every error
+        from this route leaves the conversation untouched, only errors raised
+        before the appends start.
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
@@ -68,8 +79,6 @@ def create_conversation(req: CreateConversationRequest):
     conversation_id = _main._store.create_conversation(team_id=req.team_id)
 
     if req.initial_message:
-        _main._store.append_message(conversation_id, "user", req.initial_message)
-
         existing_agents = [
             {"agent_name": a.agent_name, "role": a.role}
             for a in _main._store.list_team_agents(req.team_id)
@@ -82,21 +91,12 @@ def create_conversation(req: CreateConversationRequest):
             current_agents=existing_agents,
         )
 
+        _main._save_agents_and_process(req.team_id, conversation_id, agents_data, process)
+
+        # Persist the turn only now that the LLM call and roster/process saves
+        # have succeeded — see the docstring's failure-mode postcondition.
+        _main._store.append_message(conversation_id, "user", req.initial_message)
         _main._store.append_message(conversation_id, "assistant", reply)
-        try:
-            _main._save_agents_from_llm(req.team_id, agents_data)
-        except Exception as e:
-            logger.warning(
-                "Roster save failed for team %s after conversation %s turn: %s",
-                req.team_id,
-                conversation_id,
-                e,
-            )
-            raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
-        if process:
-            _main._store.save_process(req.team_id, process)
-            _main._store.set_conversation_process(conversation_id, process.process_id)
-            _main._after_process_saved(req.team_id, process)
 
         return _build_state_response(conversation_id, req.team_id, process, suggestions)
 
@@ -106,18 +106,24 @@ def create_conversation(req: CreateConversationRequest):
 
 
 def send_message(conversation_id: str, req: SendMessageRequest):
-    """Send a user message on an existing conversation and get the assistant's reply.
+    """Run one conversation turn and append it to the conversation history.
 
-    Preconditions: ``conversation_id`` refers to an existing conversation.
-    Postconditions: ``200`` with the conversation's updated state; ``404`` if the
-        conversation is unknown (nothing persisted). The user/assistant chat turn
-        is appended to the store *before* the LLM's roster is saved via
-        ``_save_agents_from_llm``; if that save fails because the agent registry
-        is unavailable, this raises ``503`` instead of an opaque ``500`` — but the
-        conversation is left with the chat turn already persisted and the
-        roster/registry write rolled back (partial state). A client retrying the
-        same message re-processes it against a conversation that already contains
-        the prior turn.
+    Preconditions: ``conversation_id`` names an existing conversation —
+        checked first, before any LLM call or store mutation: an unknown
+        ``conversation_id`` raises ``HTTPException(404)`` immediately.
+    Postconditions: on success, both the user message and the assistant
+        reply are appended (in that order) and any updated process is saved.
+        A failure in ``_agent.respond`` (LLM error, propagates as-is) or
+        ``_save_agents_and_process`` (roster/process save failure, raised as
+        ``HTTPException(503)``) happens before either append, so the
+        conversation history stays exactly as it was and a client retry
+        cannot duplicate or half-save a turn from *those* failures. That
+        guarantee narrows once the two ``_store.append_message`` calls begin:
+        each is its own committed write, so a failure between them (e.g. a
+        store outage on the second call) can leave the user message persisted
+        without the assistant reply — callers should not assume every error
+        from this route leaves the conversation untouched, only errors raised
+        before the appends start.
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
@@ -135,8 +141,6 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     existing_messages = _main._store.get_messages(conversation_id)
     history = [(m.role, m.content) for m in existing_messages]
 
-    _main._store.append_message(conversation_id, "user", req.message)
-
     reply, updated_process, suggestions, agents_data = _main._agent.respond(
         conversation_history=history,
         current_process=current_process,
@@ -144,24 +148,14 @@ def send_message(conversation_id: str, req: SendMessageRequest):
         current_agents=existing_agents,
     )
 
-    _main._store.append_message(conversation_id, "assistant", reply)
-    try:
-        _main._save_agents_from_llm(team_id, agents_data)
-    except Exception as e:
-        logger.warning(
-            "Roster save failed for team %s after conversation %s turn: %s",
-            team_id,
-            conversation_id,
-            e,
-        )
-        raise HTTPException(status_code=503, detail="Agent registry unavailable") from e
+    _main._save_agents_and_process(team_id, conversation_id, agents_data, updated_process)
 
-    effective_process = current_process
-    if updated_process:
-        _main._store.save_process(team_id, updated_process)
-        _main._store.set_conversation_process(conversation_id, updated_process.process_id)
-        effective_process = updated_process
-        _main._after_process_saved(team_id, updated_process)
+    effective_process = updated_process or current_process
+
+    # Persist the turn only now that the LLM call and roster/process saves
+    # have succeeded — see the docstring's failure-mode postcondition.
+    _main._store.append_message(conversation_id, "user", req.message)
+    _main._store.append_message(conversation_id, "assistant", reply)
 
     return _build_state_response(conversation_id, team_id, effective_process, suggestions)
 
