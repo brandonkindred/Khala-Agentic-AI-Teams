@@ -184,8 +184,9 @@ def _dispatch() -> DispatchTable:
 
     # -- team_agents ------------------------------------------------------
     # Full-roster prune used by _write_team_agents: delete rows whose agent_name
-    # is not in the kept set. Must precede the single-row delete (it also matches
-    # "agent_name in norm") and the team-wide delete.
+    # is not in the kept set. Mutually exclusive with the single-row delete
+    # below by signature ("<> all" vs "agent_name =" + "returning"), regardless
+    # of registration order.
     def match_prune_team_agents(norm: str) -> bool:
         return norm.startswith("delete from agentic_team_agents where team_id") and "<> all" in norm
 
@@ -199,12 +200,15 @@ def _dispatch() -> DispatchTable:
                 removed += 1
         cur.rowcount = removed
 
-    # Single-row targeted delete (RETURNING the deleted row) — must precede the
-    # team-wide delete handler, whose prefix this also matches.
+    # Single-row targeted delete (RETURNING the deleted row). Requires both
+    # "agent_name =" and "returning" so it stays mutually exclusive with the
+    # prune matcher above and the team-wide delete below, regardless of
+    # registration order.
     def match_delete_team_agent(norm: str) -> bool:
         return (
             norm.startswith("delete from agentic_team_agents where team_id")
-            and "agent_name" in norm
+            and "agent_name =" in norm
+            and "returning" in norm
         )
 
     def handle_delete_team_agent(cur: FakeCursor, params: tuple) -> None:
