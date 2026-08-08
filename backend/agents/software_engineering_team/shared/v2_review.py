@@ -63,6 +63,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from llm_service import LLMClient
+from software_engineering_team.code_review_agent.change_surface import (
+    ChangeSurface,
+    build_change_surface_from_pairs,
+)
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.models import ReviewContext, Task
@@ -239,6 +243,45 @@ def _unwrap_llm_review_result(result: Any) -> _ReviewStepResult:
             raw_issue_count=result.raw_issue_count,
         )
     return _ReviewStepResult(issues=list(result))
+
+
+def _maybe_build_change_surface_from_pairs(
+    new_contents: Mapping[str, str],
+    old_contents: Optional[Mapping[str, str]] = None,
+) -> Optional[ChangeSurface]:
+    """Call the shared change-surface builder only when a meaningful diff exists.
+
+    Consumed by the ``CodeReviewInput`` ``code=``/``pre_numbered=True`` wiring
+    (a separate change): this function only decides *whether* a surface is
+    worth building from SE-style old/new content maps, not how it is used.
+
+    Preconditions:
+        - ``new_contents`` maps path -> new file text (may be empty).
+        - ``old_contents``, when provided, maps path -> previously resolved
+          file text (resolution itself happens elsewhere; this function does
+          not read disk or git). ``None`` means "no old content available for
+          any path" and is treated the same as by
+          :func:`build_change_surface_from_pairs` (every path is wholly new).
+
+    Postconditions:
+        - Returns ``None`` without calling ``build_change_surface_from_pairs``
+          when ``new_contents`` is empty, or when ``old_contents`` is exactly
+          equal to ``new_contents`` (nothing changed) -- a cheap short-circuit
+          ahead of the diff/expansion work.
+        - Otherwise calls ``build_change_surface_from_pairs(new_contents,
+          old_contents)`` exactly once and returns its result, unless that
+          result is empty (``ChangeSurface.is_empty``), in which case returns
+          ``None`` so an empty/identical diff never masquerades as a surface.
+        - Never raises for well-typed string mappings.
+    """
+    if not new_contents:
+        return None
+    if old_contents is not None and dict(old_contents) == dict(new_contents):
+        return None
+    surface = build_change_surface_from_pairs(new_contents, old_contents)
+    if surface.is_empty:
+        return None
+    return surface
 
 
 def _code_review_step(
