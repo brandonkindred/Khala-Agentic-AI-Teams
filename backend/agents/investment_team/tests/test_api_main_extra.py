@@ -1415,6 +1415,63 @@ def test_run_backtest_background_mid_run_cancellation(
     assert "backtest_id" not in state
 
 
+def test_run_backtest_background_cancel_before_completed_write(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestResult,
+        StrategySpec,
+    )
+
+    state: Dict[str, Any] = {}
+    cancel_checks = iter([False, False, True])
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
+    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+
+    bt_result = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        api_main, "_run_real_data_backtest", lambda strategy, config: (bt_result, [])
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
+
+    status = api_main._run_backtest_background(
+        "job-cancel-before-completed", strategy, config, "tester", []
+    )
+
+    # Cancelled at the checkpoint immediately before the COMPLETED write.
+    assert status == api_main._BT_JOB_STATUS_CANCELLED
+    # Only the earlier RUNNING write happened — COMPLETED must never land.
+    assert state.get("status") == "running"
+    assert "backtest_id" not in state
+    # But the backtest record was already persisted before that checkpoint —
+    # the fix skips the status write, not the record write.
+    assert len(api_main._backtests) == 1
+
+
 def test_run_backtest_background_cancel_during_backtest_execution_error(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
