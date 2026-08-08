@@ -1709,6 +1709,29 @@ def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client
     assert resp.json()["deleted"] is True
 
 
+@pytest.mark.parametrize(
+    ("handler_name", "required_snippets"),
+    [
+        ("get_backtest_job_status", ["Preconditions:", "Postconditions:", "404"]),
+        ("list_backtest_jobs", ["Postconditions:", "running_only"]),
+        ("cancel_backtest_job", ["Preconditions:", "Postconditions:", "404", "409"]),
+        ("delete_backtest_job", ["Preconditions:", "Postconditions:", "404"]),
+    ],
+)
+def test_backtest_job_handler_has_documented_contract(
+    handler_name: str, required_snippets: List[str]
+) -> None:
+    """Regression guard for #5141: these handlers must document their
+    purpose, preconditions, and the status codes they can return — a bare
+    or missing docstring here is the exact defect that issue reported."""
+    from investment_team.api import main as api_main
+
+    doc = getattr(api_main, handler_name).__doc__
+    assert doc, f"{handler_name} is missing a docstring"
+    for snippet in required_snippets:
+        assert snippet in doc, f"{handler_name} docstring missing {snippet!r}"
+
+
 def test_list_backtests_empty(api_client) -> None:
     resp = api_client.get("/backtests")
     assert resp.status_code == 200
