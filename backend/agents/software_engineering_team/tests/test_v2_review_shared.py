@@ -120,8 +120,11 @@ def _build_verify_fn(
 # ---------------------------------------------------------------------------
 
 
-def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> None:
+def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path, caplog) -> None:
     """A raising linting tool agent is logged and skipped (run_review lint except)."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="software_engineering_team.shared.v2_review")
     config = _build_config()
 
     def _boom(*a, **kw):
@@ -138,6 +141,7 @@ def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> No
         **_noop_runners(),
     )
     assert result.passed  # lint failure was swallowed; no blocking issue
+    assert any("lint crashed" in r.message for r in caplog.records)
 
 
 def test_run_review_forwards_language_to_llm_review_fn(tmp_path: Path) -> None:
