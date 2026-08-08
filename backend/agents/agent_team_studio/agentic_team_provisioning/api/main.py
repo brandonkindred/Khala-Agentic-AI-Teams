@@ -677,11 +677,14 @@ async def upload_team_asset(team_id: str, file: UploadFile):
         filename sanitizes to nothing usable; ``409`` if an asset with the same
         sanitized name already exists (uploads never silently overwrite one
         another); ``413`` if the upload exceeds
-        ``AGENTIC_TEAM_MAX_ASSET_BYTES`` (default 10 MiB) — enforced by reading
-        in bounded chunks, so an oversized upload is rejected without ever
-        buffering the full payload into memory. The filesystem write and stat
-        run off the event loop (``asyncio.to_thread``) so a large upload can't
-        stall concurrent requests.
+        ``AGENTIC_TEAM_MAX_ASSET_BYTES`` (default 10 MiB). Each chunk is
+        written to disk as it's read rather than buffered in memory, so
+        neither the in-flight memory footprint nor the on-disk footprint
+        ever exceeds the configured limit; on any failure (the ``413``, or
+        otherwise) the partial file is removed, so a failed upload never
+        leaves a truncated asset behind. The filesystem open/write/close/stat
+        calls all run off the event loop (``asyncio.to_thread``) so a large
+        upload can't stall concurrent requests.
     """
     infra = _get_infra_or_404(team_id)
     safe_name = _safe_asset_name(file.filename or "upload")
@@ -690,19 +693,24 @@ async def upload_team_asset(team_id: str, file: UploadFile):
         raise HTTPException(status_code=409, detail=f"Asset already exists: {safe_name}")
 
     max_bytes = _max_asset_upload_bytes()
-    chunks: list[bytes] = []
     total = 0
-    while True:
-        chunk = await file.read(_ASSET_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status_code=413, detail="Asset exceeds maximum upload size")
-        chunks.append(chunk)
-    content = b"".join(chunks)
+    try:
+        handle = await asyncio.to_thread(dest.open, "wb")
+        try:
+            while True:
+                chunk = await file.read(_ASSET_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(status_code=413, detail="Asset exceeds maximum upload size")
+                await asyncio.to_thread(handle.write, chunk)
+        finally:
+            await asyncio.to_thread(handle.close)
+    except BaseException:
+        await asyncio.to_thread(dest.unlink, missing_ok=True)
+        raise
 
-    await asyncio.to_thread(dest.write_bytes, content)
     stat = await asyncio.to_thread(dest.stat)
     return AssetInfo(
         name=safe_name,
