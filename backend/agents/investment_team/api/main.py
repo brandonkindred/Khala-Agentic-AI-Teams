@@ -2507,7 +2507,7 @@ def _finalize_strategy_lab_cycle_record(
             record.paper_trading_skipped_reason = "no_market_data"
             _emit("paper_trading_skipped", {"reason": "no_market_data", "detail": str(exc)})
         except Exception as exc:
-            logger.warning("Paper trading step failed (non-fatal): %s", exc)
+            logger.exception("Paper trading step failed (non-fatal)")
             record.paper_trading_status = "failed"
             record.paper_trading_error = str(exc)[:_MAX_PAPER_TRADING_ERROR_LENGTH]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
