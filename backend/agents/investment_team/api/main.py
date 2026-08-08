@@ -117,27 +117,6 @@ from investment_team.strategy_lab.config import (
     MAX_PARALLEL as _MAX_PARALLEL,
 )
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
-from investment_team.strategy_lab.orchestrator_api import (
-    _PURGE_MAX_WORKERS as _PURGE_MAX_WORKERS,  # noqa: F401
-)
-from investment_team.strategy_lab.orchestrator_api import (
-    _PURGE_TIMEOUT_S as _PURGE_TIMEOUT_S,  # noqa: F401
-)
-from investment_team.strategy_lab.orchestrator_api import (
-    _STRATEGY_LAB_PROGRESS_FIELDS as _STRATEGY_LAB_PROGRESS_FIELDS,  # noqa: F401
-)
-from investment_team.strategy_lab.orchestrator_api import (
-    STRATEGY_LAB_TERMINAL_STATUSES,
-    _delete_paper_sessions_for_lab_record,
-    _job_progress_percent,
-    _persist_run_state,
-    _purge_strategy_lab_job_storage,
-    _reconcile_run_progress,
-    _snapshot_prior_records,
-)
-from investment_team.strategy_lab.orchestrator_api import (
-    _delete_jobs_concurrently as _delete_jobs_concurrently,  # noqa: F401
-)
 from investment_team.strategy_lab.run_state import (
     DEFAULT_FENCING_GENERATION,
 )
@@ -202,6 +181,7 @@ _job_progress_percent = _strategy_lab_orchestrator_api._job_progress_percent
 _persist_run_state = _strategy_lab_orchestrator_api._persist_run_state
 _purge_strategy_lab_job_storage = _strategy_lab_orchestrator_api._purge_strategy_lab_job_storage
 _reconcile_run_progress = _strategy_lab_orchestrator_api._reconcile_run_progress
+_snapshot_prior_records = _strategy_lab_orchestrator_api._snapshot_prior_records
 _run_state_to_response = _strategy_lab_orchestrator_api._run_state_to_response
 _fail_strategy_lab_run = _strategy_lab_orchestrator_api._fail_strategy_lab_run
 _dispatch_strategy_lab_run = _strategy_lab_orchestrator_api._dispatch_strategy_lab_run
