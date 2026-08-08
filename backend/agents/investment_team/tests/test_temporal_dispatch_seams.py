@@ -278,11 +278,13 @@ def test_signal_paper_trading_stop_sends_stop_signal(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Worker boots all three queues
+# Worker boots investment and advisory queues and starts strategy lab worker
 # ---------------------------------------------------------------------------
 
 
-def test_worker_boots_all_three_queues(monkeypatch) -> None:
+def test_worker_boots_investment_and_advisory_queues_and_starts_strategy_lab_worker(
+    monkeypatch,
+) -> None:
     from investment_team.strategy_lab.temporal import worker as sl_worker
     from investment_team.strategy_lab.temporal.workflows import TASK_QUEUE as STRATEGY_LAB_QUEUE
     from investment_team.temporal import worker as worker_mod
