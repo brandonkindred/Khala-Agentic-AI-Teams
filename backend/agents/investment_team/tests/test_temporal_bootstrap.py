@@ -129,6 +129,71 @@ def test_temporal_package_init_does_not_call_os_getenv() -> None:
         )
 
 
+def test_temporal_workflows_import_does_not_call_os_getenv() -> None:
+    """Companion to test_temporal_package_init_does_not_call_os_getenv: the
+    workflows submodule import chain (which also executes the parent
+    package's __init__) must independently stay getenv-free at import time.
+    Spied on its own -- not chained onto another import's spy -- so this
+    can't reintroduce the reset-then-reuse vacuousness fixed for #5137."""
+    import os
+
+    _purge("investment_team.temporal")
+    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+        importlib.import_module("investment_team.temporal.workflows")
+        assert spy.call_count == 0, (
+            f"investment_team.temporal.workflows import chain called os.getenv "
+            f"{spy.call_count} time(s) — this trips the temporalio workflow sandbox."
+        )
+
+
+def _write_getenv_probe_package(tmp_path, monkeypatch) -> str:
+    """Create an importable throwaway package whose __init__ calls os.getenv
+    once, plus an empty submodule -- for proving the import-time spy
+    patterns below actually work, independent of investment_team.temporal."""
+    pkg_name = "_getenv_probe_pkg"
+    pkg_dir = tmp_path / pkg_name
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("import os\nos.getenv('PROBE_VAR')\n")
+    (pkg_dir / "submodule.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return pkg_name
+
+
+def test_reset_and_reimport_pattern_is_vacuous_against_getenv_in_init(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression test for the #5137 bug: the old pattern (import a
+    submodule to trigger __init__, reset_mock, then re-import the
+    already-cached package) must NOT detect an os.getenv call in __init__ --
+    proving why that pattern was wrong to use, even though it looks like a
+    real assertion."""
+    import os
+
+    pkg_name = _write_getenv_probe_package(tmp_path, monkeypatch)
+
+    _purge(pkg_name)
+    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+        importlib.import_module(f"{pkg_name}.submodule")  # executes __init__ once
+        spy.reset_mock()
+        importlib.import_module(pkg_name)  # cached -- does NOT re-execute __init__
+        assert spy.call_count == 0  # vacuously "clean" despite the getenv call above
+
+
+def test_purge_and_direct_import_pattern_detects_getenv_in_init(tmp_path, monkeypatch) -> None:
+    """The corrected pattern used by
+    test_temporal_package_init_does_not_call_os_getenv (purge, then import
+    the package directly under the spy, no reset_mock) must detect an
+    os.getenv call in __init__ -- the fix for the #5137 vacuousness bug."""
+    import os
+
+    pkg_name = _write_getenv_probe_package(tmp_path, monkeypatch)
+
+    _purge(pkg_name)
+    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+        importlib.import_module(pkg_name)
+        assert spy.call_count == 1
+
+
 def test_worker_module_exposes_team_service_entrypoint() -> None:
     """team_service/entrypoint.py looks up ``TEAM_TEMPORAL_WORKER_FUNC`` on
     ``TEAM_TEMPORAL_WORKER_MODULE``. Keep the contract pinned so a rename can't
