@@ -4166,7 +4166,10 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
           in-memory-only snapshot; this endpoint always returns 200. An
           ``_active_runs`` entry missing a truthy ``run_id`` (malformed or
           partially-constructed) is skipped and logged rather than raising
-          ``KeyError``.
+          ``KeyError``. An entry whose response construction
+          (``_run_state_to_response``) fails -- e.g. a field that cannot be
+          coerced to its response type -- is likewise skipped and logged
+          (``logger.warning``) rather than raising out of this endpoint.
     """
 
     def _in_memory_runs_by_id() -> Dict[str, Dict[str, Any]]:
@@ -4216,7 +4219,14 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
         logger.debug("Job service fallback failed for run listing", exc_info=True)
         in_memory = _in_memory_runs_by_id()
 
-    runs = [_run_state_to_response(r) for r in in_memory.values()]
+    runs: List[StrategyLabRunStatusResponse] = []
+    for rid, r in in_memory.items():
+        try:
+            runs.append(_run_state_to_response(r))
+        except Exception:
+            logger.warning(
+                "Skipping run %r in listing; _run_state_to_response failed", rid, exc_info=True
+            )
     return ActiveRunsResponse(runs=runs)
 
 
