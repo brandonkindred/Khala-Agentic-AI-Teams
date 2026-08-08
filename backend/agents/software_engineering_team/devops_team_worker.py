@@ -209,13 +209,34 @@ class DevOpsTeamWorker:
             if pkg is not None
             else []
         )
-        success = bool(result.success and pkg is not None and pkg.status == "completed")
+        # A "completed" package with no delivered artifacts (pkg.files_changed is always
+        # exactly aggregated_artifacts.keys() -- see devops_team/doc_runbook_agent/agent.py)
+        # means Phase 2 produced nothing and Phase 3/5 both skip writing entirely: the
+        # feature branch this worker cut has zero new commits. Accepting that as
+        # "in_review" would hand the Tech Lead an empty diff, which can be approved and
+        # merged as if the task were actually implemented. Treat it as incomplete instead.
+        completed_without_artifacts = (
+            result.success and pkg is not None and pkg.status == "completed" and not files_changed
+        )
+        success = bool(
+            result.success and pkg is not None and pkg.status == "completed" and files_changed
+        )
         if not success:
-            reason = str(result.failure_reason or "DevOps pipeline did not complete")
+            summary = _devops_result_summary(pkg)
+            if completed_without_artifacts:
+                reason = "DevOps pipeline completed without producing any files to deliver"
+            else:
+                reason = str(result.failure_reason or "DevOps pipeline did not complete")
+            # Fold the rendered gate/notes detail into the error itself, not just
+            # changes_summary: the swarm's _handle_incomplete_implementation only persists
+            # result["error"] into revision_feedback, so a bare "Quality gates failed"
+            # label (with the actionable findings stranded in changes_summary) would leave
+            # the next attempt with nothing concrete to act on.
+            error_detail = f"{reason}\n\n{summary}" if summary else reason
             return _failed_result(
                 branch,
-                reason,
-                changes_summary=_devops_result_summary(pkg),
+                error_detail,
+                changes_summary=summary,
                 files_to_create_or_edit=files_changed,
                 commands_run=commands_run,
             )

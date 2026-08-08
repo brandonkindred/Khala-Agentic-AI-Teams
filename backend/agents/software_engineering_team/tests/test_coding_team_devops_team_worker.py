@@ -198,7 +198,13 @@ def test_devops_worker_translates_blocked_package(tmp_path, monkeypatch) -> None
     out = worker.run_implement(_base_task(), tmp_path)
 
     assert out["status"] == "failed"
-    assert out["error"] == "Quality gates failed"
+    # The error itself carries the rendered gate/notes detail, not just the generic
+    # failure_reason label -- _handle_incomplete_implementation only persists
+    # result["error"] into revision_feedback, so the next attempt needs the specifics
+    # here, not stranded in changes_summary alone.
+    assert out["error"].startswith("Quality gates failed")
+    assert "security_review=fail" in out["error"]
+    assert "Security findings unresolved." in out["error"]
     assert out["files_to_create_or_edit"] == ["infra/main.tf"]
     assert "security_review=fail" in out["changes_summary"]
 
@@ -241,13 +247,18 @@ def test_devops_worker_contains_run_task_exception(tmp_path, monkeypatch) -> Non
     assert "boom" in out["error"]
 
 
-def test_devops_worker_falls_back_to_task_branch_when_no_artifacts(tmp_path, monkeypatch) -> None:
+def test_devops_worker_falls_back_to_task_branch_when_git_operations_omit_it(
+    tmp_path, monkeypatch
+) -> None:
+    """When the completion package's git_operations.branch_created is blank (but real
+    files were still delivered), the worker falls back to the branch it prepared itself."""
     _patch_branch_handoff(monkeypatch, branch="feature/provision")
     no_branch = DevOpsTeamResult(
         success=True,
         completion_package=DevOpsCompletionPackage(
             task_id="provision",
             status="completed",
+            files_changed=["infra/main.tf"],
             git_operations=GitOperationsMetadata(branch_created=""),
         ),
     )
@@ -259,7 +270,71 @@ def test_devops_worker_falls_back_to_task_branch_when_no_artifacts(tmp_path, mon
 
     out = worker.run_implement(_base_task(), tmp_path)
 
+    assert out["status"] == "in_review"
     assert out["feature_branch"] == "feature/provision"
+
+
+def test_devops_worker_rejects_completed_package_with_no_delivered_files(
+    tmp_path, monkeypatch
+) -> None:
+    """A 'completed' package with an empty files_changed means Phase 2 produced nothing
+    and Phase 3/5 both skipped writing -- the feature branch has zero new commits. This
+    must NOT be accepted as in_review (an empty diff can be trivially approved and
+    merged as if the task were actually implemented)."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision")
+    empty = DevOpsTeamResult(
+        success=True,
+        completion_package=DevOpsCompletionPackage(
+            task_id="provision",
+            status="completed",
+            files_changed=[],
+            git_operations=GitOperationsMetadata(branch_created=""),
+        ),
+    )
+    worker = DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=_FakeDevOpsLead(empty),
+    )
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "without producing any files to deliver" in out["error"].lower()
+    assert out["feature_branch"] == "feature/provision"
+    assert out["files_to_create_or_edit"] == []
+
+
+def test_devops_worker_failure_error_carries_gate_detail_for_revision_feedback(
+    tmp_path, monkeypatch
+) -> None:
+    """The swarm's _handle_incomplete_implementation persists only result["error"] into
+    revision_feedback (it ignores changes_summary), so a failure's error string must
+    itself carry the actionable gate/notes detail -- not just a terse generic label."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision")
+    blocked = DevOpsTeamResult(
+        success=False,
+        failure_reason="Quality gates failed",
+        completion_package=DevOpsCompletionPackage(
+            task_id="provision",
+            status="blocked",
+            files_changed=["infra/main.tf"],
+            quality_gates={"iac_validate": "fail"},
+            notes=["Terraform plan produced invalid resource references."],
+            git_operations=GitOperationsMetadata(branch_created="feature/provision"),
+        ),
+    )
+    worker = DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=_FakeDevOpsLead(blocked),
+    )
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "iac_validate=fail" in out["error"]
+    assert "Terraform plan produced invalid resource references." in out["error"]
 
 
 def test_devops_worker_branch_name_matches_pipeline_suffix() -> None:
