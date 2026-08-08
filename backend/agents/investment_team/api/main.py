@@ -181,6 +181,7 @@ _job_progress_percent = _strategy_lab_orchestrator_api._job_progress_percent
 _persist_run_state = _strategy_lab_orchestrator_api._persist_run_state
 _purge_strategy_lab_job_storage = _strategy_lab_orchestrator_api._purge_strategy_lab_job_storage
 _reconcile_run_progress = _strategy_lab_orchestrator_api._reconcile_run_progress
+_snapshot_prior_records = _strategy_lab_orchestrator_api._snapshot_prior_records
 _run_state_to_response = _strategy_lab_orchestrator_api._run_state_to_response
 _fail_strategy_lab_run = _strategy_lab_orchestrator_api._fail_strategy_lab_run
 _dispatch_strategy_lab_run = _strategy_lab_orchestrator_api._dispatch_strategy_lab_run
@@ -463,23 +464,6 @@ _backtests: _PersistentDict = _PersistentDict("backtests")
 _strategy_lab_records: _PersistentDict = _PersistentDict("strategy_lab_records")
 _paper_trading_sessions: _PersistentDict = _PersistentDict("paper_trading_sessions")
 _advisor_sessions: _PersistentDict = _PersistentDict("advisor_sessions")
-
-
-def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]:
-    """Locked read of the strategy-lab store, parsed and sorted by created_at.
-
-    Preconditions:
-        None — safe to call against an empty store.
-    Postconditions:
-        Returns a freshly parsed list of StrategyLabRecord, sorted by
-        ``created_at`` ascending (oldest-first) by default, or descending
-        (newest-first) when ``reverse=True``. Never returns None.
-    """
-    with _lock:
-        raw = list(_strategy_lab_records.values())
-    records = [StrategyLabRecord.parse_persisted(r) for r in raw]
-    records.sort(key=lambda r: r.created_at, reverse=reverse)
-    return records
 
 
 @lru_cache(maxsize=1)
