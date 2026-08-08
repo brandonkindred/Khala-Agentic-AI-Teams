@@ -263,20 +263,18 @@ def _code_review_step(
           description surfaced to the external agent (the caller scopes this to the task or a
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
         - ``llm_review_fn(llm=, task=, files=, language=, review_context=,
-          enable_llm_review_grounding=)`` is the per-team chunking/prompt/parse
-          reviewer. For frontend, this is also the test patch surface for
-          ``Agent`` / ``resolve_text_mode_strands_model``; backend's version
-          calls ``code_review_agent.coordinator.run_coordinator`` directly
-          instead (see this module's own docstring), so it has no ``Agent``
-          patch surface. Either way it must accept ``review_context`` so the
+          enable_llm_review_grounding=)`` is the per-team reviewer. Both V2
+          teams' versions call ``code_review_agent.coordinator.run_coordinator``
+          directly (see each team's own ``_run_llm_review`` docstring), so
+          neither is an ``Agent`` / ``resolve_text_mode_strands_model`` patch
+          surface for code review. It must accept ``review_context`` so the
           fallback reviewer sees the same context the external agent path
-          does, and ``language`` so a fallback that forwards it to
-          ``CodeReviewInput`` (e.g. backend's coordinator-backed fallback) reviews
-          the code under its actual language instead of ``CodeReviewInput``'s
-          ``typescript`` default. It returns an :class:`LlmReviewOutput` in
-          production; a bare issue list is also accepted (see
-          ``_unwrap_llm_review_result``) so a stub runner without a raw count is
-          unaffected.
+          does, and ``language`` so it can forward it to ``CodeReviewInput``
+          and review the code under its actual language instead of
+          ``CodeReviewInput``'s ``typescript`` default. It returns an
+          :class:`LlmReviewOutput` in production; a bare issue list is also
+          accepted (see ``_unwrap_llm_review_result``) so a stub runner
+          without a raw count is unaffected.
         - ``review_context`` bundles the caller's system architecture and project specification,
           when available; ``None`` means "nothing to add" so a caller that does not have this
           context yet keeps working unchanged.

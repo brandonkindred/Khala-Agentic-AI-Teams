@@ -49,18 +49,19 @@ class LlmReviewOutput(Generic[IssueT]):
     (see ``shared.phases.review_cycle.grounding_rejection_ratio``, which treats
     ``None`` and ``<= 0`` identically as "no ratio available").
 
-    Preconditions: constructed by ``run_llm_review`` (frontend's fallback) or
-    ``backend_code_v2_team.phases.review._run_llm_review`` (backend's,
-    coordinator-backed fallback — see this module's docstring).
+    Preconditions: constructed by ``run_llm_review`` (unused by either V2
+    team's production path — see this module's docstring) or by either V2
+    team's coordinator-backed ``_run_llm_review``
+    (``backend_code_v2_team``/``frontend_code_v2_team``).
 
     Postconditions/Invariants:
         - From ``run_llm_review``: ``raw_issue_count == len(issues)`` measured
           before the grounding filter ran (or unconditionally when grounding is
           disabled/skipped), so ``raw_issue_count >= len(issues)`` always holds;
           empty input (no non-blank files) yields ``LlmReviewOutput([], 0)``.
-        - From backend's coordinator-backed fallback: ``raw_issue_count`` is
-          always ``None`` — that path has no separate grounding pass to report
-          a pre-filter count for, and reporting a fabricated int (e.g.
+        - From either V2 team's coordinator-backed fallback: ``raw_issue_count``
+          is always ``None`` — that path has no separate grounding pass to
+          report a pre-filter count for, and reporting a fabricated int (e.g.
           ``len(issues)``) would make the circuit breaker see a false "0%
           rejected" instead of "no data" for every call.
     """
