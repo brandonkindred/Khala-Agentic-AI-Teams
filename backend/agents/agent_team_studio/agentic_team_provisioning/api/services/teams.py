@@ -17,7 +17,6 @@ from pydantic import ValidationError
 
 from agent_registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
-    build_agent_manifest,
     is_generated_manifest,
 )
 from agent_team_studio.agentic_team_provisioning.models import (
@@ -25,6 +24,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_REGISTRY,
     AddAgentFromRegistryRequest,
     AgenticTeamAgent,
+    AgenticTeamDetail,
     CreateTeamRequest,
     CreateTeamResponse,
     GeneratedManifestsResponse,
@@ -102,15 +102,26 @@ def get_team(team_id: str):
     """Retrieve a single agentic team by id.
 
     Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with the full ``TeamDetailResponse`` when the team
-        exists; ``404`` if no team with the given id is found.
+    Postconditions: ``200`` with ``TeamDetailResponse`` whose nested ``agents``
+        are Manifest-enriched (same soft-orphan contract as ``GET .../agents``);
+        ``404`` if no team with the given id is found.
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     team = _main._store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    return TeamDetailResponse(team=team)
+    detail = AgenticTeamDetail(
+        team_id=team.team_id,
+        name=team.name,
+        description=team.description,
+        mode=team.mode,
+        agents=[_main.enrich_roster_agent(a) for a in team.agents],
+        processes=team.processes,
+        created_at=team.created_at,
+        updated_at=team.updated_at,
+    )
+    return TeamDetailResponse(team=detail)
 
 
 def list_team_agents(team_id: str):
@@ -132,21 +143,17 @@ def list_team_agents(team_id: str):
 
 
 def list_team_agent_manifests(team_id: str):
-    """Generated agent_registry manifests (with the cognition core stamped) for the roster.
+    """Resolvable agent_registry manifests for the team's roster.
 
-    Each **generated** roster agent is rendered into a validated ``AgentManifest``
-    carrying the batteries-included ``cognition`` block; nothing is written to the
-    registry's manifest discovery paths. A **registry-source** agent (added via Agent
-    Studio's from-registry endpoint) instead returns its *original* registry manifest
-    so the advertised id is the one that actually resolves for the Agent Console /
-    ``/api/agents/{id}/invoke``.
+    Returns the Manifest currently registered for each roster ref's
+    ``manifest_id`` (registry-source originals and generated wrappers alike).
+    Refs whose Manifest no longer resolves in this process are **omitted** —
+    never fabricated — so the Agent Console / ``/api/agents/{id}/invoke`` path
+    is not advertised an id that would 404.
 
     Preconditions: ``team_id`` is a non-empty string.
-    Postconditions: ``200`` with one manifest per roster agent — a generated agent's
-        stamped wrapper, or a registry-source agent's *original* registry manifest;
-        a registry-source agent whose manifest no longer resolves in this process is
-        **omitted** rather than advertised with a synthetic generated id this team
-        never registered (which would 404 on invoke). ``404`` if the team is unknown.
+    Postconditions: ``200`` with zero or more resolvable manifests; ``404`` if
+        the team is unknown.
     """
     # ``get_registry`` is imported inline (not at module top) so the test suite's
     # ``monkeypatch.setattr("agent_registry.get_registry", …)`` is resolved at call
@@ -161,19 +168,12 @@ def list_team_agent_manifests(team_id: str):
     registry = get_registry()
     manifests = []
     for a in team.agents:
-        if a.source == SOURCE_REGISTRY:
-            # Advertise only the original, resolvable registry manifest; if it no
-            # longer resolves here, omit the agent rather than fabricate an
-            # unresolvable wrapper id.
-            original = registry.get(a.manifest_id) if a.manifest_id else None
-            if original is not None:
-                manifests.append(original)
-            continue
+        # Advertise only resolvable Manifests. Orphan registry *or* generated
+        # refs are omitted — fabricating an unregistered wrapper would 404 on
+        # catalog/invoke for the advertised id.
         existing = registry.get(a.manifest_id) if a.manifest_id else None
         if existing is not None:
             manifests.append(existing)
-        else:
-            manifests.append(build_agent_manifest(team_id, a.agent_name))
     return GeneratedManifestsResponse(team_id=team_id, manifests=manifests)
 
 

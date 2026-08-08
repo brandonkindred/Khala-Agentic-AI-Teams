@@ -123,7 +123,11 @@ def _check_roster_depth(
     *,
     personas: dict[str, RosterPersonaView] | None = None,
 ) -> list[RosterGap]:
-    """Flag agents that lack detail — they need at least one of skills/capabilities/tools/expertise."""
+    """Flag agents that lack Manifest-projected depth (skills/tools/expertise).
+
+    ``capabilities`` is never projected from ``AgentManifest`` (always empty on
+    the persona view), so it is excluded from the depth check.
+    """
     gaps: list[RosterGap] = []
     for a in agents:
         if personas is not None and a.manifest_id in personas:
@@ -146,24 +150,22 @@ def _check_roster_depth(
         missing: list[str] = []
         if not persona.skills:
             missing.append("skills")
-        if not persona.capabilities:
-            missing.append("capabilities")
         if not persona.tools:
             missing.append("tools")
         if not persona.expertise:
             missing.append("expertise")
-        if len(missing) == 4:
+        if len(missing) == 3:
             gaps.append(
                 RosterGap(
                     category="incomplete_profile",
                     detail=(
-                        f"Agent '{a.agent_name}' has no skills, capabilities, tools, or expertise "
+                        f"Agent '{a.agent_name}' has no skills, tools, or expertise "
                         "defined. The roster cannot validate coverage without this information."
                     ),
                     agent_name=a.agent_name,
                 )
             )
-        elif len(missing) >= 3:
+        elif len(missing) >= 2:
             gaps.append(
                 RosterGap(
                     category="sparse_profile",

@@ -541,6 +541,7 @@ class AgenticTeamStore:
 
                 raw = json.loads(raw)
             agent, changed = migrate_roster_row(team_id, dict(raw))
+            agent = AgenticTeamAgent.model_validate(agent.model_dump(mode="json"))
             if changed:
                 self._upsert_team_agent_row(cur, team_id, agent, now)
             agents.append(agent)
@@ -567,6 +568,7 @@ class AgenticTeamStore:
 
             raw = json.loads(raw)
         agent, changed = migrate_roster_row(team_id, dict(raw))
+        agent = AgenticTeamAgent.model_validate(agent.model_dump(mode="json"))
         if changed:
             now = datetime.now(tz=timezone.utc)
             self._upsert_team_agent_row(cur, team_id, agent, now)

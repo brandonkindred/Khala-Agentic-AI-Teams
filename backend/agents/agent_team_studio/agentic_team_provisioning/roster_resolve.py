@@ -92,16 +92,31 @@ def _thin_agent(*, agent_name: str, source: str, manifest_id: str) -> AgenticTea
     )
 
 
-def _skill_tags_from_fat_raw(raw: dict) -> list[str]:
-    """Extract deduped non-blank skill strings from a legacy fat roster dict."""
-    skills = raw.get("skills") or []
-    if not isinstance(skills, list):
+def _string_tags_from_fat_raw(raw: dict, key: str) -> list[str]:
+    """Extract deduped non-blank strings from a legacy fat roster list field."""
+    values = raw.get(key) or []
+    if not isinstance(values, list):
         return []
     tags: list[str] = []
-    for skill in skills:
-        cleaned = str(skill).strip()
+    for value in values:
+        cleaned = str(value).strip()
         if cleaned and cleaned not in tags:
             tags.append(cleaned)
+    return tags
+
+
+def _persona_tags_from_fat_raw(raw: dict) -> list[str]:
+    """Fold legacy free-text persona lists into Manifest skill tags.
+
+    ``skills``, ``tools``, ``capabilities``, and ``expertise`` have no separate
+    Manifest homes for free-text labels (``cognition.tools`` is reserved for
+    resolvable tool ids). Merge them into tags so migrate does not drop labels.
+    """
+    tags: list[str] = []
+    for key in ("skills", "tools", "capabilities", "expertise"):
+        for tag in _string_tags_from_fat_raw(raw, key):
+            if tag not in tags:
+                tags.append(tag)
     return tags
 
 
@@ -119,12 +134,13 @@ def _ensure_generated_manifest_from_fat(
         * ``registry`` supports ``get`` / ``register`` (with ``require_persist``).
     Postconditions:
         * Ensures a Manifest at ``manifest_id``. Fat ``role`` → summary;
-          fat ``skills`` → skill tags (merged with any existing non-marker tags).
-        * Does not clear existing skill tags when fat ``skills`` is empty/absent.
+          fat ``skills`` / ``tools`` / ``capabilities`` / ``expertise`` → skill
+          tags (merged with any existing non-marker tags).
+        * Does not clear existing skill tags when those fat lists are empty/absent.
         * Registration uses ``require_persist=True`` so a dynamic-store upsert
           failure raises and callers can leave the fat roster row unstripped.
     """
-    fat_skills = _skill_tags_from_fat_raw(raw)
+    fat_skills = _persona_tags_from_fat_raw(raw)
     role = raw.get("role")
     role_summary = str(role).strip() if role is not None and str(role).strip() else None
     existing = registry.get(manifest_id)
@@ -173,8 +189,9 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
         * ``changed`` is ``False`` when ``raw`` is already thin-only with
           ``manifest_id`` set.
         * For ``source == "generated"``, ensures a Manifest exists and copies
-          legacy fat ``role`` / ``skills`` onto summary / tags when present
-          (merging skill tags with any already on the Manifest). Manifest
+          legacy fat ``role`` onto summary and fat ``skills`` / ``tools`` /
+          ``capabilities`` / ``expertise`` onto skill tags when present
+          (merging with any already on the Manifest). Manifest
           registration is fail-closed (``require_persist=True``) so a store
           upsert failure aborts before callers strip the fat roster row.
     Raises:

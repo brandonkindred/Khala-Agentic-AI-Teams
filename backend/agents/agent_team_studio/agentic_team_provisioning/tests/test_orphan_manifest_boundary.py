@@ -75,6 +75,41 @@ def test_get_agents_returns_200_with_orphan(client: TestClient) -> None:
     assert row["skills"] == []
 
 
+def test_get_team_soft_enriches_orphan_agents(client: TestClient) -> None:
+    """GET /teams/{id} must enrich nested agents (same soft-orphan contract as list)."""
+    team_id = AgenticTeamStore().create_team(name="Detail Pod", description="").team_id
+    AgenticTeamStore().save_team_agents(team_id, [_orphan_agent()])
+
+    resp = client.get(f"/teams/{team_id}")
+    assert resp.status_code == 200
+    agents = resp.json()["team"]["agents"]
+    assert len(agents) == 1
+    assert agents[0]["agent_name"] == "orphan.agent"
+    assert agents[0]["manifest_id"] == _ORPHAN_MANIFEST_ID
+    assert agents[0]["role"] == ""
+    assert agents[0]["skills"] == []
+    assert "role" in agents[0]
+
+
+def test_manifests_endpoint_omits_orphan_generated(client: TestClient) -> None:
+    """Generated orphan refs must not advertise a fabricated unregistered Manifest."""
+    team_id = AgenticTeamStore().create_team(name="Gen Orphan", description="").team_id
+    AgenticTeamStore().save_team_agents(
+        team_id,
+        [
+            AgenticTeamAgent(
+                agent_name="Writer",
+                source="generated",
+                manifest_id="agentic_team_provisioning.missing.writer",
+            )
+        ],
+    )
+
+    resp = client.get(f"/teams/{team_id}/agents/manifests")
+    assert resp.status_code == 200
+    assert resp.json()["manifests"] == []
+
+
 def test_validate_roster_reports_missing_manifest(empty_registry: None) -> None:
     from agent_team_studio.agentic_team_provisioning.models import (
         AgenticTeam,

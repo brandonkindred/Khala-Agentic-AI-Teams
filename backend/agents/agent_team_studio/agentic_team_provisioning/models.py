@@ -150,10 +150,11 @@ class AgenticTeamAgent(BaseModel):
 class EnrichedRosterAgent(BaseModel):
     """Thin roster ref plus flattened persona fields for API responses.
 
-    Preconditions: ``manifest_id`` resolves in the agent registry when building
-        from a persisted row (see ``enrich_roster_agent`` in ``api.main``).
+    Preconditions: ``agent`` is a valid thin roster ref (see ``enrich_roster_agent``).
     Postconditions: exposes ``agent_name``, ``source``, ``manifest_id``, and the
-        persona view fields projected from the linked ``AgentManifest``.
+        persona view fields projected from the linked ``AgentManifest`` when it
+        resolves; when the Manifest is missing, persona fields are empty
+        (soft enrich — list/detail endpoints must not 500 on one orphan).
     Invariants: persona fields are never persisted on ``agentic_team_agents``.
     """
 
@@ -231,6 +232,27 @@ class AgenticTeam(BaseModel):
     updated_at: str = Field(default="")
 
 
+class AgenticTeamDetail(BaseModel):
+    """API team detail with Manifest-enriched roster agents (GET /teams/{id}).
+
+    Invariants:
+        * ``agents`` are ``EnrichedRosterAgent`` views — persona is join-at-read,
+          never a second write SoT on the roster row.
+    """
+
+    team_id: str = Field(..., description="Unique id (UUID)")
+    name: str = Field(..., description="Team display name")
+    description: str = Field(default="", description="Short description of what the team does")
+    mode: TeamMode = Field(default=TeamMode.DEVELOPMENT)
+    agents: list[EnrichedRosterAgent] = Field(
+        default_factory=list,
+        description="Roster refs with Manifest-joined persona fields for UI chips",
+    )
+    processes: list[ProcessDefinition] = Field(default_factory=list)
+    created_at: str = Field(default="")
+    updated_at: str = Field(default="")
+
+
 # ---------------------------------------------------------------------------
 # API request / response models
 # ---------------------------------------------------------------------------
@@ -258,7 +280,7 @@ class TeamSummary(BaseModel):
 
 
 class TeamDetailResponse(BaseModel):
-    team: AgenticTeam
+    team: AgenticTeamDetail
 
 
 class GeneratedManifestsResponse(BaseModel):

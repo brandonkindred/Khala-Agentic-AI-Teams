@@ -172,6 +172,27 @@ def test_incomplete_profile(registry: _FakeRegistry) -> None:
     assert any(g.category == "incomplete_profile" for g in result.gaps)
 
 
+def test_depth_does_not_require_capabilities(registry: _FakeRegistry) -> None:
+    """Manifest projection never fills capabilities; depth uses skills/tools/expertise only."""
+    manifest_id = manifest_agent_id(_TEAM_ID, "A")
+    _register(
+        registry,
+        AgentManifest(
+            id=manifest_id,
+            team=_TEAM_ID,
+            name="A",
+            summary="role",
+            tags=["s1"],
+            cognition=CognitionSpec(tools=["t1"]),
+            source=_SOURCE,
+        ),
+    )
+    agent = AgenticTeamAgent(agent_name="A", source="generated", manifest_id=manifest_id)
+    result = validate_roster(_team(agents=[agent], processes=[_process("P1", ["A"])]))
+    assert result.is_fully_staffed is True
+    assert result.gaps == []
+
+
 def test_no_agents_no_processes() -> None:
     result = validate_roster(_team(agents=[], processes=[]))
     assert result.is_fully_staffed is True

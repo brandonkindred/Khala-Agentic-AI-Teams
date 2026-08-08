@@ -169,6 +169,50 @@ def test_migrate_generated_stamps_manifest_id_and_strips_fat(
     assert stamped.summary == "Writes docs"
 
 
+def test_migrate_folds_fat_tools_capabilities_expertise_into_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Free-text fat tools/capabilities/expertise have no Manifest field home —
+    fold them into tags so labels survive the thin rewrite."""
+    team_id = "team-1"
+    raw = {
+        "agent_name": "Writer",
+        "role": "Writes docs",
+        "skills": ["seo"],
+        "capabilities": ["edit"],
+        "tools": ["Grammarly"],
+        "expertise": ["B2B"],
+        "source": "generated",
+        "manifest_id": None,
+    }
+    expected_id = manifest_agent_id(team_id, "Writer")
+
+    class _Reg:
+        def __init__(self) -> None:
+            self._m: dict = {}
+
+        def get(self, agent_id: str):
+            return self._m.get(agent_id)
+
+        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+            self._m[manifest.id] = manifest
+
+    reg = _Reg()
+    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+
+    agent, changed = migrate_roster_row(team_id, raw)
+    assert changed is True
+    assert agent.manifest_id == expected_id
+    stamped = reg.get(expected_id)
+    assert stamped is not None
+    for tag in ("seo", "edit", "Grammarly", "B2B"):
+        assert tag in stamped.tags
+    view = persona_from_manifest(stamped)
+    assert "Grammarly" in view.skills
+    assert "edit" in view.skills
+    assert "B2B" in view.skills
+
+
 def test_migrate_with_manifest_id_merges_fat_skills(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fat skills alongside an already-stamped manifest_id must fold into Manifest tags."""
     team_id = "team-1"

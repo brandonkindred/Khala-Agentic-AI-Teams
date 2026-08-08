@@ -44,12 +44,12 @@ export interface ProcessDefinition {
 /** Provenance of a roster entry (Agent Studio §3, Stage 3). */
 export type AgenticTeamAgentSource = 'generated' | 'registry';
 
-/** Named agent in the team's roster (thin ref; persona enriched on GET/list). */
+/** Named agent in the team's roster (thin ref; persona enriched on GET team / list). */
 export interface AgenticTeamAgent {
   agent_name: string;
   source: AgenticTeamAgentSource;
   manifest_id: string;
-  /** Enriched from linked AgentManifest — present on GET/list responses. */
+  /** Enriched from linked AgentManifest — present on GET team and list responses. */
   role?: string;
   skills?: string[];
   capabilities?: string[];

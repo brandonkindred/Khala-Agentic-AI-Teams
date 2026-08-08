@@ -178,12 +178,11 @@ def test_from_registry_empty_tags_agent_added_but_flagged_sparse(
     client: TestClient, registry: _FakeRegistry
 ) -> None:
     """A manifest with NO tags and no cognition projects to a roster agent with only
-    ``expertise`` populated (skills/capabilities/tools all empty) — three missing
-    categories, which ``roster_validation`` correctly flags ``sparse_profile``. The
-    add still succeeds (201); validation honestly reports the team is not fully
-    staffed. (Studio-saved manifests always carry the 'studio' tag, so this
-    degenerate shape only arises for hand-authored / non-Studio catalog manifests —
-    and a tag-less, tool-less, capability-less agent genuinely *is* under-specified.)"""
+    ``expertise`` populated (skills/tools empty) — two of three depth categories
+    missing, which ``roster_validation`` flags ``sparse_profile``. The add still
+    succeeds (201); validation honestly reports the team is not fully staffed.
+    (``capabilities`` is excluded from depth — Manifest projection never fills it.)
+    """
     registry.register(
         AgentManifest(
             id="empty.tags",
@@ -203,7 +202,7 @@ def test_from_registry_empty_tags_agent_added_but_flagged_sparse(
     assert body["expertise"] == ["empty"]  # only expertise populated
 
     validation = client.get(f"/teams/{team_id}/roster/validation").json()
-    assert validation["is_fully_staffed"] is False  # sparse_profile: 3 categories missing
+    assert validation["is_fully_staffed"] is False  # sparse_profile: skills+tools missing
     assert any(g["category"] == "sparse_profile" for g in validation["gaps"])
 
 
@@ -860,10 +859,16 @@ def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyP
 
 def test_manifests_endpoint_returns_original_for_registry_agent(client: TestClient) -> None:
     """A registry-source roster agent advertises its *original* resolvable manifest id,
-    while a generated agent still gets the synthetic stamped wrapper."""
+    while a generated agent advertises its registered stamped wrapper (orphans omitted)."""
+    from agent_registry import get_registry
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+        build_agent_manifest,
+    )
+
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
     gen = _thin_gen(team_id, "Writer")
+    get_registry().register(build_agent_manifest(team_id, "Writer", summary="Writes"))
     AgenticTeamStore().add_or_replace_team_agent(team_id, gen)
 
     manifests = {
@@ -897,6 +902,22 @@ def test_manifests_endpoint_omits_unresolvable_registry_agent(client: TestClient
         m["name"] for m in client.get(f"/teams/{team_id}/agents/manifests").json()["manifests"]
     }
     assert names == {"blogging.planner"}  # Orphan omitted, resolvable one kept
+
+
+def test_get_team_enriches_roster_persona(client: TestClient) -> None:
+    """GET /teams/{id} nested agents include Manifest-joined persona fields."""
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    resp = client.get(f"/teams/{team_id}")
+    assert resp.status_code == 200
+    agents = resp.json()["team"]["agents"]
+    assert len(agents) == 1
+    assert agents[0]["agent_name"] == "blogging.planner"
+    assert agents[0]["manifest_id"] == "blogging.planner"
+    assert agents[0]["role"] == "Plans SEO-aware blog outlines"
+    assert "seo" in agents[0]["skills"]
+    assert "web.search" in agents[0]["tools"]
 
 
 def test_merge_generated_agents_invokes_on_merged(client: TestClient) -> None:
