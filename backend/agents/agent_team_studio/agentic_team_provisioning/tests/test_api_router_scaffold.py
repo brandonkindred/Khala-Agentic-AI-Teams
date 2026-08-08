@@ -71,6 +71,15 @@ def test_teams_and_conversations_routers_importable() -> None:
     assert isinstance(conversations.router, APIRouter)
 
 
+def test_list_teams_route_has_dbc_docstring() -> None:
+    from agent_team_studio.agentic_team_provisioning.api.routes.teams import list_teams
+
+    doc = list_teams.__doc__
+    assert doc
+    assert "Preconditions:" in doc
+    assert "Postconditions:" in doc
+
+
 def test_testing_router_importable() -> None:
     from agent_team_studio.agentic_team_provisioning.api.routes import testing
 

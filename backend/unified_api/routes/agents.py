@@ -80,6 +80,15 @@ def list_agents(
 
 @router.get("/teams", response_model=list[TeamGroup])
 def list_teams() -> list[TeamGroup]:
+    """List every team present in the merged agent registry.
+
+    Preconditions: none.
+    Postconditions: returns one ``TeamGroup`` per distinct team key across all
+        merged manifests (static + dynamic), sorted by ``display_name``
+        case-insensitively; each group's ``tags`` is the sorted union of its
+        agents' tags and ``agent_count`` is the number of manifests for that
+        team. Returns an empty list when the registry has no manifests.
+    """
     return get_registry().teams()
 
 
