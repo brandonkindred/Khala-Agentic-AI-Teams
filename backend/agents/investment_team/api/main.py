@@ -3342,8 +3342,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
         - ``HTTPException`` 400: the run's status is not in
-          ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
-          dict.
+          ``RESUMABLE_STATUSES``; its ``request_payload`` is missing/not a
+          dict; or the stored ``request_payload`` fails
+          ``RunStrategyLabRequest`` validation (e.g. a corrupted or
+          schema-stale persisted payload).
         - ``HTTPException`` 409: another transition for this run_id is
           already in flight, or another run is already ``"running"``.
         - ``HTTPException`` 503: reading the current durable generation —
