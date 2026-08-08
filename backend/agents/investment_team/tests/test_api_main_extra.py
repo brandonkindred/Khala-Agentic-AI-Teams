@@ -66,6 +66,43 @@ if TYPE_CHECKING:
     from investment_team.models import StrategyLabRecord
 
 
+def test_api_main_has_no_module_level_logging_basic_config_call() -> None:
+    """A top-level ``logging.basicConfig(...)`` statement in this module would
+    mutate the global root logger as a side effect of merely importing it,
+    overriding the application entrypoint's (or a test runner's) intended
+    logging setup depending on import order.
+
+    Statically inspects the module's top-level statements (rather than
+    reimporting it) because ``investment_team.api.main`` has real import-time
+    side effects of its own (``create_team_app(...)``, module-level
+    singletons) that a forced reimport would re-trigger and that other
+    modules alias by identity (see ``test_orchestrator_api``'s
+    ``_DEFERRED``-symbol aliasing checks) — reloading would silently break
+    those instead of testing this module's logging behavior.
+    """
+    import ast
+    import inspect
+
+    from investment_team.api import main as api_main
+
+    tree = ast.parse(inspect.getsource(api_main))
+    offending = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "basicConfig"
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "logging"
+    ]
+    assert not offending, (
+        "Module-level logging.basicConfig call reintroduced in "
+        "investment_team.api.main — this mutates the global root logger "
+        "as a side effect of import."
+    )
+
+
 def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
     """The Strategy Lab concurrency clamp bounds a request's max_parallel to the
     env-configured ceiling and logs only when it actually lowers the value."""
