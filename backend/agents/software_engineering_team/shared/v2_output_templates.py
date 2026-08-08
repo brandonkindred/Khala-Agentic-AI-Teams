@@ -140,25 +140,6 @@ def parse_files_and_summary_template(
     return {"files": files, "summary": summary}
 
 
-def parse_files_with_validation(
-    text: str, *, normalize: Callable[[str], str] = _identity
-) -> Tuple[Dict[str, Any], List[str], Dict[str, str]]:
-    """Parse files from template output.
-
-    Note: Truncation detection is now handled at the LLM client level via
-    finish_reason checks. This function simply parses the output without
-    additional validation.
-
-    Returns:
-        Tuple of:
-        - parsed: Dict with "files" and "summary" keys
-        - truncated_paths: Always empty list (deprecated)
-        - validation_errors: Always empty dict (deprecated)
-    """
-    parsed = parse_files_and_summary_template(text, normalize=normalize)
-    return parsed, [], {}
-
-
 def _parse_microtask_block(block: str) -> Dict[str, Any] | None:
     """Parse a single microtask block (key: value lines)."""
     out: Dict[str, Any] = {}
@@ -531,9 +512,6 @@ def make_output_templates(
         normalize_file_path=normalize_file_path,
         parse_files_and_summary_template=functools.partial(
             parse_files_and_summary_template, normalize=normalize_file_path
-        ),
-        parse_files_with_validation=functools.partial(
-            parse_files_with_validation, normalize=normalize_file_path
         ),
         parse_planning_template=parse_planning,
         parse_review_template=parse_review_template,
