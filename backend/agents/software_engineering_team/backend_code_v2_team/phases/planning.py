@@ -19,15 +19,15 @@ from typing import Any, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
+from llm_service.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
+)
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.planning import (
     parse_planning_output,
     plan_fixes_impl,
     run_planning_impl,
-)
-from software_engineering_team.shared.strands_model import (
-    LlmRunner,
-    resolve_text_mode_strands_model,
 )
 
 from .. import models as _models

@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from software_engineering_team.shared.branch_utils import make_branch_suffix, make_slug
+from shared.git.branch_utils import make_branch_suffix, make_slug
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,

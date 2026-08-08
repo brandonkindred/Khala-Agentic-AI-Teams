@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import LLMClient
+from llm_service.strands_model import resolve_text_mode_strands_model
 from software_engineering_team.shared.agent_review import (
     AgentReviewCache,
     run_qa_agent,
@@ -42,7 +43,6 @@ from software_engineering_team.shared.review_utils import (
 from software_engineering_team.shared.review_utils import (
     run_documentation_self_review as _shared_run_documentation_self_review,
 )
-from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 from software_engineering_team.shared.v2_review import (
     _review_steps_run_sequentially,  # noqa: F401  (re-exported for tests)
 )

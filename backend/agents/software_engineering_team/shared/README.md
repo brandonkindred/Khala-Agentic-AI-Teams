@@ -65,7 +65,7 @@ AGENT_DEFAULT_MODELS = {
 ### Usage
 
 ```python
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 llm = LLMClient()
 
@@ -87,10 +87,10 @@ result = llm.complete_json(
 ### Agent-Specific Client
 
 ```python
-from shared.llm import get_llm_for_agent
+from software_engineering_team.shared.llm import get_client
 
 # Uses LLM_MODEL_BACKEND or agent default
-llm = get_llm_for_agent("backend")
+llm = get_client("backend")
 ```
 
 ## Models (`models.py`)

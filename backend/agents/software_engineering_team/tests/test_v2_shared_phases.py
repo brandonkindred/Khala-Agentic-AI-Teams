@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from llm_service.strands_model import LlmRunner
 from software_engineering_team.backend_code_v2_team import models as be_models
 from software_engineering_team.shared.git_utils import write_files_and_commit
 from software_engineering_team.shared.models import (
@@ -42,7 +43,6 @@ from software_engineering_team.shared.repo_writer import (
     write_repo_text_files,
 )
 from software_engineering_team.shared.stack_profile import StackProfile
-from software_engineering_team.shared.strands_model import LlmRunner
 from software_engineering_team.tests.test_helpers import init_repo_with_existing_development
 
 # --- helpers ---------------------------------------------------------------

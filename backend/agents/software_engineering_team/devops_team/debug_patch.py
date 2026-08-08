@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from software_engineering_team.shared.branch_utils import make_branch_suffix
+from shared.git.branch_utils import make_branch_suffix
 from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 

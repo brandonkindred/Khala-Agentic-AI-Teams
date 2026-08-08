@@ -133,7 +133,7 @@ class FileGeneratorToolAgent(StaticPhaseToolAgent):
     _parse_files_and_summary: Optional[Callable[[str], Dict[str, Any]]] = None
 
     def __init__(self, llm=None) -> None:
-        from software_engineering_team.shared.strands_model import resolve_strands_model
+        from llm_service.strands_model import resolve_strands_model
 
         # v2 tool agents consume template-parsed output (parse_review_template /
         # parse_files_and_summary_template / parse_problem_solving_single_issue_template);

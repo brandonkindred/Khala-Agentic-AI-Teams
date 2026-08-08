@@ -877,7 +877,7 @@ def test_recursive_processor_default_branch_uses_injected_llm_client(monkeypatch
     """
     import strands
 
-    import software_engineering_team.shared.strands_model as strands_model_module
+    import llm_service.strands_model as strands_model_module
     from llm_service import LLMClient
     from software_engineering_team.shared.decomposition import (
         RecursiveProcessor,
