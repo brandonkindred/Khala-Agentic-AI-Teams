@@ -94,6 +94,23 @@ def test_nonzero_override_is_preserved() -> None:
     assert slip == 3.0
 
 
+def test_missing_overrides_use_asset_class_defaults_for_crypto() -> None:
+    """The live path passes the strategy's asset class through so a crypto
+    strategy omitting fee overrides gets Kraken-tier 26/10 bps instead of the
+    flat 5/2 stock-tier default."""
+    req = RunPaperTradingRequest(lab_record_id="x")
+    tx, slip = _resolve_fee_overrides(req, asset_class="crypto")
+    assert tx == 26.0
+    assert slip == 10.0
+
+
+def test_explicit_override_wins_over_asset_class_default() -> None:
+    req = RunPaperTradingRequest(lab_record_id="x", transaction_cost_bps=1.5, slippage_bps=0.0)
+    tx, slip = _resolve_fee_overrides(req, asset_class="crypto")
+    assert tx == 1.5
+    assert slip == 0.0
+
+
 # ---------------------------------------------------------------------------
 # timeframe validation
 # ---------------------------------------------------------------------------
