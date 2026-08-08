@@ -16,8 +16,10 @@ from llm_service.strands_adapter import (
     _flatten_system_prompt_content,
     _strands_messages_to_openai,
     _tool_specs_to_openai,
-    get_strands_model,
     run_json_via_strands,
+)
+from llm_service.strands_adapter import (
+    _get_strands_model as get_strands_model,
 )
 
 # ---------------------------------------------------------------------------
@@ -746,6 +748,20 @@ def test_public_llm_service_get_strands_model_accepts_client_kwarg() -> None:
     assert isinstance(model, LLMClientModel)
     assert model._client is client
     assert model.get_config()["response_format"] == "text"
+
+
+def test_adapter_get_strands_model_is_not_publicly_exported() -> None:
+    """``strands_adapter`` must not export a public ``get_strands_model`` name:
+    ``llm_service.get_strands_model`` (re-exported from ``strands_provider``,
+    which adds caching, provider resolution, and fingerprint invalidation) is
+    the sole canonical public entry point. The adapter's own factory is a
+    low-level, package-private helper (``_get_strands_model``).
+    """
+    import llm_service.strands_adapter as adapter
+
+    assert "get_strands_model" not in adapter.__all__
+    assert not hasattr(adapter, "get_strands_model")
+    assert hasattr(adapter, "_get_strands_model")
 
 
 def test_invocation_state_invalid_response_format_raises() -> None:

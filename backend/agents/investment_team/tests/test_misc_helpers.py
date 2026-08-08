@@ -1403,10 +1403,10 @@ def _patch_ollama_llm_service(monkeypatch: pytest.MonkeyPatch):
     """Wire model_factory to the Ollama branch and capture the llm_service routing.
 
     The default Ollama path delegates to
-    ``llm_service.strands_adapter.get_strands_model`` (the hardened path). This
+    ``llm_service.strands_adapter._get_strands_model`` (the hardened path). This
     patches that source attribute with a recorder so tests can assert what
     ``get_strands_model`` forwards. ``get_strands_model`` imports the adapter
-    lazily (``from llm_service.strands_adapter import get_strands_model``) at
+    lazily (``from llm_service.strands_adapter import _get_strands_model``) at
     call time, so patching the module attribute is picked up.
 
     Returns ``(model_factory, recorder)`` where ``recorder.calls`` is a list of
@@ -1431,7 +1431,7 @@ def _patch_ollama_llm_service(monkeypatch: pytest.MonkeyPatch):
             return ("LLM_SERVICE_MODEL", agent_key, response_format)
 
     recorder = _Recorder()
-    monkeypatch.setattr(adapter, "get_strands_model", recorder)
+    monkeypatch.setattr(adapter, "_get_strands_model", recorder)
     return model_factory, recorder
 
 

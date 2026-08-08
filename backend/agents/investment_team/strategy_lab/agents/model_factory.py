@@ -190,7 +190,7 @@ def get_strands_model(
 
     For the default **Ollama** provider this routes through the platform's
     hardened ``llm_service`` client (via :func:`llm_service.strands_adapter.
-    get_strands_model`) rather than constructing strands' native ``OllamaModel``
+    _get_strands_model`) rather than constructing strands' native ``OllamaModel``
     directly. The llm_service client converts an empty / thinking-only / prose-
     only model turn into a real signal — it detects it, runs a reduced-thinking
     ("proof-of-change") retry ladder that ends by disabling thinking entirely, and
@@ -336,7 +336,7 @@ def get_strands_model(
     # Route through the hardened llm_service path. Imported lazily so the module
     # carries no import-time dependency on strands beyond the provider branches
     # above, and so tests can monkeypatch the source attribute.
-    from llm_service.strands_adapter import get_strands_model as _llm_service_strands_model
+    from llm_service.strands_adapter import _get_strands_model as _llm_service_strands_model
 
     logger.info(
         "Strategy Lab LLM routed through llm_service: agent_key=%s model=%s host=%s "
