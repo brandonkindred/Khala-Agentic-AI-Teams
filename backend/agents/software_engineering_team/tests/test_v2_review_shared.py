@@ -368,6 +368,65 @@ def test_run_review_raw_issue_count_none_when_code_review_agent_succeeds(tmp_pat
     assert any(i.description == "from agent" for i in result.issues)
 
 
+def test_run_review_code_review_agent_issue_uses_suggestion_field(tmp_path: Path) -> None:
+    """The real CodeReviewIssue model carries fix guidance in ``suggestion``, not
+    ``recommendation`` -- _code_review_step must read ``suggestion`` so that field isn't
+    silently dropped from the external agent's issues."""
+    config = _build_config()
+
+    class _Issue:
+        severity = "medium"
+        description = "from agent"
+        file_path = "x.py"
+        suggestion = "do the fix"
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[_Issue()])
+
+    result = run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+    issue = next(i for i in result.issues if i.description == "from agent")
+    assert issue.recommendation == "do the fix"
+
+
+def test_run_review_code_review_agent_issue_falls_back_to_recommendation_field(
+    tmp_path: Path,
+) -> None:
+    """Backward compatibility: an issue object with no ``suggestion`` attribute still
+    populates ``recommendation`` from a legacy ``recommendation`` attribute."""
+    config = _build_config()
+
+    class _Issue:
+        severity = "medium"
+        description = "from agent"
+        file_path = "x.py"
+        recommendation = "legacy fix"
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[_Issue()])
+
+    result = run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+    issue = next(i for i in result.issues if i.description == "from agent")
+    assert issue.recommendation == "legacy fix"
+
+
 # ---------------------------------------------------------------------------
 # run_microtask_review branches
 # ---------------------------------------------------------------------------
@@ -508,6 +567,35 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         build_verify_fn=_build_verify_fn,
     )
     assert any(i.description == "llm" for i in result2.issues)
+
+
+def test_microtask_code_review_agent_issue_uses_suggestion_field(tmp_path: Path) -> None:
+    """The microtask code-review-agent path reads ``suggestion`` (the real
+    CodeReviewIssue field) into ``recommendation``, same as the full-task path."""
+    config = _build_config()
+
+    class _Issue:
+        severity = "medium"
+        description = "magic"
+        file_path = "x.py"
+        suggestion = "do the fix"
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[_Issue()])
+
+    result = run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+    issue = next(i for i in result.issues if i.description == "magic")
+    assert issue.recommendation == "do the fix"
 
 
 def test_microtask_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
