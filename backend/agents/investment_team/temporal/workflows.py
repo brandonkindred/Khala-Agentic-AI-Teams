@@ -77,11 +77,16 @@ def run_backtest_activity(
         - Otherwise ``_run_backtest_background`` has run and persisted the job
           result; outcome is taken from the worker's return value (entry
           short-circuit still reads the job store). Raises ``ApplicationError``
-          if the worker returned ``failed`` (so Temporal retries within the
-          bounded policy). If the worker returned ``cancelled`` (a user-initiated
-          cancel during the run), returns a status dict reporting ``cancelled``
-          rather than ``completed``. Returns a ``completed`` status dict
-          otherwise.
+          (``type="BacktestFailed"``) if the worker returned ``failed`` (so
+          Temporal retries within the bounded policy). If the worker returned
+          ``cancelled`` (a user-initiated cancel during the run), returns a
+          status dict reporting ``cancelled`` rather than ``completed``.
+          Returns a ``completed`` status dict when the worker returned
+          ``completed``. Any other (non-terminal/unrecognized) return value —
+          a job that did not reach a terminal status within its polling
+          deadline — raises a non-retryable ``ApplicationError``
+          (``type="BacktestPollingTimeout"``): this is a deterministic
+          condition, not a transient one, so retrying would not help.
     """
     from investment_team.api.main import (
         _BT_JOB_STATUS_CANCELLED,
@@ -107,7 +112,17 @@ def run_backtest_activity(
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
     if final_status == _BT_JOB_STATUS_CANCELLED:
         return {"job_id": job_id, "status": "cancelled"}
-    return {"job_id": job_id, "status": "completed"}
+    if final_status == _BT_JOB_STATUS_COMPLETED:
+        return {"job_id": job_id, "status": "completed"}
+    # Deterministic (not transient) condition: the worker returned without
+    # reaching a terminal status within its polling deadline. Raise
+    # non-retryable so Temporal does not burn retry attempts on a failure a
+    # retry cannot fix.
+    raise ApplicationError(
+        f"Backtest {job_id} polling exceeded deadline",
+        type="BacktestPollingTimeout",
+        non_retryable=True,
+    )
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")

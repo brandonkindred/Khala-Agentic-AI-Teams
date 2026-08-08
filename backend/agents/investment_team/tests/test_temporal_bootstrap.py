@@ -319,6 +319,35 @@ def test_run_backtest_activity_raises_when_job_failed(monkeypatch) -> None:
         run_backtest_activity("job-x", {}, {}, "agent", [])
 
 
+def test_run_backtest_activity_raises_application_error_on_polling_timeout(
+    monkeypatch,
+) -> None:
+    """A job that never reaches a terminal status within its polling deadline
+    must surface as a non-retryable ApplicationError, not a raw TimeoutError
+    (and not be silently reported as ``completed``, the prior fallthrough
+    behavior)."""
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_RUNNING,
+    )
+
+    from temporalio.exceptions import ApplicationError
+
+    with pytest.raises(ApplicationError, match="polling exceeded deadline") as exc_info:
+        run_backtest_activity("job-timeout", {}, {}, "agent", [])
+
+    assert exc_info.value.type == "BacktestPollingTimeout"
+    assert exc_info.value.non_retryable is True
+
+
 def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
     """A user-cancelled backtest must be reported as ``cancelled``, not the
     default ``completed`` — outcome comes from the worker return value."""
