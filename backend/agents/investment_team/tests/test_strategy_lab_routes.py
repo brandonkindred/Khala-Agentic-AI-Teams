@@ -951,6 +951,41 @@ def test_restart_strategy_lab_run_404(lab_job_client, api_client) -> None:
     assert resp.status_code == 404
 
 
+def test_restart_strategy_lab_run_404_when_state_deleted_between_reads(
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
+) -> None:
+    """Regression: a run deleted in the window between the pre-lock existence
+    check and the lock-acquired re-read must 404 cleanly with the same
+    message as the early check, not raise (surfacing as a 500) or fall
+    through to a different 404 shape.
+
+    Simulated via a stateful ``_get_run_state`` stub keyed on call count —
+    the same technique as
+    ``test_resume_strategy_lab_run_404_when_state_deleted_between_reads``,
+    restart's own analogue of that resume regression.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-deleted-mid-restart"
+    api_main._active_runs[run_id] = _resumable_state(run_id)
+
+    call_count = {"n": 0}
+
+    def _stateful_get_run_state(rid: str):
+        call_count["n"] += 1
+        if call_count["n"] > 1:
+            api_main._active_runs.pop(rid, None)
+            return None
+        return api_main._active_runs.get(rid)
+
+    monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/restart")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == f"Strategy lab run '{run_id}' not found."
+    assert call_count["n"] >= 2
+
+
 def test_restart_strategy_lab_run_400_when_payload_missing(lab_job_client, api_client) -> None:
     """A restartable run with no stored ``request_payload`` to rebuild dispatch from returns 400."""
     from investment_team.api import main as api_main
@@ -2410,6 +2445,41 @@ def test_list_strategy_lab_runs_skips_active_run_entry_missing_run_id(
     assert run_ids == {"run-ok"}
 
 
+def test_list_strategy_lab_runs_skips_entry_response_construction_failure(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """An ``_active_runs`` entry that ``_run_state_to_response`` cannot convert
+    into a response model (e.g. a ``total_cycles`` value that can't coerce to
+    ``int``) must not 500 the whole listing -- it's skipped and logged, and
+    every other (well-formed) entry still appears in the response. Regression
+    test: the response-construction step used to sit outside the endpoint's
+    ``try/except``, so a single malformed entry's ``ValidationError`` would
+    propagate uncaught, violating the documented "always returns 200"
+    contract."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-ok"] = {
+        "run_id": "run-ok",
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    # total_cycles is a required `int` field on the response model; a dict
+    # value cannot be coerced, so `_run_state_to_response` raises.
+    api_main._active_runs["run-bad-total-cycles"] = {
+        "run_id": "run-bad-total-cycles",
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": {"not": "an int"},
+    }
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+
+    resp = api_client.get("/strategy-lab/runs")
+
+    assert resp.status_code == 200
+    run_ids = {r["run_id"] for r in resp.json()["runs"]}
+    assert run_ids == {"run-ok"}
+
+
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -3489,6 +3559,75 @@ def _make_subscriber(events):
     return _Sub()
 
 
+def test_make_subscriber_returns_expected_contract() -> None:
+    """``_make_subscriber`` must honor the subscription contract it
+    promises, not just exist.
+
+    Preconditions:
+        - None; exercises ``_make_subscriber`` directly with a sample deque.
+
+    Postconditions:
+        - ``sub.events`` is the exact deque object passed in (not a copy),
+          since ``stream_strategy_lab_run`` polls the live deque for new
+          events pushed after subscription.
+        - ``sub.touch()`` is callable and returns ``None`` without raising.
+    """
+    from collections import deque
+
+    events = deque([{"type": "complete", "summary": "ok"}])
+    sub = _make_subscriber(events)
+
+    assert sub.events is events
+    assert sub.touch() is None
+
+
+def test_stream_tests_reuse_shared_subscriber_helper() -> None:
+    """Guard against the four stream tests regressing back to duplicated
+    inline ``_Sub`` classes.
+
+    Preconditions:
+        - None; inspects this test module's own source.
+
+    Postconditions:
+        - The fake-subscriber class def appears exactly once in the module
+          (inside ``_make_subscriber`` itself) — a second occurrence would
+          mean a test reintroduced an inline copy instead of reusing the
+          helper.
+        - Each of the four stream tests that previously defined its own
+          copy calls ``_make_subscriber(`` instead.
+    """
+    from pathlib import Path
+
+    # Built via concatenation (rather than a literal) so this assertion
+    # doesn't match its own source line and inflate the count.
+    needle = "class " + "_Sub:"
+    source = Path(__file__).read_text()
+    assert source.count(needle) == 1
+
+    reusing_tests = [
+        test_stream_strategy_lab_run_does_not_block_on_threading_lock,
+        test_stream_strategy_lab_run_emits_snapshot_update_and_terminates,
+        test_stream_strategy_lab_run_terminates_on_error_event,
+        test_stream_strategy_lab_run_snapshot_reconciles_progress,
+    ]
+    for test_func in reusing_tests:
+        assert "_make_subscriber(" in inspect.getsource(test_func)
+
+
+def test_stream_strategy_lab_run_has_documented_contract() -> None:
+    """Regression guard: the SSE handler's docstring must document its
+    contract with structured Preconditions/Postconditions/Raises sections,
+    not just the threadpool-offload narrative -- a caller needs to know the
+    expected ``run_id`` shape, the 404 case, and the snapshot/done behavior
+    for terminal runs without reading the implementation."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.stream_strategy_lab_run.__doc__
+    assert doc, "stream_strategy_lab_run is missing a docstring"
+    for snippet in ("Preconditions:", "Postconditions:", "Raises:", "404"):
+        assert snippet in doc, f"stream_strategy_lab_run docstring missing {snippet!r}"
+
+
 def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Streaming a run_id with neither in-memory nor persisted state returns 404."""
     from investment_team.api import main as api_main
@@ -3541,6 +3680,68 @@ def test_stream_strategy_lab_run_terminal_short_circuit_completed_with_errors(
     body = resp.text
     assert "snapshot" in body
     assert "done" in body
+
+
+def test_stream_strategy_lab_run_terminal_snapshot_immune_to_post_check_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for the terminal SSE snapshot race (parent finding: a
+    pre-existing bug flagged against PR #4535 in ``stream_strategy_lab_run``).
+
+    The ``state`` dict handed to the terminal branch is the *same* object
+    stored in ``_active_runs[run_id]`` -- not a copy. A background thread
+    (e.g. ``_reconcile_run_progress`` running for a different request, or a
+    concurrent cancel/resume/reset handler) can mutate that dict in place
+    between this coroutine returning its ``StreamingResponse`` and Starlette
+    actually draining the one-shot terminal generator. Before the fix,
+    ``_terminal_gen`` read ``_run_state_to_response(state)`` lazily at
+    drain-time, so such a mutation leaked into the emitted snapshot. The fix
+    captures ``_run_state_to_response(state).model_dump(...)`` eagerly,
+    before the generator is even defined, pinning the snapshot to the state
+    observed at the terminal check.
+
+    Preconditions:
+        - A terminal run exists in ``_active_runs``.
+
+    Postconditions:
+        - Mutating the same ``_active_runs[run_id]`` dict object in place
+          after ``stream_strategy_lab_run`` returns but before its body is
+          drained does not change the emitted snapshot: it still reflects
+          ``completed_cycles=7`` / ``status=completed`` (the values at the
+          terminal check), not the post-check ``completed_cycles=999`` /
+          ``status=running`` values written afterward.
+    """
+    import asyncio
+
+    from investment_team.api import main as api_main
+
+    run_id = "terminal-race-snapshot"
+    state = {
+        "run_id": run_id,
+        "status": "completed",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 10,
+        "completed_cycles": 7,
+    }
+    monkeypatch.setitem(api_main._active_runs, run_id, state)
+    monkeypatch.setattr(api_main, "_reconcile_run_progress", lambda rid: None)
+
+    async def _consume() -> str:
+        resp = await api_main.stream_strategy_lab_run(run_id)
+        # Simulate a background thread racing the response by mutating the
+        # exact same dict object in place before the generator is drained.
+        api_main._active_runs[run_id]["completed_cycles"] = 999
+        api_main._active_runs[run_id]["status"] = "running"
+        chunks: List[str] = []
+        async for chunk in resp.body_iterator:
+            chunks.append(chunk if isinstance(chunk, str) else chunk.decode())
+        return "".join(chunks)
+
+    body = asyncio.run(_consume())
+    assert '"completed_cycles": 7' in body
+    assert '"status": "completed"' in body
+    assert '"completed_cycles": 999' not in body
+    assert '"status": "running"' not in body
 
 
 def test_stream_strategy_lab_run_source_uses_async_lock() -> None:

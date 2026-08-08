@@ -329,7 +329,7 @@ def test_run_code_review_sizes_context_with_strands_adapter() -> None:
     get_max_context_tokens on it. Without adapter delegation that raised
     AttributeError and every review failed closed ("Review failed: ...")."""
     from llm_service.clients.dummy import DummyLLMClient
-    from llm_service.strands_adapter import get_strands_model
+    from llm_service.strands_adapter import _get_strands_model as get_strands_model
     from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
 
     llm = get_strands_model("code_review", client=DummyLLMClient())

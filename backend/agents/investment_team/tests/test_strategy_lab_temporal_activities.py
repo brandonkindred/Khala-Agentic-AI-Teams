@@ -1393,6 +1393,44 @@ def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypat
     assert storage["skipped_reason"] == "expert_failed"
 
 
+def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(monkeypatch):
+    """A provider.close() failure in the finally block must not replace an
+    already-successful brief with an unhandled exception -- the guard covers
+    the happy path, not just the fail-open branches."""
+    from investment_team.api import main as api_main
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            raise RuntimeError("close boom")
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx):
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    # Must not raise despite close() failing, and must return the brief the
+    # try block already produced -- not a fail-open fallback tuple.
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert isinstance(brief, _FakeBrief)
+    assert storage.get("skipped") is not True
+    assert storage["brief_version"] == "v1"
+
+
 def test_is_strategy_lab_run_externally_stopped_reads_job_status(monkeypatch):
     """The broad check fires for any external stop signal -- cancelled,
     failed, or interrupted alike -- not just a genuine cancellation."""

@@ -386,7 +386,9 @@ def _code_review_step(
                         severity=getattr(item, "severity", "medium"),
                         description=getattr(item, "description", str(item)),
                         file_path=getattr(item, "file_path", ""),
-                        recommendation=getattr(item, "recommendation", ""),
+                        recommendation=getattr(
+                            item, "suggestion", getattr(item, "recommendation", "")
+                        ),
                     )
                     for item in getattr(cr_result, "issues", [])
                 ]
