@@ -716,6 +716,18 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /**
    * Build a custom interactive SVG flowchart from the process definition.
    * Nodes are interactive — clicking them opens the step editor.
+   *
+   * Postconditions: `flowchartSvg` is `null` when `process` is null or has no
+   * steps; otherwise it holds a `SafeHtml` built from a hand-rolled SVG
+   * string via `sanitizer.bypassSecurityTrustHtml`, rendered unsanitized via
+   * `[innerHTML]`. Every process-derived value interpolated into that string
+   * (trigger type/description, step id/name, agent names, output
+   * description) MUST be passed through `escSvg` first — these values can
+   * originate from LLM-generated process definitions seeded by untrusted
+   * chat input, so an unescaped field here is a live stored-XSS vector, not
+   * just a display bug. Any new dynamic field added to this method must be
+   * wrapped in `escSvg` and covered by the tests in
+   * `describe('flowchart SVG escaping (XSS hardening)', ...)`.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {
     // The outgoing SVG (if any) is about to be discarded via [innerHTML] —
@@ -764,7 +776,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     // Draw trigger node (rounded rect, green tint)
     const trigY = nodeY(0);
     svg += `<rect x="${cx - nodeWidth / 2}" y="${trigY}" width="${nodeWidth}" height="${nodeHeight}" rx="25" ry="25" fill="#1a3a2a" stroke="#3fb950" stroke-width="1.5"/>`;
-    svg += `<text x="${cx}" y="${trigY + nodeHeight / 2 + 5}" text-anchor="middle" fill="#3fb950" font-size="12" font-family="sans-serif">${this.escSvg(process.trigger.trigger_type.toUpperCase())}: ${this.truncate(process.trigger.description || 'Trigger', 20)}</text>`;
+    svg += `<text x="${cx}" y="${trigY + nodeHeight / 2 + 5}" text-anchor="middle" fill="#3fb950" font-size="12" font-family="sans-serif">${this.escSvg(process.trigger.trigger_type.toUpperCase())}: ${this.escSvg(this.truncate(process.trigger.description || 'Trigger', 20))}</text>`;
 
     // Arrow from trigger to first step
     if (steps.length > 0) {
@@ -845,7 +857,23 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     return text.length > max ? text.substring(0, max - 1) + '\u2026' : text;
   }
 
+  /**
+   * Escape a plain-text value for interpolation into the hand-rolled SVG
+   * markup built by `buildFlowchart`.
+   *
+   * Precondition: `text` is plain text, not markup.
+   * Postcondition: returns `text` with `& < > " '` replaced by HTML
+   * entities. `buildFlowchart` trusts the assembled SVG string via
+   * `bypassSecurityTrustHtml`, so every value that reaches the template
+   * MUST be passed through this helper — a value that skips it is an XSS
+   * vector.
+   */
   private escSvg(text: string): string {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 }
