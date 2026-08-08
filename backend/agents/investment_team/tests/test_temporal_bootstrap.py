@@ -17,7 +17,11 @@ Covers three things the runtime depends on:
    and delegates to the *existing* ``_run_backtest_background`` worker. (The
    Strategy Lab batch run is no longer a coarse activity here — it is driven by
    the fine-grained ``StrategyLabBatchWorkflow`` in
-   ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.)
+   ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.) A
+   background heartbeat (mirroring ``paper_trading.py``) beats for the run's
+   duration and, on Temporal cancellation, cancels the underlying job so
+   ``_run_backtest_background``'s own checkpoints honor it;
+   ``InvestmentBacktestWorkflow`` sets a matching ``heartbeat_timeout``.
 
 3. **Dispatch branch.** ``POST /backtests`` routes through a Temporal workflow
    when ``is_temporal_enabled()`` and falls back to a daemon thread otherwise
@@ -30,8 +34,10 @@ Covers three things the runtime depends on:
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
+import time
 import unittest.mock as mock
 
 import pytest
@@ -338,6 +344,103 @@ def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
     result = run_backtest_activity("job-cancelled", {}, {}, "agent", [])
 
     assert result == {"job_id": "job-cancelled", "status": "cancelled"}
+
+
+def test_run_backtest_activity_heartbeats_during_run(monkeypatch) -> None:
+    """A background heartbeat must beat while ``_run_backtest_background`` runs
+    — without it (the gap this closes), Temporal has no way to detect a worker
+    crash during a run that can last hours."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: False)
+
+    beats = []
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: beats.append(1))
+
+    def _bg(*a):
+        # Block until at least one heartbeat fires (bounded).
+        for _ in range(200):
+            if beats:
+                return api_main._BT_JOB_STATUS_COMPLETED
+            time.sleep(0.01)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-hb", {}, {}, "agent", [])
+
+    assert len(beats) >= 1
+    assert result == {"job_id": "job-hb", "status": "completed"}
+
+
+def test_run_backtest_activity_cancellation_cancels_job(monkeypatch) -> None:
+    """On Temporal cancellation the heartbeat cancels the underlying job so the
+    existing checkpoints inside ``_run_backtest_background`` observe it and
+    honor the cancellation, instead of the run silently continuing to
+    completion/failure with no way for Temporal to stop it."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+
+    cancelled_ids = []
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
+
+    def _bg(job_id, *a):
+        # Block until the heartbeat observes cancellation (bounded).
+        for _ in range(200):
+            if cancelled_ids:
+                return api_main._BT_JOB_STATUS_CANCELLED
+            time.sleep(0.01)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-cancel", {}, {}, "agent", [])
+
+    assert cancelled_ids == ["job-cancel"]
+    assert result == {"job_id": "job-cancel", "status": "cancelled"}
+
+
+def test_investment_backtest_workflow_sets_heartbeat_timeout(monkeypatch) -> None:
+    """``InvestmentBacktestWorkflow`` must pass ``heartbeat_timeout`` to
+    ``execute_activity`` so Temporal actually enforces the activity's
+    heartbeat contract at the workflow level."""
+    from temporalio import workflow as tl_workflow
+
+    from investment_team.temporal.workflows import (
+        _HEARTBEAT_TIMEOUT,
+        InvestmentBacktestWorkflow,
+    )
+
+    captured = {}
+
+    async def _fake_exec(fn, *, args, **kw):
+        captured.update(kw)
+        return {"job_id": "job-1", "status": "completed"}
+
+    monkeypatch.setattr(tl_workflow, "execute_activity", _fake_exec)
+
+    result = asyncio.run(InvestmentBacktestWorkflow().run("job-1", {}, {}, "agent", []))
+
+    assert captured["heartbeat_timeout"] == _HEARTBEAT_TIMEOUT
+    assert result == {"job_id": "job-1", "status": "completed"}
 
 
 # ---------------------------------------------------------------------------

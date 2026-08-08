@@ -27,7 +27,13 @@ retry (which fires on worker crash / start_to_close timeout):
   value from ``_run_backtest_background``, not a post-run job-store read;
 * a worker-level failure is re-raised as an ``ApplicationError`` so Temporal sees
   the failure (and retries within the bounded policy) instead of the swallowed
-  exception being reported as success.
+  exception being reported as success;
+* a background heartbeat (``shared.concurrency.BackgroundHeartbeat``, the same
+  driver ``paper_trading.run_paper_trading_activity`` uses) beats for the
+  duration of the run so Temporal can detect a worker crash during a run that
+  can last hours, and — on Temporal cancellation — cancels the underlying job so
+  ``_run_backtest_background``'s own cancellation checkpoints observe and honor
+  it.
 """
 
 from __future__ import annotations
@@ -55,6 +61,13 @@ _ACTIVITY_RETRY = RetryPolicy(
 # Temporal does not time it out.
 _ACTIVITY_TIMEOUT = timedelta(hours=6)
 
+# How often the activity heartbeats (and re-checks for Temporal cancellation),
+# mirroring paper_trading.py's driver. Wide enough to avoid heartbeat spam over
+# a run that can last hours, but short enough that Temporal detects a worker
+# crash well within a single retry cycle.
+_HEARTBEAT_INTERVAL_S = 30.0
+_HEARTBEAT_TIMEOUT = timedelta(seconds=120)
+
 
 @activity.defn(name="investment_run_backtest")
 def run_backtest_activity(
@@ -74,34 +87,56 @@ def run_backtest_activity(
     Postconditions:
         - Short-circuits (no recompute) when the job already completed, so a
           retry whose predecessor finished does not orphan a duplicate record.
-        - Otherwise ``_run_backtest_background`` has run and persisted the job
-          result; outcome is taken from the worker's return value (entry
-          short-circuit still reads the job store). Raises ``ApplicationError``
-          if the worker returned ``failed`` (so Temporal retries within the
-          bounded policy). If the worker returned ``cancelled`` (a user-initiated
-          cancel during the run), returns a status dict reporting ``cancelled``
-          rather than ``completed``. Returns a ``completed`` status dict
-          otherwise.
+        - Otherwise a background heartbeat runs for the duration of the call:
+          it beats on ``activity.heartbeat()`` so Temporal can detect a worker
+          crash, and, once ``activity.is_cancelled()`` observes a Temporal
+          cancellation, cancels the job (``_bt_cancel_job``) so
+          ``_run_backtest_background``'s own cancellation checkpoints see it and
+          return ``cancelled`` at their next check rather than overwriting the
+          job to completed/failed.
+        - ``_run_backtest_background`` has run and persisted the job result;
+          outcome is taken from the worker's return value (entry short-circuit
+          still reads the job store). Raises ``ApplicationError`` if the worker
+          returned ``failed`` (so Temporal retries within the bounded policy).
+          If the worker returned ``cancelled`` (a user-initiated cancel during
+          the run, including one driven by Temporal cancellation via the
+          heartbeat above), returns a status dict reporting ``cancelled`` rather
+          than ``completed``. Returns a ``completed`` status dict otherwise.
     """
     from investment_team.api.main import (
         _BT_JOB_STATUS_CANCELLED,
         _BT_JOB_STATUS_COMPLETED,
         _BT_JOB_STATUS_FAILED,
         _backtest_job_status,
+        _bt_cancel_job,
         _run_backtest_background,
     )
     from investment_team.models import BacktestConfig, StrategySpec
+    from shared.concurrency import BackgroundHeartbeat
 
     if _backtest_job_status(job_id) == _BT_JOB_STATUS_COMPLETED:
         return {"job_id": job_id, "status": "completed"}
 
-    final_status = _run_backtest_background(
-        job_id,
-        StrategySpec(**strategy),
-        BacktestConfig(**config),
-        submitted_by,
-        notes,
-    )
+    def _beat() -> None:
+        # Best-effort: outside a real activity context (e.g. a direct-call unit
+        # test) these raise and BackgroundHeartbeat swallows them.
+        activity.heartbeat()
+        if activity.is_cancelled():
+            _bt_cancel_job(job_id)
+
+    with BackgroundHeartbeat(
+        _beat,
+        _HEARTBEAT_INTERVAL_S,
+        copy_context=True,
+        name=f"backtest-hb-{job_id}",
+    ):
+        final_status = _run_backtest_background(
+            job_id,
+            StrategySpec(**strategy),
+            BacktestConfig(**config),
+            submitted_by,
+            notes,
+        )
 
     if final_status == _BT_JOB_STATUS_FAILED:
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
@@ -130,11 +165,14 @@ class InvestmentBacktestWorkflow:
 
         Postconditions:
             - Returns the activity result, retrying per ``_ACTIVITY_RETRY`` on
-              failure.
+              failure. ``heartbeat_timeout`` is set so Temporal treats a silent
+              activity (no heartbeat within the window — e.g. a crashed worker)
+              as failed rather than waiting the full ``_ACTIVITY_TIMEOUT``.
         """
         return await workflow.execute_activity(
             run_backtest_activity,
             args=[job_id, strategy, config, submitted_by, notes],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
             retry_policy=_ACTIVITY_RETRY,
         )
