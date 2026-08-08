@@ -5070,6 +5070,40 @@ def _paper_trading_session_already_terminal(session_id: str) -> bool:
     return session.status not in _ACTIVE_PT_STATES
 
 
+def _apply_paper_trading_failure(
+    session: PaperTradingSession,
+    error: str,
+    *,
+    completed_at: Optional[str] = None,
+    terminated_reason: Optional[str] = None,
+    set_legacy_divergence_analysis: bool = False,
+) -> None:
+    """Mutate ``session`` in place to record a terminal failure.
+
+    Shared by ``_fail_paper_trading_session`` (single-session, self-locking) and
+    ``_recover_orphaned_paper_trading_sessions`` (whole-batch, caller-locked) so
+    the terminal-write fields live in one place.
+
+    Preconditions:
+        - Caller holds ``_lock`` and has already decided ``session`` should be
+          failed (e.g. confirmed it isn't already COMPLETED/FAILED).
+    Postconditions:
+        - session.status == FAILED and session.error == error.
+        - session.completed_at is set to ``completed_at`` if given, else the
+          current UTC time.
+        - If ``terminated_reason`` is not None, session.terminated_reason is set.
+        - If ``set_legacy_divergence_analysis``, session.divergence_analysis is
+          mirrored from session.error.
+    """
+    session.status = PaperTradingStatus.FAILED
+    session.error = error
+    session.completed_at = completed_at or datetime.now(tz=timezone.utc).isoformat()
+    if terminated_reason is not None:
+        session.terminated_reason = terminated_reason
+    if set_legacy_divergence_analysis:
+        session.divergence_analysis = session.error
+
+
 def _fail_paper_trading_session(session_id: str, error: str) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
@@ -5101,9 +5135,7 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             # deciding to mark it failed).
             return
         try:
-            session.status = PaperTradingStatus.FAILED
-            session.error = error
-            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            _apply_paper_trading_failure(session, error)
             _paper_trading_sessions[session_id] = session
         except Exception:
             # The mutations above and the dict write (which round-trips
@@ -5709,16 +5741,18 @@ def _recover_orphaned_paper_trading_sessions() -> None:
                     continue
                 if session.status not in _ACTIVE_PT_STATES:
                     continue
-                session.status = PaperTradingStatus.FAILED
-                session.completed_at = now_iso
-                session.terminated_reason = "process_exit"
-                session.error = (
-                    "Paper trading did not complete — the worker process exited before "
-                    "finalizing the session. Re-run the paper trade from the Strategy Lab."
-                )
-                # Preserve the legacy free-form field too so older clients still read a message.
-                session.divergence_analysis = session.error
                 try:
+                    _apply_paper_trading_failure(
+                        session,
+                        (
+                            "Paper trading did not complete — the worker process exited "
+                            "before finalizing the session. Re-run the paper trade from "
+                            "the Strategy Lab."
+                        ),
+                        completed_at=now_iso,
+                        terminated_reason="process_exit",
+                        set_legacy_divergence_analysis=True,
+                    )
                     _paper_trading_sessions[session.session_id] = session
                     recovered += 1
                 except Exception:
