@@ -680,15 +680,18 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.error()).toBe('save failed');
   });
 
-  // ── Flowchart click-handler cleanup (memory-leak fix) ────────────────────
+  // ── Flowchart click delegation ────────────────────────────────────────────
   //
-  // attachFlowchartClickHandlers binds a click listener to every rendered
-  // [data-step-id] node. Because the flowchart SVG is fully replaced via
-  // [innerHTML] on each buildFlowchart call, those listeners must be
-  // explicitly detached before the old nodes are discarded (and on component
-  // destroy) or they leak closures over `this` and DOM node references.
+  // The flowchart SVG is injected via [innerHTML], so Angular can't bind
+  // (click)/(keydown) to its individual nodes. Instead single (click) and
+  // (keydown) listeners on the container (declared in the template) walk up
+  // to the closest [data-step-id] ancestor of the event target. Because the
+  // listeners live on the stable container rather than the replaced SVG
+  // children, they need no manual rebinding or cleanup when buildFlowchart
+  // replaces the DOM. Each generated node carries tabindex="0" so it's
+  // reachable by keyboard, with Enter/Space mirroring a click.
 
-  describe('flowchart click handler cleanup', () => {
+  describe('flowchart click delegation', () => {
     function createFlowchartFixture(proc: ProcessDefinition): ComponentFixture<ProcessDesignerChatComponent> {
       api.createConversation.mockReturnValueOnce(
         of({ conversation_id: 'c-flow', messages: [], current_process: proc, suggested_questions: [] }),
@@ -699,7 +702,7 @@ describe('ProcessDesignerChatComponent', () => {
       return flowFixture;
     }
 
-    it('clicking a rendered node still invokes onStepClick', () => {
+    it('clicking a rendered node invokes onStepClick', () => {
       const proc = process({ steps: [step({ step_id: 's-1' })] });
       const flowFixture = createFlowchartFixture(proc);
       const flowComponent = flowFixture.componentInstance;
@@ -707,50 +710,99 @@ describe('ProcessDesignerChatComponent', () => {
 
       const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
       expect(node).toBeTruthy();
-      expect(node.dataset['bound']).toBe('1');
 
       node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
       expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
     });
 
-    it('detaches listeners from outgoing nodes before the flowchart is rebuilt', () => {
+    it('clicking a descendant of a node (its label text) still resolves the step id', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      const descendant = node.querySelector('text') as HTMLElement;
+      expect(descendant).toBeTruthy();
+
+      descendant.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
+    });
+
+    it('clicking the container background does not invoke onStepClick', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+      expect(container).toBeTruthy();
+
+      container.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onStepClickSpy).not.toHaveBeenCalled();
+    });
+
+    it('the single container listener still handles clicks after the flowchart is rebuilt', () => {
       const proc = process({
         steps: [step({ step_id: 's-1', next_steps: ['s-2'] }), step({ step_id: 's-2' })],
       });
       const flowFixture = createFlowchartFixture(proc);
       const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
 
-      const nodeBefore = flowFixture.nativeElement.querySelector('[data-step-id="s-2"]') as HTMLElement;
-      expect(nodeBefore).toBeTruthy();
-      const removeEventListenerSpy = vi.spyOn(nodeBefore, 'removeEventListener');
-
-      // Triggers buildFlowchart, which must detach the outgoing nodes' listeners
-      // (and clear their `data-bound` markers) before the new SVG is rendered.
+      // Triggers buildFlowchart, which fully replaces the injected SVG DOM.
       flowComponent.onStepDeleted('s-2');
-
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('click', expect.any(Function));
-      expect(nodeBefore.dataset['bound']).toBeUndefined();
-      expect((flowComponent as unknown as { flowchartClickListeners: unknown[] }).flowchartClickListeners).toHaveLength(0);
-
-      // The rebuilt flowchart still binds a fresh listener to the surviving node.
       flowFixture.detectChanges();
+
       const nodeAfter = flowFixture.nativeElement.querySelector('[data-step-id="s-1"]') as HTMLElement;
-      expect(nodeAfter.dataset['bound']).toBe('1');
-      expect((flowComponent as unknown as { flowchartClickListeners: unknown[] }).flowchartClickListeners).toHaveLength(1);
+      expect(nodeAfter).toBeTruthy();
+
+      nodeAfter.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
     });
 
-    it('detaches remaining listeners on destroy', () => {
+    it('pressing Enter on a focused node invokes onStepClick (keyboard activation)', () => {
       const proc = process({ steps: [step({ step_id: 's-1' })] });
       const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
 
       const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
-      const removeEventListenerSpy = vi.spyOn(node, 'removeEventListener');
+      expect(node.getAttribute('tabindex')).toBe('0');
 
-      flowFixture.destroy();
+      node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
 
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('click', expect.any(Function));
-      expect(node.dataset['bound']).toBeUndefined();
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
+    });
+
+    it('pressing Space on a focused node invokes onStepClick and prevents page scroll', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      const spaceEvent = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+      node.dispatchEvent(spaceEvent);
+
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
+      expect(spaceEvent.defaultPrevented).toBe(true);
+    });
+
+    it('pressing an unrelated key does not invoke onStepClick', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+
+      expect(onStepClickSpy).not.toHaveBeenCalled();
     });
   });
 });

@@ -93,7 +93,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   @Output() readonly rosterChanged = new EventEmitter<RosterValidationResult | null>();
 
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
-  @ViewChild('flowchartContainer') flowchartContainer!: ElementRef<HTMLDivElement>;
 
   private readonly api = inject(AgenticTeamApiService);
   private readonly fb = inject(FormBuilder);
@@ -135,13 +134,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /** Guards `refreshRoster` against out-of-order refresh results. */
   private readonly rosterRefreshGuard = new LatestOnly();
 
-  /**
-   * Click listeners bound by `attachFlowchartClickHandlers`, tracked so they
-   * can be explicitly removed (see `detachFlowchartClickHandlers`) instead of
-   * being silently discarded whenever the flowchart SVG is replaced.
-   */
-  private readonly flowchartClickListeners: { node: HTMLElement; listener: (e: Event) => void }[] = [];
-
   private conversationId: string | null = null;
   /** Monotonic stamp for `startConversation`; guards against out-of-order createConversation results. */
   private conversationSeq = 0;
@@ -174,7 +166,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
 
   ngAfterViewChecked(): void {
     this.scrollToBottom();
-    this.attachFlowchartClickHandlers();
   }
 
   private scrollToBottom(): void {
@@ -184,41 +175,38 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     }
   }
 
-  private attachFlowchartClickHandlers(): void {
-    if (!this.flowchartContainer?.nativeElement) return;
-    const nodes = this.flowchartContainer.nativeElement.querySelectorAll('[data-step-id]');
-    nodes.forEach((node: Element) => {
-      if ((node as HTMLElement).dataset['bound']) return;
-      (node as HTMLElement).dataset['bound'] = '1';
-      const listener = (e: Event) => {
-        e.stopPropagation();
-        const stepId = (node as HTMLElement).dataset['stepId'];
-        if (stepId) this.onStepClick(stepId);
-      };
-      node.addEventListener('click', listener);
-      this.flowchartClickListeners.push({ node: node as HTMLElement, listener });
-    });
+  /**
+   * Delegated click handler bound once on the flowchart container (see the
+   * template). Since the SVG is injected via `[innerHTML]`, Angular can't bind
+   * `(click)` to its individual nodes directly — walking up to the closest
+   * `[data-step-id]` ancestor lets a single container-level listener handle
+   * clicks on any node, including ones added by a later `buildFlowchart` call.
+   */
+  onFlowchartClick(event: MouseEvent): void {
+    this.dispatchFlowchartStepEvent(event);
   }
 
   /**
-   * Remove every click listener bound by `attachFlowchartClickHandlers` and
-   * clear their `data-bound` markers. Called before each `buildFlowchart`
-   * replaces the flowchart's DOM (so the outgoing nodes' listeners don't
-   * linger) and from `ngOnDestroy` (so the component doesn't leave listeners
-   * closing over `this` attached to nodes still in the document).
+   * Delegated keyboard handler mirroring `onFlowchartClick`, so the step nodes
+   * generated in `buildFlowchart` (each rendered with `tabindex="0"`) are
+   * operable by keyboard, not just mouse.
    */
-  private detachFlowchartClickHandlers(): void {
-    for (const { node, listener } of this.flowchartClickListeners) {
-      node.removeEventListener('click', listener);
-      delete node.dataset['bound'];
-    }
-    this.flowchartClickListeners.length = 0;
+  onFlowchartKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault(); // Space must not scroll the page.
+    this.dispatchFlowchartStepEvent(event);
+  }
+
+  private dispatchFlowchartStepEvent(event: Event): void {
+    const target = (event.target as HTMLElement).closest('[data-step-id]') as HTMLElement | null;
+    if (!target) return;
+    const stepId = target.dataset['stepId'];
+    if (stepId) this.onStepClick(stepId);
   }
 
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
-    this.detachFlowchartClickHandlers();
   }
 
   private startConversation(): void {
@@ -715,10 +703,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
    * Nodes are interactive — clicking them opens the step editor.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {
-    // The outgoing SVG (if any) is about to be discarded via [innerHTML] —
-    // detach its listeners now rather than relying on the DOM nodes becoming
-    // unreferenced garbage.
-    this.detachFlowchartClickHandlers();
     if (!process || process.steps.length === 0) {
       this.flowchartSvg.set(null);
       return;
@@ -775,8 +759,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       const isSelected = step.step_id === selectedId;
       const hasNoAgents = step.agents.length === 0;
 
-      // Clickable group
-      svg += `<g data-step-id="${this.escSvg(step.step_id)}" class="flowchart-node" style="cursor:pointer">`;
+      // Clickable group — tabindex/role make it keyboard-focusable so
+      // onFlowchartKeydown (delegated on the container) can activate it.
+      svg += `<g data-step-id="${this.escSvg(step.step_id)}" class="flowchart-node" style="cursor:pointer" tabindex="0" role="button" aria-label="${this.escSvg(step.name)}">`;
 
       if (isDecision) {
         // Diamond shape
