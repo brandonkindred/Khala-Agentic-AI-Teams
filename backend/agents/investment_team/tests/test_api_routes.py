@@ -1169,7 +1169,11 @@ def test_promotion_decision_502_on_empty_escalation_queue_name(api_client, monke
     )
     resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
     assert resp.status_code == 502
-    assert resp.json()["detail"]
+    # Assert the specific "invalid queue name" detail, not just any 502 — an
+    # empty string would also fail the later `not in _workflow_state.queues`
+    # check with a (different) 502, which would mask a regression that
+    # dropped the `not queue_name` guard itself.
+    assert resp.json()["detail"] == "Promotion decision result has invalid escalation queue name"
 
 
 def test_promotion_decision_502_on_non_string_payload_id(api_client, monkeypatch) -> None:
