@@ -818,6 +818,11 @@ class TestBackendAgentReviewCache:
 
 class TestBackendRunProblemSolvingForMicrotask:
     def test_problem_solving_no_issues(self):
+        """Problem solving should report resolved when the review has no issues.
+
+        With an empty issue list and a passed review, the function should not
+        need to invoke the LLM and should return a resolved result.
+        """
         from backend_code_v2_team.models import Microtask, ReviewResult
         from backend_code_v2_team.phases.problem_solving import run_problem_solving_for_microtask
 

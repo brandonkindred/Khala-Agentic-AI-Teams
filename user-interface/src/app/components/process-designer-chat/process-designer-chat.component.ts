@@ -164,8 +164,34 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     }
   }
 
+  /** Distance (px) from the bottom within which the user is considered "at the bottom" for auto-scroll purposes. */
+  private static readonly SCROLL_BOTTOM_THRESHOLD_PX = 48;
+
+  /**
+   * Set by a message-add site (`sendMessage`, `applyState`) that determined the
+   * user was near the bottom before the mutation; consumed by the next
+   * `ngAfterViewChecked` — the point at which the newly-added message's DOM has
+   * actually been laid out — and cleared so later view-checked cycles with no
+   * new message don't force a scroll.
+   */
+  private pendingScrollToBottom = false;
+
   ngAfterViewChecked(): void {
-    this.scrollToBottom();
+    if (this.pendingScrollToBottom) {
+      this.pendingScrollToBottom = false;
+      this.scrollToBottom();
+    }
+  }
+
+  /**
+   * Whether the messages container is scrolled at (or within threshold of) its
+   * bottom. Used to decide whether a newly-added message should auto-scroll the
+   * view, so a user who has scrolled up to read history isn't yanked back down.
+   */
+  private isNearBottom(): boolean {
+    const el = this.messagesContainer?.nativeElement;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < ProcessDesignerChatComponent.SCROLL_BOTTOM_THRESHOLD_PX;
   }
 
   private scrollToBottom(): void {
@@ -242,6 +268,11 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     current_process: ProcessDefinition | null;
     suggested_questions: string[];
   }): void {
+    // Capture before mutating: a new message should only auto-scroll the view
+    // when the user hadn't already scrolled away from the bottom to read history.
+    if (res.messages.length > this.messages().length && this.isNearBottom()) {
+      this.pendingScrollToBottom = true;
+    }
     this.conversationId = res.conversation_id;
     this.messages.set(res.messages);
     this.currentProcess.set(res.current_process);
@@ -509,6 +540,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       content: message,
       timestamp: new Date().toISOString(),
     };
+    if (this.isNearBottom()) this.pendingScrollToBottom = true;
     this.messages.update((msgs) => [...msgs, optimisticMessage]);
     this.loading.set(true);
     this.error.set(null);
