@@ -40,7 +40,7 @@ from software_engineering_team.team_routing import (
     _team_key,
     _v2_team_kind_for_stack,
 )
-from software_engineering_team.worker_factory import _v2_text_mode_llm
+from software_engineering_team.worker_factory import _devops_raw_llm_client, _v2_text_mode_llm
 
 GIT_UTILS = "shared.git.git_utils"
 
@@ -2347,6 +2347,43 @@ def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch)
     assert result is not broken
 
 
+def test_devops_raw_llm_client_passes_through_none_and_llm_client():
+    """None and a real LLMClient instance are returned unchanged -- nothing to unwrap."""
+    from llm_service.clients.dummy import DummyLLMClient
+
+    assert _devops_raw_llm_client(None) is None
+    client = DummyLLMClient()
+    assert _devops_raw_llm_client(client) is client
+
+
+def test_devops_raw_llm_client_unwraps_public_client_accessor():
+    """A wrapper exposing a public ``client`` property (LLMClientModel's shape)
+    unwraps to that underlying client."""
+    from types import SimpleNamespace
+
+    raw = object()
+    wrapper = SimpleNamespace(client=raw)
+    assert _devops_raw_llm_client(wrapper) is raw
+
+
+def test_devops_raw_llm_client_falls_back_to_private_client_attribute():
+    """A wrapper with only a private ``_client`` attribute still unwraps."""
+    from types import SimpleNamespace
+
+    raw = object()
+    wrapper = SimpleNamespace(_client=raw)
+    assert _devops_raw_llm_client(wrapper) is raw
+
+
+def test_devops_raw_llm_client_passes_through_opaque_handle_unchanged():
+    """A handle with neither a client nor _client attribute is returned as-is,
+    rather than raising -- DevOps agents assert non-None at their own boundary."""
+    from types import SimpleNamespace
+
+    opaque = SimpleNamespace(something_else=True)
+    assert _devops_raw_llm_client(opaque) is opaque
+
+
 def test_frontend_v2_worker_uses_injected_llm_getter():
     """Frontend v2 worker construction must honor the coding-team LLM injection path."""
     captured_keys: List[str] = []
@@ -2375,8 +2412,10 @@ def test_frontend_v2_worker_uses_injected_llm_getter():
 
 
 def test_build_implementation_worker_returns_devops_worker_when_flag_on(monkeypatch) -> None:
-    """A devops stack builds a DevOpsTeamWorker directly, bypassing CodeEngineProvider,
-    with the LLM handed through unwrapped (no v2 text-mode coercion)."""
+    """A devops stack builds a DevOpsTeamWorker directly, bypassing CodeEngineProvider
+    (no v2 text-mode coercion; a plain non-wrapper handle passes through unchanged --
+    see test_build_implementation_worker_devops_unwraps_strands_model for the
+    Strands-model-unwrap case)."""
     monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
     from software_engineering_team.devops_team_worker import DevOpsTeamWorker
 
@@ -2397,6 +2436,41 @@ def test_build_implementation_worker_returns_devops_worker_when_flag_on(monkeypa
     assert worker.team_kind == "devops"
     assert captured_keys == ["devops"]
     assert worker.team_lead.llm == "devops-client"
+
+
+def test_build_implementation_worker_devops_unwraps_strands_model(monkeypatch) -> None:
+    """The production llm_getter path returns a Strands-wrapped LLMClientModel, not a
+    raw LLMClient. Two DevOps specialist agents (DevSecOpsReviewAgent, ChangeReviewAgent)
+    call complete_json directly and need the raw client -- passing the wrapper through
+    unchanged would AttributeError deep inside those calls and silently fail/fail-open
+    the security_review/change_review gates. _build_implementation_worker must unwrap it
+    via the model's public ``client`` accessor before constructing DevOpsTeamLeadAgent."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+
+    class _FakeStrandsModel:
+        """Stands in for llm_service.strands_adapter.LLMClientModel: wraps a raw
+        client and exposes it via a public ``client`` property, but does NOT itself
+        expose complete_json (matching the Strands Model protocol, not LLMClient)."""
+
+        def __init__(self, client: Any) -> None:
+            self._client = client
+
+        @property
+        def client(self) -> Any:
+            return self._client
+
+    raw_client = object()  # stand-in for a real llm_service.LLMClient instance
+    strands_model = _FakeStrandsModel(raw_client)
+
+    worker = orch_mod._build_implementation_worker(
+        "devops_worker",
+        StackSpec(name="devops", tools_services=["Terraform"]),
+        lambda key: strands_model,
+        engine_provider=None,
+    )
+
+    assert worker.team_lead.llm is raw_client
+    assert worker.team_lead.llm is not strands_model
 
 
 def test_build_implementation_worker_devops_stack_is_backend_when_flag_off() -> None:
